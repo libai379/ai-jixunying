@@ -17,7 +17,11 @@
 - 功能：单聊 / 群聊、互相 @（含 AI 之间接力，最多 N 轮）、身份认知（知道自己和别人是谁、背后什么模型）、联网搜索、看图、读 PDF/Word/Excel/PPT/文本、画图、服务商预设（国内外三十多家，含九模型测评的准确模型名和测评名次）。
 - 联网搜索：「自动」模式下 Kimi / 智谱 / 千问用平台官方内置搜索，其他模型调我们自己的 web_search（默认免费必应，可换博查 / 智谱 / Tavily / Brave）；不会调工具的模型由引擎代搜。不需要单独的 AI。
 - 画图协议（engine/ImageGen.kt）：OpenAI 风格、硅基流动、阿里百炼 / 千问AI平台（异步任务）、MiniMax、可灵（API Key 或 AK:SK 签 JWT）、魔搭（异步任务）。
+  没在 设置→画图 指定时自动挑（model/ImagePick.kt：免费的 cogview-3-flash 优先，按预设推断同一个 Key 能调的画图模型，失败换下一个）。
 - 说话规矩写在 engine/Prompts.kt：正经回答为主、幽默点到为止、不知道就说不知道、时效信息先搜再答并标出处。
+- 记忆（engine/Memory.kt，2026-10-08）：记录员（model/RecorderPick.kt，默认 mimo-v2.6-flash）把太长的聊天压成摘要，全群一份，存 convs\<id>.memo.json；长期记忆 AppState.memories 写进每位成员的设定，AI 有 remember 工具，攒够 4 句用户的话自动挑；search_history 工具和侧栏搜索能翻以前的聊天。
+- 本地文档（engine/DocLibrary.kt）：两端各自给文档建索引（存 docindex\），AI 用 search_documents / read_document，只能读收录了的文件；侧栏「我的文档」页。手机要「所有文件访问」权限；手机上微信「用其他应用打开」和系统分享都能把文件交给 AI（MainActivity 的 VIEW / SEND 意图）。
+- 微信助理（engine/WeixinBridge.kt）：腾讯官方 ClawBot 的 iLink 协议，照官方插件 @tencent-weixin/openclaw-weixin 源码写（细节在 docs/参考资料.md）。只接在电脑上，凭证存 %APPDATA%\ai-jixunying\weixin\；每个微信联系人一个「微信对话」（Conversation.channel = weixin:<编号>），走 Engine.channelTurn。
 
 ## 红线
 
@@ -29,17 +33,21 @@
 - 工程目录用 ASCII 名 `ai-jixunying`，不要改成中文路径。
 - 所有显示名、包名、文件名按 docs/命名规范.md，不许再出现 AI他妈 / aichatroom / taic 等旧名。
 - 电脑发给手机的状态必须打码（Engine.remoteView）；手机传回打码的 Key 时保留电脑上的原值。只有「导入配置」（ExportConfig）会经加密线路把真 Key 给已配对的手机。
+- 微信只走官方渠道：ClawBot 助理、用户转发、「用其他应用打开」、电脑上微信自己存成普通文件的收件文件夹（用户手动打开开关）。不读微信本地加密的聊天数据库，不从微信进程里取密钥。
+- 微信助理只回答扫码绑定的本人（WeixinBridge.handle 里的 owner 检查），不许去掉：AI 能读本机文档，放开就等于把文档给陌生人看。
+- 文档工具只能读收录了的文件（DocLibrary.find），不许改成能读任意路径。
 
 ## 工程结构
 
 - shared/：Kotlin 多平台模块（desktop JVM + android）
   - commonMain/model：数据模型、指令和事件协议（Protocol.kt）、配对码（Pairing.kt）、服务商预设和测评成绩（Presets.kt）
   - commonMain/client：Backend 接口、ClientStore、RemoteBackend（遥控电脑，含心跳和掉线重连）、Hub（本机 + 电脑两个后端）
-  - commonMain/ui：全部界面，桌面和手机共用；宽屏侧栏布局，窄屏抽屉布局；Devices.kt 是联机相关界面
-  - jvmShared/engine：Engine（调度、上下文、工具循环、内置搜索）、Prompts、LlmClient、WebSearch、ImageGen、DocExtract、Storage；PlatformBits 是 PDF 和图片压缩的平台接口
+  - commonMain/ui：全部界面，桌面和手机共用；宽屏侧栏布局，窄屏抽屉布局；Devices.kt 是联机相关界面，DocsScreen「我的文档」，MemoryPage、WeixinPage 是设置里的记忆、微信页。设置改动统一走 AppController.updateSettings（改了就生效、排队、拿最新状态），不要再加「保存」按钮
+  - jvmShared/engine：Engine（调度、上下文、工具循环、内置搜索、记忆、文档、外部渠道）、Prompts、LlmClient、WebSearch、ImageGen、DocExtract、Storage、ConfigMerge、Memory（记录员）、DocLibrary、WeixinBridge；PlatformBits 是 PDF、图片压缩、默认文档文件夹、文件权限的平台接口
   - jvmShared/relay：Crypto（AES-GCM）、MqttMulti（多中转 + 探测自检 + 切片信封）、RelayHost（电脑端）、RelayLink 和 pairWithHost（手机端）
   - desktopMain / androidMain：平台实现（PDFBox / pdfbox-android，ImageIO / BitmapFactory，二维码生成）
-  - desktopTest：EngineTest（假模型服务器 + 进程内 MQTT 服务器 Moquette，把全流程跑一遍）；ConfigMergeTest（同步不重复、启动合并重复）；LiveRelayTest、LiveSearchTest、LiveSnoopTest 是真联网检查，设 JXY_LIVE=1（Snoop 用 JXY_SNOOP=配对码）才跑
+  - desktopTest：EngineTest（假模型服务器 + 假 iLink / CDN + 进程内 MQTT 服务器 Moquette，把全流程跑一遍）；ConfigMergeTest（同步不重复、启动合并重复）；ShotsTest（离屏截图，见下）；LiveRelayTest、LiveSearchTest、LiveSnoopTest 是真联网检查，设 JXY_LIVE=1（Snoop 用 JXY_SNOOP=配对码）才跑；LiveRecorderTest 设 JXY_LIVE_RECORDER=数据文件夹 才跑（用那份数据里的真 Key 试记录员）
+  - 自动测试不扫开发机的真实文档（Gradle 给测试设了 -Djxy.docs.autoscan=false）
 - desktopApp/：桌面入口 Main.kt（启动 RelayHost）和打包配置
 - androidApp/：安卓入口 MainActivity.kt（本机引擎、扫码配对、选文件）
 
@@ -55,7 +63,8 @@
 - 打包安卓：./gradlew :androidApp:assembleDebug（用专用签名）
 - 给用户打开桌面版：先 :desktopApp:createDistributable，把 desktopApp/build/compose/binaries/main/app/ai-jixunying 复制到 G:\DevCache\ai-jixunying-app 再运行（直接运行 build 目录里的会占住文件，下次打包失败）
 - 渲染：Main.kt 默认 skiko.renderApi=OPENGL（DirectX 在用户电脑上会让字闪，见教训库 26）。用户正在用的窗口只截图，不要模拟鼠标键盘
-- 交付：复制到 F:\apk-out\，文件名 AI集训营.exe / AI集训营.apk，不带版本号和日期，汇报时报文件时间。复制前先把版本号加上去（三处：androidApp 的 versionCode / versionName、desktopApp 的 packageVersion、设置「关于」页）
+- 检查界面（不碰用户屏幕）：JXY_SHOTS=G:/DevCache/shots ./gradlew :shared:desktopTest --tests "*ShotsTest*" --rerun，电脑和手机尺寸、各页面、弹窗、深色模式都画成 PNG。要加场景就在 ShotsTest 里加一行，App 的 debugStart 支持 settings:标签名#弹窗、conv:对话编号#convsettings、docs、settingshome、newchat
+- 交付：复制到 F:\apk-out\，文件名 AI集训营.exe / AI集训营.apk，不带版本号和日期，汇报时报文件时间。复制前先把版本号加上去（四处：androidApp 的 versionCode / versionName、desktopApp 的 packageVersion、model/Presets.kt 的 APP_VERSION、WeixinBridge 的 BOT_AGENT）
 
 ## 用户偏好
 

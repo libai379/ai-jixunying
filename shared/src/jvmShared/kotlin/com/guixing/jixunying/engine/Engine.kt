@@ -798,7 +798,13 @@ class Engine(
 
     /** 某个渠道（比如某个微信用户）最近的那个对话；没有就新建一个。 */
     fun channelConversation(channel: String, title: String, memberIds: List<String>, webSearch: Boolean): String {
-        state.conversations.filter { it.channel == channel }.maxByOrNull { it.updatedAt }?.let { return it.id }
+        state.conversations.filter { it.channel == channel }.maxByOrNull { it.updatedAt }?.let { c ->
+            // 对话里的成员都被删光了：补上现在指定回答的成员，不然以后微信里怎么问都答不上来
+            if (c.memberIds.none { state.member(it) != null } && memberIds.isNotEmpty()) {
+                updateState { s -> s.copy(conversations = s.conversations.map { if (it.id == c.id) it.copy(memberIds = memberIds) else it }) }
+            }
+            return c.id
+        }
         return newChannelConversation(channel, title, memberIds, webSearch)
     }
 
