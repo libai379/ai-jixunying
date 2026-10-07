@@ -79,6 +79,7 @@ import com.guixing.jixunying.client.RemoteBackend
 import com.guixing.jixunying.model.AppState
 import com.guixing.jixunying.model.Command
 import com.guixing.jixunying.model.Evals
+import com.guixing.jixunying.model.ImagePick
 import com.guixing.jixunying.model.Member
 import com.guixing.jixunying.model.MemberTemplates
 import com.guixing.jixunying.model.Presets
@@ -285,7 +286,7 @@ private fun ProviderDialog(ctl: AppController, existing: ProviderConfig?, onClos
                 val looksChat = models.filter { !Presets.guessImageGen(it.id) }.map { it.id }
                 result = false to (if (looksChat.isNotEmpty())
                     "现在没有「聊天」模型可以测：${looksChat.joinToString("、")} 被设成了「画图」。它是聊天模型，把它改回「聊天」再测。"
-                else "这个服务商只有画图模型，测试连通要用聊天模型。画图模型到 设置 → 画图 里选上，然后在对话里说「画一张……」试试。")
+                else "这个服务商只有画图模型，测试连通要用聊天模型。画图模型到 设置 → 画图 点「试画」测试。")
                 return@OutlinedButton
             }
             busy = true
@@ -384,8 +385,8 @@ private fun ProviderDialog(ctl: AppController, existing: ProviderConfig?, onClos
                 }
             }
             Text(
-                "聊天模型用来对话，当 AI 成员；画图模型（比如 MiniMax 的 image-01）只用来出图，要到 设置 → 画图 里选上它。" +
-                    "选好以后，任何成员聊天时需要图都会自动调用它，你也可以点输入框上的「直接画图」只出图。",
+                "聊天模型用来对话，当 AI 成员；画图模型（比如智谱的 cogview-3-flash、MiniMax 的 image-01）只用来出图，" +
+                    "聊天里说「画一张……」会自动用上，不用另外设置。想指定用哪个画图模型、或者试画一张，到 设置 → 画图。",
                 style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, modifier = Modifier.padding(top = 6.dp),
             )
             Spacer(Modifier.height(8.dp))
@@ -665,46 +666,108 @@ private fun engineLabel(e: SearchEngine) = when (e) {
 
 // ———————————————— 画图 ————————————————
 
+/**
+ * 画图页。以前要先选服务商、再填模型名、再点保存，用户看不懂。现在：
+ * 已配好的服务商里能画图的模型直接列出来（标明谁家官方、要不要钱），点一下就生效；默认「自动」，不选也能画。
+ */
 @Composable
 private fun ImagePage(ctl: AppController, state: AppState) {
-    var ig by remember(state.settings.imageGen) { mutableStateOf(state.settings.imageGen) }
-    val provider = state.provider(ig.providerId)
-    PageHeader("画图", "选一个画图模型。选好后聊天里直接说「画一张……」，AI 会自己调用它；也可以点输入框上的「直接画图」只出图。")
+    val candidates = remember(state.providers) { ImagePick.candidates(state.providers) }
+    val auto = ImagePick.isAuto(state)
+    val current = ImagePick.resolve(state).firstOrNull()
+    val ig = state.settings.imageGen
+    var testing by remember { mutableStateOf(false) }
+    var result by remember { mutableStateOf<Pair<Boolean, String>?>(null) }
+    var testImage by remember { mutableStateOf<com.guixing.jixunying.model.Attachment?>(null) }
+    fun save(next: com.guixing.jixunying.model.ImageGenSettings) = ctl.run(Command.SaveSettings(state.settings.copy(imageGen = next)), quiet = true)
+
+    PageHeader("画图", "不用专门设置：在任何对话里说「画一张……」，AI 会自己调用画图模型。输入框上的「直接画图」则不经过 AI，直接把你写的话当画面描述。")
+    if (candidates.isEmpty()) {
+        SectionCard {
+            Text("还没有能画图的服务商", style = MaterialTheme.typography.titleSmall)
+            Spacer(Modifier.height(4.dp))
+            Text("画图用的是各家平台的官方画图模型，和聊天用同一个 Key。到「模型服务」添加下面任意一家并填 Key，这里就会自动用上：",
+                style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
+            Spacer(Modifier.height(6.dp))
+            listOf(
+                "智谱开放平台：cogview-3-flash 免费",
+                "MiniMax：image-01",
+                "火山方舟：豆包 Seedream（即梦同款）",
+                "阿里百炼 / 千问AI平台：千问图像、通义万相",
+                "硅基流动：可图 Kolors、Qwen-Image",
+                "魔搭 ModelScope：每天有免费额度",
+            ).forEach { Text("· $it", style = MaterialTheme.typography.bodySmall) }
+            Spacer(Modifier.height(10.dp))
+            Button(onClick = { ctl.openSettings(SettingsTab.PROVIDERS) }) { Text("去添加服务商") }
+        }
+        return
+    }
     SectionCard {
-        FieldLabel("服务商")
-        Text("国内能画图的：豆包 Seedream（火山方舟）、千问图像 / 通义万相（千问AI平台、阿里百炼）、可灵、智谱 CogView（cogview-3-flash 免费）、" +
-            "MiniMax image-01、混元生图（腾讯 TokenHub）、文心 iRAG（百度千帆）、阶跃、硅基流动（Kolors / Qwen-Image）、魔搭（每天免费额度）。" +
-            "先到「模型服务」添加对应的服务商并填 Key。",
-            style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle, modifier = Modifier.padding(bottom = 8.dp))
-        SelectBox(provider?.name ?: "选择服务商", leading = provider?.let { { PresetBadge(Presets.byId(it.presetId), 20.dp) } }) { close ->
-            state.providers.sortedByDescending { p -> p.models.count { it.imageGen } }.forEach { p ->
-                androidx.compose.material3.DropdownMenuItem({
-                    Column {
-                        Text(p.name)
-                        val n = p.models.count { it.imageGen }
-                        Text(if (n > 0) "$n 个画图模型" else "没有标记为画图的模型", style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
-                    }
-                }, leadingIcon = { PresetBadge(Presets.byId(p.presetId), 20.dp) }, onClick = {
-                    ig = ig.copy(providerId = p.id, modelId = p.models.firstOrNull { it.imageGen }?.id.orEmpty()); close()
-                })
+        FieldLabel("用哪个画图模型", "点一下就换，马上生效")
+        val first = candidates.first()
+        RadioRow(auto, "自动（推荐）",
+            "现在会用 ${first.modelId}（${first.providerName}，${first.note}）。画失败了会自动换下一个。") {
+            save(ig.copy(providerId = "", modelId = ""))
+        }
+        candidates.forEach { c ->
+            val sel = !auto && current?.providerId == c.providerId && current.modelId == c.modelId
+            RadioRow(sel, c.modelId, "${c.providerName} · ${c.note}" + if (c.inferred) " · 用这家的 Key 直接调" else "") {
+                save(ig.copy(providerId = c.providerId, modelId = c.modelId))
             }
         }
-        Spacer(Modifier.height(10.dp))
-        FieldLabel("模型", "可以直接输入，也可以点右边的箭头选")
-        if (provider != null) {
-            ModelPicker(ig.modelId, { ig = ig.copy(modelId = it.trim()) }, provider.models.filter { it.imageGen }, "例如 cogview-3-flash")
-        }
-        Spacer(Modifier.height(10.dp))
-        FieldLabel("默认尺寸")
+        Text("上面都是各家平台自己的官方画图模型，用的就是你在「模型服务」里填的那个 Key，不用另外申请。",
+            style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, modifier = Modifier.padding(top = 6.dp))
+    }
+    Spacer(Modifier.height(12.dp))
+    SectionCard {
+        FieldLabel("默认尺寸", "AI 也可以按你说的比例改")
         FlowRowCompat {
             listOf("1024x1024", "1024x1536", "1536x1024", "768x1344", "1344x768", "2048x2048").forEach { sz ->
                 Box(Modifier.padding(end = 6.dp, bottom = 6.dp)) {
-                    ToggleChip(sz, Icons.Rounded.Brush, ig.size == sz) { ig = ig.copy(size = sz) }
+                    ToggleChip(sz, Icons.Rounded.Brush, ig.size == sz) { save(ig.copy(size = sz)) }
                 }
             }
         }
-        Spacer(Modifier.height(8.dp))
-        Button(onClick = { ctl.run(Command.SaveSettings(state.settings.copy(imageGen = ig)), "已保存") }) { Text("保存") }
+    }
+    Spacer(Modifier.height(12.dp))
+    SectionCard {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("试画一张", style = MaterialTheme.typography.titleSmall)
+                Text("画一只水彩风格的橘猫，看看能不能用" + if (current?.free == true) "（这个模型免费）。" else "（会按张扣一点费用）。",
+                    style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
+            }
+            Spacer(Modifier.width(10.dp))
+            Button(enabled = !testing, onClick = {
+                testing = true; result = null; testImage = null
+                ctl.run(Command.TestImage(if (auto) "" else current?.providerId.orEmpty(), if (auto) "" else current?.modelId.orEmpty()), quiet = true) { r ->
+                    testing = false
+                    result = r.ok to r.message.ifBlank { if (r.ok) "画好了" else "没画成" }
+                    if (r.ok) testImage = runCatching { com.guixing.jixunying.model.AppJson.decodeFromString(com.guixing.jixunying.model.Attachment.serializer(), r.data) }.getOrNull()
+                }
+            }) { Text(if (testing) "正在画…" else "试画") }
+        }
+        result?.let { (ok, text) -> TestResultBox(ok, text) { result = null } }
+        testImage?.let { a ->
+            val img = rememberImage(ctl, a.id)
+            Spacer(Modifier.height(10.dp))
+            Box(Modifier.size(240.dp).clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.surfaceVariant), contentAlignment = Alignment.Center) {
+                if (img != null) androidx.compose.foundation.Image(img, a.name, Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Crop)
+                else androidx.compose.material3.CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+            }
+        }
+    }
+}
+
+/** 单选行：圆点 + 标题 + 灰色说明，整行可点。 */
+@Composable
+fun RadioRow(selected: Boolean, title: String, desc: String?, onClick: () -> Unit) {
+    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).clickable(onClick = onClick).padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+        RadioButton(selected, onClick)
+        Column(Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
+            if (!desc.isNullOrBlank()) Text(desc, style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
+        }
     }
 }
 

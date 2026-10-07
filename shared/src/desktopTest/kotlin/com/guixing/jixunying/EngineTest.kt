@@ -159,6 +159,11 @@ class EngineTest {
                     call.respondText("""{"data":[{"b64_json":"$pngB64"}]}""", ContentType.Application.Json)
                 }
                 get("/img/1.png") { call.respondBytes(png, ContentType.Image.PNG) }
+                // 画不出来的服务商（比如 Key 没开通画图），用来测自动换下一个
+                post("/bad/v1/images/generations") {
+                    imageRequests += "bad:" + call.receiveText()
+                    call.respondText("""{"error":{"message":"model not enabled for this key"}}""", ContentType.Application.Json, HttpStatusCode.Forbidden)
+                }
                 post("/api/v1/services/aigc/multimodal-generation/generation") {
                     imageRequests += "dashscope:" + call.request.headers["X-DashScope-Async"] + ":" + call.receiveText()
                     call.respondText("""{"output":{"task_id":"t1","task_status":"PENDING"}}""", ContentType.Application.Json)
@@ -366,6 +371,53 @@ class EngineTest {
         assertTrue(imageRequests.any { it.startsWith("minimax:") && "\"aspect_ratio\":\"1:1\"" in it })
         assertTrue(imageRequests.any { it.startsWith("kling:Bearer ey") }, "AK:SK 要签成 JWT")
         assertTrue(imageRequests.any { it.startsWith("modelscope:true:") })
+    }
+
+    /**
+     * 没在 设置→画图 指定模型时自动挑：免费的智谱 cogview-3-flash 优先（服务商模型列表里没有也按预设推断），
+     * 画不出来就换下一个（MiniMax 的 image-01）；刚失败过的排到后面，下次直接用能用的。
+     */
+    @Test
+    fun imageAutoPickAndFallback() = runBlocking {
+        val (e, ms) = engineWithMembers("小智")
+        e.call(Command.SaveProvider(ProviderConfig("pz", "zhipu", "智谱", "${base()}/bad/v1", "k", listOf(ModelInfo("glm-fake")))))
+        e.call(Command.SaveProvider(ProviderConfig("pm", "minimax", "MiniMax", "${base()}/mm/v1", "k", listOf(ModelInfo("MiniMax-M3")))))
+        val picks = com.guixing.jixunying.model.ImagePick.resolve(e.state)
+        assertEquals(listOf("cogview-3-flash", "cogview-4-250304", "image-01"), picks.map { it.modelId })
+        assertTrue(picks.first().free)
+
+        val conv = e.call(Command.CreateConversation(listOf(ms[0].id))).data
+        e.call(Command.SendMessage(conv, "一只猫", drawImage = true))
+        waitIdle(e, conv, 1)
+        val m = e.store.messages.value[conv]!!.last()
+        assertEquals(MsgStatus.DONE, m.status, m.error)
+        assertEquals("image-01（MiniMax）", m.modelLabel)
+        assertEquals(listOf("bad", "bad", "minimax"), imageRequests.map { it.substringBefore(':') }, "cogview-3-flash、cogview-4 都失败后换 MiniMax")
+
+        imageRequests.clear()
+        val r = e.call(Command.TestImage())
+        assertTrue(r.ok, r.message)
+        assertEquals(listOf("minimax"), imageRequests.map { it.substringBefore(':') }, "刚失败过的排到后面")
+
+        // 指定了模型就只用它，失败了直接报错，不偷偷换
+        e.call(Command.SaveSettings(e.state.settings.copy(imageGen = ImageGenSettings("pz", "cogview-3-flash", "1024x1024"))))
+        val r2 = e.call(Command.TestImage())
+        assertFalse(r2.ok)
+        assertTrue("HTTP 403" in r2.message, r2.message)
+    }
+
+    /** @ 了不在这个对话里的成员：把他拉进来，由他回答（以前会悄悄换成对话里的别人答）。 */
+    @Test
+    fun mentionOutsiderJoinsConversation() = runBlocking {
+        val (e, ms) = engineWithMembers("甲", "乙")
+        val conv = e.call(Command.CreateConversation(listOf(ms[0].id))).data
+        e.call(Command.UpdateConversation(e.state.conversation(conv)!!.copy(webSearch = false)))
+        e.call(Command.SendMessage(conv, "@乙 你好"))
+        waitIdle(e, conv, 1)
+        assertEquals(listOf("m0", "m1"), e.state.conversation(conv)!!.memberIds)
+        val ai = e.store.messages.value[conv]!!.filter { it.role == Role.AI }
+        assertEquals(listOf("m1"), ai.map { it.senderId }, "只有被 @ 的乙回答")
+        assertEquals("我是乙。", ai.single().content)
     }
 
     /** 边聊边画：聊天里让 AI 画图，图在 AI 的回复里；图还没画完时接着发下一句，也能马上回答。 */

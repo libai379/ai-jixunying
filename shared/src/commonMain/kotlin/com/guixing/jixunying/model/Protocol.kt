@@ -12,6 +12,8 @@ sealed interface Command {
     @Serializable data class FetchModels(val providerId: String) : Command
     /** 用一句话测试连通性。 */
     @Serializable data class TestProvider(val providerId: String, val modelId: String) : Command
+    /** 试画一张（服务商留空 = 按自动规则选）。结果 data 是生成图片的 Attachment JSON。 */
+    @Serializable data class TestImage(val providerId: String = "", val modelId: String = "", val prompt: String = "") : Command
 
     @Serializable data class SaveMember(val member: Member) : Command
     @Serializable data class DeleteMember(val id: String) : Command

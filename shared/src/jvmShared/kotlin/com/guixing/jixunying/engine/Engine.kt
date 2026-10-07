@@ -10,6 +10,8 @@ import com.guixing.jixunying.model.Command
 import com.guixing.jixunying.model.CommandResult
 import com.guixing.jixunying.model.Conversation
 import com.guixing.jixunying.model.Event
+import com.guixing.jixunying.model.ImageChoice
+import com.guixing.jixunying.model.ImagePick
 import com.guixing.jixunying.model.Member
 import com.guixing.jixunying.model.Message
 import com.guixing.jixunying.model.ModelInfo
@@ -58,6 +60,9 @@ const val PAINTER_ID = "tool:image"
 
 /** 一次回答最多调几次工具（搜索、读网页、画图）。 */
 const val MAX_TOOL_USES = 8
+
+const val NO_IMAGE_MODEL = "还没有能画图的服务商。到 设置 → 模型服务 添加任意一家能画图的平台并填 Key：智谱开放平台（cogview-3-flash 免费）、" +
+    "MiniMax（image-01）、火山方舟（豆包 Seedream）、阿里百炼（通义万相）等都行。加好以后在聊天里说「画一张……」就会自动用它，不用别的设置。"
 
 /**
  * 引擎：电脑和手机各有一个，都能单独用。数据、Key、模型调用都在本机。
@@ -277,6 +282,16 @@ class Engine(private val storage: Storage, private val isPhone: Boolean = false)
             if (said.isBlank()) CommandResult(false, "接口通了（$secs 秒），但模型「${c.modelId}」没有返回文字。检查一下模型名是否写对。")
             else CommandResult(message = "连通了（$secs 秒，模型 ${c.modelId}）。它说：" + said.take(120))
         }
+        is Command.TestImage -> {
+            val only = if (c.providerId.isBlank()) null else {
+                val p = state.provider(c.providerId) ?: return CommandResult(false, "服务商不存在")
+                ImageChoice(p.id, p.name, c.modelId, free = false, inferred = false, note = "")
+            }
+            val t0 = now()
+            val r = paintAuto(c.prompt.ifBlank { "一只坐在窗台上晒太阳的橘猫，水彩画风格，暖色调" }, "1024x1024", only)
+            CommandResult(message = "用 ${r.label} 画好了（${"%.1f".format((now() - t0) / 1000.0)} 秒）",
+                data = AppJson.encodeToString(Attachment.serializer(), r.att))
+        }
         is Command.SaveMember -> {
             updateState { s ->
                 val exists = s.member(c.member.id) != null
@@ -437,8 +452,15 @@ class Engine(private val storage: Storage, private val isPhone: Boolean = false)
     }
 
     private suspend fun send(c: Command.SendMessage): CommandResult {
-        val conv = state.conversation(c.convId) ?: return CommandResult(false, "对话不存在")
+        var conv = state.conversation(c.convId) ?: return CommandResult(false, "对话不存在")
         if (c.text.isBlank() && c.attachmentIds.isEmpty()) return CommandResult(false, "空消息")
+        // @ 了不在这个对话里的成员：直接拉进来让他回答（以前会悄悄换成别人答）
+        val invited = if (c.drawImage) emptyList() else parseMentions(c.text, state.members).filter { it.id !in conv.memberIds }
+        if (invited.isNotEmpty()) {
+            updateState { s -> s.copy(conversations = s.conversations.map { if (it.id == conv.id) it.copy(memberIds = it.memberIds + invited.map { m -> m.id }) else it }) }
+            conv = state.conversation(conv.id) ?: return CommandResult(false, "对话不存在")
+            emit(Event.Notice("已把「${invited.joinToString("、") { it.name }}」拉进这个对话"))
+        }
         if (!c.drawImage && conv.memberIds.isEmpty()) return CommandResult(false, "这个对话还没有 AI 成员，点右上角加几位")
         val atts = c.attachmentIds.mapNotNull { storage.fileMeta(it) }
         val userMsg = Message(newId(), conv.id, Role.USER, USER_ID, c.text.trim(), attachments = atts, createdAt = now())
@@ -520,26 +542,48 @@ class Engine(private val storage: Storage, private val isPhone: Boolean = false)
         return CommandResult()
     }
 
-    private fun imageGenTarget(): Pair<ProviderConfig, String>? {
-        val ig = state.settings.imageGen
-        val p = state.provider(ig.providerId) ?: return null
-        if (ig.modelId.isBlank() || !p.enabled) return null
-        return p to ig.modelId
+    /** 自动模式下画图失败过的模型（比如这个 Key 没开通画图），半小时内排到后面。 */
+    private val imageFailures = ConcurrentHashMap<String, Long>()
+
+    private class Painted(val att: Attachment, val revisedPrompt: String?, val label: String)
+
+    /**
+     * 画一张图。设置里指定了模型就只用它；自动模式按候选顺序试（免费的智谱 cogview-3-flash 优先），
+     * 一个失败换下一个，最多试三个。
+     */
+    private suspend fun paintAuto(prompt: String, size: String? = null, only: ImageChoice? = null): Painted {
+        val all = only?.let { listOf(it) } ?: ImagePick.resolve(state)
+        if (all.isEmpty()) throw IllegalStateException(NO_IMAGE_MODEL)
+        fun key(c: ImageChoice) = c.providerId + "|" + c.modelId
+        val recentlyFailed = all.filter { (imageFailures[key(it)] ?: 0L) > now() - 30 * 60_000 }
+        val order = (all - recentlyFailed.toSet() + recentlyFailed).take(3)
+        var first: Throwable? = null
+        for (c in order) {
+            val p = state.provider(c.providerId) ?: continue
+            try {
+                val (att, revised) = paint(p to c.modelId, prompt, size)
+                imageFailures.remove(key(c))
+                return Painted(att, revised, "${c.modelId}（${c.providerName}）")
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                imageFailures[key(c)] = now()
+                if (first == null) first = e
+            }
+        }
+        val e = first ?: IllegalStateException(NO_IMAGE_MODEL)
+        if (order.size <= 1) throw e
+        throw IllegalStateException("试了 ${order.joinToString("、") { it.modelId }}，都没画成。第一个的错误：${friendlyError(e)}", e)
     }
 
     private suspend fun drawDirect(convId: String, userMsg: Message) {
         val msg = Message(newId(), convId, Role.AI, PAINTER_ID, status = MsgStatus.STREAMING, createdAt = now())
         addMessage(msg)
-        val target = imageGenTarget()
-        if (target == null) {
-            updateMessage(convId, msg.id) { it.copy(status = MsgStatus.ERROR, error = "还没选画图模型：到 设置→画图 选一个（比如智谱 cogview、豆包 seedream、硅基流动 Kolors）") }
-            return
-        }
         try {
-            val att = paint(target, userMsg.content)
+            val r = paintAuto(userMsg.content)
             updateMessage(convId, msg.id) {
-                it.copy(attachments = listOf(att.first), content = att.second?.let { r -> "按描述画好了。\n\n> $r" } ?: "按描述画好了。",
-                    status = MsgStatus.DONE, modelLabel = "${target.second}（${target.first.name}）")
+                it.copy(attachments = listOf(r.att), content = r.revisedPrompt?.let { rp -> "按描述画好了。\n\n> $rp" } ?: "按描述画好了。",
+                    status = MsgStatus.DONE, modelLabel = r.label)
             }
         } catch (e: CancellationException) {
             withContext(NonCancellable) { updateMessage(convId, msg.id) { it.copy(status = MsgStatus.STOPPED) } }
@@ -575,19 +619,19 @@ class Engine(private val storage: Storage, private val isPhone: Boolean = false)
         }
         val model = provider.models.firstOrNull { it.id == member.modelId }
             ?: ModelInfo(member.modelId, vision = Presets.guessVision(member.modelId))
-        val drawTarget = imageGenTarget()
+        val hasImageModel = ImagePick.resolve(state).isNotEmpty()
         val wantSearch = conv.webSearch
         val toolsOk = model.tools && !llm.toolsDropped(provider, model.id)
         // 平台有官方内置搜索就用内置的（Kimi、智谱、千问），否则用我们自己的搜索工具
         val native = if (wantSearch && toolsOk) nativeSearchOf(provider, model.id) else NativeSearch.NONE
         val fnSearch = wantSearch && native == NativeSearch.NONE
-        val useTools = toolsOk && (wantSearch || drawTarget != null)
+        val useTools = toolsOk && (wantSearch || hasImageModel)
 
         try {
             val working = mutableListOf<JsonObject>()
-            val sys = Prompts.system(state, conv, member, canSearch = wantSearch, canDraw = drawTarget != null && useTools,
+            val sys = Prompts.system(state, conv, member, canSearch = wantSearch, canDraw = hasImageModel && useTools,
                 canSeeImages = model.vision, independentRound = independent, calledBy = calledBy,
-                nativeSearch = native != NativeSearch.NONE)
+                nativeSearch = native != NativeSearch.NONE, hasImageModel = hasImageModel)
             working += buildJsonObject { put("role", "system"); put("content", sys) }
             working += buildHistory(convId, member, cutoffId, excludeId = msg.id, vision = model.vision)
 
@@ -602,7 +646,7 @@ class Engine(private val storage: Storage, private val isPhone: Boolean = false)
                 }
             }
 
-            val tools = if (useTools) toolDefs(fnSearch, fetch = wantSearch, draw = drawTarget != null, native = native) else null
+            val tools = if (useTools) toolDefs(fnSearch, fetch = wantSearch, draw = hasImageModel, native = native) else null
             val extra = if (native == NativeSearch.QWEN) buildJsonObject {
                 put("enable_search", true)
                 putJsonObject("search_options") {
@@ -653,7 +697,7 @@ class Engine(private val storage: Storage, private val isPhone: Boolean = false)
                     // 一次回答最多用 8 次工具（Kimi 官方搜索不算），超过就让它根据已有结果直接回答
                     val result = if (!tc.name.startsWith("$") && toolUses >= MAX_TOOL_USES)
                         "这次回答已经用了 $MAX_TOOL_USES 次工具，不能再搜了。请直接根据前面的结果回答；没查到的就如实说。"
-                    else { if (!tc.name.startsWith("$")) toolUses++; runTool(convId, msg.id, tc, sources, drawTarget) }
+                    else { if (!tc.name.startsWith("$")) toolUses++; runTool(convId, msg.id, tc, sources) }
                     working += buildJsonObject {
                         put("role", "tool"); put("tool_call_id", tc.id)
                         if (tc.name.startsWith("$")) put("name", tc.name)
@@ -747,7 +791,7 @@ class Engine(private val storage: Storage, private val isPhone: Boolean = false)
         ToolStep("search", query, ok = false, note = friendlyError(e)) to emptyList()
     }
 
-    private suspend fun runTool(convId: String, msgId: String, tc: ToolCall, sources: MutableList<SearchSource>, drawTarget: Pair<ProviderConfig, String>?): String {
+    private suspend fun runTool(convId: String, msgId: String, tc: ToolCall, sources: MutableList<SearchSource>): String {
         val args = runCatching { Json.parse(tc.arguments.ifBlank { "{}" }).jsonObject }.getOrNull() ?: JsonObject(emptyMap())
         return when (tc.name) {
             // Kimi 官方搜索：搜索在 Kimi 服务器上做，客户端只要把参数原样交回去
@@ -781,12 +825,11 @@ class Engine(private val storage: Storage, private val isPhone: Boolean = false)
                 text
             }
             "generate_image" -> {
-                val target = drawTarget ?: return "画图模型没有配置"
                 val prompt = args.str("prompt").orEmpty().ifBlank { return "参数错误：缺少 prompt" }
                 try {
-                    val (att, _) = paint(target, prompt, args.str("size"))
-                    updateMessage(convId, msgId) { it.copy(attachments = it.attachments + att, tools = it.tools + ToolStep("image", prompt)) }
-                    "图片已生成，并已经显示给用户。"
+                    val r = paintAuto(prompt, args.str("size"))
+                    updateMessage(convId, msgId) { it.copy(attachments = it.attachments + r.att, tools = it.tools + ToolStep("image", prompt)) }
+                    "图片已生成（用的是 ${r.label}），并已经显示给用户。"
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Throwable) {

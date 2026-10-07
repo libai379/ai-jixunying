@@ -32,6 +32,8 @@ object Prompts {
         independentRound: Boolean,
         calledBy: String?,
         nativeSearch: Boolean = false,
+        /** 有没有能用的画图模型（canDraw 还要求这个模型会调工具）。 */
+        hasImageModel: Boolean = canDraw,
     ): String {
         val profile = state.profile
         val others = conv.memberIds.filter { it != me.id }.mapNotNull { state.member(it) }
@@ -98,7 +100,8 @@ object Prompts {
             appendLine(if (canSeeImages) "- 你能看图：用户发来的图片会直接给你看。" else "- 你看不到图片：如果用户发了图，告诉他你这个模型不支持看图，可以换一个能看图的成员。")
             appendLine("- 用户发来的文档（PDF、Word、Excel、PPT、代码、文本等）已经转成文字放在消息里，标有「附件」字样。")
             if (canDraw) appendLine("- 你可以画图：用户要图片、要改图时调用 generate_image，提示词要具体（主体、风格、构图、光线、色彩）；用户说「改成……」就在上一张的基础上调整描述重新画。画完简单说明即可，不用把图再描述一遍。可以一边聊一边画。")
-            else appendLine("- 你现在不能画图（还没选画图模型）。用户要图时，告诉他：先到 设置 → 画图 选一个画图模型（比如 MiniMax image-01、智谱 cogview-3-flash、豆包 Seedream），之后在聊天里直接说「画一张……」就行。")
+            else if (hasImageModel) appendLine("- 你这个模型不会调用工具，没法自己画图。用户要图时，请他点输入框上的「直接画图」，再描述画面。")
+            else appendLine("- 你现在不能画图：用户还没接入能画图的服务商。用户要图时告诉他：到 设置 → 模型服务 添加任意一家能画图的平台并填 Key（智谱开放平台的 cogview-3-flash 免费，MiniMax 的 image-01、豆包 Seedream 也行），加好之后直接说「画一张……」就行，不用别的设置。")
             appendLine()
             append("现在轮到你（${me.name}）发言。")
         }

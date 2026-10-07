@@ -560,8 +560,11 @@ private fun Composer(ctl: AppController, state: AppState, conv: Conversation, ru
         val at = before.lastIndexOf('@')
         if (at >= 0 && before.substring(at + 1).none { it.isWhitespace() } && before.length - at <= 12) before.substring(at + 1) else null
     }
+    // 候选：对话里的成员在前；不在对话里的也列出来，@ 了会被拉进对话
+    val outsiders = state.members.filter { it.id !in conv.memberIds }
     val suggestions = if (mentionQuery == null) emptyList() else
-        (members.map { it.name to it } + listOf("所有人" to null)).filter { it.first.contains(mentionQuery, true) }
+        (members.map { it.name to it } + (if (members.size > 1) listOf("所有人" to null) else emptyList()) + outsiders.map { it.name to it })
+            .filter { it.first.contains(mentionQuery, true) }
 
     fun insertMention(name: String) {
         val cursor = text.selection.start
@@ -617,7 +620,9 @@ private fun Composer(ctl: AppController, state: AppState, conv: Conversation, ru
                                 Text(name, style = MaterialTheme.typography.bodyMedium)
                                 if (m != null) {
                                     Spacer(Modifier.width(6.dp))
-                                    Text(m.modelId, style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, maxLines = 1)
+                                    val outside = m.id !in conv.memberIds
+                                    Text(if (outside) "不在这个对话里，@ 了会拉进来" else m.modelId, style = MaterialTheme.typography.labelSmall,
+                                        color = if (outside) Ext.c.warning else Ext.c.subtle, maxLines = 1)
                                 }
                             }
                         }
@@ -683,7 +688,7 @@ private fun Composer(ctl: AppController, state: AppState, conv: Conversation, ru
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         ComposerIcon(Icons.Rounded.AttachFile, "附件（图片、PDF、Word、Excel、PPT、代码…）") { pick(false) }
                         ComposerIcon(Icons.Rounded.Image, "图片") { pick(true) }
-                        if (members.size > 1) ComposerIcon(Icons.Rounded.AlternateEmail, "@ 成员") {
+                        if (state.members.size > 1) ComposerIcon(Icons.Rounded.AlternateEmail, "@ 成员（也能 @ 不在这个对话里的成员，会把他拉进来）") {
                             text = TextFieldValue(text.text + (if (text.text.isEmpty() || text.text.endsWith(" ")) "@" else " @"), TextRange(Int.MAX_VALUE))
                         }
                         Spacer(Modifier.width(6.dp))
