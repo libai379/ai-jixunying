@@ -95,12 +95,16 @@ class EngineTest {
                     val msgs = req["messages"]!!.jsonArray
                     val last = msgs.last().jsonObject
                     val lastText = (last["content"] as? JsonPrimitive)?.contentOrNull.orEmpty()
-                    val name = memberName(req)
+                    val firstText = (msgs.first().jsonObject["content"] as? JsonPrimitive)?.contentOrNull.orEmpty()
+                    // 记录员的请求没有成员设定
+                    val name = runCatching { memberName(req) }.getOrDefault("记录员")
                     val tools = req["tools"] as? JsonArray
-                    val hasFnSearch = tools?.any { it.jsonObject["function"]?.jsonObject?.get("name")?.jsonPrimitive?.content == "web_search" } == true
-                    val hasDraw = tools?.any { it.jsonObject["function"]?.jsonObject?.get("name")?.jsonPrimitive?.content == "generate_image" } == true
+                    fun hasTool(n: String) = tools?.any { it.jsonObject["function"]?.jsonObject?.get("name")?.jsonPrimitive?.content == n } == true
+                    val hasFnSearch = hasTool("web_search")
+                    val hasDraw = hasTool("generate_image")
                     val sawTool = msgs.any { it.jsonObject["role"]?.jsonPrimitive?.content == "tool" }
                     val drew = msgs.any { it.jsonObject["role"]?.jsonPrimitive?.content == "tool" && "图片已生成" in it.jsonObject["content"].toString() }
+                    val remembered = msgs.any { it.jsonObject["role"]?.jsonPrimitive?.content == "tool" && "记住" in it.jsonObject["content"].toString() }
                     // 只看用户最新的那一句（连续几句会合并成一条）
                     val latest = lastText.substringAfterLast("【")
                     call.respondTextWriter(ContentType.Text.EventStream) {
@@ -109,6 +113,16 @@ class EngineTest {
                             chunk(Json.encodeToString(JsonObject.serializer(), JsonObject(mapOf("content" to JsonPrimitive(it)))))
                         }
                         when {
+                            // —— 记录员 ——
+                            "你是聊天记录员" in firstText -> say("## 话题\n测试话题\n## 已经定下的结论\n摘要里的结论")
+                            "找出值得长期记住的" in firstText -> say("""好的：[{"text":"在北京做产品经理","kind":"关于我","replaces":null}]""")
+                            "下面是关于一位用户的长期记忆" in firstText -> say("""[{"text":"喜欢简短的回答","kind":"偏好","from":[1,2]}]""")
+                            // 用户说「记住」：调 remember
+                            hasTool("remember") && latest.contains("记住") && !sawTool -> {
+                                chunk("""{"tool_calls":[{"index":0,"id":"mem_1","type":"function","function":{"name":"remember","arguments":"{\"text\":\"喜欢简短的回答\",\"kind\":\"偏好\"}"}}]}""")
+                                write("data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n")
+                            }
+                            remembered -> say("记住了。")
                             // Kimi 官方搜索：先回一个 $web_search 调用，客户端原样交回参数后再回答
                             model == "kimi-fake" && !sawTool -> {
                                 chunk("""{"tool_calls":[{"index":0,"id":"ws_1","type":"builtin_function","function":{"name":"${'$'}web_search","arguments":"{\"search_result\":{\"search_id\":\"abc\"}}"}}]}""")
@@ -404,6 +418,64 @@ class EngineTest {
         val r2 = e.call(Command.TestImage())
         assertFalse(r2.ok)
         assertTrue("HTTP 403" in r2.message, r2.message)
+    }
+
+    /** AI 用 remember 记下的东西，之后每位成员的设定里都有；能在别的对话里被用上。 */
+    @Test
+    fun rememberToolFeedsLaterPrompts() = runBlocking {
+        val (e, ms) = engineWithMembers("甲", "乙")
+        val c1 = e.call(Command.CreateConversation(listOf(ms[0].id))).data
+        e.call(Command.UpdateConversation(e.state.conversation(c1)!!.copy(webSearch = false)))
+        e.call(Command.SendMessage(c1, "记住我喜欢简短的回答"))
+        waitIdle(e, c1, 1)
+        val ai = e.store.messages.value[c1]!!.last()
+        assertEquals("记住了。", ai.content, ai.error)
+        assertEquals("memory", ai.tools.single().kind)
+        assertEquals(listOf("喜欢简短的回答"), e.state.memories.map { it.text })
+        // 另一个对话、另一位成员也知道
+        val c2 = e.call(Command.CreateConversation(listOf(ms[1].id))).data
+        e.call(Command.SendMessage(c2, "你好"))
+        waitIdle(e, c2, 1)
+        val sys = systemOf(requests.last { memberName(it) == "乙" })
+        assertTrue("[偏好] 喜欢简短的回答" in sys, sys)
+        // 敏感信息不记
+        val bad = e.call(Command.SaveMemory(com.guixing.jixunying.model.MemoryItem("x", "我的密码是 123456")))
+        assertFalse(bad.ok)
+    }
+
+    /** 聊长了由记录员压成摘要（全群一份），之后发给模型的只有摘要 + 最近的原文；攒够 4 句用户的话会自动挑长期记忆。 */
+    @Test
+    fun recorderCompactsAndExtracts() = runBlocking {
+        val (e, ms) = engineWithMembers("甲")
+        e.call(Command.SaveSettings(e.state.settings.copy(memory = e.state.settings.memory.copy(compressAt = 400))))
+        val conv = e.call(Command.CreateConversation(listOf(ms[0].id))).data
+        e.call(Command.UpdateConversation(e.state.conversation(conv)!!.copy(webSearch = false)))
+        repeat(5) { i ->
+            e.call(Command.SendMessage(conv, "第${i}句：" + "很长的内容".repeat(30)))
+            waitIdle(e, conv, i + 1)
+            delay(300) // 等后台的记录员干完
+        }
+        val c = e.state.conversation(conv)!!
+        assertTrue(c.summarized > 0, "应该压缩过")
+        assertTrue(requests.any { "你是聊天记录员" in it.toString() })
+        // 最后一次回答的上下文：有摘要，没有第 0 句原文
+        val lastChat = requests.last { runCatching { memberName(it) }.getOrNull() == "甲" }
+        val ctx = lastChat["messages"].toString()
+        assertTrue("【对话摘要】" in ctx && "摘要里的结论" in ctx, ctx.take(400))
+        assertFalse("第0句" in ctx, "压缩掉的原文不再发")
+        // 长期记忆：自动挑出来了
+        assertTrue(e.state.memories.any { it.text == "在北京做产品经理" }, e.state.memories.toString())
+
+        // 搜以前的聊天
+        val hits = AppJson.decodeFromString(kotlinx.serialization.builtins.ListSerializer(com.guixing.jixunying.model.HistoryHit.serializer()),
+            e.call(Command.SearchHistory("第3句")).data)
+        assertEquals("第3句：", hits.first().snippet.take(4))
+
+        // 整理：两条变一条
+        e.call(Command.SaveMemory(com.guixing.jixunying.model.MemoryItem("m-a", "喜欢简洁", "偏好")))
+        val tidy = e.call(Command.TidyMemories)
+        assertTrue(tidy.ok, tidy.message)
+        assertEquals(listOf("喜欢简短的回答"), e.state.memories.map { it.text })
     }
 
     /** @ 了不在这个对话里的成员：把他拉进来，由他回答（以前会悄悄换成对话里的别人答）。 */

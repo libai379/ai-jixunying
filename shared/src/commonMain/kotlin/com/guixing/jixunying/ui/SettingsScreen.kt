@@ -42,6 +42,8 @@ import androidx.compose.material.icons.rounded.Language
 import androidx.compose.material.icons.rounded.Menu
 import androidx.compose.material.icons.rounded.Palette
 import androidx.compose.material.icons.rounded.PhoneAndroid
+import androidx.compose.material.icons.rounded.Psychology
+import androidx.compose.material.icons.rounded.PushPin
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Visibility
 import androidx.compose.material.icons.rounded.VisibilityOff
@@ -92,6 +94,7 @@ private fun tabIcon(t: SettingsTab): ImageVector = when (t) {
     SettingsTab.PROVIDERS -> Icons.Rounded.Cloud
     SettingsTab.MEMBERS -> Icons.Rounded.Groups
     SettingsTab.PROFILE -> Icons.Rounded.Badge
+    SettingsTab.MEMORY -> Icons.Rounded.Psychology
     SettingsTab.SEARCH -> Icons.Rounded.Language
     SettingsTab.IMAGE -> Icons.Rounded.Brush
     SettingsTab.DEVICES -> Icons.Rounded.PhoneAndroid
@@ -158,6 +161,7 @@ private fun SettingsPage(ctl: AppController, state: AppState, tab: SettingsTab) 
                 SettingsTab.PROVIDERS -> ProvidersPage(ctl, state)
                 SettingsTab.MEMBERS -> MembersPage(ctl, state)
                 SettingsTab.PROFILE -> ProfilePage(ctl, state)
+                SettingsTab.MEMORY -> MemoryPage(ctl, state)
                 SettingsTab.SEARCH -> SearchPage(ctl, state)
                 SettingsTab.IMAGE -> ImagePage(ctl, state)
                 SettingsTab.DEVICES -> DevicesPage(ctl, state)
@@ -169,7 +173,7 @@ private fun SettingsPage(ctl: AppController, state: AppState, tab: SettingsTab) 
 }
 
 @Composable
-private fun PageHeader(title: String, desc: String, action: @Composable (() -> Unit)? = null) {
+fun PageHeader(title: String, desc: String, action: @Composable (() -> Unit)? = null) {
     // 窄屏（手机）上按钮放到说明下面，不挤压文字
     androidx.compose.foundation.layout.BoxWithConstraints(Modifier.fillMaxWidth().padding(bottom = 16.dp)) {
         val narrow = maxWidth < 520.dp
@@ -855,7 +859,7 @@ private fun ModelPicker(value: String, onChange: (String) -> Unit, options: List
 
 /** 弹窗里的结果条：绿色成功、红色失败，文字可以选中复制。 */
 @Composable
-private fun TestResultBox(ok: Boolean, text: String, onClose: () -> Unit) {
+fun TestResultBox(ok: Boolean, text: String, onClose: () -> Unit) {
     val color = if (ok) Ext.c.success else MaterialTheme.colorScheme.error
     Row(
         Modifier.fillMaxWidth().padding(top = 10.dp).clip(RoundedCornerShape(10.dp))

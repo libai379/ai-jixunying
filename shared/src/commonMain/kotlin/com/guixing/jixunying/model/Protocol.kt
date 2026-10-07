@@ -45,6 +45,14 @@ sealed interface Command {
     /** 手机把电脑导出的配置并入本机。 */
     @Serializable data class ImportConfig(val bundleJson: String) : Command
 
+    /** 长期记忆：新增或修改一条。 */
+    @Serializable data class SaveMemory(val item: MemoryItem) : Command
+    @Serializable data class DeleteMemory(val id: String) : Command
+    /** 让记录员合并重复、矛盾的记忆。 */
+    @Serializable data object TidyMemories : Command
+    /** 搜所有对话的聊天内容。结果 data 是 List<HistoryHit> 的 JSON。 */
+    @Serializable data class SearchHistory(val query: String, val limit: Int = 30) : Command
+
     /** 换一个新的配对二维码（旧的立即失效）。 */
     @Serializable data object NewPairingCode : Command
     @Serializable data class RemoveDevice(val id: String) : Command
@@ -52,6 +60,17 @@ sealed interface Command {
 
 @Serializable
 data class CommandResult(val ok: Boolean = true, val message: String = "", val data: String = "")
+
+/** 聊天记录搜索的一条结果。 */
+@Serializable
+data class HistoryHit(
+    val convId: String,
+    val convTitle: String,
+    val messageId: String,
+    val sender: String,
+    val snippet: String,
+    val time: Long,
+)
 
 /** 从电脑导到手机的配置包。 */
 @Serializable
@@ -62,6 +81,7 @@ data class ConfigBundle(
     val search: SearchSettings,
     val imageGen: ImageGenSettings,
     val proxy: String,
+    val memories: List<MemoryItem> = emptyList(),
 )
 
 /** 引擎推给界面的事件。 */

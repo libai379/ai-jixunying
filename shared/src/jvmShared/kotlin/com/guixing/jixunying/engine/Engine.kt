@@ -13,6 +13,7 @@ import com.guixing.jixunying.model.Event
 import com.guixing.jixunying.model.ImageChoice
 import com.guixing.jixunying.model.ImagePick
 import com.guixing.jixunying.model.Member
+import com.guixing.jixunying.model.MemoryItem
 import com.guixing.jixunying.model.Message
 import com.guixing.jixunying.model.ModelInfo
 import com.guixing.jixunying.model.MsgStatus
@@ -359,6 +360,23 @@ class Engine(private val storage: Storage, private val isPhone: Boolean = false)
             CommandResult()
         }
         is Command.Regenerate -> regenerate(c.convId, c.messageId)
+        is Command.SaveMemory -> {
+            val text = c.item.text.trim()
+            if (text.isBlank()) return CommandResult(false, "内容是空的")
+            if (looksSensitive(text)) return CommandResult(false, "这条像是密码、Key、证件号之类的敏感信息，不建议放进记忆（每次聊天都会发给模型）")
+            updateState { s ->
+                val item = c.item.copy(text = text.take(300), updatedAt = now(), createdAt = c.item.createdAt.takeIf { it > 0 } ?: now())
+                s.copy(memories = if (s.memories.any { it.id == item.id }) s.memories.map { if (it.id == item.id) item else it } else s.memories + item)
+            }
+            CommandResult()
+        }
+        is Command.DeleteMemory -> {
+            updateState { s -> s.copy(memories = s.memories.filterNot { it.id == c.id }) }
+            CommandResult()
+        }
+        is Command.TidyMemories -> tidyMemories()
+        is Command.SearchHistory -> CommandResult(data = AppJson.encodeToString(
+            kotlinx.serialization.builtins.ListSerializer(com.guixing.jixunying.model.HistoryHit.serializer()), searchHistory(c.query, c.limit)))
         is Command.NewPairingCode -> {
             previousSecret = null
             updateState { it.copy(pairingSecret = newSecret()) }
@@ -379,7 +397,7 @@ class Engine(private val storage: Storage, private val isPhone: Boolean = false)
         }
         is Command.ExportConfig -> {
             val s = state
-            val bundle = ConfigBundle(s.providers, s.members, s.profile, s.settings.search, s.settings.imageGen, s.settings.proxy)
+            val bundle = ConfigBundle(s.providers, s.members, s.profile, s.settings.search, s.settings.imageGen, s.settings.proxy, s.memories)
             CommandResult(data = AppJson.encodeToString(ConfigBundle.serializer(), bundle))
         }
         is Command.ImportConfig -> {
@@ -394,6 +412,7 @@ class Engine(private val storage: Storage, private val isPhone: Boolean = false)
             else buildList {
                 if (res.addedProviders > 0) add("新增 ${res.addedProviders} 个服务商")
                 if (res.addedMembers > 0) add("新增 ${res.addedMembers} 位成员")
+                if (res.addedMemories > 0) add("新增 ${res.addedMemories} 条记忆")
                 if (res.filled.size <= 3) addAll(res.filled)
                 else { addAll(res.filled.take(2)); add("另有 ${res.filled.size - 2} 项补上了空缺") }
                 if (res.removedDuplicates > 0) add("合并了 ${res.removedDuplicates} 个重复项")
@@ -467,9 +486,170 @@ class Engine(private val storage: Storage, private val isPhone: Boolean = false)
         addMessage(userMsg)
         touchConversation(conv.id, c.text.ifBlank { atts.firstOrNull()?.name.orEmpty() })
         launchFor(conv.id) {
-            if (c.drawImage) drawDirect(conv.id, userMsg) else runTurn(conv.id, userMsg)
+            if (c.drawImage) drawDirect(conv.id, userMsg) else {
+                runTurn(conv.id, userMsg)
+                // 答完以后在后台：聊天太长就压缩，攒够了就挑出值得长期记住的
+                scope.launch { afterTurn(conv.id) }
+            }
         }
         return CommandResult()
+    }
+
+    // ———————————————— 记忆 ————————————————
+
+    private val memoLocks = ConcurrentHashMap<String, kotlinx.coroutines.sync.Mutex>()
+
+    /** 记录员的活：同一个对话同时只跑一份，正在跑就跳过（下次答完会再看）。 */
+    private suspend fun afterTurn(convId: String) {
+        val lock = memoLocks.getOrPut(convId) { kotlinx.coroutines.sync.Mutex() }
+        if (!lock.tryLock()) return
+        try {
+            runCatching { compactIfLong(convId) }
+            runCatching { extractMemories(convId) }
+        } finally {
+            lock.unlock()
+        }
+    }
+
+    private fun userMsg(text: String) = buildJsonObject { put("role", "user"); put("content", text) }
+
+    private fun speakerName(m: Message) = when {
+        m.role == Role.USER -> state.profile.name
+        m.senderId == PAINTER_ID -> "画图助手"
+        else -> state.member(m.senderId)?.name ?: "已移除的成员"
+    }
+
+    private fun transcriptOf(msgs: List<Message>, maxPerMessage: Int): String = buildString {
+        for (m in msgs) {
+            append("【").append(speakerName(m)).append("】")
+            append(stripThink(m.content).take(maxPerMessage))
+            m.attachments.forEach { a -> append("\n[附件：").append(a.name).append("]") }
+            append("\n\n")
+        }
+    }
+
+    private fun msgCost(m: Message) = m.content.length + m.attachments.sumOf { minOf(it.textChars, 4000) } + 50
+
+    /**
+     * 没压缩的聊天超过设定字数（默认 2.4 万字）时，把前面的部分交给记录员压成摘要，最近约三分之一保留原文。
+     * 摘要全群共用一份（前身是每个成员各压一遍，调用次数是成员数倍）。
+     */
+    internal suspend fun compactIfLong(convId: String, force: Boolean = false): Boolean {
+        val ms = state.settings.memory
+        val memo = storage.loadMemo(convId)
+        val fresh = snapshot(convId).filter {
+            it.status == MsgStatus.DONE && it.role != Role.SYSTEM && it.createdAt > memo.upToTime && (it.content.isNotBlank() || it.attachments.isNotEmpty())
+        }
+        if (!force && fresh.sumOf(::msgCost) < ms.compressAt) return false
+        var kept = 0
+        var cut = fresh.size
+        while (cut > 0 && kept + msgCost(fresh[cut - 1]) <= ms.compressAt / 3) { cut--; kept += msgCost(fresh[cut]) }
+        cut = minOf(cut, fresh.size - 4)
+        if (cut <= 0) return false
+        val fold = fresh.subList(0, cut)
+        val (p, model) = Recorder.pick(state) ?: return false
+        val prompt = Recorder.summarizePrompt(memo.summary, transcriptOf(fold, 3000), state.profile.name)
+        val r = withContext(Dispatchers.IO) { llm.chat(p, model, listOf(userMsg(prompt)), null, null) { _, _ -> } }
+        val summary = stripThink(r.content).trim()
+        if (summary.length < 20) return false
+        val next = storage.loadMemo(convId).copy(summary = summary.take(8000), upToTime = fold.last().createdAt,
+            summarizedCount = memo.summarizedCount + fold.size, updatedAt = now())
+        storage.saveMemo(convId, next)
+        updateState { s -> s.copy(conversations = s.conversations.map { if (it.id == convId) it.copy(summarized = next.summarizedCount) else it }) }
+        return true
+    }
+
+    /** 攒够 4 句用户的话，让记录员挑出值得长期记住的、关于用户本人的信息。 */
+    internal suspend fun extractMemories(convId: String, force: Boolean = false) {
+        val ms = state.settings.memory
+        if (!ms.enabled || !ms.autoExtract) return
+        val memo = storage.loadMemo(convId)
+        val fresh = snapshot(convId).filter { it.status == MsgStatus.DONE && it.createdAt > memo.scannedUpToTime && it.content.isNotBlank() }
+        if (fresh.isEmpty() || (!force && fresh.count { it.role == Role.USER } < 4)) return
+        val (p, model) = Recorder.pick(state) ?: return
+        val existing = state.memories
+        val prompt = Recorder.extractPrompt(existing, transcriptOf(fresh.takeLast(40), 1500), state.profile.name)
+        val r = withContext(Dispatchers.IO) { llm.chat(p, model, listOf(userMsg(prompt)), null, null) { _, _ -> } }
+        // 看不懂输出就不挪扫描位置，下次再试
+        val items = Recorder.parseItems(r.content) ?: return
+        storage.saveMemo(convId, storage.loadMemo(convId).copy(scannedUpToTime = fresh.last().createdAt))
+        val changed = applyExtracted(items.take(3), existing, state.conversation(convId)?.title.orEmpty())
+        if (changed.isNotEmpty()) emit(Event.Notice("记住了：${changed.first().text}" + (if (changed.size > 1) " 等 ${changed.size} 条" else "") + "（设置 → 记忆 可以查看和修改）"))
+    }
+
+    private fun applyExtracted(items: List<Recorder.Extracted>, existing: List<MemoryItem>, source: String): List<MemoryItem> {
+        val changed = mutableListOf<MemoryItem>()
+        updateState { s ->
+            val list = s.memories.toMutableList()
+            for (e in items) {
+                if (looksSensitive(e.text)) continue
+                val replaced = e.replaces?.let { existing.getOrNull(it - 1) }?.let { old -> list.indexOfFirst { it.id == old.id } }?.takeIf { it >= 0 }
+                val same = list.indexOfFirst { Recorder.similar(it.text, e.text) }
+                when {
+                    replaced != null -> list[replaced] = list[replaced].copy(text = e.text, kind = e.kind, updatedAt = now()).also(changed::add)
+                    same >= 0 -> Unit
+                    else -> list += MemoryItem(newId(), e.text, e.kind, source, now(), now()).also(changed::add)
+                }
+            }
+            s.copy(memories = list)
+        }
+        return changed
+    }
+
+    /** 密码、Key、证件号之类不进长期记忆。 */
+    private fun looksSensitive(text: String): Boolean {
+        val t = text.lowercase()
+        return listOf("密码", "password", "api key", "apikey", "身份证", "银行卡", "验证码", "口令").any { it in t } ||
+            Regex("sk-[a-z0-9]{12,}").containsMatchIn(t) || Regex("\\d{15,}").containsMatchIn(t)
+    }
+
+    private fun rememberNow(text: String, kind: String, source: String): String {
+        val clean = text.trim().take(300)
+        if (clean.isBlank()) return "参数错误：缺少 text"
+        if (looksSensitive(clean)) return "这条看起来是密码、Key、证件号之类的敏感信息，没有记。请提醒用户敏感信息不要放进记忆。"
+        var result = "已记住：$clean"
+        updateState { s ->
+            val i = s.memories.indexOfFirst { Recorder.similar(it.text, clean) }
+            if (i >= 0) {
+                result = "已经记过类似的，已更新为：$clean"
+                s.copy(memories = s.memories.toMutableList().also { it[i] = it[i].copy(text = clean, kind = kind, updatedAt = now()) })
+            } else s.copy(memories = s.memories + MemoryItem(newId(), clean, kind, source, now(), now()))
+        }
+        return result
+    }
+
+    private suspend fun tidyMemories(): CommandResult {
+        val pinned = state.memories.filter { it.pinned }
+        val items = state.memories.filterNot { it.pinned }
+        if (items.size < 2) return CommandResult(message = "记忆不多，不用整理")
+        val (p, model) = Recorder.pick(state) ?: return CommandResult(false, "没有能用的模型来整理（先在 模型服务 里配一个）")
+        val r = withContext(Dispatchers.IO) { llm.chat(p, model, listOf(userMsg(Recorder.tidyPrompt(items))), null, null) { _, _ -> } }
+        val out = Recorder.parseItems(r.content) ?: return CommandResult(false, "记录员的输出看不懂，没有改动")
+        if (out.isEmpty()) return CommandResult(false, "记录员一条都没留，不像话，没有改动")
+        val next = out.map { e ->
+            val src = e.from.mapNotNull { items.getOrNull(it - 1) }
+            MemoryItem(newId(), e.text, e.kind, src.firstOrNull()?.source ?: "整理", src.minOfOrNull { it.createdAt } ?: now(), now())
+        }
+        updateState { it.copy(memories = pinned + next) }
+        return CommandResult(message = "整理好了：${items.size} 条变成 ${next.size} 条（置顶的没动）")
+    }
+
+    /** 搜所有对话的聊天内容，按命中多少、时间新旧排序。 */
+    fun searchHistory(query: String, limit: Int): List<com.guixing.jixunying.model.HistoryHit> {
+        val terms = Recorder.terms(query)
+        if (terms.isEmpty()) return emptyList()
+        val need = if (terms.size >= 4) 2 else 1
+        val hits = mutableListOf<Pair<Int, com.guixing.jixunying.model.HistoryHit>>()
+        for (conv in state.conversations) {
+            for (m in snapshot(conv.id)) {
+                if (m.status == MsgStatus.STREAMING || m.content.isBlank()) continue
+                val sc = Recorder.score(m.content, terms)
+                if (sc < need) continue
+                hits += sc to com.guixing.jixunying.model.HistoryHit(conv.id, conv.title, m.id, speakerName(m), Recorder.snippet(stripThink(m.content), terms), m.createdAt)
+            }
+        }
+        return hits.sortedWith(compareByDescending<Pair<Int, com.guixing.jixunying.model.HistoryHit>> { it.first }.thenByDescending { it.second.time })
+            .take(limit).map { it.second }
     }
 
     /** 找出文字里 @ 了哪些成员，按出现顺序；名字有包含关系时取最长的。 */
@@ -625,13 +805,15 @@ class Engine(private val storage: Storage, private val isPhone: Boolean = false)
         // 平台有官方内置搜索就用内置的（Kimi、智谱、千问），否则用我们自己的搜索工具
         val native = if (wantSearch && toolsOk) nativeSearchOf(provider, model.id) else NativeSearch.NONE
         val fnSearch = wantSearch && native == NativeSearch.NONE
-        val useTools = toolsOk && (wantSearch || hasImageModel)
+        val memOn = state.settings.memory.enabled
+        val useTools = toolsOk && (wantSearch || hasImageModel || memOn)
 
         try {
             val working = mutableListOf<JsonObject>()
             val sys = Prompts.system(state, conv, member, canSearch = wantSearch, canDraw = hasImageModel && useTools,
                 canSeeImages = model.vision, independentRound = independent, calledBy = calledBy,
-                nativeSearch = native != NativeSearch.NONE, hasImageModel = hasImageModel)
+                nativeSearch = native != NativeSearch.NONE, hasImageModel = hasImageModel,
+                memories = if (memOn) Recorder.forPrompt(state.memories) else emptyList(), canRemember = memOn && useTools)
             working += buildJsonObject { put("role", "system"); put("content", sys) }
             working += buildHistory(convId, member, cutoffId, excludeId = msg.id, vision = model.vision)
 
@@ -646,7 +828,7 @@ class Engine(private val storage: Storage, private val isPhone: Boolean = false)
                 }
             }
 
-            val tools = if (useTools) toolDefs(fnSearch, fetch = wantSearch, draw = hasImageModel, native = native) else null
+            val tools = if (useTools) toolDefs(fnSearch, fetch = wantSearch, draw = hasImageModel, native = native, memory = memOn) else null
             val extra = if (native == NativeSearch.QWEN) buildJsonObject {
                 put("enable_search", true)
                 putJsonObject("search_options") {
@@ -739,7 +921,7 @@ class Engine(private val storage: Storage, private val isPhone: Boolean = false)
         }
     }
 
-    private fun toolDefs(search: Boolean, fetch: Boolean, draw: Boolean, native: NativeSearch): JsonArray = buildJsonArray {
+    private fun toolDefs(search: Boolean, fetch: Boolean, draw: Boolean, native: NativeSearch, memory: Boolean = false): JsonArray = buildJsonArray {
         when (native) {
             NativeSearch.KIMI -> add(buildJsonObject {
                 put("type", "builtin_function")
@@ -778,6 +960,16 @@ class Engine(private val storage: Storage, private val isPhone: Boolean = false)
                     put("prompt", prop("画面描述：主体、风格、构图、光线、色彩，越具体越好"))
                     put("size", prop("可选，图片尺寸，如 1024x1024、1024x1792"))
                 }, listOf("prompt"))
+        }
+        if (memory) {
+            fn("remember", "把关于用户的、以后的对话也用得上的信息记进长期记忆（身份、职业、所在地、偏好、对回答方式的要求、长期项目）。" +
+                "用户说「记住……」时一定要调用。不要记一次性的问题，不要记密码、Key、证件号。",
+                buildJsonObject {
+                    put("text", prop("要记的内容，一句完整的话，以用户为主语，例如「希望回答先给结论」"))
+                    put("kind", prop("类别：关于我 / 偏好 / 要求 / 事实"))
+                }, listOf("text"))
+            fn("search_history", "搜索以前所有对话的聊天记录。用户提到「上次」「之前说过」「以前聊的」，或者需要回忆更早的原话时使用。返回匹配的片段（对话标题、日期、谁说的）。",
+                buildJsonObject { put("query", prop("关键词，越具体越好")) }, listOf("query"))
         }
     }
 
@@ -837,9 +1029,26 @@ class Engine(private val storage: Storage, private val isPhone: Boolean = false)
                     "画图失败：${friendlyError(e)}。请告诉用户。"
                 }
             }
+            "remember" -> {
+                val text = args.str("text").orEmpty()
+                val kind = args.str("kind")?.trim()?.takeIf { it in Recorder.kinds } ?: "关于我"
+                val res = rememberNow(text, kind, state.conversation(convId)?.title.orEmpty())
+                updateMessage(convId, msgId, persist = false) { it.copy(tools = it.tools + ToolStep("memory", text.trim().take(80), ok = res.startsWith("已"))) }
+                res
+            }
+            "search_history" -> {
+                val q = args.str("query").orEmpty().ifBlank { return "参数错误：缺少 query" }
+                val hits = searchHistory(q, 8)
+                updateMessage(convId, msgId, persist = false) { it.copy(tools = it.tools + ToolStep("history", q, ok = hits.isNotEmpty())) }
+                if (hits.isEmpty()) "以前的聊天里没找到和「$q」相关的内容。如实告诉用户。"
+                else hits.joinToString("\n\n") { h -> "[${h.convTitle} · ${dayOf(h.time)} · ${h.sender}] ${h.snippet}" }
+            }
             else -> "没有这个工具：${tc.name}"
         }
     }
+
+    private fun dayOf(millis: Long): String =
+        java.time.Instant.ofEpochMilli(millis).atZone(java.time.ZoneId.of("Asia/Shanghai")).toLocalDate().let { "${it.year}年${it.monthValue}月${it.dayOfMonth}日" }
 
     private fun lastUserText(convId: String, cutoffId: String?): String {
         val all = snapshot(convId)
@@ -847,14 +1056,18 @@ class Engine(private val storage: Storage, private val isPhone: Boolean = false)
         return all.subList(0, end).lastOrNull { it.role == Role.USER }?.content.orEmpty()
     }
 
-    /** 把聊天记录转成模型的 messages。别人的话标上「【名字】」，自己的话是 assistant。 */
+    /**
+     * 把聊天记录转成模型的 messages。别人的话标上「【名字】」，自己的话是 assistant。
+     * 记录员压缩过的部分换成摘要放在最前面，只发摘要之后的原文。
+     */
     private fun buildHistory(convId: String, me: Member, cutoffId: String?, excludeId: String, vision: Boolean): List<JsonObject> {
         val all = snapshot(convId)
+        val memo = storage.loadMemo(convId)
         val end = cutoffId?.let { id -> all.indexOfFirst { it.id == id } + 1 }?.takeIf { it > 0 } ?: all.size
         // 还在生成中的回答（别人这一轮没说完的半句话、正在画的图）不算进上下文
         val usable = all.subList(0, end).filter {
             it.id != excludeId && it.role != Role.SYSTEM && it.status != MsgStatus.ERROR && it.status != MsgStatus.STREAMING &&
-                (it.content.isNotBlank() || it.attachments.isNotEmpty())
+                (it.content.isNotBlank() || it.attachments.isNotEmpty()) && (memo.summary.isBlank() || it.createdAt > memo.upToTime)
         }
         val profile = state.profile
         val budget = 48_000
@@ -871,6 +1084,8 @@ class Engine(private val storage: Storage, private val isPhone: Boolean = false)
 
         data class Part(val role: String, val text: String, val images: List<String>)
         val parts = mutableListOf<Part>()
+        if (memo.summary.isNotBlank()) parts += Part("user",
+            "【对话摘要】这个对话更早的部分已经由记录员压缩成下面的摘要（要查原话可以用 search_history）：\n\n" + memo.summary, emptyList())
         if (picked.size < usable.size) parts += Part("user", "（更早的聊天记录太长，已省略）", emptyList())
         picked.forEachIndexed { idx, m ->
             val mine = m.role == Role.AI && m.senderId == me.id

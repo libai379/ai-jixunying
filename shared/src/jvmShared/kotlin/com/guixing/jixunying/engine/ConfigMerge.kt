@@ -34,8 +34,9 @@ object ConfigMerge {
         /** 本机已有、只补了空缺的项，写成给人看的话，比如「阿德」补上了定位。 */
         val filled: List<String>,
         val removedDuplicates: Int,
+        val addedMemories: Int = 0,
     ) {
-        val nothingNew get() = addedProviders == 0 && addedMembers == 0 && filled.isEmpty() && removedDuplicates == 0
+        val nothingNew get() = addedProviders == 0 && addedMembers == 0 && filled.isEmpty() && removedDuplicates == 0 && addedMemories == 0
     }
 
     fun import(s: AppState, b: ConfigBundle, keepLocalProxy: Boolean): ImportResult {
@@ -92,14 +93,21 @@ object ConfigMerge {
             // 电脑上的本地代理地址在手机上没用
             proxy = if (keepLocalProxy) s.settings.proxy else b.proxy,
         )
+        // 长期记忆：内容差不多的不重复加
+        val memories = s.memories.toMutableList()
+        var addedMem = 0
+        for (m in b.memories) {
+            if (memories.none { it.id == m.id || Recorder.similar(it.text, m.text) }) { memories += m; addedMem++ }
+        }
         val merged = s.copy(
             providers = providers,
             members = members,
             profile = if (s.profile == UserProfile()) b.profile else s.profile,
             settings = settings,
+            memories = memories,
         )
         val (clean, mMap, removed) = dedupe(merged)
-        return ImportResult(clean, mMap, addedP, addedM, filled, removed)
+        return ImportResult(clean, mMap, addedP, addedM, filled, removed, addedMem)
     }
 
     /** 合并重复的服务商和成员。保留对话里正在用的那一份。返回（新状态，成员编号映射，去掉了几项）。 */

@@ -69,7 +69,19 @@ class Storage(val root: File) {
 
     fun deleteConversation(convId: String, attachmentIds: List<String>) {
         File(convDir, "$convId.json").delete()
+        File(convDir, "$convId.memo.json").delete()
         attachmentIds.forEach { deleteFile(it) }
+    }
+
+    /** 记录员给这个对话写的摘要（没有就是空的）。 */
+    fun loadMemo(convId: String): ConvMemo {
+        val f = File(convDir, "${safe(convId)}.memo.json")
+        if (!f.exists()) return ConvMemo()
+        return runCatching { AppJson.decodeFromString(ConvMemo.serializer(), f.readText(Charsets.UTF_8)) }.getOrElse { ConvMemo() }
+    }
+
+    fun saveMemo(convId: String, memo: ConvMemo) = synchronized(this) {
+        writeAtomic(File(convDir, "${safe(convId)}.memo.json"), AppJson.encodeToString(ConvMemo.serializer(), memo))
     }
 
     fun putFile(att: Attachment, bytes: ByteArray, extractedText: String?) {

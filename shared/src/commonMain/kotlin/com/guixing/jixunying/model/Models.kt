@@ -90,6 +90,38 @@ data class RelaySettings(
     }
 }
 
+/**
+ * 记忆。三层（参考 Claude Code / MiMo Code / WorkBuddy，见 docs/构想.md 第四节）：
+ * 1. 对话太长时，记录员把前面的聊天压缩成摘要，群里大家共用一份；
+ * 2. 关于用户的长期记忆（身份、偏好、要求），所有对话、所有成员都能用，可以看、可以改；
+ * 3. AI 能搜以前的聊天记录。
+ */
+@Serializable
+data class MemorySettings(
+    /** 长期记忆写进每位成员的设定，并允许 AI 用 remember 工具记东西。 */
+    val enabled: Boolean = true,
+    /** 聊完后记录员自动挑出值得长期记住的要点。 */
+    val autoExtract: Boolean = true,
+    /** 记录员用哪个模型；留空自动挑便宜的（mimo-v2.6-flash 优先）。 */
+    val recorderProviderId: String = "",
+    val recorderModelId: String = "",
+    /** 一个对话没压缩的部分超过多少字就压缩。 */
+    val compressAt: Int = 24_000,
+)
+
+@Serializable
+data class MemoryItem(
+    val id: String,
+    val text: String,
+    /** 关于我 / 偏好 / 要求 / 事实 */
+    val kind: String = "关于我",
+    /** 从哪来：对话标题、「手动添加」。 */
+    val source: String = "",
+    val createdAt: Long = 0,
+    val updatedAt: Long = 0,
+    val pinned: Boolean = false,
+)
+
 @Serializable
 data class Settings(
     val search: SearchSettings = SearchSettings(),
@@ -99,6 +131,7 @@ data class Settings(
     val darkMode: Int = 0, // 0 跟随系统 1 浅色 2 深色
     /** 一次用户发言最多引发几轮 AI 之间的 @ 接力，防止无限互聊。 */
     val maxMentionChain: Int = 3,
+    val memory: MemorySettings = MemorySettings(),
 )
 
 @Serializable
@@ -121,6 +154,8 @@ data class Conversation(
     val createdAt: Long = 0,
     val updatedAt: Long = 0,
     val pinned: Boolean = false,
+    /** 前面有多少条消息已经压缩成摘要（界面上提示用）。 */
+    val summarized: Int = 0,
 ) {
     val isGroup: Boolean get() = memberIds.size > 1
 }
@@ -206,6 +241,8 @@ data class AppState(
     val pairingSecret: String = "",
     /** 中转服务器连接情况，给界面显示用，不存盘也行。 */
     val relayStatus: String = "",
+    /** 关于用户的长期记忆。 */
+    val memories: List<MemoryItem> = emptyList(),
 ) {
     fun member(id: String) = members.firstOrNull { it.id == id }
     fun provider(id: String) = providers.firstOrNull { it.id == id }

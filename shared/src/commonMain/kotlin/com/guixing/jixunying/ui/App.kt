@@ -43,13 +43,15 @@ import kotlinx.coroutines.launch
 val LocalSnackbar = androidx.compose.runtime.staticCompositionLocalOf { SnackbarHostState() }
 
 enum class SettingsTab(val title: String) {
-    PROVIDERS("模型服务"), MEMBERS("AI 成员"), PROFILE("我的资料"), SEARCH("联网搜索"), IMAGE("画图"),
+    PROVIDERS("模型服务"), MEMBERS("AI 成员"), PROFILE("我的资料"), MEMORY("记忆"), SEARCH("联网搜索"), IMAGE("画图"),
     DEVICES("联机"), APPEARANCE("外观"), ABOUT("关于"),
 }
 
 /** 界面级状态：当前操作哪台设备、打开哪个对话、是否在设置页。 */
 class AppController(val hub: Hub, val backend: Backend, val scope: CoroutineScope, val snackbar: SnackbarHostState) {
     var currentConvId by mutableStateOf<String?>(null)
+    /** 打开对话后要滚到的消息（从搜索结果点进来时）。 */
+    var focusMessageId by mutableStateOf<String?>(null)
     var settingsTab by mutableStateOf<SettingsTab?>(null)
     var showNewChat by mutableStateOf(false)
     var debugDialog = ""

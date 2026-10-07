@@ -57,9 +57,12 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.guixing.jixunying.client.ConnState
+import com.guixing.jixunying.model.AppJson
 import com.guixing.jixunying.model.AppState
 import com.guixing.jixunying.model.Command
 import com.guixing.jixunying.model.Conversation
+import com.guixing.jixunying.model.HistoryHit
+import kotlinx.serialization.builtins.ListSerializer
 import kotlin.time.Clock
 import kotlin.time.ExperimentalTime
 
@@ -107,6 +110,16 @@ fun Sidebar(ctl: AppController, modifier: Modifier, onNavigate: () -> Unit) {
         Spacer(Modifier.height(8.dp))
 
         val list = state.conversations.filter { query.isBlank() || it.title.contains(query, true) || memberNames(state, it).contains(query, true) }
+        // 也搜聊天内容（两个字以上，停顿一下再搜，免得每打一个字都搜一遍）
+        var hits by remember { mutableStateOf<List<HistoryHit>>(emptyList()) }
+        androidx.compose.runtime.LaunchedEffect(query, ctl.backend) {
+            hits = emptyList()
+            val q = query.trim()
+            if (q.length < 2) return@LaunchedEffect
+            kotlinx.coroutines.delay(350)
+            val r = ctl.backend.call(Command.SearchHistory(q, 20))
+            if (r.ok) hits = runCatching { AppJson.decodeFromString(ListSerializer(HistoryHit.serializer()), r.data) }.getOrDefault(emptyList())
+        }
         val now = nowMillis()
         val dayMs = 86_400_000L
         val groups = listOf(
@@ -117,8 +130,23 @@ fun Sidebar(ctl: AppController, modifier: Modifier, onNavigate: () -> Unit) {
         ).filter { it.second.isNotEmpty() }
 
         LazyColumn(Modifier.weight(1f)) {
-            if (list.isEmpty()) item {
+            if (list.isEmpty() && hits.isEmpty()) item {
                 Text(if (query.isBlank()) "还没有对话" else "没找到", style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle, modifier = Modifier.padding(12.dp))
+            }
+            if (hits.isNotEmpty()) {
+                item(key = "h_hits") {
+                    Text("聊天内容里找到", style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, modifier = Modifier.padding(start = 10.dp, top = 12.dp, bottom = 4.dp))
+                }
+                items(hits, key = { "hit_" + it.convId + it.messageId }) { h ->
+                    Column(
+                        Modifier.fillMaxWidth().padding(vertical = 1.dp).clip(RoundedCornerShape(10.dp))
+                            .clickable { ctl.focusMessageId = h.messageId; ctl.openConversation(h.convId); onNavigate() }
+                            .padding(horizontal = 10.dp, vertical = 7.dp),
+                    ) {
+                        Text("${h.convTitle} · ${h.sender}", style = MaterialTheme.typography.labelMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(h.snippet, style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    }
+                }
             }
             groups.forEach { (label, convs) ->
                 item(key = "h_$label") {

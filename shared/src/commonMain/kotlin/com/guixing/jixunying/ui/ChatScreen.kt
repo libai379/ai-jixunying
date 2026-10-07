@@ -41,6 +41,8 @@ import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.ExpandLess
 import androidx.compose.material.icons.rounded.ExpandMore
+import androidx.compose.material.icons.rounded.FolderOpen
+import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.Image
 import androidx.compose.material.icons.rounded.Language
 import androidx.compose.material.icons.rounded.Menu
@@ -160,6 +162,15 @@ private fun ChatTopBar(state: AppState, conv: Conversation, wide: Boolean, openD
 private fun MessageList(ctl: AppController, state: AppState, conv: Conversation, messages: List<Message>) {
     val listState = rememberLazyListState()
     val last = messages.lastOrNull()
+    // 从侧栏搜索结果点进来：滚到那条消息
+    LaunchedEffect(ctl.focusMessageId, messages.size) {
+        val target = ctl.focusMessageId ?: return@LaunchedEffect
+        val i = messages.indexOfFirst { it.id == target }
+        if (i >= 0) {
+            listState.scrollToItem(i + 1)
+            ctl.focusMessageId = null
+        }
+    }
     // 新消息或流式输出时，如果本来就在底部附近就跟着滚到底
     LaunchedEffect(messages.size, last?.content?.length, last?.attachments?.size) {
         if (messages.isEmpty()) return@LaunchedEffect
@@ -167,6 +178,7 @@ private fun MessageList(ctl: AppController, state: AppState, conv: Conversation,
         val lastVisible = info.visibleItemsInfo.lastOrNull()?.index ?: 0
         // 自己刚发的消息、或者本来就在底部附近，都滚到底
         val justSent = last?.role == Role.USER
+        if (ctl.focusMessageId != null) return@LaunchedEffect
         if (justSent || lastVisible >= info.totalItemsCount - 3 || messages.size <= 2) listState.animateScrollToItem(messages.size)
     }
     if (messages.isEmpty()) {
@@ -180,7 +192,16 @@ private fun MessageList(ctl: AppController, state: AppState, conv: Conversation,
         modifier = Modifier.fillMaxSize().pointerInput(Unit) { detectTapGestures { focusManager.clearFocus() } },
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        item { Spacer(Modifier.height(16.dp)) }
+        item {
+            Spacer(Modifier.height(16.dp))
+            if (conv.summarized > 0) {
+                Text("前面 ${conv.summarized} 条已由记录员压缩成摘要，AI 记得要点；原话还在这里，AI 需要时也能搜到",
+                    style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                    modifier = Modifier.padding(horizontal = 24.dp).widthIn(max = 640.dp).clip(RoundedCornerShape(10.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant).padding(horizontal = 12.dp, vertical = 6.dp))
+                Spacer(Modifier.height(8.dp))
+            }
+        }
         items(messages, key = { it.id }) { m ->
             Box(Modifier.widthIn(max = 860.dp).fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
                 if (m.role == Role.USER) UserMessage(ctl, state, m) else AiMessage(ctl, state, m)
@@ -285,9 +306,15 @@ private fun ToolStepsView(tools: List<ToolStep>, streaming: Boolean) {
     val searches = tools.count { it.kind == "search" }
     val pages = tools.count { it.kind == "fetch" }
     val images = tools.count { it.kind == "image" }
+    val docs = tools.count { it.kind == "doc" }
+    val history = tools.count { it.kind == "history" }
+    val memos = tools.count { it.kind == "memory" }
     val summary = buildList {
         if (searches > 0) add("联网搜了 $searches 次")
         if (pages > 0) add("读了 $pages 个网页")
+        if (docs > 0) add("查了 $docs 次文档")
+        if (history > 0) add("翻了 $history 次聊天记录")
+        if (memos > 0) add("记了 $memos 条")
         if (images > 0) add("画了 $images 张图")
     }.joinToString(" · ")
     val latest = tools.last()
@@ -318,6 +345,9 @@ private fun ToolStepView(t: ToolStep) {
     val (icon, label) = when (t.kind) {
         "search" -> Icons.Rounded.Language to (if (t.ok) "搜索「${t.input}」· ${t.sources.size} 条结果" else "搜索「${t.input}」失败")
         "fetch" -> Icons.Rounded.Description to (if (t.ok) "阅读网页 ${t.input.take(60)}" else "网页打不开 ${t.input.take(60)}")
+        "memory" -> Icons.Rounded.Psychology to (if (t.ok) "记住了：${t.input.take(40)}" else "没记：${t.input.take(40)}")
+        "history" -> Icons.Rounded.History to (if (t.ok) "翻了以前的聊天「${t.input.take(24)}」" else "以前的聊天里没找到「${t.input.take(24)}」")
+        "doc" -> Icons.Rounded.FolderOpen to (if (t.ok) t.input.take(60) else "${t.input.take(50)}（没找到）")
         else -> Icons.Rounded.Brush to (if (t.ok) "画图：${t.input.take(40)}" else "画图失败")
     }
     Column(Modifier.padding(bottom = 6.dp)) {
