@@ -1,0 +1,2 @@
+# 提交钩子由 sh 执行，CRLF 行尾会报错
+tools/git-hooks/* text eol=lf

@@ -1,0 +1,41 @@
+#!/bin/sh
+# AI集训营 三文档的提交闸（2026-10-08 用户要求「跟其他项目一样」，照星阙 horosa-app 的 commit-msg 钩子做）。
+#   这次提交改了代码（shared/ androidApp/ desktopApp/ tools/ gradle/ 或 gradle 构建文件） ⇒ 必须带上 当前任务.md；
+#   提交说明第一行含「收尾」                                                         ⇒ 还必须带上 编年史.md。
+# 只看暂存区；缺哪份就拒绝提交并说缺哪份。不设跳过开关（--no-verify 跳过钩子须用户同意）。
+# 生效方式：git config core.hooksPath tools/git-hooks（新克隆 / 换机器后要重新执行一次）。
+# 本文件必须是 LF 行尾（.gitattributes 已锁），CRLF 会让 sh 报错。
+
+msg_file="$1"
+first=$(head -n 1 "$msg_file")
+staged=$(git -c core.quotepath=off diff --cached --name-only)
+
+has() {
+	printf '%s\n' "$staged" | grep -qx "$1"
+}
+
+code=$(printf '%s\n' "$staged" | grep -E '^(shared|androidApp|desktopApp|tools|gradle)/|(^|/)(build\.gradle\.kts|settings\.gradle\.kts|gradle\.properties)$' | head -n 1)
+missing=""
+
+if ! has '当前任务.md'; then
+	if [ -n "$code" ]; then
+		missing="$missing 当前任务.md"
+	else
+		case "$first" in
+			*收尾*) missing="$missing 当前任务.md" ;;
+		esac
+	fi
+fi
+
+case "$first" in
+	*收尾*)
+		has '编年史.md' || missing="$missing 编年史.md"
+		;;
+esac
+
+if [ -n "$missing" ]; then
+	echo "提交被拒（tools/git-hooks/commit-msg）：这次提交缺了：$missing" >&2
+	echo "改了代码要覆盖 当前任务.md；第一行含「收尾」的还要追加 编年史.md（见 CLAUDE.md 开头）。改好、git add 之后再提交。" >&2
+	exit 1
+fi
+exit 0
