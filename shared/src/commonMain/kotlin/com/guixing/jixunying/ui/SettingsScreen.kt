@@ -273,7 +273,10 @@ private fun ProviderDialog(ctl: AppController, existing: ProviderConfig?, onClos
         OutlinedButton(enabled = !busy && models.isNotEmpty(), onClick = {
             val chat = models.firstOrNull { !it.imageGen }
             if (chat == null) {
-                result = false to "这个服务商只填了画图模型，测试连通要用聊天模型。画图可以到 设置 → 画图 里选它，然后在对话里打开「画图」试一张。"
+                val looksChat = models.filter { !Presets.guessImageGen(it.id) }.map { it.id }
+                result = false to (if (looksChat.isNotEmpty())
+                    "现在没有「聊天」模型可以测：${looksChat.joinToString("、")} 被设成了「画图」。它是聊天模型，把它改回「聊天」再测。"
+                else "这个服务商只有画图模型，测试连通要用聊天模型。画图模型到 设置 → 画图 里选上，然后在对话里打开「画图」试一张。")
                 return@OutlinedButton
             }
             busy = true
@@ -341,7 +344,7 @@ private fun ProviderDialog(ctl: AppController, existing: ProviderConfig?, onClos
             SwitchRow("走代理", "海外服务商一般要开 · 代理 ${state.settings.proxy.ifBlank { "未设置" }}（在 外观 里改）", useProxy) { useProxy = it }
             HorizontalDivider(color = Ext.c.border, modifier = Modifier.padding(vertical = 8.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
-                FieldLabel("模型", "勾「看图」的模型能看图片，勾「画图」的出现在画图设置里")
+                FieldLabel("模型", "每个模型选是「聊天」还是「画图」用")
                 Spacer(Modifier.weight(1f))
                 TextButton(enabled = !busy && key.isNotBlank(), onClick = {
                     busy = true
@@ -366,12 +369,17 @@ private fun ProviderDialog(ctl: AppController, existing: ProviderConfig?, onClos
                             Text(m.id, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             Evals.label(m.id)?.let { Text(it, style = MaterialTheme.typography.labelSmall, color = Ext.c.success) }
                         }
-                        MiniCheck("看图", m.vision) { v -> models = models.map { if (it.id == m.id) it.copy(vision = v) else it } }
-                        MiniCheck("画图", m.imageGen) { v -> models = models.map { if (it.id == m.id) it.copy(imageGen = v, tools = !v) else it } }
+                        if (!m.imageGen) MiniCheck("能看图", m.vision) { v -> models = models.map { if (it.id == m.id) it.copy(vision = v) else it } }
+                        TypeToggle(m.imageGen) { img -> models = models.map { if (it.id == m.id) it.copy(imageGen = img, tools = !img, vision = if (img) false else it.vision) else it } }
                         IconButton(onClick = { models = models.filterNot { it.id == m.id } }, Modifier.size(30.dp)) { Icon(Icons.Rounded.Delete, "移除", Modifier.size(15.dp), tint = Ext.c.subtle) }
                     }
                 }
             }
+            Text(
+                "聊天模型用来对话，当 AI 成员；画图模型（比如 MiniMax 的 image-01）只用来出图，要到 设置 → 画图 里选上它。" +
+                    "选好以后，任何成员聊天时需要图都会自动调用它，你也可以在输入框打开「画图」直接出图。",
+                style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, modifier = Modifier.padding(top = 6.dp),
+            )
             Spacer(Modifier.height(8.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
                 AppTextField(newModel, { newModel = it }, Modifier.weight(1f), placeholder = "手动添加模型名，例如 deepseek-v4-flash")
@@ -790,5 +798,24 @@ private fun TestResultBox(ok: Boolean, text: String, onClose: () -> Unit) {
             Text(text, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurface)
         }
         IconButton(onClick = onClose, Modifier.size(26.dp)) { Icon(Icons.Rounded.Close, "关闭", Modifier.size(14.dp), tint = Ext.c.subtle) }
+    }
+}
+
+/** 模型类型：聊天 / 画图，二选一。 */
+@Composable
+private fun TypeToggle(image: Boolean, onChange: (Boolean) -> Unit) {
+    Row(
+        Modifier.padding(horizontal = 4.dp).clip(RoundedCornerShape(8.dp)).border(1.dp, Ext.c.border, RoundedCornerShape(8.dp)),
+    ) {
+        listOf(false to "聊天", true to "画图").forEach { (v, label) ->
+            val sel = image == v
+            Box(
+                Modifier.background(if (sel) MaterialTheme.colorScheme.primary.copy(alpha = 0.14f) else Color.Transparent)
+                    .clickable { onChange(v) }.padding(horizontal = 10.dp, vertical = 4.dp),
+            ) {
+                Text(label, style = MaterialTheme.typography.labelSmall, fontWeight = if (sel) FontWeight.SemiBold else FontWeight.Normal,
+                    color = if (sel) MaterialTheme.colorScheme.primary else Ext.c.subtle)
+            }
+        }
     }
 }
