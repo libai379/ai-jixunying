@@ -175,8 +175,9 @@ fun AppDialog(
     content: @Composable ColumnScope.() -> Unit,
 ) {
     Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+      Column(Modifier.widthIn(max = width).fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
         Surface(
-            Modifier.widthIn(max = width).fillMaxWidth().padding(16.dp),
+            Modifier.fillMaxWidth().padding(16.dp),
             shape = RoundedCornerShape(22.dp),
             color = MaterialTheme.colorScheme.surface,
             tonalElevation = 2.dp,
@@ -194,6 +195,9 @@ fun AppDialog(
                 Row(Modifier.fillMaxWidth().padding(top = 16.dp), horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.End), verticalAlignment = Alignment.CenterVertically, content = actions)
             }
         }
+        // 弹窗打开时提示条显示在弹窗下方（同一层），不会被挡住
+        androidx.compose.material3.SnackbarHost(LocalSnackbar.current)
+      }
     }
 }
 

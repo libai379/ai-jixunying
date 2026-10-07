@@ -245,7 +245,10 @@ class Engine(private val storage: Storage, private val isPhone: Boolean = false)
             val r = withContext(Dispatchers.IO) {
                 llm.chat(p, c.modelId, listOf(buildJsonObject { put("role", "user"); put("content", "用一句话（不超过 20 个字）介绍你是谁、什么模型。") }), null, null) { _, _ -> }
             }
-            CommandResult(message = "连通了（${r.usage.millis} 毫秒）：" + r.content.trim().take(80))
+            val said = r.content.ifBlank { r.reasoning }.replace(Regex("<think>[\\s\\S]*?</think>"), "").trim()
+            val secs = "%.1f".format(r.usage.millis / 1000.0)
+            if (said.isBlank()) CommandResult(false, "接口通了（$secs 秒），但模型「${c.modelId}」没有返回文字。检查一下模型名是否写对。")
+            else CommandResult(message = "连通了（$secs 秒，模型 ${c.modelId}）。它说：" + said.take(120))
         }
         is Command.SaveMember -> {
             updateState { s ->
@@ -863,7 +866,8 @@ class Engine(private val storage: Storage, private val isPhone: Boolean = false)
             val body = e.body.take(300)
             val lower = body.lowercase()
             val hint = when {
-                e.status == 401 || e.status == 403 && "key" in lower -> "API Key 不对或已失效"
+                e.status == 401 || (e.status == 403 && "key" in lower) || "invalid api key" in lower || "login fail" in lower ||
+                    "unauthorized" in lower || "authentication" in lower || "令牌" in body -> "API Key 不对或已失效"
                 e.status == 402 || "insufficient" in lower || "余额" in body || "balance" in lower || "quota" in lower -> "余额或额度不足"
                 e.status == 404 -> "模型名或接口地址不对"
                 e.status == 429 -> "请求太频繁或额度用完了，稍后再试"

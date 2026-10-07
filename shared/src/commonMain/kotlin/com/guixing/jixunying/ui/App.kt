@@ -39,6 +39,9 @@ import com.guixing.jixunying.model.CommandResult
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 
+/** 全局提示条。弹窗打开时，弹窗里也放一个，免得提示被弹窗挡住。 */
+val LocalSnackbar = androidx.compose.runtime.staticCompositionLocalOf { SnackbarHostState() }
+
 enum class SettingsTab(val title: String) {
     PROVIDERS("模型服务"), MEMBERS("AI 成员"), PROFILE("我的资料"), SEARCH("联网搜索"), IMAGE("画图"),
     DEVICES("联机"), APPEARANCE("外观"), ABOUT("关于"),
@@ -54,12 +57,16 @@ class AppController(val hub: Hub, val backend: Backend, val scope: CoroutineScop
     /** 手机正在遥控电脑。 */
     val remoteMode: Boolean get() = backend !== hub.local
 
-    fun run(cmd: Command, okText: String? = null, then: (CommandResult) -> Unit = {}) {
+    /**
+     * 执行指令。回调先跑（按钮马上恢复），提示条另外显示；quiet 时不弹提示（调用方自己在界面上显示结果）。
+     */
+    fun run(cmd: Command, okText: String? = null, quiet: Boolean = false, then: (CommandResult) -> Unit = {}) {
         scope.launch {
             val r = backend.call(cmd)
+            then(r)
+            if (quiet) return@launch
             if (!r.ok) snackbar.showSnackbar(r.message.ifBlank { "操作失败" }, duration = SnackbarDuration.Long)
             else if (okText != null || r.message.isNotBlank()) snackbar.showSnackbar(okText ?: r.message)
-            then(r)
         }
     }
 
@@ -81,8 +88,8 @@ fun App(hub: Hub, platform: Platform, debugStart: String? = null) {
     val backend: Backend = remote?.takeIf { useRemote } ?: hub.local
     val state by backend.store.state.collectAsState()
     AppTheme(state.settings.darkMode) {
-        CompositionLocalProvider(LocalPlatform provides platform) {
-            val snackbar = remember { SnackbarHostState() }
+        val snackbar = remember { SnackbarHostState() }
+        CompositionLocalProvider(LocalPlatform provides platform, LocalSnackbar provides snackbar) {
             val scope = rememberCoroutineScope()
             // 切换本机 / 电脑时整个界面换一套状态
             key(backend) {

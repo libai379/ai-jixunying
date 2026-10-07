@@ -31,6 +31,7 @@ import androidx.compose.material.icons.automirrored.rounded.OpenInNew
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Badge
 import androidx.compose.material.icons.rounded.Brush
+import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Cloud
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Edit
@@ -259,6 +260,8 @@ private fun ProviderDialog(ctl: AppController, existing: ProviderConfig?, onClos
     var newModel by remember { mutableStateOf("") }
     var search by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
+    /** 测试连通 / 拉取模型的结果，直接显示在弹窗里（不再用会被弹窗挡住的提示条）。 */
+    var result by remember { mutableStateOf<Pair<Boolean, String>?>(null) }
     var confirmDelete by remember { mutableStateOf(false) }
     val id = remember { existing?.id ?: ("p" + nowMillis().toString(36)) }
 
@@ -268,11 +271,21 @@ private fun ProviderDialog(ctl: AppController, existing: ProviderConfig?, onClos
         if (existing != null) TextButton(onClick = { confirmDelete = true }) { Text("删除", color = MaterialTheme.colorScheme.error) }
         Spacer(Modifier.weight(1f))
         OutlinedButton(enabled = !busy && models.isNotEmpty(), onClick = {
-            busy = true
-            ctl.run(Command.SaveProvider(draft())) {
-                ctl.run(Command.TestProvider(id, models.first().id)) { busy = false }
+            val chat = models.firstOrNull { !it.imageGen }
+            if (chat == null) {
+                result = false to "这个服务商只填了画图模型，测试连通要用聊天模型。画图可以到 设置 → 画图 里选它，然后在对话里打开「画图」试一张。"
+                return@OutlinedButton
             }
-        }) { Text(if (busy) "请稍候…" else "测试连通") }
+            busy = true
+            result = null
+            ctl.run(Command.SaveProvider(draft()), quiet = true) { saved ->
+                if (!saved.ok) { busy = false; result = false to saved.message; return@run }
+                ctl.run(Command.TestProvider(id, chat.id), quiet = true) { r ->
+                    busy = false
+                    result = r.ok to r.message.ifBlank { if (r.ok) "连通了" else "失败了" }
+                }
+            }
+        }) { Text(if (busy) "正在测试…" else "测试连通") }
         TextButton(onClose) { Text("取消") }
         Button(onClick = { ctl.run(Command.SaveProvider(draft()), "已保存"); onClose() }) { Text("保存") }
     }) {
@@ -332,10 +345,12 @@ private fun ProviderDialog(ctl: AppController, existing: ProviderConfig?, onClos
                 Spacer(Modifier.weight(1f))
                 TextButton(enabled = !busy && key.isNotBlank(), onClick = {
                     busy = true
-                    ctl.run(Command.SaveProvider(draft())) {
-                        ctl.run(Command.FetchModels(id)) { r ->
+                    result = null
+                    ctl.run(Command.SaveProvider(draft()), quiet = true) {
+                        ctl.run(Command.FetchModels(id), quiet = true) { r ->
                             busy = false
                             if (r.ok) ctl.backend.store.state.value.provider(id)?.let { models = it.models }
+                            result = r.ok to r.message.ifBlank { if (r.ok) "已更新模型列表" else "拉取失败" }
                         }
                     }
                 }) {
@@ -368,6 +383,7 @@ private fun ProviderDialog(ctl: AppController, existing: ProviderConfig?, onClos
                 }) { Text("添加") }
             }
         }
+        result?.let { (ok, text) -> TestResultBox(ok, text) { result = null } }
     }
     if (confirmDelete && existing != null) {
         AppDialog("删除服务商", { confirmDelete = false }, width = 420.dp, actions = {
@@ -756,5 +772,23 @@ private fun ModelPicker(value: String, onChange: (String) -> Unit, options: List
                 }, onClick = { onChange(md.id); open = false })
             }
         }
+    }
+}
+
+/** 弹窗里的结果条：绿色成功、红色失败，文字可以选中复制。 */
+@Composable
+private fun TestResultBox(ok: Boolean, text: String, onClose: () -> Unit) {
+    val color = if (ok) Ext.c.success else MaterialTheme.colorScheme.error
+    Row(
+        Modifier.fillMaxWidth().padding(top = 10.dp).clip(RoundedCornerShape(10.dp))
+            .background(color.copy(alpha = 0.10f)).border(1.dp, color.copy(alpha = 0.35f), RoundedCornerShape(10.dp))
+            .padding(start = 12.dp, top = 8.dp, bottom = 8.dp, end = 4.dp),
+        verticalAlignment = Alignment.Top,
+    ) {
+        Text(if (ok) "✓" else "!", color = color, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 1.dp, end = 8.dp))
+        androidx.compose.foundation.text.selection.SelectionContainer(Modifier.weight(1f).heightIn(max = 140.dp).verticalScroll(rememberScrollState())) {
+            Text(text, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurface)
+        }
+        IconButton(onClick = onClose, Modifier.size(26.dp)) { Icon(Icons.Rounded.Close, "关闭", Modifier.size(14.dp), tint = Ext.c.subtle) }
     }
 }

@@ -147,6 +147,7 @@ class LlmClient(private val proxyOf: (ProviderConfig) -> String?) {
                 val obj = runCatching { Json.parse(text).jsonObject }.getOrNull()
                     ?: throw ApiException(resp.status.value, text)
                 obj["error"]?.let { throw ApiException(resp.status.value, it.toString()) }
+                checkBaseResp(obj)
                 checkSources(obj)
                 val msg = obj["choices"]?.jsonArray?.firstOrNull()?.jsonObject?.get("message")?.jsonObject
                 val c = msg?.str("content").orEmpty()
@@ -165,6 +166,7 @@ class LlmClient(private val proxyOf: (ProviderConfig) -> String?) {
                 if (data.isEmpty()) continue
                 val obj = runCatching { Json.parse(data).jsonObject }.getOrNull() ?: continue
                 obj["error"]?.let { throw ApiException(200, it.toString()) }
+                checkBaseResp(obj)
                 parseUsage(obj["usage"])?.let { usage = it }
                 checkSources(obj)
                 val choice = obj["choices"]?.jsonArray?.firstOrNull()?.jsonObject ?: continue
@@ -183,6 +185,13 @@ class LlmClient(private val proxyOf: (ProviderConfig) -> String?) {
             if (s.name.isEmpty()) null else ToolCall(s.id.toString().ifEmpty { "call_$i" }, s.name.toString(), s.args.toString(), s.type.ifEmpty { "function" })
         }
         return ChatResult(content.toString(), reasoning.toString(), toolCalls, usage, finish)
+    }
+
+    /** MiniMax 等会在 HTTP 200 里用 base_resp.status_code 报错（比如 1004 登录失败、1008 余额不足）。 */
+    private fun checkBaseResp(o: JsonObject) {
+        val br = o["base_resp"] as? JsonObject ?: return
+        val code = br["status_code"]?.jsonPrimitive?.intOrNull ?: 0
+        if (code != 0) throw ApiException(if (code == 1004) 401 else 400, br.toString())
     }
 
     private class ToolSlot(val id: StringBuilder = StringBuilder(), val name: StringBuilder = StringBuilder(), val args: StringBuilder = StringBuilder(), var type: String = "")
