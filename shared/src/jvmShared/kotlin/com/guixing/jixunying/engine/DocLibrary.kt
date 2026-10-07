@@ -45,7 +45,8 @@ class DocLibrary(private val dir: File) {
             "android", "wechat files", "xwechat_files", "tencent files", "my games",
         )
         const val MAX_FILES = 20_000
-        const val MAX_EXTRACT_BYTES = 30L * 1024 * 1024
+        /** 单个文件超过这么大只按文件名收：电脑 30MB；手机按可用内存收紧（大 PDF 抽文字很吃内存）。 */
+        val MAX_EXTRACT_BYTES = minOf(30L * 1024 * 1024, Runtime.getRuntime().maxMemory() / 16)
         const val MAX_TEXT_CHARS = 400_000
 
         fun folderOf(path: String): String {

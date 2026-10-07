@@ -592,15 +592,18 @@ class EngineTest {
         assertEquals("bot", wxHeaders.first())
         assertTrue(wxHeaders.any { it.startsWith("auth=Bearer tok;type=ilink_bot_token;uin=") })
 
-        fun msg(id: Long, items: String) = """{"message_id":$id,"from_user_id":"u1@im.wechat","to_user_id":"bot1@im.bot","message_type":1,"context_token":"ctx$id","item_list":[$items]}"""
+        fun msg(id: Long, items: String, from: String = "me@im.wechat") = """{"message_id":$id,"from_user_id":"$from","to_user_id":"bot1@im.bot","message_type":1,"context_token":"ctx$id","item_list":[$items]}"""
         val keyB64 = Base64.getEncoder().encodeToString(wxKey)
         wxInbox += msg(98765432109876543, """{"type":1,"text_item":{"text":"你好"}}""")
         wxInbox += msg(2, """{"type":2,"image_item":{"media":{"encrypt_query_param":"img1","aes_key":"$keyB64","encrypt_type":1}}},{"type":1,"text_item":{"text":"看看这张"}}""")
         wxInbox += msg(3, """{"type":1,"text_item":{"text":"帮我画一只猫"}}""")
+        // 陌生人发来的不理（只回答扫码绑定的本人）
+        wxInbox += msg(5, """{"type":1,"text_item":{"text":"我是陌生人"}}""", from = "stranger@im.wechat")
         wxInbox += msg(4, """{"type":1,"text_item":{"text":"/新对话"}}""")
         withTimeout(20_000) { while (wxSent.none { "换个新话题" in it }) delay(50) }
 
-        val conv = e.state.conversations.filter { it.channel == "weixin:u1@im.wechat" }
+        val conv = e.state.conversations.filter { it.channel == "weixin:me@im.wechat" }
+        assertTrue(e.state.conversations.none { it.channel == "weixin:stranger@im.wechat" }, "陌生人的消息不处理")
         assertEquals(2, conv.size, "/新对话 新开了一个")
         val first = conv.last()
         e.call(Command.LoadMessages(first.id))
@@ -611,7 +614,8 @@ class EngineTest {
 
         val texts = wxSent.filter { it.startsWith("{") }.map { Json.parseToJsonElement(it).jsonObject["msg"]!!.jsonObject }
         val firstReply = texts.first()
-        assertEquals("u1@im.wechat", firstReply["to_user_id"]!!.jsonPrimitive.content)
+        assertEquals("me@im.wechat", firstReply["to_user_id"]!!.jsonPrimitive.content)
+        assertTrue(texts.none { it["to_user_id"]!!.jsonPrimitive.content == "stranger@im.wechat" })
         assertEquals("ctx98765432109876543", firstReply["context_token"]!!.jsonPrimitive.content, "回复带上对方那条消息的 context_token（大整数不丢精度）")
         assertEquals("我是小智。", firstReply["item_list"]!!.jsonArray[0].jsonObject["text_item"]!!.jsonObject["text"]!!.jsonPrimitive.content)
         assertTrue(texts.any { it["item_list"]!!.jsonArray[0].jsonObject["type"]!!.jsonPrimitive.content == "2" }, "画的图发回微信")

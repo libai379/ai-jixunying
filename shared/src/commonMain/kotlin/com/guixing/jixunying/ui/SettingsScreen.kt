@@ -468,7 +468,7 @@ private fun MiniCheck(label: String, checked: Boolean, onChange: (Boolean) -> Un
 
 @Composable
 private fun MembersPage(ctl: AppController, state: AppState) {
-    var editing by remember { mutableStateOf<Member?>(null) }
+    var editing by remember { mutableStateOf(if (ctl.debugDialog == "edit") state.members.firstOrNull() else null) }
     PageHeader("AI 成员", "每位成员 = 一个模型 + 名字和定位。它知道自己是谁、背后是什么模型，也知道群里还有谁。") {
         Button(onClick = { editing = newMember(state, null) }, shape = RoundedCornerShape(10.dp)) {
             Icon(Icons.Rounded.Add, null, Modifier.size(16.dp)); Spacer(Modifier.width(4.dp)); Text("添加成员")

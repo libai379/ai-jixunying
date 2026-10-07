@@ -143,7 +143,10 @@ fun AppTheme(darkMode: Int, content: @Composable () -> Unit) {
     val dark = when (darkMode) { 1 -> false; 2 -> true; else -> isSystemInDarkTheme() }
     val scheme: ColorScheme = if (dark) DarkScheme else LightScheme
     androidx.compose.runtime.CompositionLocalProvider(LocalExtra provides if (dark) DarkExtra else LightExtra) {
-        MaterialTheme(colorScheme = scheme, typography = AppTypography, shapes = AppShapes, content = content)
+        MaterialTheme(colorScheme = scheme, typography = AppTypography, shapes = AppShapes) {
+            // 没写颜色的文字和图标默认跟着主题走：以前默认是黑色，深色模式下侧栏、标题、成员名都看不见
+            androidx.compose.runtime.CompositionLocalProvider(androidx.compose.material3.LocalContentColor provides scheme.onBackground, content = content)
+        }
     }
 }
 

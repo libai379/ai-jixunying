@@ -317,8 +317,14 @@ fun NewChatDialog(ctl: AppController) {
         if (state.members.isEmpty()) {
             Text("还没有 AI 成员。先到 设置→AI 成员 添加。", style = MaterialTheme.typography.bodyMedium)
         } else {
-            Text("选一位就是单聊，选多位就是群聊（可以互相 @、互相纠错）。", style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
-            Spacer(Modifier.height(10.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("选一位就是单聊，选多位就是群聊（可以互相 @、互相纠错）。", style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle,
+                    modifier = Modifier.weight(1f))
+                if (state.members.size > 1) TextButton(onClick = {
+                    picked = if (picked.size == state.members.size) state.members.take(1).map { it.id }.toSet() else state.members.map { it.id }.toSet()
+                }) { Text(if (picked.size == state.members.size) "只选一位" else "全选") }
+            }
+            Spacer(Modifier.height(6.dp))
             Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState())) {
                 MemberPickList(state, picked) { id -> picked = if (id in picked) picked - id else picked + id }
             }

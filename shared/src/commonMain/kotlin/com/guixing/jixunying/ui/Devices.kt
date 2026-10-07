@@ -161,7 +161,7 @@ fun HostDevicesPage(ctl: AppController, state: AppState) {
                 Text("用手机扫码配对", style = MaterialTheme.typography.titleSmall)
                 Spacer(Modifier.height(6.dp))
                 Text(
-                    "1. 手机装上 AI集训营，打开 设置 → 联机 → 扫码配对\n" +
+                    "1. 手机装上 AI集训营，打开 设置 → 连接电脑 → 扫码配对\n" +
                         "2. 扫左边的二维码，几秒钟就好\n" +
                         "3. 以后手机侧栏顶上能在「本机」和这台电脑之间切换\n\n" +
                         "扫不了码？点下面「复制配对码」，用微信发到手机上，在手机的联机页粘贴。\n" +
@@ -284,7 +284,7 @@ fun PhoneDevicesPage(ctl: AppController) {
                 Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
             }
             Spacer(Modifier.height(10.dp))
-            Text("电脑上：打开 AI集训营 → 设置 → 联机，就能看到二维码。", style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
+            Text("电脑上：打开 AI集训营 → 设置 → 手机联机，就能看到二维码。", style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
         }
     } else {
         val conn by r.conn.collectAsState()

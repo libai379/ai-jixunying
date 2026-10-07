@@ -114,7 +114,7 @@ fun ChatScreen(ctl: AppController, convId: String, wide: Boolean, openDrawer: ()
     val allMessages by ctl.backend.store.messages.collectAsState()
     val conv = state.conversation(convId) ?: return
     val messages = allMessages[convId].orEmpty()
-    var showConvSettings by remember { mutableStateOf(false) }
+    var showConvSettings by remember { mutableStateOf(ctl.debugDialog == "convsettings") }
     // 不管从哪条路打开的对话，聊天记录没加载就补上（以前有的入口只切了对话、没加载，显示成空的）
     LaunchedEffect(convId, ctl.backend) {
         if (!ctl.backend.store.hasMessages(convId)) ctl.run(Command.LoadMessages(convId), quiet = true)

@@ -386,6 +386,10 @@ class WeixinBridge(
     private suspend fun handle(m: JsonObject) {
         val from = m.str("from_user_id") ?: return
         if ((m.int("message_type") ?: 1) != 1) return
+        // 只回答扫码绑定的本人（和官方插件的默认规则一样）。别人能给这个助理发消息，
+        // 不拦的话陌生人就能用你的 AI、还能让它搜你电脑上的文档。
+        val owner = account?.userId?.trim().orEmpty()
+        if (owner.isNotEmpty() && from != owner) return
         msgId(m)?.let { id ->
             if (!seen.add(id)) return
             if (seen.size > 500) synchronized(seen) { seen.iterator().let { it.next(); it.remove() } }

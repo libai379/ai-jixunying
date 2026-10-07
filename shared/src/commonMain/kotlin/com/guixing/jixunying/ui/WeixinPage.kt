@@ -76,18 +76,23 @@ fun WeixinPage(ctl: AppController, state: AppState) {
         Spacer(Modifier.height(10.dp))
         if (wx.loginLink.isNotBlank()) {
             Row(verticalAlignment = Alignment.Top) {
-                if (platform.qrMatrix(wx.loginLink) != null) {
+                val canShowQr = platform.qrMatrix(wx.loginLink) != null
+                if (canShowQr) {
                     QrCode(wx.loginLink, 200)
                     Spacer(Modifier.width(16.dp))
                 }
                 Column(Modifier.weight(1f)) {
-                    Text("1. 打开手机微信，点右上角「＋」→「扫一扫」\n2. 扫左边的二维码，在手机上点「确认」\n3. 绑定好以后，微信里会多一个助理对话，给它发消息就行",
-                        style = MaterialTheme.typography.bodySmall)
+                    // 手机上（遥控电脑时）显示不了二维码，自己的屏幕也没法用自己的微信扫：改成发链接
+                    Text(
+                        if (canShowQr) "1. 打开手机微信，点右上角「＋」→「扫一扫」\n2. 扫左边的二维码，在手机上点「确认」\n3. 绑定好以后，微信里会多一个助理对话，给它发消息就行"
+                        else "1. 点下面「复制链接」\n2. 发到自己的微信里（比如「文件传输助手」），点开链接，按提示确认\n3. 绑定好以后，微信里会多一个助理对话，给它发消息就行",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
                     Spacer(Modifier.height(8.dp))
                     OutlinedButton(onClick = { clipboard.setText(AnnotatedString(wx.loginLink)); ctl.toast("绑定链接已复制") }) {
-                        Icon(Icons.Rounded.ContentCopy, null, Modifier.size(15.dp)); Spacer(Modifier.width(4.dp)); Text("扫不了码？复制链接")
+                        Icon(Icons.Rounded.ContentCopy, null, Modifier.size(15.dp)); Spacer(Modifier.width(4.dp)); Text(if (canShowQr) "扫不了码？复制链接" else "复制链接")
                     }
-                    Text("把链接发到自己微信（比如「文件传输助手」）里点开，也能绑定。",
+                    if (canShowQr) Text("把链接发到自己微信（比如「文件传输助手」）里点开，也能绑定。",
                         style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, modifier = Modifier.padding(top = 4.dp))
                     if (wx.needVerifyCode) {
                         Spacer(Modifier.height(10.dp))

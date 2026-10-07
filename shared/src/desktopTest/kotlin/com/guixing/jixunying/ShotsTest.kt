@@ -149,6 +149,17 @@ class ShotsTest {
             "settings-search" to "settings:SEARCH", "settings-profile" to "settings:PROFILE")
         for ((name, start) in narrow) shoot("phone-$name", 824, 1784, 2f, hub, phone, start)
 
+        // 弹窗
+        shoot("desktop-convsettings", 1280, 820, 1f, hub, desktop, "conv:c1#convsettings")
+        shoot("desktop-member-edit", 1280, 820, 1f, hub, desktop, "settings:MEMBERS#edit")
+        shoot("phone-convsettings", 824, 1784, 2f, hub, phone, "conv:c1#convsettings")
+        shoot("phone-devices", 824, 1784, 2f, hub, phone, "settings:DEVICES")
+        // 深色
+        kotlinx.coroutines.runBlocking { e.call(com.guixing.jixunying.model.Command.SaveSettings(e.state.settings.copy(darkMode = 2))) }
+        shoot("desktop-dark-chat", 1280, 820, 1f, hub, desktop, "conv:c1")
+        shoot("desktop-dark-docs", 1280, 820, 1f, hub, desktop, "docs")
+        shoot("phone-dark-settings-home", 824, 1784, 2f, hub, phone, "settingshome")
+
         // 空白状态：第一次打开
         val empty = Engine(Storage(File(tmp, "empty")))
         shoot("desktop-welcome", 1280, 820, 1f, Hub(empty), desktop, null)
