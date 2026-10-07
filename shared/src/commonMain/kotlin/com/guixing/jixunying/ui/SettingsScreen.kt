@@ -441,14 +441,13 @@ private fun MembersPage(ctl: AppController, state: AppState) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     MemberAvatar(m, 42.dp)
                     Spacer(Modifier.width(12.dp))
+                    // 名字一行，模型和服务商一行，测评成绩一行：窄屏上也不会挤成「…」
                     Column(Modifier.weight(1f)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(m.name, style = MaterialTheme.typography.titleSmall)
-                            Spacer(Modifier.width(8.dp))
-                            if (p == null || m.modelId.isBlank()) Pill("未配置模型", MaterialTheme.colorScheme.error)
-                            else Pill("${m.modelId} · ${p.name}", MaterialTheme.colorScheme.primary)
-                            Evals.label(m.modelId)?.let { Spacer(Modifier.width(6.dp)); Pill(it, Ext.c.success) }
-                        }
+                        Text(m.name, style = MaterialTheme.typography.titleSmall)
+                        if (p == null || m.modelId.isBlank()) Text("未配置模型", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.error)
+                        else Text("${m.modelId} · ${p.name}", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Evals.label(m.modelId)?.let { Text(it, style = MaterialTheme.typography.labelSmall, color = Ext.c.success) }
                         if (m.bio.isNotBlank()) Text(m.bio, style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle, maxLines = 2, overflow = TextOverflow.Ellipsis)
                     }
                     IconButton(onClick = { editing = m }) { Icon(Icons.Rounded.Edit, "编辑", Modifier.size(18.dp)) }
@@ -744,7 +743,7 @@ private fun AppearancePage(ctl: AppController, state: AppState) {
 
 @Composable
 private fun AboutPage(ctl: AppController) {
-    PageHeader("关于", "AI集训营 1.1.0")
+    PageHeader("关于", "AI集训营 1.1.1")
     SectionCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
             BrandMark(44)

@@ -303,9 +303,9 @@ fun PhoneDevicesPage(ctl: AppController) {
                 }
             }) {
                 Icon(Icons.Rounded.Download, null, Modifier.size(16.dp)); Spacer(Modifier.width(4.dp))
-                Text(if (busy) "正在导入…" else "把电脑上的模型服务和成员导入本机")
+                Text(if (busy) "正在同步…" else "同步电脑上的模型服务和成员")
             }
-            Text("导入后手机不连电脑也能直接用这些模型（Key 加密传过来，只存在这台手机上）。",
+            Text("同步后手机不连电脑也能直接用这些模型（Key 加密传过来，只存在这台手机上）。手机上已有的不会重复添加，也不会被覆盖，只补电脑上多出来的。",
                 style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, modifier = Modifier.padding(top = 6.dp))
             Spacer(Modifier.height(12.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {

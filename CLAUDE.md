@@ -10,7 +10,7 @@
 - 联机：手机配对电脑后，在任何地方（不用同一个 Wi-Fi，隔半个地球也行）都能遥控电脑上的 AI集训营。
   - 两边都主动连公共 MQTT 中转（默认 EMQX 两个入口 + HiveMQ，同时连），内容用配对时交换的密钥 AES-256-GCM 端到端加密。不需要自己的服务器、公网 IP、端口映射。
   - 配对：电脑「设置→手机联机」显示二维码（也能复制成文字配对码），手机扫码或粘贴。二维码一次性。
-  - 手机侧栏顶上可以在「本机」和「电脑」之间切换；「连接电脑」页能一键把电脑上的服务商（含 Key）和成员导入手机。
+  - 手机侧栏顶上可以在「本机」和「电脑」之间切换；「连接电脑」页能一键把电脑上的服务商（含 Key）和成员同步到手机。按内容比对（engine/ConfigMerge.kt）：同一个账号、同一位成员不重复加，手机上已有的不覆盖只补空缺；启动时也会合并重复项。
 - 功能：单聊 / 群聊、互相 @（含 AI 之间接力，最多 N 轮）、身份认知（知道自己和别人是谁、背后什么模型）、联网搜索、看图、读 PDF/Word/Excel/PPT/文本、画图、服务商预设（国内外三十多家，含九模型测评的准确模型名和测评名次）。
 - 联网搜索：「自动」模式下 Kimi / 智谱 / 千问用平台官方内置搜索，其他模型调我们自己的 web_search（默认免费必应，可换博查 / 智谱 / Tavily / Brave）；不会调工具的模型由引擎代搜。不需要单独的 AI。
 - 画图协议（engine/ImageGen.kt）：OpenAI 风格、硅基流动、阿里百炼 / 千问AI平台（异步任务）、MiniMax、可灵（API Key 或 AK:SK 签 JWT）、魔搭（异步任务）。
@@ -36,7 +36,7 @@
   - jvmShared/engine：Engine（调度、上下文、工具循环、内置搜索）、Prompts、LlmClient、WebSearch、ImageGen、DocExtract、Storage；PlatformBits 是 PDF 和图片压缩的平台接口
   - jvmShared/relay：Crypto（AES-GCM）、MqttMulti（多中转 + 探测自检 + 切片信封）、RelayHost（电脑端）、RelayLink 和 pairWithHost（手机端）
   - desktopMain / androidMain：平台实现（PDFBox / pdfbox-android，ImageIO / BitmapFactory，二维码生成）
-  - desktopTest：EngineTest（假模型服务器 + 进程内 MQTT 服务器 Moquette，把全流程跑一遍）；LiveRelayTest、LiveSearchTest、LiveSnoopTest 是真联网检查，设 JXY_LIVE=1（Snoop 用 JXY_SNOOP=配对码）才跑
+  - desktopTest：EngineTest（假模型服务器 + 进程内 MQTT 服务器 Moquette，把全流程跑一遍）；ConfigMergeTest（同步不重复、启动合并重复）；LiveRelayTest、LiveSearchTest、LiveSnoopTest 是真联网检查，设 JXY_LIVE=1（Snoop 用 JXY_SNOOP=配对码）才跑
 - desktopApp/：桌面入口 Main.kt（启动 RelayHost）和打包配置
 - androidApp/：安卓入口 MainActivity.kt（本机引擎、扫码配对、选文件）
 
@@ -47,11 +47,12 @@
 - 跑桌面版（用测试数据，不碰正式数据）：JAVA_TOOL_OPTIONS="-Djxy.data=G:/ai-jixunying/data-dev" ./gradlew :desktopApp:run
   - 再加 -Djxy.start=settings:DEVICES 或 settings:PROVIDERS#add 可以直接打开某个设置页或弹窗，方便截图
 - 安卓模拟器：pixel6_api34（启动前 unset 掉 HTTP(S)_PROXY）；adb input text 只能输英文，配对码可以用它粘贴
+- 真机测试（用户授权过，手机插线时）：adb 在 F:\android_sdk\platform-tools（不在 PATH 上）。tools/phone_ui.py 按文字点界面、截图；tools/inspect_state.py 看数据里的服务商和成员（Key 只显示指纹）。手机数据用 adb exec-out run-as com.guixing.jixunying tar cf - files/data 导出，改数据之前先备份到 G:\DevCache\phone-backup\。Python 用 -I 时要加 -X utf8，否则中文乱码
 - 打包桌面：./gradlew :desktopApp:packageExe（产物在 desktopApp/build/compose/binaries/main/exe/）。需要带 jpackage 的 JDK，路径在 gradle.properties 的 packageJdk；版本号在 desktopApp/build.gradle.kts，每次发版要加，否则覆盖安装会提示已安装
 - 打包安卓：./gradlew :androidApp:assembleDebug（用专用签名）
 - 给用户打开桌面版：先 :desktopApp:createDistributable，把 desktopApp/build/compose/binaries/main/app/ai-jixunying 复制到 G:\DevCache\ai-jixunying-app 再运行（直接运行 build 目录里的会占住文件，下次打包失败）
 - 渲染：Main.kt 默认 skiko.renderApi=OPENGL（DirectX 在用户电脑上会让字闪，见教训库 26）。用户正在用的窗口只截图，不要模拟鼠标键盘
-- 交付：复制到 F:\apk-out\，文件名 AI集训营.exe / AI集训营.apk，不带版本号和日期，汇报时报文件时间
+- 交付：复制到 F:\apk-out\，文件名 AI集训营.exe / AI集训营.apk，不带版本号和日期，汇报时报文件时间。复制前先把版本号加上去（三处：androidApp 的 versionCode / versionName、desktopApp 的 packageVersion、设置「关于」页）
 
 ## 用户偏好
 

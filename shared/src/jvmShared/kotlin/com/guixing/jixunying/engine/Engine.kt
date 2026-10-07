@@ -100,9 +100,33 @@ class Engine(private val storage: Storage, private val isPhone: Boolean = false)
         if (s.pairingSecret.isEmpty()) s = s.copy(pairingSecret = newSecret())
         // 手机上一般没有本地 HTTP 代理（用的是 VPN 类软件），默认直连
         if (isPhone && storage.loadState() == null) s = s.copy(settings = s.settings.copy(proxy = ""))
+        // 以前重复导入留下的同一个服务商 / 同一位成员，启动时合并掉
+        val (deduped, memberMap, removed) = ConfigMerge.dedupe(s)
+        if (removed > 0) s = deduped
         if (s != state) { state = s; storage.saveState(s) }
+        if (memberMap.isNotEmpty()) remapSenders(memberMap)
         emit(Event.State(state))
         storage.brokenNotes.forEach { emit(Event.Notice(it, error = true)) }
+    }
+
+    /** 成员合并后，聊天记录里的发言人跟着改到保留的那一份。 */
+    private fun remapSenders(map: Map<String, String>) {
+        if (map.isEmpty()) return
+        for (conv in state.conversations) {
+            val list = messages(conv.id)
+            var changed = false
+            synchronized(list) {
+                for (i in list.indices) {
+                    val to = map[list[i].senderId] ?: continue
+                    list[i] = list[i].copy(senderId = to)
+                    changed = true
+                }
+            }
+            if (changed) {
+                save(conv.id)
+                emit(Event.Messages(conv.id, snapshot(conv.id)))
+            }
+        }
     }
 
     // ———————————————— 基础 ————————————————
@@ -346,22 +370,20 @@ class Engine(private val storage: Storage, private val isPhone: Boolean = false)
         is Command.ImportConfig -> {
             val b = runCatching { AppJson.decodeFromString(ConfigBundle.serializer(), c.bundleJson) }.getOrNull()
                 ?: return CommandResult(false, "配置数据损坏")
-            updateState { s ->
-                val providers = s.providers.filterNot { p -> b.providers.any { it.id == p.id } } + b.providers
-                val members = s.members.filterNot { m -> b.members.any { it.id == m.id } } + b.members
-                s.copy(
-                    providers = providers,
-                    members = members,
-                    profile = if (s.profile == com.guixing.jixunying.model.UserProfile()) b.profile else s.profile,
-                    settings = s.settings.copy(
-                        search = b.search,
-                        imageGen = b.imageGen,
-                        // 电脑上的本地代理地址在手机上没用
-                        proxy = if (isPhone) s.settings.proxy else b.proxy,
-                    ),
-                )
-            }
-            CommandResult(message = "导入了 ${b.providers.size} 个服务商、${b.members.size} 位成员")
+            // 按内容比对：同一个账号的服务商、同名同模型的成员不重复加；本机已有的重复项顺便合并
+            var r: ConfigMerge.ImportResult? = null
+            updateState { s -> ConfigMerge.import(s, b, keepLocalProxy = isPhone).also { r = it }.state }
+            val res = r!!
+            remapSenders(res.memberMap)
+            val msg = if (res.nothingNew) "电脑和这台设备的模型服务、成员已经一样，没有要导入的"
+            else buildList {
+                if (res.addedProviders > 0) add("新增 ${res.addedProviders} 个服务商")
+                if (res.addedMembers > 0) add("新增 ${res.addedMembers} 位成员")
+                if (res.filled.size <= 3) addAll(res.filled)
+                else { addAll(res.filled.take(2)); add("另有 ${res.filled.size - 2} 项补上了空缺") }
+                if (res.removedDuplicates > 0) add("合并了 ${res.removedDuplicates} 个重复项")
+            }.joinToString("，")
+            CommandResult(message = msg)
         }
     }
 
