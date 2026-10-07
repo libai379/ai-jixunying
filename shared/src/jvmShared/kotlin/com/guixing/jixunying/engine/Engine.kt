@@ -56,6 +56,9 @@ import java.util.concurrent.ConcurrentHashMap
 
 const val PAINTER_ID = "tool:image"
 
+/** 一次回答最多调几次工具（搜索、读网页、画图）。 */
+const val MAX_TOOL_USES = 8
+
 /**
  * 引擎：电脑和手机各有一个，都能单独用。数据、Key、模型调用都在本机。
  * 电脑上的引擎还会通过 RelayHost 接受配对手机的遥控。
@@ -598,11 +601,19 @@ class Engine(private val storage: Storage, private val isPhone: Boolean = false)
             }
             var usage = Usage()
             var rounds = 0
+            var toolUses = 0
             while (true) {
                 rounds++
+                val before = snapshot(convId).firstOrNull { it.id == msg.id }?.content?.length ?: 0
                 val r = llm.chat(provider, model.id, working, member.temperature, tools, extra, onSources) { c, rs -> appendDelta(convId, msg.id, c, rs) }
                 usage = Usage(usage.prompt + r.usage.prompt, usage.completion + r.usage.completion, usage.cached + r.usage.cached, usage.millis + r.usage.millis)
                 if (r.toolCalls.isEmpty() || rounds >= 8) break
+                // 这一轮说的是「我去查一下」「这页打不开，换个词再搜」之类的过程话，挪进推理过程，正文只留最后的回答
+                updateMessage(convId, msg.id, persist = false) { m ->
+                    val cut = before.coerceIn(0, m.content.length)
+                    val said = m.content.substring(cut).trim()
+                    if (said.isEmpty()) m else m.copy(content = m.content.substring(0, cut), reasoning = (m.reasoning + "\n\n" + said).trim())
+                }
                 working += buildJsonObject {
                     put("role", "assistant")
                     put("content", r.content)
@@ -617,14 +628,16 @@ class Engine(private val storage: Storage, private val isPhone: Boolean = false)
                     }
                 }
                 for (tc in r.toolCalls) {
-                    val result = runTool(convId, msg.id, tc, sources, drawTarget)
+                    // 一次回答最多用 8 次工具（Kimi 官方搜索不算），超过就让它根据已有结果直接回答
+                    val result = if (!tc.name.startsWith("$") && toolUses >= MAX_TOOL_USES)
+                        "这次回答已经用了 $MAX_TOOL_USES 次工具，不能再搜了。请直接根据前面的结果回答；没查到的就如实说。"
+                    else { if (!tc.name.startsWith("$")) toolUses++; runTool(convId, msg.id, tc, sources, drawTarget) }
                     working += buildJsonObject {
                         put("role", "tool"); put("tool_call_id", tc.id)
                         if (tc.name.startsWith("$")) put("name", tc.name)
                         put("content", result)
                     }
                 }
-                if (r.content.isNotBlank()) appendDelta(convId, msg.id, "\n\n", "")
             }
             val done = updateMessage(convId, msg.id) {
                 it.copy(content = cleanReply(it.content, member), status = MsgStatus.DONE, usage = usage)

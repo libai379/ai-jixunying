@@ -103,19 +103,7 @@ fun Sidebar(ctl: AppController, modifier: Modifier, onNavigate: () -> Unit) {
             Text("新对话")
         }
         Spacer(Modifier.height(10.dp))
-        Row(
-            Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).background(MaterialTheme.colorScheme.surface)
-                .border(1.dp, Ext.c.border, RoundedCornerShape(10.dp)).padding(horizontal = 10.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Icon(Icons.Rounded.Search, null, Modifier.size(16.dp), tint = Ext.c.subtle)
-            Spacer(Modifier.width(6.dp))
-            Box(Modifier.weight(1f)) {
-                if (query.isEmpty()) Text("搜索对话", style = MaterialTheme.typography.bodyMedium, color = Ext.c.subtle)
-                BasicTextField(query, { query = it }, singleLine = true, textStyle = MaterialTheme.typography.bodyMedium.copy(color = MaterialTheme.colorScheme.onSurface),
-                    cursorBrush = SolidColor(MaterialTheme.colorScheme.primary), modifier = Modifier.fillMaxWidth())
-            }
-        }
+        TapToSearchField(query, { query = it }, "搜索对话")
         Spacer(Modifier.height(8.dp))
 
         val list = state.conversations.filter { query.isBlank() || it.title.contains(query, true) || memberNames(state, it).contains(query, true) }

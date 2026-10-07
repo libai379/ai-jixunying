@@ -23,6 +23,14 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -110,14 +118,19 @@ fun SectionCard(modifier: Modifier = Modifier, padding: PaddingValues = PaddingV
     }
 }
 
+/** 字段标题 + 灰色提示。窄屏上提示整体换到下一行，不会被挤成一列一列的字。 */
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
 fun FieldLabel(text: String, hint: String? = null) {
-    Row(verticalAlignment = Alignment.Bottom, modifier = Modifier.padding(bottom = 6.dp, top = 4.dp)) {
-        Text(text, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurface)
-        if (hint != null) {
-            Spacer(Modifier.width(8.dp))
-            Text(hint, style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
-        }
+    androidx.compose.foundation.layout.FlowRow(
+        Modifier.padding(bottom = 6.dp, top = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        Text(text, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurface,
+            modifier = Modifier.align(Alignment.Bottom))
+        if (hint != null) Text(hint, style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle,
+            modifier = Modifier.align(Alignment.Bottom))
     }
 }
 
@@ -209,3 +222,45 @@ fun formatSize(bytes: Long): String = when {
 
 val MemberColors = listOf(0xFF5B6CFF, 0xFF0EA5E9, 0xFF10B981, 0xFFF59E0B, 0xFFEC4899, 0xFF8B5CF6, 0xFFEF4444, 0xFF14B8A6, 0xFF64748B, 0xFFF97316)
 val MemberEmojis = listOf("🤖", "🧠", "📊", "💻", "🧐", "✍️", "🦉", "🐱", "🦊", "🐼", "🌟", "🔬", "🎨", "📚", "⚖️", "🩺", "🚀", "🍵", "🎯", "🧭")
+
+/**
+ * 搜索框：平时只是一个搜索按钮的样子，点了才变成输入框、才弹键盘。
+ * 侧栏和下拉菜单打开时会把焦点交给里面第一个能输入的框，直接放输入框会一打开就弹键盘。
+ */
+@Composable
+fun TapToSearchField(value: String, onChange: (String) -> Unit, placeholder: String, modifier: Modifier = Modifier) {
+    var active by remember { mutableStateOf(false) }
+    var focusedOnce by remember { mutableStateOf(false) }
+    val focus = remember { androidx.compose.ui.focus.FocusRequester() }
+    Row(
+        modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).background(MaterialTheme.colorScheme.surface)
+            .border(1.dp, Ext.c.border, RoundedCornerShape(10.dp))
+            .then(if (!active) Modifier.clickable { active = true; focusedOnce = false } else Modifier)
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(Icons.Rounded.Search, null, Modifier.size(16.dp), tint = Ext.c.subtle)
+        Spacer(Modifier.width(6.dp))
+        Box(Modifier.weight(1f)) {
+            if (value.isEmpty()) Text(placeholder, style = MaterialTheme.typography.bodyMedium, color = Ext.c.subtle, maxLines = 1)
+            if (active) {
+                androidx.compose.foundation.text.BasicTextField(
+                    value, onChange, singleLine = true,
+                    textStyle = MaterialTheme.typography.bodyMedium.copy(color = MaterialTheme.colorScheme.onSurface),
+                    cursorBrush = androidx.compose.ui.graphics.SolidColor(MaterialTheme.colorScheme.primary),
+                    modifier = Modifier.fillMaxWidth().focusRequester(focus).onFocusChanged {
+                        if (it.isFocused) focusedOnce = true else if (focusedOnce) active = false
+                    },
+                )
+                LaunchedEffect(Unit) { focus.requestFocus() }
+            } else if (value.isNotEmpty()) {
+                Text(value, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+        }
+        if (value.isNotEmpty()) {
+            Box(Modifier.size(22.dp).clip(CircleShape).clickable { onChange(""); active = false }, contentAlignment = Alignment.Center) {
+                Icon(Icons.Rounded.Close, "清空", Modifier.size(14.dp), tint = Ext.c.subtle)
+            }
+        }
+    }
+}

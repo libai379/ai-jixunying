@@ -80,6 +80,8 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextRange
@@ -171,7 +173,13 @@ private fun MessageList(ctl: AppController, state: AppState, conv: Conversation,
         ChatEmptyHint(state, conv)
         return
     }
-    LazyColumn(state = listState, modifier = Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally) {
+    val focusManager = androidx.compose.ui.platform.LocalFocusManager.current
+    // 点聊天区域收起键盘（和微信一样）
+    LazyColumn(
+        state = listState,
+        modifier = Modifier.fillMaxSize().pointerInput(Unit) { detectTapGestures { focusManager.clearFocus() } },
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
         item { Spacer(Modifier.height(16.dp)) }
         items(messages, key = { it.id }) { m ->
             Box(Modifier.widthIn(max = 860.dp).fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
@@ -244,7 +252,7 @@ private fun AiMessage(ctl: AppController, state: AppState, m: Message) {
                 if (m.modelLabel.isNotBlank()) Pill(m.modelLabel, Ext.c.subtle)
             }
             Spacer(Modifier.height(6.dp))
-            m.tools.forEach { ToolStepView(it) }
+            ToolStepsView(m.tools, streaming = m.status == MsgStatus.STREAMING)
             if (reasoning.isNotEmpty()) ReasoningView(reasoning, streaming = m.status == MsgStatus.STREAMING && body.isEmpty())
             if (body.isNotBlank()) SelectionContainer { MarkdownText(body, sources = sources) }
             if (m.status == MsgStatus.STREAMING && body.isEmpty() && reasoning.isEmpty()) TypingDots()
@@ -266,6 +274,41 @@ private fun TypingDots() {
         CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
         Spacer(Modifier.width(8.dp))
         Text("正在思考…", style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
+    }
+}
+
+/** 工具步骤：两步以内照常列出；多了就折叠成一行摘要，点开再看明细，免得刷屏。 */
+@Composable
+private fun ToolStepsView(tools: List<ToolStep>, streaming: Boolean) {
+    if (tools.size <= 2) { tools.forEach { ToolStepView(it) }; return }
+    var open by remember { mutableStateOf(false) }
+    val searches = tools.count { it.kind == "search" }
+    val pages = tools.count { it.kind == "fetch" }
+    val images = tools.count { it.kind == "image" }
+    val summary = buildList {
+        if (searches > 0) add("联网搜了 $searches 次")
+        if (pages > 0) add("读了 $pages 个网页")
+        if (images > 0) add("画了 $images 张图")
+    }.joinToString(" · ")
+    val latest = tools.last()
+    Column(Modifier.padding(bottom = 6.dp)) {
+        Row(
+            Modifier.clip(RoundedCornerShape(8.dp)).background(MaterialTheme.colorScheme.surfaceVariant)
+                .clickable { open = !open }.padding(horizontal = 10.dp, vertical = 5.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(Icons.Rounded.Language, null, Modifier.size(14.dp), tint = MaterialTheme.colorScheme.primary)
+            Spacer(Modifier.width(6.dp))
+            Text(
+                if (streaming) "$summary · 正在${if (latest.kind == "fetch") "读网页" else if (latest.kind == "image") "画图" else "搜「${latest.input.take(16)}」"}…" else summary,
+                style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 520.dp),
+            )
+            Icon(if (open) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore, null, Modifier.size(16.dp), tint = Ext.c.subtle)
+        }
+        AnimatedVisibility(open) {
+            Column(Modifier.padding(start = 8.dp, top = 6.dp)) { tools.forEach { ToolStepView(it) } }
+        }
     }
 }
 

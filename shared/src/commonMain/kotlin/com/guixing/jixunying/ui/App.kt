@@ -135,6 +135,10 @@ private fun MainLayout(ctl: AppController) {
         } else {
             val drawer = rememberDrawerState(DrawerValue.Closed)
             val scope = rememberCoroutineScope()
+            // 返回键：先关侧栏，再关设置页，最后才交给系统（退出）
+            LocalPlatform.current.BackHandler(drawer.isOpen || ctl.settingsTab != null) {
+                if (drawer.isOpen) scope.launch { drawer.close() } else ctl.settingsTab = null
+            }
             ModalNavigationDrawer(
                 drawerState = drawer,
                 drawerContent = {

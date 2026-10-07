@@ -17,6 +17,9 @@ interface Platform {
     fun qrMatrix(text: String): List<BooleanArray>? = null
     /** 打开摄像头扫二维码（手机端配对用），取消返回 null。 */
     suspend fun scanQr(): String? = null
+    /** 安卓的返回键（电脑上没有）。 */
+    @androidx.compose.runtime.Composable
+    fun BackHandler(enabled: Boolean, onBack: () -> Unit) {}
     fun getPref(key: String): String? = null
     fun setPref(key: String, value: String?) {}
 }

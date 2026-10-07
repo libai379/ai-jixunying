@@ -132,10 +132,13 @@ class MainActivity : ComponentActivity() {
                 setDesiredBarcodeFormats(ScanOptions.QR_CODE)
                 setPrompt("扫描电脑上 AI集训营「手机联机」页的二维码")
                 setBeepEnabled(false)
-                setOrientationLocked(false)
+                setOrientationLocked(true)
             })
             return d.await()
         }
+
+        @androidx.compose.runtime.Composable
+        override fun BackHandler(enabled: Boolean, onBack: () -> Unit) = androidx.activity.compose.BackHandler(enabled, onBack)
 
         private val prefs get() = getSharedPreferences("jxy", Context.MODE_PRIVATE)
         override fun getPref(key: String): String? = prefs.getString(key, null)

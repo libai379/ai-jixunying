@@ -169,13 +169,22 @@ private fun SettingsPage(ctl: AppController, state: AppState, tab: SettingsTab) 
 
 @Composable
 private fun PageHeader(title: String, desc: String, action: @Composable (() -> Unit)? = null) {
-    Row(Modifier.fillMaxWidth().padding(bottom = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-        Column(Modifier.weight(1f)) {
+    // 窄屏（手机）上按钮放到说明下面，不挤压文字
+    androidx.compose.foundation.layout.BoxWithConstraints(Modifier.fillMaxWidth().padding(bottom = 16.dp)) {
+        val narrow = maxWidth < 520.dp
+        if (narrow) Column {
             Text(title, style = MaterialTheme.typography.titleLarge)
             Spacer(Modifier.height(2.dp))
             Text(desc, style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
+            if (action != null) { Spacer(Modifier.height(10.dp)); action() }
+        } else Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(title, style = MaterialTheme.typography.titleLarge)
+                Spacer(Modifier.height(2.dp))
+                Text(desc, style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
+            }
+            if (action != null) { Spacer(Modifier.width(12.dp)); action() }
         }
-        action?.invoke()
     }
 }
 
@@ -185,7 +194,7 @@ private fun PageHeader(title: String, desc: String, action: @Composable (() -> U
 private fun ProvidersPage(ctl: AppController, state: AppState) {
     var editing by remember { mutableStateOf<ProviderConfig?>(null) }
     var adding by remember { mutableStateOf(ctl.debugDialog == "add") }
-    PageHeader("模型服务", "填 API Key 接入各家模型。Key 只存在电脑上，手机端只看得到打码后的样子。") {
+    PageHeader("模型服务", "填 API Key 接入各家模型。Key 只存在这台设备上；手机遥控电脑时，电脑上的 Key 在手机上只显示打码后的样子。") {
         Button(onClick = { adding = true }, shape = RoundedCornerShape(10.dp)) {
             Icon(Icons.Rounded.Add, null, Modifier.size(16.dp)); Spacer(Modifier.width(4.dp)); Text("添加服务商")
         }
@@ -276,7 +285,7 @@ private fun ProviderDialog(ctl: AppController, existing: ProviderConfig?, onClos
                 val looksChat = models.filter { !Presets.guessImageGen(it.id) }.map { it.id }
                 result = false to (if (looksChat.isNotEmpty())
                     "现在没有「聊天」模型可以测：${looksChat.joinToString("、")} 被设成了「画图」。它是聊天模型，把它改回「聊天」再测。"
-                else "这个服务商只有画图模型，测试连通要用聊天模型。画图模型到 设置 → 画图 里选上，然后在对话里打开「画图」试一张。")
+                else "这个服务商只有画图模型，测试连通要用聊天模型。画图模型到 设置 → 画图 里选上，然后在对话里说「画一张……」试试。")
                 return@OutlinedButton
             }
             busy = true
@@ -295,7 +304,7 @@ private fun ProviderDialog(ctl: AppController, existing: ProviderConfig?, onClos
         Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState())) {
             FieldLabel("服务商", "都按 OpenAI 兼容协议接入")
             SelectBox(preset.name, leading = { PresetBadge(preset, 20.dp) }) { close ->
-                Box(Modifier.padding(horizontal = 8.dp, vertical = 4.dp)) { AppTextField(search, { search = it }, placeholder = "搜索") }
+                Box(Modifier.padding(horizontal = 8.dp, vertical = 4.dp)) { TapToSearchField(search, { search = it }, "搜索服务商") }
                 val list = Presets.all.filter { search.isBlank() || it.name.contains(search, true) || it.id.contains(search, true) }
                 list.groupBy { it.group }.forEach { (group, items) ->
                     Text(group, style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, modifier = Modifier.padding(start = 14.dp, top = 8.dp, bottom = 2.dp))
@@ -344,8 +353,7 @@ private fun ProviderDialog(ctl: AppController, existing: ProviderConfig?, onClos
             SwitchRow("走代理", "海外服务商一般要开 · 代理 ${state.settings.proxy.ifBlank { "未设置" }}（在 外观 里改）", useProxy) { useProxy = it }
             HorizontalDivider(color = Ext.c.border, modifier = Modifier.padding(vertical = 8.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
-                FieldLabel("模型", "每个模型选是「聊天」还是「画图」用")
-                Spacer(Modifier.weight(1f))
+                Box(Modifier.weight(1f)) { FieldLabel("模型", "每个模型选「聊天」还是「画图」") }
                 TextButton(enabled = !busy && key.isNotBlank(), onClick = {
                     busy = true
                     result = null
@@ -357,7 +365,7 @@ private fun ProviderDialog(ctl: AppController, existing: ProviderConfig?, onClos
                         }
                     }
                 }) {
-                    Icon(Icons.Rounded.Refresh, null, Modifier.size(16.dp)); Spacer(Modifier.width(4.dp)); Text("拉取模型列表")
+                    Icon(Icons.Rounded.Refresh, null, Modifier.size(16.dp)); Spacer(Modifier.width(4.dp)); Text("拉取模型列表", maxLines = 1, softWrap = false)
                 }
             }
             Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).border(1.dp, Ext.c.border, RoundedCornerShape(10.dp))) {
@@ -377,7 +385,7 @@ private fun ProviderDialog(ctl: AppController, existing: ProviderConfig?, onClos
             }
             Text(
                 "聊天模型用来对话，当 AI 成员；画图模型（比如 MiniMax 的 image-01）只用来出图，要到 设置 → 画图 里选上它。" +
-                    "选好以后，任何成员聊天时需要图都会自动调用它，你也可以在输入框打开「画图」直接出图。",
+                    "选好以后，任何成员聊天时需要图都会自动调用它，你也可以点输入框上的「直接画图」只出图。",
                 style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, modifier = Modifier.padding(top = 6.dp),
             )
             Spacer(Modifier.height(8.dp))
@@ -662,7 +670,7 @@ private fun engineLabel(e: SearchEngine) = when (e) {
 private fun ImagePage(ctl: AppController, state: AppState) {
     var ig by remember(state.settings.imageGen) { mutableStateOf(state.settings.imageGen) }
     val provider = state.provider(ig.providerId)
-    PageHeader("画图", "选一个画图模型。输入框打开「画图」直接出图；聊天时 AI 也能自己调用它画图。")
+    PageHeader("画图", "选一个画图模型。选好后聊天里直接说「画一张……」，AI 会自己调用它；也可以点输入框上的「直接画图」只出图。")
     SectionCard {
         FieldLabel("服务商")
         Text("国内能画图的：豆包 Seedream（火山方舟）、千问图像 / 通义万相（千问AI平台、阿里百炼）、可灵、智谱 CogView（cogview-3-flash 免费）、" +
