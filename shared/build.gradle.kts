@@ -26,27 +26,38 @@ kotlin {
             implementation(libs.cmp.icons)
             api(libs.coroutines.core)
             api(libs.serialization.json)
-            implementation(libs.ktor.client.core)
-            implementation(libs.ktor.client.websockets)
+        }
+        // 引擎：电脑和手机都要能单独用，所以放在两边共用的 JVM 源码集里
+        val jvmShared by creating {
+            dependsOn(commonMain.get())
+            dependencies {
+                implementation(libs.ktor.client.core)
+                implementation(libs.ktor.client.okhttp)
+                implementation(libs.paho.mqtt)
+            }
         }
         val desktopMain by getting {
+            dependsOn(jvmShared)
             dependencies {
                 implementation(libs.coroutines.swing)
-                implementation(libs.ktor.client.okhttp)
-                implementation(libs.ktor.server.core)
-                implementation(libs.ktor.server.cio)
-                implementation(libs.ktor.server.websockets)
                 implementation(libs.pdfbox)
+                implementation(libs.zxing.core)
             }
         }
         val desktopTest by getting {
             dependencies {
                 implementation(kotlin("test"))
+                implementation(libs.moquette)
+                // 测试里用假的模型服务器
+                implementation(libs.ktor.server.cio)
             }
         }
-        androidMain.dependencies {
-            implementation(libs.coroutines.android)
-            implementation(libs.ktor.client.okhttp)
+        androidMain {
+            dependsOn(jvmShared)
+            dependencies {
+                implementation(libs.coroutines.android)
+                implementation(libs.pdfbox.android)
+            }
         }
     }
 }

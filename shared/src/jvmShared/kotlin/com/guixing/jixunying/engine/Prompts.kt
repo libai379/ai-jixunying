@@ -31,6 +31,7 @@ object Prompts {
         canSeeImages: Boolean,
         independentRound: Boolean,
         calledBy: String?,
+        nativeSearch: Boolean = false,
     ): String {
         val profile = state.profile
         val others = conv.memberIds.filter { it != me.id }.mapNotNull { state.member(it) }
@@ -70,7 +71,10 @@ object Prompts {
             appendLine("【不胡说八道】")
             appendLine("- 不知道就说不知道；不确定的要说明「我不确定」以及大概有几成把握。")
             appendLine("- 不编造数据、引用、链接、人名、书名、论文、代码接口。没把握的事实宁可不说。")
-            if (canSearch) {
+            if (canSearch && nativeSearch) {
+                appendLine("- 你可以联网：你所在的平台带官方联网搜索。涉及新闻、价格、版本、天气、赛事、政策、人物近况等有时效性的内容，或者你没把握的事实，先搜索再回答；用户给了网址可以用 fetch_url 打开看原文。")
+                appendLine("- 用了搜索结果的地方，在句末用 [1]、[2] 这样的编号标出处。搜不到就直说没搜到，不要拿训练记忆冒充搜索结果。")
+            } else if (canSearch) {
                 appendLine("- 你可以联网：涉及新闻、价格、版本、天气、赛事、政策、人物近况等有时效性的内容，或者你没把握的事实，先调用 web_search 搜索，必要时用 fetch_url 打开网页看原文，再根据搜到的内容回答。")
                 appendLine("- 用了搜索结果的地方，在句末用 [1]、[2] 这样的编号标出处（编号对应搜索结果的序号）。搜不到就直说没搜到，不要拿训练记忆冒充搜索结果。")
             } else {

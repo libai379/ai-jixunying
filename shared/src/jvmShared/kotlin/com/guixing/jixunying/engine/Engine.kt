@@ -48,17 +48,19 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
-import java.io.ByteArrayOutputStream
-import java.security.SecureRandom
+import com.guixing.jixunying.model.AppJson
+import com.guixing.jixunying.model.ConfigBundle
 import java.util.Base64
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
-import javax.imageio.ImageIO
 
 const val PAINTER_ID = "tool:image"
 
-/** 引擎：只在电脑上跑。数据、Key、模型调用都在这里，手机只是遥控器。 */
-class Engine(private val storage: Storage) : Backend {
+/**
+ * 引擎：电脑和手机各有一个，都能单独用。数据、Key、模型调用都在本机。
+ * 电脑上的引擎还会通过 RelayHost 接受配对手机的遥控。
+ */
+class Engine(private val storage: Storage, private val isPhone: Boolean = false) : Backend {
     override val store = ClientStore()
     override val isHost = true
     override val conn: StateFlow<ConnState> = MutableStateFlow(ConnState.Local)
@@ -77,18 +79,25 @@ class Engine(private val storage: Storage) : Backend {
         private set
     private val convs = ConcurrentHashMap<String, MutableList<Message>>()
     private val running = ConcurrentHashMap<String, MutableSet<Job>>()
-    private val random = SecureRandom()
 
     private fun proxyFor(useProxy: Boolean) = if (useProxy) state.settings.proxy.trim().ifEmpty { null } else null
     private val llm = LlmClient { proxyFor(it.useProxy) }
     private val search = WebSearch { state.settings.proxy.trim().ifEmpty { null } }
     private val images = ImageGen { proxyFor(it.useProxy) }
 
-    /** 服务器设置变了（端口、开关）时通知外面重启局域网服务。 */
-    var onServerSettingsChanged: (() -> Unit)? = null
+    /** 联机设置变了（开关、中转列表）时通知外面重启联机服务。 */
+    var onRelaySettingsChanged: (() -> Unit)? = null
+
+    /** 上一个配对密钥：手机补发的配对请求可能还用旧的，留 3 分钟。 */
+    @Volatile private var previousSecret: Pair<String, Long>? = null
 
     init {
-        if (state.pairingCode.isEmpty()) state = state.copy(pairingCode = newPairingCode())
+        var s = state
+        if (s.hostId.isEmpty()) s = s.copy(hostId = com.guixing.jixunying.relay.Crypto.randomHex(8))
+        if (s.pairingSecret.isEmpty()) s = s.copy(pairingSecret = newSecret())
+        // 手机上一般没有本地 HTTP 代理（用的是 VPN 类软件），默认直连
+        if (isPhone && storage.loadState() == null) s = s.copy(settings = s.settings.copy(proxy = ""))
+        if (s != state) { state = s; storage.saveState(s) }
         emit(Event.State(state))
         storage.brokenNotes.forEach { emit(Event.Notice(it, error = true)) }
     }
@@ -102,7 +111,7 @@ class Engine(private val storage: Storage) : Backend {
 
     private fun now() = System.currentTimeMillis()
     private fun newId() = UUID.randomUUID().toString().replace("-", "").take(20)
-    private fun newPairingCode() = (100000 + random.nextInt(900000)).toString()
+    private fun newSecret() = Base64.getEncoder().encodeToString(com.guixing.jixunying.relay.Crypto.randomBytes(16))
 
     private fun updateState(transform: (AppState) -> AppState): AppState {
         val s = synchronized(stateLock) {
@@ -114,18 +123,47 @@ class Engine(private val storage: Storage) : Backend {
         return s
     }
 
-    fun setServerAddresses(list: List<String>) {
-        synchronized(stateLock) { state = state.copy(serverAddresses = list) }
+    /** 中转连接情况只给界面看，不存盘。 */
+    fun setRelayStatus(text: String) {
+        if (state.relayStatus == text) return
+        synchronized(stateLock) { state = state.copy(relayStatus = text) }
         emit(Event.State(state))
     }
 
-    /** 发给手机的状态：Key 打码，配对码和设备令牌不给。 */
+    fun hostName(): String = state.settings.relay.deviceName.ifBlank {
+        runCatching { java.net.InetAddress.getLocalHost().hostName }.getOrDefault("我的电脑")
+    }
+
+    /** 当前和刚换掉的配对密钥（字节）。 */
+    fun pairingSecrets(): List<ByteArray> = buildList {
+        add(Base64.getDecoder().decode(state.pairingSecret))
+        previousSecret?.let { (sec, at) -> if (now() - at < 180_000) add(Base64.getDecoder().decode(sec)) }
+    }
+
+    /** 新手机配对成功：记下它，换一个新的配对密钥（二维码只能用一次）。同一台手机补发的请求不重复记。 */
+    fun registerDevice(d: PairedDevice) {
+        val existing = state.devices.firstOrNull { it.id == d.id }
+        if (existing != null && existing.key == d.key) return
+        previousSecret = state.pairingSecret to now()
+        updateState { s -> s.copy(devices = s.devices.filterNot { it.id == d.id } + d, pairingSecret = newSecret()) }
+        emit(Event.Notice("「${d.name}」已配对，以后在哪儿都能连这台电脑"))
+    }
+
+    fun touchDevice(id: String) {
+        updateState { s -> s.copy(devices = s.devices.map { if (it.id == id) it.copy(lastSeen = now()) else it }) }
+    }
+
+    /** 发给手机的状态：Key 打码，配对密钥和设备密钥不给。 */
     fun remoteView(s: AppState): AppState = s.copy(
         providers = s.providers.map { it.copy(apiKey = maskKey(it.apiKey)) },
         settings = s.settings.copy(search = s.settings.search.copy(apiKeys = s.settings.search.apiKeys.mapValues { maskKey(it.value) })),
-        devices = s.devices.map { it.copy(token = maskKey(it.token)) },
-        pairingCode = "",
+        devices = s.devices.map { it.copy(key = "") },
+        pairingSecret = "",
     )
+
+    /** 当前的配对码（给电脑界面显示成二维码）。 */
+    fun pairingCode(): com.guixing.jixunying.model.PairingCode =
+        com.guixing.jixunying.model.PairingCode(state.hostId, state.pairingSecret, hostName(), state.settings.relay.brokers)
 
     private fun messages(convId: String): MutableList<Message> = convs.getOrPut(convId) { storage.loadMessages(convId) }
 
@@ -227,13 +265,13 @@ class Engine(private val storage: Storage) : Backend {
         }
         is Command.SaveProfile -> { updateState { it.copy(profile = c.profile) }; CommandResult() }
         is Command.SaveSettings -> {
-            val before = state.settings.server
+            val before = state.settings.relay
             updateState { s ->
                 val oldKeys = s.settings.search.apiKeys
                 val keys = c.settings.search.apiKeys.mapValues { (k, v) -> if (isMaskedKey(v)) oldKeys[k].orEmpty() else v }
                 s.copy(settings = c.settings.copy(search = c.settings.search.copy(apiKeys = keys)))
             }
-            if (before != state.settings.server) onServerSettingsChanged?.invoke()
+            if (before.enabled != state.settings.relay.enabled || before.brokers != state.settings.relay.brokers) onRelaySettingsChanged?.invoke()
             CommandResult()
         }
         is Command.CreateConversation -> {
@@ -276,10 +314,48 @@ class Engine(private val storage: Storage) : Backend {
             CommandResult()
         }
         is Command.Regenerate -> regenerate(c.convId, c.messageId)
-        is Command.NewPairingCode -> { updateState { it.copy(pairingCode = newPairingCode()) }; CommandResult() }
-        is Command.RemoveDevice -> {
-            updateState { s -> s.copy(devices = s.devices.filterNot { it.token == c.token || maskKey(it.token) == c.token }) }
+        is Command.NewPairingCode -> {
+            previousSecret = null
+            updateState { it.copy(pairingSecret = newSecret()) }
             CommandResult()
+        }
+        is Command.RemoveDevice -> {
+            updateState { s -> s.copy(devices = s.devices.filterNot { it.id == c.id }) }
+            CommandResult()
+        }
+        is Command.UploadFile -> {
+            val bytes = runCatching { Base64.getDecoder().decode(c.base64) }.getOrNull() ?: return CommandResult(false, "文件数据损坏")
+            val att = upload(c.name, c.mime, bytes) ?: return CommandResult(false, "「${c.name}」上传失败")
+            CommandResult(data = AppJson.encodeToString(Attachment.serializer(), att))
+        }
+        is Command.GetFile -> {
+            val bytes = storage.fileBytes(c.id) ?: return CommandResult(false, "文件不存在")
+            CommandResult(data = Base64.getEncoder().encodeToString(bytes))
+        }
+        is Command.ExportConfig -> {
+            val s = state
+            val bundle = ConfigBundle(s.providers, s.members, s.profile, s.settings.search, s.settings.imageGen, s.settings.proxy)
+            CommandResult(data = AppJson.encodeToString(ConfigBundle.serializer(), bundle))
+        }
+        is Command.ImportConfig -> {
+            val b = runCatching { AppJson.decodeFromString(ConfigBundle.serializer(), c.bundleJson) }.getOrNull()
+                ?: return CommandResult(false, "配置数据损坏")
+            updateState { s ->
+                val providers = s.providers.filterNot { p -> b.providers.any { it.id == p.id } } + b.providers
+                val members = s.members.filterNot { m -> b.members.any { it.id == m.id } } + b.members
+                s.copy(
+                    providers = providers,
+                    members = members,
+                    profile = if (s.profile == com.guixing.jixunying.model.UserProfile()) b.profile else s.profile,
+                    settings = s.settings.copy(
+                        search = b.search,
+                        imageGen = b.imageGen,
+                        // 电脑上的本地代理地址在手机上没用
+                        proxy = if (isPhone) s.settings.proxy else b.proxy,
+                    ),
+                )
+            }
+            CommandResult(message = "导入了 ${b.providers.size} 个服务商、${b.members.size} 位成员")
         }
     }
 
@@ -307,20 +383,6 @@ class Engine(private val storage: Storage) : Backend {
     override suspend fun fileBytes(id: String): ByteArray? = withContext(Dispatchers.IO) { storage.fileBytes(id) }
 
     fun fileMeta(id: String) = storage.fileMeta(id)
-
-    // ———————————————— 配对 ————————————————
-
-    fun pair(code: String, deviceName: String): String? {
-        if (code.isBlank() || code != state.pairingCode) return null
-        val token = ByteArray(24).also(random::nextBytes).joinToString("") { "%02x".format(it) }
-        updateState { s ->
-            s.copy(devices = s.devices + PairedDevice(deviceName.ifBlank { "手机" }.take(30), token, now()), pairingCode = newPairingCode())
-        }
-        emit(Event.Notice("「${deviceName.ifBlank { "手机" }}」已配对"))
-        return token
-    }
-
-    fun deviceForToken(token: String): PairedDevice? = state.devices.firstOrNull { it.token == token && token.isNotEmpty() }
 
     // ———————————————— 聊天 ————————————————
 
@@ -488,12 +550,16 @@ class Engine(private val storage: Storage) : Backend {
         val drawTarget = imageGenTarget()
         val wantSearch = conv.webSearch
         val toolsOk = model.tools && !llm.toolsDropped(provider, model.id)
+        // 平台有官方内置搜索就用内置的（Kimi、智谱、千问），否则用我们自己的搜索工具
+        val native = if (wantSearch && toolsOk) nativeSearchOf(provider, model.id) else NativeSearch.NONE
+        val fnSearch = wantSearch && native == NativeSearch.NONE
         val useTools = toolsOk && (wantSearch || drawTarget != null)
 
         try {
             val working = mutableListOf<JsonObject>()
             val sys = Prompts.system(state, conv, member, canSearch = wantSearch, canDraw = drawTarget != null && useTools,
-                canSeeImages = model.vision, independentRound = independent, calledBy = calledBy)
+                canSeeImages = model.vision, independentRound = independent, calledBy = calledBy,
+                nativeSearch = native != NativeSearch.NONE)
             working += buildJsonObject { put("role", "system"); put("content", sys) }
             working += buildHistory(convId, member, cutoffId, excludeId = msg.id, vision = model.vision)
 
@@ -508,14 +574,32 @@ class Engine(private val storage: Storage) : Backend {
                 }
             }
 
-            val tools = if (useTools) toolDefs(wantSearch, drawTarget != null) else null
+            val tools = if (useTools) toolDefs(fnSearch, fetch = wantSearch, draw = drawTarget != null, native = native) else null
+            val extra = if (native == NativeSearch.QWEN) buildJsonObject {
+                put("enable_search", true)
+                putJsonObject("search_options") {
+                    put("enable_source", true); put("enable_citation", true); put("citation_format", "[<number>]")
+                }
+            } else null
+            val nativeLabel = when (native) {
+                NativeSearch.KIMI -> "Kimi 官方联网搜索"
+                NativeSearch.ZHIPU -> "智谱官方联网搜索"
+                NativeSearch.QWEN -> "千问官方联网搜索"
+                NativeSearch.NONE -> ""
+            }
+            val onSources: (List<SearchSource>) -> Unit = { found ->
+                if (found.isNotEmpty() && sources.isEmpty()) {
+                    sources += found
+                    updateMessage(convId, msg.id, persist = false) { it.copy(tools = it.tools + ToolStep("search", nativeLabel, found)) }
+                }
+            }
             var usage = Usage()
             var rounds = 0
             while (true) {
                 rounds++
-                val r = llm.chat(provider, model.id, working, member.temperature, tools) { c, rs -> appendDelta(convId, msg.id, c, rs) }
+                val r = llm.chat(provider, model.id, working, member.temperature, tools, extra, onSources) { c, rs -> appendDelta(convId, msg.id, c, rs) }
                 usage = Usage(usage.prompt + r.usage.prompt, usage.completion + r.usage.completion, usage.cached + r.usage.cached, usage.millis + r.usage.millis)
-                if (r.toolCalls.isEmpty() || rounds >= 6) break
+                if (r.toolCalls.isEmpty() || rounds >= 8) break
                 working += buildJsonObject {
                     put("role", "assistant")
                     put("content", r.content)
@@ -523,7 +607,7 @@ class Engine(private val storage: Storage) : Backend {
                     putJsonArray("tool_calls") {
                         r.toolCalls.forEach { tc ->
                             add(buildJsonObject {
-                                put("id", tc.id); put("type", "function")
+                                put("id", tc.id); put("type", tc.type)
                                 putJsonObject("function") { put("name", tc.name); put("arguments", tc.arguments.ifBlank { "{}" }) }
                             })
                         }
@@ -531,7 +615,11 @@ class Engine(private val storage: Storage) : Backend {
                 }
                 for (tc in r.toolCalls) {
                     val result = runTool(convId, msg.id, tc, sources, drawTarget)
-                    working += buildJsonObject { put("role", "tool"); put("tool_call_id", tc.id); put("content", result) }
+                    working += buildJsonObject {
+                        put("role", "tool"); put("tool_call_id", tc.id)
+                        if (tc.name.startsWith("$")) put("name", tc.name)
+                        put("content", result)
+                    }
                 }
                 if (r.content.isNotBlank()) appendDelta(convId, msg.id, "\n\n", "")
             }
@@ -555,7 +643,34 @@ class Engine(private val storage: Storage) : Backend {
         return t
     }
 
-    private fun toolDefs(search: Boolean, draw: Boolean): JsonArray = buildJsonArray {
+    private enum class NativeSearch { NONE, KIMI, ZHIPU, QWEN }
+
+    private fun nativeSearchOf(p: ProviderConfig, model: String): NativeSearch {
+        if (state.settings.search.mode != com.guixing.jixunying.model.SearchMode.AUTO) return NativeSearch.NONE
+        if (llm.nativeSearchDropped(p, model)) return NativeSearch.NONE
+        val u = p.baseUrl.lowercase()
+        return when {
+            p.presetId.startsWith("moonshot") || "moonshot" in u || "api.kimi" in u -> NativeSearch.KIMI
+            p.presetId == "zhipu" || p.presetId == "zai" || "bigmodel.cn" in u || "api.z.ai" in u -> NativeSearch.ZHIPU
+            p.presetId.startsWith("dashscope") || p.presetId == "qianwen" || "dashscope" in u || "qianwenaiapi" in u || "maas.aliyuncs" in u -> NativeSearch.QWEN
+            else -> NativeSearch.NONE
+        }
+    }
+
+    private fun toolDefs(search: Boolean, fetch: Boolean, draw: Boolean, native: NativeSearch): JsonArray = buildJsonArray {
+        when (native) {
+            NativeSearch.KIMI -> add(buildJsonObject {
+                put("type", "builtin_function")
+                putJsonObject("function") { put("name", "\$web_search") }
+            })
+            NativeSearch.ZHIPU -> add(buildJsonObject {
+                put("type", "web_search")
+                putJsonObject("web_search") {
+                    put("enable", true); put("search_engine", "search_std"); put("search_result", true)
+                }
+            })
+            else -> Unit
+        }
         fun fn(name: String, desc: String, props: JsonObject, required: List<String>) = add(buildJsonObject {
             put("type", "function")
             putJsonObject("function") {
@@ -570,7 +685,9 @@ class Engine(private val storage: Storage) : Backend {
         if (search) {
             fn("web_search", "联网搜索。遇到时效性信息、没把握的事实时使用。返回带编号的搜索结果（标题、链接、摘要）。",
                 buildJsonObject { put("query", prop("搜索关键词，简洁具体，中文问题用中文搜")) }, listOf("query"))
-            fn("fetch_url", "打开一个网页，读取正文文字。搜索摘要不够详细时使用。",
+        }
+        if (fetch) {
+            fn("fetch_url", "打开一个网页，读取正文文字。搜索摘要不够详细、或用户给了链接时使用。",
                 buildJsonObject { put("url", prop("完整网址，http 或 https 开头")) }, listOf("url"))
         }
         if (draw) {
@@ -595,6 +712,13 @@ class Engine(private val storage: Storage) : Backend {
     private suspend fun runTool(convId: String, msgId: String, tc: ToolCall, sources: MutableList<SearchSource>, drawTarget: Pair<ProviderConfig, String>?): String {
         val args = runCatching { Json.parse(tc.arguments.ifBlank { "{}" }).jsonObject }.getOrNull() ?: JsonObject(emptyMap())
         return when (tc.name) {
+            // Kimi 官方搜索：搜索在 Kimi 服务器上做，客户端只要把参数原样交回去
+            "\$web_search" -> {
+                if (sources.isEmpty()) updateMessage(convId, msgId, persist = false) { m ->
+                    if (m.tools.any { it.input == "Kimi 官方联网搜索" }) m else m.copy(tools = m.tools + ToolStep("search", "Kimi 官方联网搜索"))
+                }
+                tc.arguments
+            }
             "web_search" -> {
                 val q = args.str("query").orEmpty().ifBlank { return "参数错误：缺少 query" }
                 val start = sources.size
@@ -729,20 +853,7 @@ class Engine(private val storage: Storage) : Backend {
     /** 图片压到长边 1600 以内再发，省流量也省 token。 */
     private fun imageDataUrl(a: Attachment): String? {
         val bytes = storage.fileBytes(a.id) ?: return null
-        val shrunk = runCatching {
-            val img = ImageIO.read(bytes.inputStream()) ?: return@runCatching null
-            val maxSide = maxOf(img.width, img.height)
-            if (maxSide <= 1600 && bytes.size < 1_500_000) return@runCatching null
-            val scale = 1600.0 / maxSide
-            val w = (img.width * minOf(1.0, scale)).toInt().coerceAtLeast(1)
-            val h = (img.height * minOf(1.0, scale)).toInt().coerceAtLeast(1)
-            val out = java.awt.image.BufferedImage(w, h, java.awt.image.BufferedImage.TYPE_INT_RGB)
-            val g = out.createGraphics()
-            g.setRenderingHint(java.awt.RenderingHints.KEY_INTERPOLATION, java.awt.RenderingHints.VALUE_INTERPOLATION_BILINEAR)
-            g.color = java.awt.Color.WHITE; g.fillRect(0, 0, w, h)
-            g.drawImage(img, 0, 0, w, h, null); g.dispose()
-            ByteArrayOutputStream().also { ImageIO.write(out, "jpg", it) }.toByteArray()
-        }.getOrNull()
+        val shrunk = runCatching { shrinkImageToJpeg(bytes, 1600, 1_500_000) }.getOrNull()
         val (data, mime) = if (shrunk != null) shrunk to "image/jpeg" else bytes to a.mime
         return "data:$mime;base64," + Base64.getEncoder().encodeToString(data)
     }
@@ -770,7 +881,4 @@ class Engine(private val storage: Storage) : Backend {
             "网络连不上：$msg$proxyHint"
         } else msg
     }
-
-    @Suppress("unused")
-    private fun JsonPrimitive.short() = content.take(50)
 }

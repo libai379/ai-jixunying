@@ -5,7 +5,6 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.BitmapFactory
 import android.net.Uri
-import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Bundle
 import android.provider.OpenableColumns
@@ -15,52 +14,75 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
-import com.guixing.jixunying.client.RemoteBackend
-import com.guixing.jixunying.model.DISCOVERY_PING
-import com.guixing.jixunying.model.DISCOVERY_PONG
-import com.guixing.jixunying.model.DISCOVERY_PORT
+import com.guixing.jixunying.client.Hub
+import com.guixing.jixunying.engine.AndroidEnv
+import com.guixing.jixunying.engine.Engine
+import com.guixing.jixunying.engine.Storage
+import com.guixing.jixunying.model.AppJson
+import com.guixing.jixunying.model.PairedHost
+import com.guixing.jixunying.relay.RelayLink
+import com.guixing.jixunying.relay.pairWithHost
 import com.guixing.jixunying.ui.App
-import com.guixing.jixunying.ui.FoundHost
 import com.guixing.jixunying.ui.PickedFile
 import com.guixing.jixunying.ui.Platform
+import com.journeyapps.barcodescanner.ScanContract
+import com.journeyapps.barcodescanner.ScanOptions
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import java.net.DatagramPacket
-import java.net.DatagramSocket
-import java.net.InetAddress
-import java.net.NetworkInterface
-import java.net.SocketTimeoutException
+import java.io.File
 
+/**
+ * 手机端：本机自带完整引擎（不连电脑也能用，模型直接从手机调用，数据存在手机里）；
+ * 配对过电脑的话，还能遥控电脑（走加密中转，隔多远都行）。
+ */
 class JxyApp : Application() {
-    val backend by lazy { RemoteBackend() }
+    lateinit var hub: Hub
+        private set
 
     override fun onCreate() {
         super.onCreate()
+        AndroidEnv.context = this
         val prefs = getSharedPreferences("jxy", Context.MODE_PRIVATE)
-        val host = prefs.getString("host", null)
-        val token = prefs.getString("token", null)
-        if (host != null && token != null) backend.connect(host, token)
+        val engine = Engine(Storage(File(filesDir, "data")), isPhone = true)
+        hub = Hub(
+            local = engine,
+            linkFactory = { RelayLink(it) },
+            pairer = { code, name -> pairWithHost(code, name) },
+            deviceName = deviceName(),
+            persist = { host ->
+                prefs.edit().apply {
+                    if (host == null) remove("paired_host") else putString("paired_host", AppJson.encodeToString(PairedHost.serializer(), host))
+                }.apply()
+            },
+        )
+        prefs.getString("paired_host", null)
+            ?.let { runCatching { AppJson.decodeFromString(PairedHost.serializer(), it) }.getOrNull() }
+            ?.let { hub.attach(it) }
     }
+
+    fun deviceName(): String = listOf(Build.MANUFACTURER, Build.MODEL).joinToString(" ").trim().ifEmpty { "手机" }
 }
 
 class MainActivity : ComponentActivity() {
     private var pickResult: CompletableDeferred<List<Uri>>? = null
     private var saveResult: CompletableDeferred<Uri?>? = null
+    private var scanResult: CompletableDeferred<String?>? = null
 
     private val pickAny = registerForActivityResult(ActivityResultContracts.GetMultipleContents()) { pickResult?.complete(it) }
     private val saveDoc = registerForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { saveResult?.complete(it) }
+    private val scan = registerForActivityResult(ScanContract()) { scanResult?.complete(it.contents) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
-        val backend = (application as JxyApp).backend
-        setContent { App(backend, platform) }
+        val hub = (application as JxyApp).hub
+        setContent { App(hub, platform) }
     }
 
     private val platform = object : Platform {
         override val isDesktop = false
-        override val deviceName: String get() = listOf(Build.MANUFACTURER, Build.MODEL).joinToString(" ").trim().ifEmpty { "手机" }
+        override val deviceName: String get() = (application as JxyApp).deviceName()
 
         override suspend fun pickFiles(imagesOnly: Boolean): List<PickedFile> {
             val d = CompletableDeferred<List<Uri>>()
@@ -103,46 +125,17 @@ class MainActivity : ComponentActivity() {
             runCatching { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
         }
 
-        override suspend fun discoverHosts(): List<FoundHost> = withContext(Dispatchers.IO) {
-            val wifi = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-            val lock = wifi.createMulticastLock("jxy-discover").apply { setReferenceCounted(false); acquire() }
-            val found = LinkedHashMap<String, FoundHost>()
-            try {
-                DatagramSocket().use { sock ->
-                    sock.broadcast = true
-                    sock.soTimeout = 600
-                    val ping = DISCOVERY_PING.toByteArray()
-                    val targets = broadcastAddresses() + InetAddress.getByName("255.255.255.255")
-                    repeat(3) {
-                        targets.forEach { addr -> runCatching { sock.send(DatagramPacket(ping, ping.size, addr, DISCOVERY_PORT)) } }
-                        val until = System.currentTimeMillis() + 700
-                        while (System.currentTimeMillis() < until) {
-                            val buf = ByteArray(512)
-                            val pkt = DatagramPacket(buf, buf.size)
-                            try {
-                                sock.receive(pkt)
-                            } catch (_: SocketTimeoutException) {
-                                break
-                            }
-                            val parts = String(pkt.data, 0, pkt.length).split('|')
-                            if (parts.size >= 3 && parts[0] == DISCOVERY_PONG) {
-                                val addr = "${pkt.address.hostAddress}:${parts[2]}"
-                                found[addr] = FoundHost(parts[1], addr)
-                            }
-                        }
-                    }
-                }
-            } catch (_: Throwable) {
-            } finally {
-                lock.release()
-            }
-            found.values.toList()
+        override suspend fun scanQr(): String? {
+            val d = CompletableDeferred<String?>()
+            scanResult = d
+            scan.launch(ScanOptions().apply {
+                setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+                setPrompt("扫描电脑上 AI集训营「手机联机」页的二维码")
+                setBeepEnabled(false)
+                setOrientationLocked(false)
+            })
+            return d.await()
         }
-
-        private fun broadcastAddresses(): List<InetAddress> = runCatching {
-            NetworkInterface.getNetworkInterfaces().toList().filter { it.isUp && !it.isLoopback }
-                .flatMap { it.interfaceAddresses }.mapNotNull { it.broadcast }
-        }.getOrDefault(emptyList())
 
         private val prefs get() = getSharedPreferences("jxy", Context.MODE_PRIVATE)
         override fun getPref(key: String): String? = prefs.getString(key, null)

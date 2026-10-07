@@ -1,7 +1,5 @@
 package com.guixing.jixunying.engine
 
-import org.apache.pdfbox.Loader
-import org.apache.pdfbox.text.PDFTextStripper
 import java.io.ByteArrayInputStream
 import java.util.zip.ZipInputStream
 
@@ -31,7 +29,7 @@ object DocExtract {
     /** 返回 (文字, 说明)。文字为 null 表示读不出来。 */
     fun extract(name: String, bytes: ByteArray): Pair<String?, String> = try {
         when (val e = ext(name)) {
-            "pdf" -> pdf(bytes)
+            "pdf" -> extractPdfText(bytes)
             "docx" -> ooxml(bytes, Regex("""^word/(document|footnotes|endnotes)\d*\.xml$""")) to ""
             "pptx" -> ooxml(bytes, Regex("""^ppt/slides/slide\d+\.xml$"""), slides = true) to ""
             "xlsx" -> xlsx(bytes) to ""
@@ -44,15 +42,6 @@ object DocExtract {
         }
     } catch (t: Throwable) {
         null to "读取失败：${t.message?.take(80)}"
-    }
-
-    private fun pdf(bytes: ByteArray): Pair<String?, String> {
-        Loader.loadPDF(bytes).use { doc ->
-            val text = PDFTextStripper().getText(doc).trim()
-            return if (text.length < 20 && doc.numberOfPages > 0)
-                null to "这个 PDF 是扫描件（${doc.numberOfPages} 页图片），抽不出文字；可以截图后按图片发送"
-            else text to "${doc.numberOfPages} 页"
-        }
     }
 
     private fun decodeText(bytes: ByteArray): String {

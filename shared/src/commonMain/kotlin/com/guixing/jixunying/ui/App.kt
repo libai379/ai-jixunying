@@ -24,6 +24,7 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -32,8 +33,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.guixing.jixunying.client.Backend
-import com.guixing.jixunying.client.ConnState
-import com.guixing.jixunying.client.RemoteBackend
+import com.guixing.jixunying.client.Hub
 import com.guixing.jixunying.model.Command
 import com.guixing.jixunying.model.CommandResult
 import kotlinx.coroutines.CoroutineScope
@@ -41,15 +41,18 @@ import kotlinx.coroutines.launch
 
 enum class SettingsTab(val title: String) {
     PROVIDERS("模型服务"), MEMBERS("AI 成员"), PROFILE("我的资料"), SEARCH("联网搜索"), IMAGE("画图"),
-    DEVICES("手机连接"), APPEARANCE("外观"), ABOUT("关于"),
+    DEVICES("联机"), APPEARANCE("外观"), ABOUT("关于"),
 }
 
-/** 界面级状态：当前打开哪个对话、是否在设置页。 */
-class AppController(val backend: Backend, val scope: CoroutineScope, val snackbar: SnackbarHostState) {
+/** 界面级状态：当前操作哪台设备、打开哪个对话、是否在设置页。 */
+class AppController(val hub: Hub, val backend: Backend, val scope: CoroutineScope, val snackbar: SnackbarHostState) {
     var currentConvId by mutableStateOf<String?>(null)
     var settingsTab by mutableStateOf<SettingsTab?>(null)
     var showNewChat by mutableStateOf(false)
     var debugDialog = ""
+
+    /** 手机正在遥控电脑。 */
+    val remoteMode: Boolean get() = backend !== hub.local
 
     fun run(cmd: Command, okText: String? = null, then: (CommandResult) -> Unit = {}) {
         scope.launch {
@@ -72,43 +75,41 @@ class AppController(val backend: Backend, val scope: CoroutineScope, val snackba
 }
 
 @Composable
-fun App(backend: Backend, platform: Platform, debugStart: String? = null) {
+fun App(hub: Hub, platform: Platform, debugStart: String? = null) {
+    val useRemote by hub.useRemote.collectAsState()
+    val remote by hub.remote.collectAsState()
+    val backend: Backend = remote?.takeIf { useRemote } ?: hub.local
     val state by backend.store.state.collectAsState()
     AppTheme(state.settings.darkMode) {
         CompositionLocalProvider(LocalPlatform provides platform) {
             val snackbar = remember { SnackbarHostState() }
             val scope = rememberCoroutineScope()
-            val ctl = remember(backend) {
-                AppController(backend, scope, snackbar).also { c ->
-                    // 开发截图用：-Djxy.start=settings:MEMBERS 之类
-                    debugStart?.let { s ->
-                        if (s.startsWith("settings")) c.settingsTab = SettingsTab.entries.firstOrNull { it.name == s.substringAfter(':', "") } ?: SettingsTab.PROVIDERS
-                        if (s == "newchat") c.showNewChat = true
-                        c.debugDialog = s.substringAfter('#', "")
+            // 切换本机 / 电脑时整个界面换一套状态
+            key(backend) {
+                val ctl = remember(backend) {
+                    AppController(hub, backend, scope, snackbar).also { c ->
+                        // 开发截图用：-Djxy.start=settings:MEMBERS 之类
+                        debugStart?.let { s ->
+                            if (s.startsWith("settings")) c.settingsTab = SettingsTab.entries.firstOrNull { it.name == s.substringAfter(':', "").substringBefore('#') } ?: SettingsTab.PROVIDERS
+                            if (s == "newchat") c.showNewChat = true
+                            c.debugDialog = s.substringAfter('#', "")
+                        }
                     }
                 }
-            }
-            val conn by backend.conn.collectAsState()
-
-            LaunchedEffect(backend) {
-                backend.store.notices.collect { snackbar.showSnackbar(it.text, duration = if (it.error) SnackbarDuration.Long else SnackbarDuration.Short) }
-            }
-            // 默认打开最近的对话
-            LaunchedEffect(state.conversations.isNotEmpty()) {
-                if (ctl.currentConvId == null) state.conversations.firstOrNull()?.let {
-                    ctl.currentConvId = it.id
-                    if (!backend.store.hasMessages(it.id)) ctl.run(Command.LoadMessages(it.id))
+                LaunchedEffect(backend) {
+                    backend.store.notices.collect { snackbar.showSnackbar(it.text, duration = if (it.error) SnackbarDuration.Long else SnackbarDuration.Short) }
                 }
-            }
-
-            Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
-                val remote = backend as? RemoteBackend
-                if (remote != null && (conn is ConnState.NotPaired || (conn is ConnState.Failed && state.providers.isEmpty() && state.members.isEmpty()))) {
-                    ConnectScreen(remote, ctl)
-                } else {
+                // 默认打开最近的对话
+                LaunchedEffect(backend, state.conversations.isNotEmpty()) {
+                    if (ctl.currentConvId == null) state.conversations.firstOrNull()?.let {
+                        ctl.currentConvId = it.id
+                        if (!backend.store.hasMessages(it.id)) ctl.run(Command.LoadMessages(it.id))
+                    }
+                }
+                Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
                     MainLayout(ctl)
+                    SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).safeDrawingPadding().padding(bottom = 80.dp))
                 }
-                SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).safeDrawingPadding().padding(bottom = 80.dp))
             }
         }
     }
@@ -145,11 +146,16 @@ private fun MainLayout(ctl: AppController) {
 private fun MainContent(ctl: AppController, wide: Boolean, openDrawer: () -> Unit) {
     val tab = ctl.settingsTab
     val state by ctl.backend.store.state.collectAsState()
-    when {
-        tab != null -> SettingsScreen(ctl, tab, wide, openDrawer)
-        state.providers.isEmpty() || state.members.isEmpty() -> WelcomeScreen(ctl, wide, openDrawer)
-        ctl.currentConvId != null && state.conversation(ctl.currentConvId!!) != null -> ChatScreen(ctl, ctl.currentConvId!!, wide, openDrawer)
-        else -> EmptyChatScreen(ctl, wide, openDrawer)
+    androidx.compose.foundation.layout.Column(Modifier.fillMaxSize()) {
+        if (ctl.remoteMode) RemoteBanner(ctl)
+        Box(Modifier.weight(1f)) {
+            when {
+                tab != null -> SettingsScreen(ctl, tab, wide, openDrawer)
+                state.providers.isEmpty() || state.members.isEmpty() -> WelcomeScreen(ctl, wide, openDrawer)
+                ctl.currentConvId != null && state.conversation(ctl.currentConvId!!) != null -> ChatScreen(ctl, ctl.currentConvId!!, wide, openDrawer)
+                else -> EmptyChatScreen(ctl, wide, openDrawer)
+            }
+        }
     }
     if (ctl.showNewChat) NewChatDialog(ctl)
 }

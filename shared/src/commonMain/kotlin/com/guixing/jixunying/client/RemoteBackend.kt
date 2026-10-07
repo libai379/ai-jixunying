@@ -4,25 +4,8 @@ import com.guixing.jixunying.model.AppJson
 import com.guixing.jixunying.model.Attachment
 import com.guixing.jixunying.model.Command
 import com.guixing.jixunying.model.CommandResult
+import com.guixing.jixunying.model.PairedHost
 import com.guixing.jixunying.model.WireFrame
-import io.ktor.client.HttpClient
-import io.ktor.client.plugins.HttpTimeout
-import io.ktor.client.plugins.websocket.WebSockets
-import io.ktor.client.plugins.websocket.webSocketSession
-import io.ktor.client.request.get
-import io.ktor.client.request.header
-import io.ktor.client.request.parameter
-import io.ktor.client.request.post
-import io.ktor.client.request.setBody
-import io.ktor.client.statement.bodyAsBytes
-import io.ktor.client.statement.bodyAsText
-import io.ktor.http.ContentType
-import io.ktor.http.contentType
-import io.ktor.http.isSuccess
-import io.ktor.websocket.DefaultWebSocketSession
-import io.ktor.websocket.Frame
-import io.ktor.websocket.readText
-import io.ktor.websocket.send
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -30,141 +13,152 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
-import kotlinx.serialization.Serializable
+import kotlin.io.encoding.Base64
+import kotlin.time.Duration.Companion.seconds
+import kotlin.time.TimeSource
 
-@Serializable
-data class PairRequest(val code: String, val deviceName: String)
+/** 手机和电脑之间的一条加密线路（具体实现走公共中转，见 jvmShared/relay）。 */
+interface FrameLink {
+    /** 至少连上了一个中转服务器。 */
+    val online: StateFlow<Boolean>
+    val incoming: SharedFlow<WireFrame>
+    suspend fun send(frame: WireFrame)
+    /** 线路自己觉得连着、却很久收不到对方消息时，拆掉重连。 */
+    fun reconnect() {}
+    fun close()
+}
 
-@Serializable
-data class PairResponse(val ok: Boolean, val token: String = "", val message: String = "", val hostName: String = "")
-
-/** 手机端：所有指令经局域网转给桌面，桌面推回事件。 */
+/** 手机遥控电脑：指令经加密线路发给电脑，电脑推回事件。电脑关着时这里显示离线，手机本机照常能用。 */
 class RemoteBackend(
+    val host: PairedHost,
+    private val link: FrameLink,
+    private val deviceName: String,
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
 ) : Backend {
     override val store = ClientStore()
     override val isHost = false
-    private val _conn = MutableStateFlow<ConnState>(ConnState.NotPaired)
+    private val _conn = MutableStateFlow<ConnState>(ConnState.Connecting)
     override val conn: StateFlow<ConnState> = _conn
 
-    private val http = HttpClient {
-        install(WebSockets) { pingIntervalMillis = 15_000 }
-        install(HttpTimeout) { connectTimeoutMillis = 5_000; requestTimeoutMillis = 120_000 }
-    }
-
-    private var host = ""
-    private var token = ""
-    private var session: DefaultWebSocketSession? = null
-    private var loopJob: Job? = null
     private var nextReq = 1L
     private val pending = mutableMapOf<Long, CompletableDeferred<CommandResult>>()
     private val lock = Mutex()
     private val fileCache = LinkedHashMap<String, ByteArray>()
+    private val clock = TimeSource.Monotonic
+    private var lastHostFrame: TimeSource.Monotonic.ValueTimeMark? = null
+    private var onlineSince: TimeSource.Monotonic.ValueTimeMark? = null
+    private var lastReconnect: TimeSource.Monotonic.ValueTimeMark? = null
+    private var reconnectGap = 90.seconds
+    private var jobs = mutableListOf<Job>()
 
-    val hostAddress get() = host
+    /** 电脑把我取消配对了。 */
+    val revoked = MutableStateFlow(false)
 
-    private fun base() = "http://$host"
-
-    suspend fun pair(hostPort: String, code: String, deviceName: String): PairResponse = runCatching {
-        val resp = http.post("http://$hostPort/api/pair") {
-            contentType(ContentType.Application.Json)
-            setBody(AppJson.encodeToString(PairRequest.serializer(), PairRequest(code.trim(), deviceName)))
-        }
-        AppJson.decodeFromString(PairResponse.serializer(), resp.bodyAsText())
-    }.getOrElse { PairResponse(false, message = "连不上 $hostPort：${it.message ?: it::class.simpleName}") }
-
-    fun connect(hostPort: String, token: String) {
-        this.host = hostPort
-        this.token = token
-        loopJob?.cancel()
-        loopJob = scope.launch { runLoop() }
-    }
-
-    fun disconnect() {
-        loopJob?.cancel()
-        loopJob = null
-        _conn.value = ConnState.NotPaired
-    }
-
-    private suspend fun runLoop() {
-        var backoff = 1_000L
-        while (scope.isActive) {
-            _conn.value = ConnState.Connecting
-            try {
-                val s = http.webSocketSession("ws://$host/api/ws") { parameter("token", token) }
-                session = s
-                _conn.value = ConnState.Connected(host)
-                backoff = 1_000L
-                // 重连后把已经打开过的会话重新拉一遍，补上断线期间的消息
-                store.messages.value.keys.forEach { cid -> scope.launch { call(Command.LoadMessages(cid)) } }
-                for (frame in s.incoming) {
-                    if (frame !is Frame.Text) continue
-                    when (val f = AppJson.decodeFromString(WireFrame.serializer(), frame.readText())) {
-                        is WireFrame.Evt -> store.apply(f.event)
-                        is WireFrame.Res -> lock.withLock { pending.remove(f.reqId) }?.complete(f.result)
-                        is WireFrame.Req -> Unit
-                    }
+    fun start() {
+        jobs += scope.launch {
+            link.incoming.collect { f ->
+                lastHostFrame = clock.markNow()
+                when (f) {
+                    is WireFrame.Evt -> store.apply(f.event)
+                    is WireFrame.Res -> lock.withLock { pending.remove(f.reqId) }?.complete(f.result)
+                    is WireFrame.Hello, is WireFrame.Req -> Unit
+                    is WireFrame.Revoked -> revoked.value = true
                 }
-                val reason = s.closeReason.await()
-                if (reason?.code == 4401.toShort()) {
-                    _conn.value = ConnState.Failed("电脑端已取消这台手机的配对，请重新配对")
-                    return
-                }
-                _conn.value = ConnState.Failed("和电脑的连接断开了，正在重连…")
-            } catch (e: Throwable) {
-                if (!scope.isActive) return
-                _conn.value = ConnState.Failed("连不上电脑（$host）：${e.message ?: e::class.simpleName}")
-            } finally {
-                session = null
-                lock.withLock {
-                    pending.values.forEach { it.complete(CommandResult(false, "连接断开")) }
-                    pending.clear()
-                }
+                refreshState()
             }
-            delay(backoff)
-            backoff = (backoff * 2).coerceAtMost(15_000L)
         }
+        // 心跳：上线时和之后每 25 秒发一次 Hello，电脑会回一声；70 秒没回音就算电脑离线
+        jobs += scope.launch {
+            var lastHello: TimeSource.Monotonic.ValueTimeMark? = null
+            var wasOnline = false
+            while (isActive) {
+                val online = link.online.value
+                if (online && !wasOnline) {
+                    onlineSince = clock.markNow()
+                    lastHello = null
+                }
+                wasOnline = online
+                if (online && (lastHello == null || lastHello.elapsedNow() > 25.seconds)) {
+                    val needState = _conn.value !is ConnState.Connected
+                    runCatching { link.send(WireFrame.Hello(deviceName, wantState = needState)) }
+                    lastHello = clock.markNow()
+                }
+                refreshState()
+                // 中转连着但电脑一直没回音：可能中转换了机器、老连接成了「僵尸」，拆掉重连一次（最多 90 秒一次）
+                val silent = lastHostFrame?.let { it.elapsedNow() > 60.seconds } ?: (onlineSince?.elapsedNow()?.let { it > 20.seconds } == true)
+                if (!silent) reconnectGap = 90.seconds
+                if (online && silent && (lastReconnect == null || lastReconnect!!.elapsedNow() > reconnectGap)) {
+                    lastReconnect = clock.markNow()
+                    // 电脑一直不回（多半是关机了）就越等越久再试，最长 10 分钟
+                    reconnectGap = (reconnectGap * 2).coerceAtMost(600.seconds)
+                    link.reconnect()
+                }
+                delay(2_000)
+            }
+        }
+    }
+
+    private fun refreshState() {
+        val before = _conn.value
+        val online = link.online.value
+        val since = onlineSince
+        val last = lastHostFrame
+        _conn.value = when {
+            revoked.value -> ConnState.Failed("电脑上已取消这台手机的配对，请重新扫码")
+            !online -> ConnState.Failed("连不上中转服务器，检查手机网络")
+            last != null && since != null && last > since && last.elapsedNow() < 70.seconds -> ConnState.Connected(host.hostName.ifBlank { "电脑" })
+            since != null && since.elapsedNow() > 12.seconds -> ConnState.Failed("电脑不在线（没开机，或者 AI集训营 没打开）")
+            else -> ConnState.Connecting
+        }
+        if (_conn.value is ConnState.Connected && before !is ConnState.Connected) {
+            // 重新连上后把已打开的会话再拉一遍，补上断线期间的消息
+            store.messages.value.keys.forEach { cid -> scope.launch { call(Command.LoadMessages(cid)) } }
+        }
+    }
+
+    fun stop() {
+        jobs.forEach { it.cancel() }
+        jobs.clear()
+        link.close()
     }
 
     override suspend fun call(command: Command): CommandResult {
-        val s = session ?: return CommandResult(false, "还没连上电脑")
+        if (revoked.value) return CommandResult(false, "已取消配对")
         val deferred = CompletableDeferred<CommandResult>()
         val id = lock.withLock { val id = nextReq++; pending[id] = deferred; id }
         return try {
-            s.send(AppJson.encodeToString(WireFrame.serializer(), WireFrame.Req(id, command)))
-            withTimeoutOrNull(180_000) { deferred.await() } ?: CommandResult(false, "电脑端没有响应")
+            link.send(WireFrame.Req(id, command))
+            withTimeoutOrNull(120_000) { deferred.await() } ?: CommandResult(false, "电脑没有响应（不在线或网络太慢）")
         } catch (e: Throwable) {
-            lock.withLock { pending.remove(id) }
             CommandResult(false, e.message ?: "发送失败")
+        } finally {
+            lock.withLock { pending.remove(id) }
         }
     }
 
-    override suspend fun upload(name: String, mime: String, bytes: ByteArray): Attachment? = runCatching {
-        val resp = http.post("${base()}/api/files") {
-            header("Authorization", "Bearer $token")
-            parameter("name", name)
-            parameter("mime", mime)
-            contentType(ContentType.Application.OctetStream)
-            setBody(bytes)
+    override suspend fun upload(name: String, mime: String, bytes: ByteArray): Attachment? {
+        val r = call(Command.UploadFile(name, mime, Base64.encode(bytes)))
+        if (!r.ok) {
+            store.apply(com.guixing.jixunying.model.Event.Notice(r.message.ifBlank { "上传失败" }, error = true))
+            return null
         }
-        if (!resp.status.isSuccess()) return null
-        AppJson.decodeFromString(Attachment.serializer(), resp.bodyAsText())
-    }.getOrNull()
+        return runCatching { AppJson.decodeFromString(Attachment.serializer(), r.data) }.getOrNull()
+    }
 
     override suspend fun fileBytes(id: String): ByteArray? {
         fileCache[id]?.let { return it }
-        return runCatching {
-            val resp = http.get("${base()}/api/files/$id") { header("Authorization", "Bearer $token") }
-            if (!resp.status.isSuccess()) null else resp.bodyAsBytes()
-        }.getOrNull()?.also {
+        val r = call(Command.GetFile(id))
+        if (!r.ok) return null
+        return runCatching { Base64.decode(r.data) }.getOrNull()?.also {
             fileCache[id] = it
-            while (fileCache.size > 40) fileCache.remove(fileCache.keys.first())
+            while (fileCache.size > 30) fileCache.remove(fileCache.keys.first())
         }
     }
 }

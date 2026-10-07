@@ -50,7 +50,16 @@ data class UserProfile(
 enum class SearchEngine { BING_FREE, BOCHA, TAVILY, ZHIPU, BRAVE }
 
 @Serializable
+enum class SearchMode {
+    /** 模型所在平台有官方内置搜索（Kimi、智谱、千问）就用内置的，其余模型调用下面选的搜索引擎。 */
+    AUTO,
+    /** 所有模型都用下面选的搜索引擎（出处显示最统一）。 */
+    ENGINE_ONLY,
+}
+
+@Serializable
 data class SearchSettings(
+    val mode: SearchMode = SearchMode.AUTO,
     val engine: SearchEngine = SearchEngine.BING_FREE,
     val apiKeys: Map<String, String> = emptyMap(),
     val useProxy: Boolean = false,
@@ -64,19 +73,29 @@ data class ImageGenSettings(
     val size: String = "1024x1024",
 )
 
+/**
+ * 联机：手机和电脑隔着半个地球也能连。两边都主动连到公共中转服务器（MQTT），
+ * 内容用配对时交换的密钥端到端加密，中转服务器只看得到乱码。不需要自己的服务器。
+ */
 @Serializable
-data class ServerSettings(
+data class RelaySettings(
     val enabled: Boolean = true,
-    val port: Int = 18765,
-    val deviceName: String = "我的电脑",
-)
+    /** 按顺序同时连接，任何一个通都能用。 */
+    val brokers: List<String> = DEFAULT_BROKERS,
+    val deviceName: String = "",
+) {
+    companion object {
+        /** EMQX 和 HiveMQ 两家公司的免费公共服务器（2026-10-07 实测可用），同时连。 */
+        val DEFAULT_BROKERS = listOf("ssl://broker-cn.emqx.io:8883", "ssl://broker.emqx.io:8883", "ssl://broker.hivemq.com:8883")
+    }
+}
 
 @Serializable
 data class Settings(
     val search: SearchSettings = SearchSettings(),
     val imageGen: ImageGenSettings = ImageGenSettings(),
     val proxy: String = "127.0.0.1:10809",
-    val server: ServerSettings = ServerSettings(),
+    val relay: RelaySettings = RelaySettings(),
     val darkMode: Int = 0, // 0 跟随系统 1 浅色 2 深色
     /** 一次用户发言最多引发几轮 AI 之间的 @ 接力，防止无限互聊。 */
     val maxMentionChain: Int = 3,
@@ -162,8 +181,15 @@ data class Message(
     val usage: Usage? = null,
 )
 
+/** 和这台电脑配对过的手机。key 是两边共享的加密密钥（Base64），只存在电脑和那台手机上。 */
 @Serializable
-data class PairedDevice(val name: String, val token: String, val pairedAt: Long, val lastSeen: Long = 0)
+data class PairedDevice(
+    val id: String,
+    val name: String,
+    val key: String,
+    val pairedAt: Long,
+    val lastSeen: Long = 0,
+)
 
 /** 除聊天记录以外的全部状态，体积小，变化时整体推送。 */
 @Serializable
@@ -174,9 +200,12 @@ data class AppState(
     val settings: Settings = Settings(),
     val conversations: List<Conversation> = emptyList(),
     val devices: List<PairedDevice> = emptyList(),
-    /** 当前配对码（只在桌面端有意义）。 */
-    val pairingCode: String = "",
-    val serverAddresses: List<String> = emptyList(),
+    /** 这台电脑在中转上的编号（随机，首次启动生成）。 */
+    val hostId: String = "",
+    /** 当前一次性配对密钥（Base64）；配对成功一次就换新的。只在电脑上有意义，不发给手机。 */
+    val pairingSecret: String = "",
+    /** 中转服务器连接情况，给界面显示用，不存盘也行。 */
+    val relayStatus: String = "",
 ) {
     fun member(id: String) = members.firstOrNull { it.id == id }
     fun provider(id: String) = providers.firstOrNull { it.id == id }

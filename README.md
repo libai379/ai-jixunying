@@ -1,22 +1,23 @@
 # AI集训营
 
 把国内外的大模型拉进一个应用：单聊像豆包，群聊里多个 AI 能互相 @、互相纠错。
-Windows 桌面端 + 安卓端，不需要云服务器：电脑就是手机的服务器，手机和电脑连同一个 Wi-Fi 就能用。
-聊天记录、附件、API Key 全部只存在你自己的电脑上。
+Windows 桌面端 + 安卓端，两边都能单独用；手机配对电脑后，在任何地方（不用同一个 Wi-Fi）都能遥控电脑上的 AI集训营。
+不需要自己的服务器：两边都连免费的公共中转，内容端到端加密，中转只看得到乱码。聊天记录、附件、API Key 都只存在你自己的设备上。
 
 ## 功能
 
 - 单聊和群聊；群聊默认「独立作答」，每个 AI 各答各的、互相看不到，避免跟风附和；答完可以互相 @ 补充或纠错
 - 每个 AI 知道自己是谁、背后是什么模型，也知道群里还有谁、用户是谁
 - 说话规矩：正经回答为主，幽默点到为止；不知道就说不知道；时效性问题先联网搜索再答，并标出处
-- 联网搜索：默认免费的必应，也可以换博查、智谱、Tavily、Brave
+- 联网搜索：Kimi、智谱、千问用平台官方内置搜索；其他模型用免费的必应，也可以换博查、智谱、Tavily、Brave
 - 发图片给能看图的模型；发 PDF、Word、Excel、PPT、代码、文本，自动转成文字给模型读
-- 画图：输入框打开「画图」直接出图，聊天中 AI 也能自己调用画图
-- 服务商预设：DeepSeek、智谱、Kimi、MiniMax、通义千问、豆包、小米 MiMo、腾讯混元 / TokenHub、百度千帆、阶跃、美团 LongCat、硅基流动、魔搭、OpenAI、Claude、Gemini、Grok、Mistral、Groq、OpenRouter、Ollama 等，都按 OpenAI 兼容协议接入
+- 画图：豆包 Seedream、千问图像 / 通义万相、可灵、智谱 CogView、MiniMax、混元生图、文心 iRAG、阶跃、硅基流动、魔搭、OpenAI 等
+- 服务商预设：DeepSeek、智谱、Kimi、MiniMax、千问、通义百炼、豆包、小米 MiMo、腾讯混元 / TokenHub、百度千帆、阶跃、美团 LongCat、硅基流动、魔搭、OpenAI、Claude、Gemini、Grok、Mistral、Groq、OpenRouter、Ollama 等，都按 OpenAI 兼容协议接入
+- 手机扫电脑上的二维码配对；手机可以一键导入电脑上配好的模型和成员
 
 ## 技术
 
-Kotlin 多平台 + Compose Multiplatform，桌面和安卓共用一套界面代码。桌面端内置 Ktor 局域网服务（WebSocket 推送消息）。
+Kotlin 多平台 + Compose Multiplatform，桌面和安卓共用界面和引擎代码。联机走 MQTT 公共中转（EMQX、HiveMQ），AES-256-GCM 端到端加密。
 
 ## 欢迎参考学习
 

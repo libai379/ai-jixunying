@@ -137,7 +137,7 @@ private fun inline(text: String, sources: List<SearchSource>, base: SpanStyle = 
         buildAnnotatedString {
             val linkStyle = TextLinkStyles(SpanStyle(color = primary, textDecoration = TextDecoration.None))
             val pattern = Regex(
-                """(\*\*[^*\n]+?\*\*)|(__[^_\n]+?__)|(`[^`\n]+?`)|(\[[^\]\n]+?\]\((https?://[^)\s]+)\))|(\[\d{1,2}\])|(https?://[^\s)）\]>，。]+)|(@[\p{L}\p{N}_\-]{1,20})|((?<![*\w])\*[^*\n]+?\*(?!\*))|(~~[^~\n]+?~~)"""
+                """(\*\*[^*\n]+?\*\*)|(__[^_\n]+?__)|(`[^`\n]+?`)|(\[[^\]\n]+?\]\((https?://[^)\s]+)\))|(\[(?:ref_)?\d{1,2}\])|(https?://[^\s)）\]>，。]+)|(@[\p{L}\p{N}_\-]{1,20})|((?<![*\w])\*[^*\n]+?\*(?!\*))|(~~[^~\n]+?~~)"""
             )
             var last = 0
             for (m in pattern.findAll(text)) {
@@ -153,7 +153,7 @@ private fun inline(text: String, sources: List<SearchSource>, base: SpanStyle = 
                         withLink(LinkAnnotation.Url(m.groupValues[5], linkStyle)) { append(label) }
                     }
                     m.groups[6] != null -> {
-                        val n = v.trim('[', ']').toInt()
+                        val n = v.trim('[', ']').removePrefix("ref_").toInt()
                         val src = sources.getOrNull(n - 1)
                         if (src != null) withLink(LinkAnnotation.Url(src.url, linkStyle)) {
                             withStyle(SpanStyle(fontSize = 11.sp, baselineShift = androidx.compose.ui.text.style.BaselineShift(0.3f), fontWeight = FontWeight.SemiBold)) { append("[$n]") }

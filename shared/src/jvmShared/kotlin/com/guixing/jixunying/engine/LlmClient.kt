@@ -1,6 +1,7 @@
 package com.guixing.jixunying.engine
 
 import com.guixing.jixunying.model.ProviderConfig
+import com.guixing.jixunying.model.SearchSource
 import com.guixing.jixunying.model.Usage
 import io.ktor.client.request.get
 import io.ktor.client.request.header
@@ -25,7 +26,7 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import java.util.concurrent.ConcurrentHashMap
 
-class ToolCall(val id: String, val name: String, val arguments: String)
+class ToolCall(val id: String, val name: String, val arguments: String, val type: String = "function")
 
 class ChatResult(
     val content: String,
@@ -45,32 +46,44 @@ class LlmClient(private val proxyOf: (ProviderConfig) -> String?) {
 
     private fun url(p: ProviderConfig, path: String) = p.baseUrl.trimEnd('/') + path
 
+    /**
+     * @param tools 函数工具 + 平台内置工具（Kimi 的 builtin_function、智谱的 web_search）
+     * @param extra 额外放进请求体的字段（千问的 enable_search 等）
+     * @param onSources 平台内置搜索返回的出处（智谱 web_search、千问 search_info）
+     */
     suspend fun chat(
         provider: ProviderConfig,
         model: String,
         messages: List<JsonObject>,
         temperature: Double?,
         tools: JsonArray?,
+        extra: JsonObject? = null,
+        onSources: (List<SearchSource>) -> Unit = {},
         onDelta: (content: String, reasoning: String) -> Unit,
     ): ChatResult {
         val key = provider.id + "|" + model
         var attempt = 0
         while (true) {
             val dropped = droppedParams[key] ?: emptySet()
+            val usableTools = tools?.filter { t ->
+                val type = (t as? JsonObject)?.str("type")
+                type == "function" || "native_search" !in dropped
+            }
             val body = buildJsonObject {
                 put("model", model)
                 put("messages", JsonArray(messages))
                 put("stream", true)
                 if ("stream_options" !in dropped) put("stream_options", buildJsonObject { put("include_usage", true) })
                 if (temperature != null && "temperature" !in dropped) put("temperature", temperature)
-                if (tools != null && tools.isNotEmpty() && "tools" !in dropped) put("tools", tools)
+                if (!usableTools.isNullOrEmpty() && "tools" !in dropped) put("tools", JsonArray(usableTools))
+                if (extra != null && "native_search" !in dropped) extra.forEach { (k, v) -> put(k, v) }
             }
             try {
-                return stream(provider, body, onDelta)
+                return stream(provider, body, onSources, onDelta)
             } catch (e: ApiException) {
                 attempt++
                 val bad = guessBadParam(e, body)
-                if (bad != null && attempt <= 3) {
+                if (bad != null && attempt <= 4) {
                     droppedParams.getOrPut(key) { ConcurrentHashMap.newKeySet() }.add(bad)
                     continue
                 }
@@ -82,12 +95,18 @@ class LlmClient(private val proxyOf: (ProviderConfig) -> String?) {
     fun toolsDropped(provider: ProviderConfig, model: String) =
         droppedParams[provider.id + "|" + model]?.contains("tools") == true
 
+    fun nativeSearchDropped(provider: ProviderConfig, model: String) =
+        droppedParams[provider.id + "|" + model]?.contains("native_search") == true
+
     private fun guessBadParam(e: ApiException, body: JsonObject): String? {
         if (e.status !in listOf(400, 422)) return null
         val t = e.body.lowercase()
+        val hasNative = "enable_search" in body ||
+            (body["tools"] as? JsonArray)?.any { (it as? JsonObject)?.str("type") != "function" } == true
         return when {
             "temperature" in t && "temperature" in body -> "temperature"
             "stream_options" in t || "include_usage" in t -> "stream_options"
+            hasNative && ("enable_search" in t || "search_options" in t || "web_search" in t || "builtin" in t || "search" in t) -> "native_search"
             ("tool" in t || "function" in t) && "tools" in body -> "tools"
             else -> null
         }
@@ -96,14 +115,23 @@ class LlmClient(private val proxyOf: (ProviderConfig) -> String?) {
     private suspend fun stream(
         provider: ProviderConfig,
         body: JsonObject,
+        onSources: (List<SearchSource>) -> Unit,
         onDelta: (String, String) -> Unit,
     ): ChatResult {
         val started = System.currentTimeMillis()
         val content = StringBuilder()
         val reasoning = StringBuilder()
-        val calls = sortedMapOf<Int, Triple<StringBuilder, StringBuilder, StringBuilder>>() // id, name, args
+        val calls = sortedMapOf<Int, ToolSlot>()
         var usage = Usage()
         var finish: String? = null
+        var sourcesSent = false
+        fun checkSources(obj: JsonObject) {
+            if (sourcesSent) return
+            val found = parseSources(obj) ?: obj["choices"]?.jsonArray?.firstOrNull()?.jsonObject?.let { c ->
+                parseSources(c) ?: (c["delta"] as? JsonObject)?.let(::parseSources) ?: (c["message"] as? JsonObject)?.let(::parseSources)
+            }
+            if (!found.isNullOrEmpty()) { sourcesSent = true; onSources(found) }
+        }
 
         Http.client(proxyOf(provider)).preparePost(url(provider, "/chat/completions")) {
             header("Authorization", "Bearer ${provider.apiKey.trim()}")
@@ -119,6 +147,7 @@ class LlmClient(private val proxyOf: (ProviderConfig) -> String?) {
                 val obj = runCatching { Json.parse(text).jsonObject }.getOrNull()
                     ?: throw ApiException(resp.status.value, text)
                 obj["error"]?.let { throw ApiException(resp.status.value, it.toString()) }
+                checkSources(obj)
                 val msg = obj["choices"]?.jsonArray?.firstOrNull()?.jsonObject?.get("message")?.jsonObject
                 val c = msg?.str("content").orEmpty()
                 val r = msg?.str("reasoning_content") ?: msg?.str("reasoning") ?: ""
@@ -137,6 +166,7 @@ class LlmClient(private val proxyOf: (ProviderConfig) -> String?) {
                 val obj = runCatching { Json.parse(data).jsonObject }.getOrNull() ?: continue
                 obj["error"]?.let { throw ApiException(200, it.toString()) }
                 parseUsage(obj["usage"])?.let { usage = it }
+                checkSources(obj)
                 val choice = obj["choices"]?.jsonArray?.firstOrNull()?.jsonObject ?: continue
                 choice.str("finish_reason")?.let { finish = it }
                 val delta = choice["delta"]?.jsonObject ?: continue
@@ -149,24 +179,47 @@ class LlmClient(private val proxyOf: (ProviderConfig) -> String?) {
             }
         }
         usage = usage.copy(millis = System.currentTimeMillis() - started)
-        val toolCalls = calls.values.mapIndexedNotNull { i, (id, name, args) ->
-            if (name.isEmpty()) null else ToolCall(id.toString().ifEmpty { "call_$i" }, name.toString(), args.toString())
+        val toolCalls = calls.values.mapIndexedNotNull { i, s ->
+            if (s.name.isEmpty()) null else ToolCall(s.id.toString().ifEmpty { "call_$i" }, s.name.toString(), s.args.toString(), s.type.ifEmpty { "function" })
         }
         return ChatResult(content.toString(), reasoning.toString(), toolCalls, usage, finish)
     }
 
-    private fun collectToolCalls(arr: JsonElement, calls: MutableMap<Int, Triple<StringBuilder, StringBuilder, StringBuilder>>) {
+    private class ToolSlot(val id: StringBuilder = StringBuilder(), val name: StringBuilder = StringBuilder(), val args: StringBuilder = StringBuilder(), var type: String = "")
+
+    private fun collectToolCalls(arr: JsonElement, calls: MutableMap<Int, ToolSlot>) {
         (arr as? JsonArray)?.forEachIndexed { i, el ->
             val o = el.jsonObject
             val idx = o["index"]?.jsonPrimitive?.intOrNull ?: i
-            val slot = calls.getOrPut(idx) { Triple(StringBuilder(), StringBuilder(), StringBuilder()) }
-            o.str("id")?.let { if (slot.first.isEmpty()) slot.first.append(it) }
+            val slot = calls.getOrPut(idx) { ToolSlot() }
+            o.str("id")?.let { if (slot.id.isEmpty()) slot.id.append(it) }
+            o.str("type")?.let { if (slot.type.isEmpty()) slot.type = it }
             o["function"]?.jsonObject?.let { f ->
-                f.str("name")?.let { if (slot.second.isEmpty()) slot.second.append(it) }
-                f.str("arguments")?.let { slot.third.append(it) }
-                (f["arguments"] as? JsonObject)?.let { slot.third.append(it.toString()) }
+                f.str("name")?.let { if (slot.name.isEmpty()) slot.name.append(it) }
+                f.str("arguments")?.let { slot.args.append(it) }
+                (f["arguments"] as? JsonObject)?.let { slot.args.append(it.toString()) }
             }
         }
+    }
+
+    /** 智谱：web_search[{title, link, content}]；千问：search_info.search_results[{index, title, url}]。 */
+    private fun parseSources(o: JsonObject): List<SearchSource>? {
+        (o["web_search"] as? JsonArray)?.let { arr ->
+            return arr.mapNotNull { it as? JsonObject }.mapNotNull { s ->
+                val url = s.str("link") ?: s.str("url") ?: return@mapNotNull null
+                SearchSource(s.str("title").orEmpty().ifBlank { url }, url, s.str("content").orEmpty().take(300))
+            }
+        }
+        (o["search_info"] as? JsonObject)?.let { info ->
+            val arr = info["search_results"] as? JsonArray ?: return null
+            return arr.mapNotNull { it as? JsonObject }
+                .sortedBy { it["index"]?.jsonPrimitive?.intOrNull ?: Int.MAX_VALUE }
+                .mapNotNull { s ->
+                    val url = s.str("url") ?: return@mapNotNull null
+                    SearchSource(s.str("title").orEmpty().ifBlank { s.str("site_name").orEmpty() }, url, s.str("site_name").orEmpty())
+                }
+        }
+        return null
     }
 
     private fun parseUsage(el: JsonElement?): Usage? {

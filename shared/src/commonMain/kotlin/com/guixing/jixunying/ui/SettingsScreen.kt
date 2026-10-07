@@ -76,11 +76,14 @@ import com.guixing.jixunying.client.ConnState
 import com.guixing.jixunying.client.RemoteBackend
 import com.guixing.jixunying.model.AppState
 import com.guixing.jixunying.model.Command
+import com.guixing.jixunying.model.Evals
 import com.guixing.jixunying.model.Member
 import com.guixing.jixunying.model.MemberTemplates
 import com.guixing.jixunying.model.Presets
 import com.guixing.jixunying.model.ProviderConfig
 import com.guixing.jixunying.model.SearchEngine
+import com.guixing.jixunying.model.SearchMode
+import kotlinx.coroutines.flow.first
 
 private fun tabIcon(t: SettingsTab): ImageVector = when (t) {
     SettingsTab.PROVIDERS -> Icons.Rounded.Cloud
@@ -93,7 +96,7 @@ private fun tabIcon(t: SettingsTab): ImageVector = when (t) {
     SettingsTab.ABOUT -> Icons.Rounded.Info
 }
 
-private fun tabTitle(t: SettingsTab, host: Boolean) = if (t == SettingsTab.DEVICES && !host) "连接电脑" else t.title
+private fun tabTitle(t: SettingsTab, desktop: Boolean) = if (t == SettingsTab.DEVICES) (if (desktop) "手机联机" else "连接电脑") else t.title
 
 @Composable
 fun SettingsScreen(ctl: AppController, tab: SettingsTab, wide: Boolean, openDrawer: () -> Unit) {
@@ -112,7 +115,7 @@ fun SettingsScreen(ctl: AppController, tab: SettingsTab, wide: Boolean, openDraw
                     ) {
                         Icon(tabIcon(t), null, Modifier.size(18.dp), tint = if (sel) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
                         Spacer(Modifier.width(10.dp))
-                        Text(tabTitle(t, ctl.backend.isHost), style = MaterialTheme.typography.bodyMedium, fontWeight = if (sel) FontWeight.SemiBold else FontWeight.Normal,
+                        Text(tabTitle(t, LocalPlatform.current.isDesktop), style = MaterialTheme.typography.bodyMedium, fontWeight = if (sel) FontWeight.SemiBold else FontWeight.Normal,
                             color = if (sel) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface)
                     }
                 }
@@ -126,9 +129,16 @@ fun SettingsScreen(ctl: AppController, tab: SettingsTab, wide: Boolean, openDraw
                 IconButton(onClick = openDrawer) { Icon(Icons.Rounded.Menu, "菜单") }
                 Text("设置", style = MaterialTheme.typography.titleMedium)
             }
-            Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp).horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            val chipScroll = rememberScrollState()
+            // 进来时把当前选中的标签滚到看得见的位置
+            androidx.compose.runtime.LaunchedEffect(tab) {
+                val i = SettingsTab.entries.indexOf(tab)
+                val max = androidx.compose.runtime.snapshotFlow { chipScroll.maxValue }.first { it > 0 }
+                chipScroll.animateScrollTo(max * i / (SettingsTab.entries.size - 1).coerceAtLeast(1))
+            }
+            Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp).horizontalScroll(chipScroll), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 SettingsTab.entries.forEach { t ->
-                    ToggleChip(tabTitle(t, ctl.backend.isHost), tabIcon(t), t == tab) { ctl.settingsTab = t }
+                    ToggleChip(tabTitle(t, LocalPlatform.current.isDesktop), tabIcon(t), t == tab) { ctl.settingsTab = t }
                 }
             }
             Spacer(Modifier.height(6.dp))
@@ -336,7 +346,10 @@ private fun ProviderDialog(ctl: AppController, existing: ProviderConfig?, onClos
                 models.forEachIndexed { i, m ->
                     if (i > 0) HorizontalDivider(color = Ext.c.border)
                     Row(Modifier.padding(start = 12.dp, end = 4.dp, top = 2.dp, bottom = 2.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Text(m.id, style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Column(Modifier.weight(1f)) {
+                            Text(m.id, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Evals.label(m.id)?.let { Text(it, style = MaterialTheme.typography.labelSmall, color = Ext.c.success) }
+                        }
                         MiniCheck("看图", m.vision) { v -> models = models.map { if (it.id == m.id) it.copy(vision = v) else it } }
                         MiniCheck("画图", m.imageGen) { v -> models = models.map { if (it.id == m.id) it.copy(imageGen = v, tools = !v) else it } }
                         IconButton(onClick = { models = models.filterNot { it.id == m.id } }, Modifier.size(30.dp)) { Icon(Icons.Rounded.Delete, "移除", Modifier.size(15.dp), tint = Ext.c.subtle) }
@@ -401,6 +414,7 @@ private fun MembersPage(ctl: AppController, state: AppState) {
                             Spacer(Modifier.width(8.dp))
                             if (p == null || m.modelId.isBlank()) Pill("未配置模型", MaterialTheme.colorScheme.error)
                             else Pill("${m.modelId} · ${p.name}", MaterialTheme.colorScheme.primary)
+                            Evals.label(m.modelId)?.let { Spacer(Modifier.width(6.dp)); Pill(it, Ext.c.success) }
                         }
                         if (m.bio.isNotBlank()) Text(m.bio, style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle, maxLines = 2, overflow = TextOverflow.Ellipsis)
                     }
@@ -515,6 +529,7 @@ private fun MemberDialog(ctl: AppController, state: AppState, initial: Member, i
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Text(md.id, style = MaterialTheme.typography.bodyMedium)
                                 if (md.vision) { Spacer(Modifier.width(6.dp)); Pill("看图") }
+                                Evals.label(md.id)?.let { Spacer(Modifier.width(6.dp)); Pill(it, Ext.c.success) }
                             }
                         }, onClick = { m = m.copy(modelId = md.id); close() })
                     }
@@ -573,12 +588,26 @@ private fun ProfilePage(ctl: AppController, state: AppState) {
 @Composable
 private fun SearchPage(ctl: AppController, state: AppState) {
     var s by remember(state.settings.search) { mutableStateOf(state.settings.search) }
-    PageHeader("联网搜索", "对话里打开「联网」后，AI 遇到时效性问题会先搜再答，并标出处。")
+    PageHeader("联网搜索", "对话里打开「联网」后，AI 遇到时效性问题会先搜再答，并标出处。不需要单独的 AI：回答问题的那个模型自己决定什么时候搜、搜什么。")
     SectionCard {
+        FieldLabel("联网方式")
+        listOf(
+            SearchMode.AUTO to ("自动（推荐）" to "Kimi、智谱、千问这几家平台自带官方搜索，用它们的；其他模型（DeepSeek、MiniMax、MiMo 等）用下面选的搜索引擎"),
+            SearchMode.ENGINE_ONLY to ("全部用下面的搜索引擎" to "所有模型统一用同一个搜索引擎，出处显示最一致"),
+        ).forEach { (mode, t) ->
+            Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).clickable { s = s.copy(mode = mode) }.padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                RadioButton(s.mode == mode, { s = s.copy(mode = mode) })
+                Column(Modifier.weight(1f)) {
+                    Text(t.first, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
+                    Text(t.second, style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
+                }
+            }
+        }
+        HorizontalDivider(color = Ext.c.border, modifier = Modifier.padding(vertical = 10.dp))
         FieldLabel("搜索引擎")
         val engines = listOf(
-            SearchEngine.BING_FREE to "免费，不用 Key，国内直连。偶尔会被限流",
-            SearchEngine.BOCHA to "国内正规搜索 API，中文结果好，按次计费（open.bochaai.com）",
+            SearchEngine.BING_FREE to "免费，不用 Key，国内直连。偶尔会被限流，结果质量一般",
+            SearchEngine.BOCHA to "推荐：国内正规搜索 API，中文结果质量好、稳定，按次计费很便宜（open.bochaai.com）",
             SearchEngine.ZHIPU to "智谱的搜索 API，用智谱开放平台的 Key",
             SearchEngine.TAVILY to "海外 AI 搜索 API，每月有免费额度（tavily.com），一般要走代理",
             SearchEngine.BRAVE to "海外搜索 API，有免费额度（brave.com/search/api），要走代理",
@@ -622,9 +651,13 @@ private fun ImagePage(ctl: AppController, state: AppState) {
     val provider = state.provider(ig.providerId)
     PageHeader("画图", "选一个画图模型。输入框打开「画图」直接出图；聊天时 AI 也能自己调用它画图。")
     SectionCard {
-        FieldLabel("服务商", "推荐：智谱 cogview-4、火山方舟 seedream、硅基流动 Kolors、OpenAI gpt-image-1")
+        FieldLabel("服务商")
+        Text("国内能画图的：豆包 Seedream（火山方舟）、千问图像 / 通义万相（千问AI平台、阿里百炼）、可灵、智谱 CogView（cogview-3-flash 免费）、" +
+            "MiniMax image-01、混元生图（腾讯 TokenHub）、文心 iRAG（百度千帆）、阶跃、硅基流动（Kolors / Qwen-Image）、魔搭（每天免费额度）。" +
+            "先到「模型服务」添加对应的服务商并填 Key。",
+            style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle, modifier = Modifier.padding(bottom = 8.dp))
         SelectBox(provider?.name ?: "选择服务商", leading = provider?.let { { PresetBadge(Presets.byId(it.presetId), 20.dp) } }) { close ->
-            state.providers.forEach { p ->
+            state.providers.sortedByDescending { p -> p.models.count { it.imageGen } }.forEach { p ->
                 androidx.compose.material3.DropdownMenuItem({
                     Column {
                         Text(p.name)
@@ -664,80 +697,7 @@ private fun ImagePage(ctl: AppController, state: AppState) {
 
 @Composable
 private fun DevicesPage(ctl: AppController, state: AppState) {
-    if (!ctl.backend.isHost) {
-        RemoteDevicePage(ctl)
-        return
-    }
-    var srv by remember(state.settings.server) { mutableStateOf(state.settings.server) }
-    PageHeader("手机连接", "电脑就是手机的服务器：不用云端，手机和电脑连同一个 Wi-Fi 就能用。聊天记录和 Key 都只在这台电脑上。")
-    SectionCard {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Text("配对码", style = MaterialTheme.typography.labelLarge, color = Ext.c.subtle)
-                Text(state.pairingCode.chunked(3).joinToString(" "), fontSize = 34.sp, fontWeight = FontWeight.Bold, letterSpacing = 4.sp,
-                    color = MaterialTheme.colorScheme.primary)
-            }
-            OutlinedButton(onClick = { ctl.run(Command.NewPairingCode) }) { Text("换一个") }
-        }
-        Spacer(Modifier.height(8.dp))
-        Text("电脑地址", style = MaterialTheme.typography.labelLarge, color = Ext.c.subtle)
-        if (state.serverAddresses.isEmpty()) Text(if (srv.enabled) "服务没起来，或者电脑没连局域网" else "服务已关闭", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error)
-        state.serverAddresses.forEach { Text(it, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Medium) }
-        Spacer(Modifier.height(10.dp))
-        Text(
-            "手机上：打开「AI集训营」→ 自动找到这台电脑（或手动填上面的地址）→ 输入配对码。\n" +
-                "第一次运行时 Windows 会弹「是否允许访问网络」，请勾选「专用网络」并允许，否则手机连不上。\n" +
-                "每个配对码只能用一次，配对成功后会自动换新的。",
-            style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle,
-        )
-    }
-    Spacer(Modifier.height(12.dp))
-    SectionCard {
-        Text("已配对的设备", style = MaterialTheme.typography.titleSmall)
-        Spacer(Modifier.height(6.dp))
-        if (state.devices.isEmpty()) Text("还没有", style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
-        state.devices.forEach { d ->
-            Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Rounded.PhoneAndroid, null, Modifier.size(18.dp), tint = Ext.c.subtle)
-                Spacer(Modifier.width(8.dp))
-                Text(d.name, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
-                TextButton(onClick = { ctl.run(Command.RemoveDevice(d.token)) }) { Text("取消配对", color = MaterialTheme.colorScheme.error) }
-            }
-        }
-    }
-    Spacer(Modifier.height(12.dp))
-    SectionCard {
-        SwitchRow("允许手机连接", "关掉后局域网服务停止", srv.enabled) { srv = srv.copy(enabled = it) }
-        FieldLabel("电脑名称", "手机上显示的名字")
-        AppTextField(srv.deviceName, { srv = srv.copy(deviceName = it.take(20)) })
-        Spacer(Modifier.height(8.dp))
-        FieldLabel("端口")
-        AppTextField(srv.port.toString(), { v -> v.filter(Char::isDigit).take(5).toIntOrNull()?.let { srv = srv.copy(port = it) } },
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
-        Spacer(Modifier.height(10.dp))
-        Button(onClick = { ctl.run(Command.SaveSettings(state.settings.copy(server = srv)), "已保存，服务已重启") }) { Text("保存") }
-    }
-}
-
-@Composable
-private fun RemoteDevicePage(ctl: AppController) {
-    val remote = ctl.backend as RemoteBackend
-    val conn by remote.conn.collectAsState()
-    val platform = LocalPlatform.current
-    PageHeader("连接电脑", "手机是遥控器：模型调用、聊天记录、Key 都在电脑上。")
-    SectionCard {
-        Text(when (val c = conn) {
-            is ConnState.Connected -> "已连接：${c.host}"
-            ConnState.Connecting -> "正在连接 ${remote.hostAddress}…"
-            is ConnState.Failed -> c.reason
-            else -> "未连接"
-        }, style = MaterialTheme.typography.bodyMedium)
-        Spacer(Modifier.height(10.dp))
-        OutlinedButton(onClick = {
-            platform.setPref("host", null); platform.setPref("token", null)
-            remote.disconnect()
-        }) { Text("断开并重新配对") }
-    }
+    if (LocalPlatform.current.isDesktop) HostDevicesPage(ctl, state) else PhoneDevicesPage(ctl)
 }
 
 // ———————————————— 外观与其他 ————————————————
@@ -768,7 +728,7 @@ private fun AppearancePage(ctl: AppController, state: AppState) {
 
 @Composable
 private fun AboutPage(ctl: AppController) {
-    PageHeader("关于", "AI集训营 1.0.0")
+    PageHeader("关于", "AI集训营 1.1.0")
     SectionCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
             BrandMark(44)

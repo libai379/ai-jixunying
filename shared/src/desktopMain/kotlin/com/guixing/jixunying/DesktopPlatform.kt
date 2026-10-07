@@ -50,6 +50,12 @@ class DesktopPlatform(private val window: () -> Frame?) : Platform {
         runCatching { Desktop.getDesktop().browse(URI(url)) }
     }
 
+    override fun qrMatrix(text: String): List<BooleanArray>? = runCatching {
+        val hints = mapOf(com.google.zxing.EncodeHintType.MARGIN to 0, com.google.zxing.EncodeHintType.ERROR_CORRECTION to com.google.zxing.qrcode.decoder.ErrorCorrectionLevel.M)
+        val m = com.google.zxing.qrcode.QRCodeWriter().encode(text, com.google.zxing.BarcodeFormat.QR_CODE, 0, 0, hints)
+        List(m.height) { y -> BooleanArray(m.width) { x -> m.get(x, y) } }
+    }.getOrNull()
+
     private val prefs = java.util.prefs.Preferences.userRoot().node("ai-jixunying")
     override fun getPref(key: String): String? = prefs.get(key, null)
     override fun setPref(key: String, value: String?) {

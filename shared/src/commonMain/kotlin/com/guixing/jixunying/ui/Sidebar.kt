@@ -80,7 +80,6 @@ fun BrandMark(size: Int = 30) {
 @Composable
 fun Sidebar(ctl: AppController, modifier: Modifier, onNavigate: () -> Unit) {
     val state by ctl.backend.store.state.collectAsState()
-    val conn by ctl.backend.conn.collectAsState()
     var query by remember { mutableStateOf("") }
 
     Column(modifier.background(Ext.c.sidebar).padding(horizontal = 12.dp)) {
@@ -92,6 +91,7 @@ fun Sidebar(ctl: AppController, modifier: Modifier, onNavigate: () -> Unit) {
                 Text("多模型助手 · 数据只在本机", style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
             }
         }
+        DeviceSwitcher(ctl)
         Button(
             onClick = { ctl.showNewChat = true; onNavigate() },
             modifier = Modifier.fillMaxWidth().height(42.dp),
@@ -146,16 +146,23 @@ fun Sidebar(ctl: AppController, modifier: Modifier, onNavigate: () -> Unit) {
 
         Column(Modifier.padding(vertical = 10.dp)) {
             NavRow(Icons.Rounded.Groups, "AI 成员", "${state.members.size} 位") { ctl.openSettings(SettingsTab.MEMBERS); onNavigate() }
-            val connText = when (val c = conn) {
-                ConnState.Local -> if (state.devices.isEmpty()) "未配对" else "${state.devices.size} 台"
-                is ConnState.Connected -> "已连接"
-                ConnState.Connecting -> "连接中…"
-                is ConnState.Failed -> "已断开"
-                ConnState.NotPaired -> "未配对"
-            }
-            NavRow(if (ctl.backend.isHost) Icons.Rounded.PhoneAndroid else Icons.Rounded.Computer, if (ctl.backend.isHost) "手机连接" else "连接电脑", connText,
-                dot = when (conn) { is ConnState.Connected -> Ext.c.success; is ConnState.Failed -> MaterialTheme.colorScheme.error; else -> null }) {
-                ctl.openSettings(SettingsTab.DEVICES); onNavigate()
+            val platform = LocalPlatform.current
+            val remote by ctl.hub.remote.collectAsState()
+            val remoteConn = remote?.conn?.collectAsState()?.value
+            if (platform.isDesktop) {
+                NavRow(Icons.Rounded.PhoneAndroid, "手机联机", if (state.devices.isEmpty()) "未配对" else "${state.devices.size} 台",
+                    dot = if (state.relayStatus.startsWith("已连上")) Ext.c.success else null) {
+                    ctl.openSettings(SettingsTab.DEVICES); onNavigate()
+                }
+            } else {
+                NavRow(Icons.Rounded.Computer, "连接电脑", when (remoteConn) {
+                    null -> "未配对"
+                    is ConnState.Connected -> "已连接"
+                    ConnState.Connecting -> "连接中…"
+                    else -> "离线"
+                }, dot = when (remoteConn) { is ConnState.Connected -> Ext.c.success; null -> null; else -> MaterialTheme.colorScheme.error }) {
+                    ctl.openSettings(SettingsTab.DEVICES); onNavigate()
+                }
             }
             NavRow(Icons.Rounded.Settings, "设置", null) { ctl.openSettings(); onNavigate() }
         }

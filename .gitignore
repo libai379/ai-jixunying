@@ -6,3 +6,7 @@ local.properties
 out/
 /data-dev/
 *.log
+
+# 签名配置（密码），只在本机
+keystore.properties
+*.jks

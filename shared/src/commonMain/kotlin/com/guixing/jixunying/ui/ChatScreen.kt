@@ -164,7 +164,9 @@ private fun MessageList(ctl: AppController, state: AppState, conv: Conversation,
         if (messages.isEmpty()) return@LaunchedEffect
         val info = listState.layoutInfo
         val lastVisible = info.visibleItemsInfo.lastOrNull()?.index ?: 0
-        if (lastVisible >= info.totalItemsCount - 3 || messages.size <= 2) listState.animateScrollToItem(messages.size)
+        // 自己刚发的消息、或者本来就在底部附近，都滚到底
+        val justSent = last?.role == Role.USER
+        if (justSent || lastVisible >= info.totalItemsCount - 3 || messages.size <= 2) listState.animateScrollToItem(messages.size)
     }
     if (messages.isEmpty()) {
         ChatEmptyHint(state, conv)
@@ -614,8 +616,8 @@ private fun Composer(ctl: AppController, state: AppState, conv: Conversation, ru
                         if (text.text.isEmpty()) Text(
                             when {
                                 drawMode -> "描述你想要的画面，比如：水墨风格的江南小镇，清晨薄雾"
-                                members.size > 1 -> "发消息…  @名字 点名回答，Enter 发送，Shift+Enter 换行"
-                                else -> "发消息，可以附图片和文档…  Enter 发送，Shift+Enter 换行"
+                                members.size > 1 -> if (platform.isDesktop) "发消息…  @名字 点名回答，Enter 发送，Shift+Enter 换行" else "发消息…  @名字 点名回答"
+                                else -> if (platform.isDesktop) "发消息，可以附图片和文档…  Enter 发送，Shift+Enter 换行" else "发消息，可以附图片和文档"
                             },
                             style = MaterialTheme.typography.bodyLarge, color = Ext.c.subtle, maxLines = 1, overflow = TextOverflow.Ellipsis,
                         )
@@ -663,7 +665,11 @@ private fun Composer(ctl: AppController, state: AppState, conv: Conversation, ru
                 }
             }
             Text(
-                "AI 也会出错，重要信息请核实。聊天记录只存在你的电脑上。",
+                "AI 也会出错，重要信息请核实。" + when {
+                    ctl.remoteMode -> "这个对话在电脑上运行和保存。"
+                    platform.isDesktop -> "聊天记录只存在这台电脑上。"
+                    else -> "聊天记录只存在这台手机上。"
+                },
                 style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle.copy(alpha = 0.7f),
                 modifier = Modifier.align(Alignment.CenterHorizontally).padding(top = 6.dp),
             )

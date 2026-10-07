@@ -71,7 +71,7 @@ fun WelcomeScreen(ctl: AppController, wide: Boolean, openDrawer: () -> Unit) {
             Spacer(Modifier.height(16.dp))
             Text("欢迎使用 AI集训营", style = MaterialTheme.typography.titleLarge.copy(fontSize = 26.sp))
             Spacer(Modifier.height(6.dp))
-            Text("把国内外的大模型拉进一个群：单聊像豆包，群聊能互相 @、互相纠错。\n联网搜索、看图读文档、画图都有。数据全在你自己的电脑上。",
+            Text("把国内外的大模型拉进一个应用：单聊像豆包，群聊能互相 @、互相纠错。\n联网搜索、看图读文档、画图都有。数据只存在你自己的设备上。",
                 style = MaterialTheme.typography.bodyMedium, color = Ext.c.subtle, textAlign = TextAlign.Center)
             Spacer(Modifier.height(32.dp))
             Column(Modifier.widthIn(max = 560.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -84,7 +84,10 @@ fun WelcomeScreen(ctl: AppController, wide: Boolean, openDrawer: () -> Unit) {
                 StepCard(3, "开始聊天", "单聊或拉群都行", false) {
                     if (state.members.isNotEmpty()) ctl.showNewChat = true else ctl.openSettings(SettingsTab.MEMBERS)
                 }
-                if (ctl.backend.isHost) StepCard(4, "（可选）手机连电脑", "手机装上安卓版，同一个 Wi-Fi 下输入配对码即可", state.devices.isNotEmpty()) {
+                val platform = LocalPlatform.current
+                if (platform.isDesktop) StepCard(4, "（可选）手机联机", "手机扫一下二维码，在哪儿都能用手机遥控这台电脑", state.devices.isNotEmpty()) {
+                    ctl.openSettings(SettingsTab.DEVICES)
+                } else if (!ctl.remoteMode) StepCard(0, "已经在电脑上配好了？", "扫电脑上的二维码配对，再一键把电脑上的模型服务和成员导入手机", ctl.hub.remote.value != null) {
                     ctl.openSettings(SettingsTab.DEVICES)
                 }
             }
@@ -104,6 +107,7 @@ private fun StepCard(n: Int, title: String, desc: String, done: Boolean, onClick
             contentAlignment = Alignment.Center,
         ) {
             if (done) Icon(Icons.Rounded.CheckCircle, null, tint = Ext.c.success)
+            else if (n == 0) Icon(Icons.Rounded.Computer, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
             else Text("$n", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
         }
         Spacer(Modifier.width(14.dp))
@@ -145,103 +149,6 @@ fun EmptyChatScreen(ctl: AppController, wide: Boolean, openDrawer: () -> Unit) {
                 ctl.run(Command.CreateConversation(state.members.map { it.id }, "全员群聊")) { r -> if (r.ok) ctl.openConversation(r.data) }
             }) { Text("拉全员进群聊") }
             TextButton(onClick = { ctl.showNewChat = true }) { Text("自己挑成员…") }
-        }
-    }
-}
-
-/** 手机端首次使用：找到电脑并配对。 */
-@Composable
-fun ConnectScreen(remote: RemoteBackend, ctl: AppController) {
-    val platform = LocalPlatform.current
-    val scope = rememberCoroutineScope()
-    val conn by remote.conn.collectAsState()
-    var hosts by remember { mutableStateOf<List<FoundHost>>(emptyList()) }
-    var searching by remember { mutableStateOf(false) }
-    var address by remember { mutableStateOf(platform.getPref("host").orEmpty()) }
-    var code by remember { mutableStateOf("") }
-    var busy by remember { mutableStateOf(false) }
-    var error by remember { mutableStateOf<String?>(null) }
-
-    fun discover() {
-        scope.launch {
-            searching = true
-            hosts = platform.discoverHosts()
-            if (address.isBlank()) hosts.firstOrNull()?.let { address = it.address }
-            searching = false
-        }
-    }
-    LaunchedEffect(Unit) { discover() }
-
-    Column(
-        Modifier.fillMaxSize().safeDrawingPadding().verticalScroll(rememberScrollState()).padding(24.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
-        Spacer(Modifier.height(30.dp))
-        BrandMark(60)
-        Spacer(Modifier.height(14.dp))
-        Text("连接你的电脑", style = MaterialTheme.typography.titleLarge)
-        Spacer(Modifier.height(6.dp))
-        Text("电脑上打开 AI集训营 → 设置 → 手机连接，手机和电脑连同一个 Wi-Fi。", style = MaterialTheme.typography.bodySmall,
-            color = Ext.c.subtle, textAlign = TextAlign.Center)
-        if (conn is ConnState.Failed) {
-            Spacer(Modifier.height(8.dp))
-            Text((conn as ConnState.Failed).reason, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error, textAlign = TextAlign.Center)
-        }
-        Spacer(Modifier.height(24.dp))
-        Column(Modifier.widthIn(max = 460.dp).fillMaxWidth()) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("找到的电脑", style = MaterialTheme.typography.labelLarge, modifier = Modifier.weight(1f))
-                if (searching) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
-                else IconButton(onClick = { discover() }) { Icon(Icons.Rounded.Refresh, "重新查找", Modifier.size(18.dp)) }
-            }
-            if (hosts.isEmpty() && !searching) Text("没找到。确认电脑端开着、同一个 Wi-Fi，或者在下面手动填地址。", style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
-            hosts.forEach { h ->
-                Row(
-                    Modifier.fillMaxWidth().padding(vertical = 4.dp).clip(RoundedCornerShape(12.dp))
-                        .border(1.dp, if (address == h.address) MaterialTheme.colorScheme.primary else Ext.c.border, RoundedCornerShape(12.dp))
-                        .clickable { address = h.address }.padding(12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Icon(Icons.Rounded.Computer, null, tint = MaterialTheme.colorScheme.primary)
-                    Spacer(Modifier.width(10.dp))
-                    Column {
-                        Text(h.name, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
-                        Text(h.address, style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
-                    }
-                }
-            }
-            Spacer(Modifier.height(14.dp))
-            FieldLabel("电脑地址")
-            AppTextField(address, { address = it.trim() }, placeholder = "例如 192.168.1.5:18765", keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri))
-            Spacer(Modifier.height(10.dp))
-            FieldLabel("配对码", "电脑上显示的 6 位数字")
-            AppTextField(code, { code = it.filter(Char::isDigit).take(6) }, placeholder = "000000", keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword))
-            error?.let {
-                Spacer(Modifier.height(8.dp))
-                Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
-            }
-            Spacer(Modifier.height(16.dp))
-            Button(
-                enabled = !busy && address.isNotBlank() && code.length == 6,
-                modifier = Modifier.fillMaxWidth().height(46.dp),
-                onClick = {
-                    busy = true; error = null
-                    scope.launch {
-                        val host = if (address.contains(':')) address else "$address:18765"
-                        val r = remote.pair(host, code, platform.deviceName)
-                        busy = false
-                        if (r.ok) {
-                            platform.setPref("host", host); platform.setPref("token", r.token)
-                            remote.connect(host, r.token)
-                        } else error = r.message
-                    }
-                },
-            ) { Text(if (busy) "正在配对…" else "配对并连接") }
-            val savedToken = platform.getPref("token")
-            if (savedToken != null && platform.getPref("host") != null) {
-                Spacer(Modifier.height(8.dp))
-                OutlinedButton(onClick = { remote.connect(platform.getPref("host")!!, savedToken) }, modifier = Modifier.fillMaxWidth()) { Text("用上次的配对重新连接") }
-            }
         }
     }
 }

@@ -5,33 +5,36 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
+import com.guixing.jixunying.client.Hub
 import com.guixing.jixunying.engine.Engine
-import com.guixing.jixunying.engine.LanServer
 import com.guixing.jixunying.engine.Storage
+import com.guixing.jixunying.relay.RelayHost
 import com.guixing.jixunying.ui.App
 import java.awt.Frame
 
 fun main() {
     val storage = Storage(Storage.defaultRoot())
     val engine = Engine(storage)
-    val server = LanServer(engine)
-    engine.onServerSettingsChanged = { server.restart() }
-    Thread { server.restart() }.start()
+    // 联机服务：连公共中转，手机在哪儿都能连进来
+    val relay = RelayHost(engine)
+    engine.onRelaySettingsChanged = { Thread { relay.restart() }.start() }
+    Thread { relay.restart() }.start()
 
     var frame: Frame? = null
     val platform = DesktopPlatform { frame }
+    val hub = Hub(engine)
 
     application {
         val state = rememberWindowState(size = DpSize(1280.dp, 820.dp))
         Window(
-            onCloseRequest = { server.stop(); exitApplication() },
+            onCloseRequest = { relay.stop(); exitApplication() },
             title = "AI集训营",
             icon = AppIcon,
             state = state,
         ) {
             frame = window
             window.minimumSize = java.awt.Dimension(420, 560)
-            App(engine, platform, System.getProperty("jxy.start"))
+            App(hub, platform, System.getProperty("jxy.start"))
         }
     }
 }
