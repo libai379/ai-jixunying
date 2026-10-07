@@ -214,6 +214,22 @@ fun AppDialog(
     }
 }
 
+/** 打字停下来一会儿就自动保存（设置页不用再找「保存」按钮）。value 等于已保存的值时不动。 */
+@Composable
+fun <T> AutoSave(value: T, saved: T, delayMs: Long = 800, save: (T) -> Unit) {
+    LaunchedEffect(value) {
+        if (value == saved) return@LaunchedEffect
+        kotlinx.coroutines.delay(delayMs)
+        save(value)
+    }
+}
+
+/** 灰色小字：「改了自动保存」。 */
+@Composable
+fun AutoSaveHint(text: String = "改了会自动保存") {
+    Text(text, style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, modifier = Modifier.padding(top = 4.dp))
+}
+
 fun formatSize(bytes: Long): String = when {
     bytes < 1024 -> "$bytes B"
     bytes < 1024 * 1024 -> "${bytes / 1024} KB"

@@ -70,7 +70,7 @@ fun DocsScreen(ctl: AppController, wide: Boolean, openDrawer: () -> Unit) {
     var hits by remember { mutableStateOf<List<DocHit>?>(null) }
     var asking by remember { mutableStateOf<String?>(null) }
     val device = if (ctl.remoteMode) "电脑「${ctl.hub.remote.value?.host?.hostName ?: ""}」" else if (platform.isDesktop) "这台电脑" else "这台手机"
-    fun save(next: DocSettings) = ctl.run(Command.SaveSettings(state.settings.copy(docs = next)), quiet = true)
+    fun save(f: (DocSettings) -> DocSettings) = ctl.updateSettings { it.copy(docs = f(it.docs)) }
 
     LaunchedEffect(query, info.count, ctl.backend) {
         if (query.isNotBlank()) delay(300)
@@ -121,7 +121,7 @@ fun DocsScreen(ctl: AppController, wide: Boolean, openDrawer: () -> Unit) {
                             Icon(Icons.Rounded.Folder, null, Modifier.size(16.dp), tint = Ext.c.subtle)
                             Spacer(Modifier.width(6.dp))
                             Text(r, style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f), maxLines = 2, overflow = TextOverflow.Ellipsis)
-                            if (r in ds.folders) IconButton(onClick = { save(ds.copy(folders = ds.folders - r)) }, Modifier.size(28.dp)) {
+                            if (r in ds.folders) IconButton(onClick = { save { it.copy(folders = it.folders - r) } }, Modifier.size(28.dp)) {
                                 Icon(Icons.Rounded.Close, "不收录这个文件夹", Modifier.size(14.dp), tint = Ext.c.subtle)
                             }
                         }
@@ -133,21 +133,21 @@ fun DocsScreen(ctl: AppController, wide: Boolean, openDrawer: () -> Unit) {
                                 val f = platform.pickFolder() ?: return@launch
                                 // 第一次自己加文件夹时，把原来默认的那些也带上，免得一加反而少了
                                 val base = ds.folders.ifEmpty { info.roots.filter { it !in info.weixinRoots } }
-                                save(ds.copy(folders = (base + f).distinct()))
+                                save { it.copy(folders = (base + f).distinct()) }
                             }
                         }) { Text("添加文件夹") }
-                        if (ds.folders.isNotEmpty()) TextButton(onClick = { save(ds.copy(folders = emptyList())) }) { Text("恢复默认") }
+                        if (ds.folders.isNotEmpty()) TextButton(onClick = { save { it.copy(folders = emptyList()) } }) { Text("恢复默认") }
                     }
                     if (platform.isDesktop || ctl.remoteMode) {
                         HorizontalLine()
                         if (info.weixinRoots.isNotEmpty()) SwitchRow("包括微信收到的文件",
                             "电脑微信把收到的文件存在「${info.weixinRoots.first()}」这类文件夹里（找到 ${info.weixinRoots.size} 个）。打开后 AI 也能搜到这些文件。聊天记录不在这里读。",
-                            ds.includeWeixin) { save(ds.copy(includeWeixin = it)) }
+                            ds.includeWeixin) { v -> save { it.copy(includeWeixin = v) } }
                         else Text("没找到电脑微信存文件的文件夹（一般在「文档\\WeChat Files」或「文档\\xwechat_files」）。",
                             style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
                     }
                     HorizontalLine()
-                    SwitchRow("让 AI 查文档", "关掉后 AI 不再搜你的文档，也不再扫描", ds.enabled) { save(ds.copy(enabled = it)) }
+                    SwitchRow("让 AI 查文档", "关掉后 AI 不再搜你的文档，也不再扫描", ds.enabled) { v -> save { it.copy(enabled = v) } }
                 }
                 Spacer(Modifier.height(16.dp))
                 AppTextField(query, { query = it }, placeholder = "搜文件名或内容，比如：合同 付款日期",
@@ -208,8 +208,9 @@ private fun DocRow(h: DocHit, canOpen: Boolean, busy: Boolean, onOpen: () -> Uni
                 maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 2.dp))
         }
         Column(horizontalAlignment = Alignment.End) {
-            TextButton(enabled = !busy, onClick = onAsk) { Text(if (busy) "读取中…" else "问 AI") }
-            if (canOpen) TextButton(onClick = onOpen) { Text("打开") }
+            val pad = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 2.dp)
+            TextButton(enabled = !busy, onClick = onAsk, contentPadding = pad, modifier = Modifier.height(32.dp)) { Text(if (busy) "读取中…" else "问 AI") }
+            if (canOpen) TextButton(onClick = onOpen, contentPadding = pad, modifier = Modifier.height(32.dp)) { Text("打开", color = Ext.c.subtle) }
         }
     }
 }

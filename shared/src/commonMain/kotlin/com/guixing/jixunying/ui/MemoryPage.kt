@@ -48,7 +48,7 @@ private val memoryKinds = listOf("关于我", "偏好", "要求", "事实")
 @Composable
 fun MemoryPage(ctl: AppController, state: AppState) {
     val ms = state.settings.memory
-    fun saveMs(next: MemorySettings) = ctl.run(Command.SaveSettings(state.settings.copy(memory = next)), quiet = true)
+    fun saveMs(f: (MemorySettings) -> MemorySettings) = ctl.updateSettings { it.copy(memory = f(it.memory)) }
     var newText by remember { mutableStateOf("") }
     var newKind by remember { mutableStateOf(memoryKinds.first()) }
     var editing by remember { mutableStateOf<MemoryItem?>(null) }
@@ -58,9 +58,9 @@ fun MemoryPage(ctl: AppController, state: AppState) {
     PageHeader("记忆", "AI 会记得关于你的事，所有对话、所有成员都能用。对话聊得太长时，记录员会把前面的部分压缩成摘要（大家共用一份）；AI 也能翻以前的聊天记录。")
 
     SectionCard {
-        SwitchRow("长期记忆", "把下面记住的事告诉每位成员；AI 也能主动记、能翻以前的聊天", ms.enabled) { saveMs(ms.copy(enabled = it)) }
+        SwitchRow("长期记忆", "把下面记住的事告诉每位成员；AI 也能主动记、能翻以前的聊天", ms.enabled) { v -> saveMs { it.copy(enabled = v) } }
         SwitchRow("聊完自动记住要点", "记录员从聊天里挑出关于你的长期信息。不记密码、Key、证件号这类敏感信息", ms.enabled && ms.autoExtract) {
-            saveMs(ms.copy(autoExtract = it, enabled = ms.enabled || it))
+            saveMs { m -> m.copy(autoExtract = it, enabled = m.enabled || it) }
         }
         HorizontalDivider(color = Ext.c.border, modifier = Modifier.padding(vertical = 8.dp))
         FieldLabel("记录员", "压缩聊天、挑记忆用的模型，便宜的就够")
@@ -78,7 +78,7 @@ fun MemoryPage(ctl: AppController, state: AppState) {
                     Text("自动（推荐）")
                     Text("优先用 mimo-v2.6-flash 这类便宜的模型", style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
                 }
-            }, onClick = { saveMs(ms.copy(recorderProviderId = "", recorderModelId = "")); close() })
+            }, onClick = { saveMs { it.copy(recorderProviderId = "", recorderModelId = "") }; close() })
             state.providers.filter(ImagePick::usable).forEach { p ->
                 p.models.filter { !it.imageGen }.forEach { m ->
                     androidx.compose.material3.DropdownMenuItem({
@@ -86,7 +86,7 @@ fun MemoryPage(ctl: AppController, state: AppState) {
                             Text(m.id)
                             Text(p.name, style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
                         }
-                    }, onClick = { saveMs(ms.copy(recorderProviderId = p.id, recorderModelId = m.id)); close() })
+                    }, onClick = { saveMs { it.copy(recorderProviderId = p.id, recorderModelId = m.id) }; close() })
                 }
             }
         }
@@ -95,7 +95,7 @@ fun MemoryPage(ctl: AppController, state: AppState) {
         FlowRowCompat {
             listOf(12_000 to "1.2 万字", 24_000 to "2.4 万字（默认）", 48_000 to "4.8 万字").forEach { (n, label) ->
                 Box(Modifier.padding(end = 6.dp, bottom = 6.dp)) {
-                    ToggleChip(label, Icons.Rounded.Psychology, ms.compressAt == n) { saveMs(ms.copy(compressAt = n)) }
+                    ToggleChip(label, Icons.Rounded.Psychology, ms.compressAt == n) { saveMs { it.copy(compressAt = n) } }
                 }
             }
         }
@@ -116,6 +116,7 @@ fun MemoryPage(ctl: AppController, state: AppState) {
         AppTextField(newText, { newText = it }, placeholder = "手动添加一条，例如：我在北京做产品经理，回答请先给结论", singleLine = false, minLines = 1)
         Spacer(Modifier.height(6.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("类别：", style = MaterialTheme.typography.labelMedium, color = Ext.c.subtle)
             KindPicker(newKind) { newKind = it }
             Spacer(Modifier.weight(1f))
             Button(enabled = newText.isNotBlank(), onClick = {
@@ -163,7 +164,10 @@ fun MemoryPage(ctl: AppController, state: AppState) {
         }) {
             AppTextField(text, { text = it }, singleLine = false, minLines = 2)
             Spacer(Modifier.height(8.dp))
-            KindPicker(kind) { kind = it }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("类别：", style = MaterialTheme.typography.labelMedium, color = Ext.c.subtle)
+                KindPicker(kind) { kind = it }
+            }
         }
     }
 }

@@ -38,6 +38,7 @@ import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Description
 import androidx.compose.material.icons.rounded.Download
+import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.ExpandLess
 import androidx.compose.material.icons.rounded.ExpandMore
@@ -114,6 +115,10 @@ fun ChatScreen(ctl: AppController, convId: String, wide: Boolean, openDrawer: ()
     val conv = state.conversation(convId) ?: return
     val messages = allMessages[convId].orEmpty()
     var showConvSettings by remember { mutableStateOf(false) }
+    // 不管从哪条路打开的对话，聊天记录没加载就补上（以前有的入口只切了对话、没加载，显示成空的）
+    LaunchedEffect(convId, ctl.backend) {
+        if (!ctl.backend.store.hasMessages(convId)) ctl.run(Command.LoadMessages(convId), quiet = true)
+    }
 
     Column(Modifier.fillMaxSize()) {
         ChatTopBar(state, conv, wide, openDrawer) { showConvSettings = true }
@@ -282,7 +287,7 @@ private fun AiMessage(ctl: AppController, state: AppState, m: Message) {
                 Spacer(Modifier.height(8.dp))
                 AttachmentStrip(ctl, m.attachments, alignEnd = false, large = true)
             }
-            if (m.status == MsgStatus.ERROR) ErrorBox(m.error)
+            if (m.status == MsgStatus.ERROR) ErrorBox(m.error, ctl)
             if (m.status == MsgStatus.STOPPED) Text("（已停止）", style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle, modifier = Modifier.padding(top = 4.dp))
             if (sources.isNotEmpty() && m.status != MsgStatus.STREAMING) SourcesRow(sources)
             if (m.status != MsgStatus.STREAMING) MessageActions(ctl, m, alignEnd = false, canRegenerate = true)
@@ -422,14 +427,27 @@ private fun SourcesRow(sources: List<com.guixing.jixunying.model.SearchSource>) 
 }
 
 @Composable
-private fun ErrorBox(error: String) {
+private fun ErrorBox(error: String, ctl: AppController) {
+    // 错误里说了「到 设置→某页」的，直接给个按钮过去，不用自己找
+    val fix = when {
+        "模型服务" in error || "API Key" in error || "Key 不对" in error || "余额" in error -> SettingsTab.PROVIDERS to "去模型服务"
+        "AI 成员" in error -> SettingsTab.MEMBERS to "去 AI 成员"
+        "画图" in error && "设置" in error -> SettingsTab.IMAGE to "去画图设置"
+        "代理" in error -> SettingsTab.APPEARANCE to "去改代理"
+        else -> null
+    }
     Row(
         Modifier.padding(top = 6.dp).fillMaxWidth().clip(RoundedCornerShape(10.dp)).background(MaterialTheme.colorScheme.errorContainer).padding(10.dp),
         verticalAlignment = Alignment.Top,
     ) {
         Icon(Icons.Rounded.ErrorOutline, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.error)
         Spacer(Modifier.width(8.dp))
-        SelectionContainer { Text(error.ifBlank { "出错了" }, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onErrorContainer) }
+        Column(Modifier.weight(1f)) {
+            SelectionContainer { Text(error.ifBlank { "出错了" }, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onErrorContainer) }
+            if (fix != null) TextButton(onClick = { ctl.openSettings(fix.first) }, contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 0.dp)) {
+                Text(fix.second + " ›", style = MaterialTheme.typography.labelMedium)
+            }
+        }
     }
 }
 
@@ -442,6 +460,8 @@ private fun MessageActions(ctl: AppController, m: Message, alignEnd: Boolean, ca
         verticalAlignment = Alignment.CenterVertically,
     ) {
         if (m.content.isNotBlank()) SmallAction(Icons.Rounded.ContentCopy, "复制") { clipboard.setText(AnnotatedString(splitThink(m.content).first)); ctl.toast("已复制") }
+        // 自己说的话：放回输入框改一改再发（和豆包、ChatGPT 一样）
+        if (m.role == Role.USER && m.content.isNotBlank()) SmallAction(Icons.Rounded.Edit, "改了重发") { ctl.composerDraft = m.convId to m.content }
         if (canRegenerate) SmallAction(Icons.Rounded.Refresh, "重新回答") { ctl.run(Command.Regenerate(m.convId, m.id)) }
         SmallAction(Icons.Rounded.Delete, "删除") { ctl.run(Command.DeleteMessage(m.convId, m.id)) }
         m.usage?.let { u ->

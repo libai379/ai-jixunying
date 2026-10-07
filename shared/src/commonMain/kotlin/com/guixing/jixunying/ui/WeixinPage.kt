@@ -46,7 +46,7 @@ fun WeixinPage(ctl: AppController, state: AppState) {
     var busy by remember { mutableStateOf(false) }
     var code by remember { mutableStateOf("") }
     var confirmUnbind by remember { mutableStateOf(false) }
-    fun save(next: WeixinSettings) = ctl.run(Command.SaveSettings(state.settings.copy(weixin = next)), quiet = true)
+    fun save(f: (WeixinSettings) -> WeixinSettings) = ctl.updateSettings { it.copy(weixin = f(it.weixin)) }
 
     PageHeader("微信", "和 WorkBuddy 的「微信助理」一样：电脑上扫码绑定以后，在手机微信里给助理发消息（文字、图片、文件、语音都行），电脑上的 AI 成员回答，回复发回微信。用的是腾讯官方的 ClawBot 接口。")
 
@@ -65,8 +65,9 @@ fun WeixinPage(ctl: AppController, state: AppState) {
     SectionCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
-                Text(if (wx.bound) "已绑定微信" else "还没绑定", style = MaterialTheme.typography.titleSmall)
-                Text(wx.status.ifBlank { "未绑定" }, style = MaterialTheme.typography.bodySmall,
+                Text(if (wx.bound) "已绑定微信" else "还没绑定微信", style = MaterialTheme.typography.titleSmall)
+                // 状态和标题说的是一回事时就不重复了
+                if (wx.status.isNotBlank() && wx.status != "未绑定") Text(wx.status, style = MaterialTheme.typography.bodySmall,
                     color = if (wx.status.startsWith("已连接")) Ext.c.success else Ext.c.subtle)
                 if (wx.bound && wx.lastMessageAt > 0) Text("最近一条微信消息：${formatTime(wx.lastMessageAt)}", style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
             }
@@ -111,17 +112,17 @@ fun WeixinPage(ctl: AppController, state: AppState) {
     }
     Spacer(Modifier.height(12.dp))
     SectionCard {
-        SwitchRow("开启微信助理", "关掉后微信里发的消息不回（绑定还在）", ws.enabled) { save(ws.copy(enabled = it)) }
-        SwitchRow("联网搜索", "微信里问时效性的问题会先搜再答，回复末尾附上来源", ws.webSearch) { save(ws.copy(webSearch = it)) }
+        SwitchRow("开启微信助理", "关掉后微信里发的消息不回（绑定还在）", ws.enabled) { v -> save { it.copy(enabled = v) } }
+        SwitchRow("联网搜索", "微信里问时效性的问题会先搜再答，回复末尾附上来源", ws.webSearch) { v -> save { it.copy(webSearch = v) } }
         Spacer(Modifier.height(6.dp))
         FieldLabel("谁来回答微信消息", "选一位就是单聊；选多位就是群聊，每位的回答各发一条")
         val picked = ws.memberIds.filter { state.member(it) != null }.ifEmpty { state.members.take(1).map { it.id } }.toSet()
         if (state.members.isEmpty()) Text("还没有 AI 成员，先到「AI 成员」添加。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
         MemberPickList(state, picked) { id ->
             val next = if (id in picked) picked - id else picked + id
-            if (next.isNotEmpty()) save(ws.copy(memberIds = state.members.map { it.id }.filter { it in next }))
+            if (next.isNotEmpty()) save { it.copy(memberIds = state.members.map { m -> m.id }.filter { id2 -> id2 in next }) }
         }
-        Text("改了以后对新的「微信对话」生效；已有的对话在对话设置里加减成员。",
+        Text("换了以后，已经有的「微信对话」也一起换成这几位。",
             style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, modifier = Modifier.padding(top = 6.dp))
     }
     Spacer(Modifier.height(12.dp))

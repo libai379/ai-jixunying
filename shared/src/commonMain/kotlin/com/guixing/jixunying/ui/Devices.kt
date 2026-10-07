@@ -216,19 +216,25 @@ fun HostDevicesPage(ctl: AppController, state: AppState) {
             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Spacer(Modifier.height(10.dp))
-        SwitchRow("允许手机联机", "关掉后不再连中转，手机也就连不上这台电脑", relay.enabled) { relay = relay.copy(enabled = it) }
-        FieldLabel("电脑名称", "手机上显示的名字")
-        AppTextField(relay.deviceName, { relay = relay.copy(deviceName = it) }, placeholder = platform.deviceName)
+        SwitchRow("允许手机联机", "关掉后不再连中转，手机也就连不上这台电脑", state.settings.relay.enabled) { v ->
+            ctl.updateSettings { it.copy(relay = it.relay.copy(enabled = v)) }
+        }
+        var deviceName by remember { mutableStateOf(state.settings.relay.deviceName) }
+        AutoSave(deviceName, state.settings.relay.deviceName) { v -> ctl.updateSettings { it.copy(relay = it.relay.copy(deviceName = v.trim().take(20))) } }
+        FieldLabel("电脑名称", "手机上显示的名字，改了自动保存")
+        AppTextField(deviceName, { deviceName = it }, placeholder = platform.deviceName)
         Spacer(Modifier.height(8.dp))
-        FieldLabel("中转服务器", "一行一个；可以换成自己的 MQTT 服务器。改了以后要重新配对")
+        // 中转服务器是高级设置：改了要重连、可能要重新配对，所以留一个明确的「应用」按钮，不边打边生效
+        FieldLabel("中转服务器（高级）", "一行一个；可以换成自己的 MQTT 服务器。改了以后手机要重新配对")
         AppTextField(brokersText, { brokersText = it }, singleLine = false, minLines = 2)
         Spacer(Modifier.height(10.dp))
+        val list = brokersText.lines().map { it.trim() }.filter { it.isNotEmpty() }.ifEmpty { RelaySettings.DEFAULT_BROKERS }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = {
-                val list = brokersText.lines().map { it.trim() }.filter { it.isNotEmpty() }.ifEmpty { RelaySettings.DEFAULT_BROKERS }
-                ctl.run(Command.SaveSettings(state.settings.copy(relay = relay.copy(brokers = list, deviceName = relay.deviceName.trim().take(20)))), "已保存")
-            }) { Text("保存") }
-            TextButton(onClick = { brokersText = RelaySettings.DEFAULT_BROKERS.joinToString("\n") }) { Text("恢复默认中转") }
+            Button(enabled = list != state.settings.relay.brokers, onClick = {
+                ctl.updateSettings { it.copy(relay = it.relay.copy(brokers = list)) }
+                ctl.toast("中转服务器已更换，正在重新连接")
+            }) { Text("应用中转服务器") }
+            TextButton(onClick = { brokersText = RelaySettings.DEFAULT_BROKERS.joinToString("\n") }) { Text("恢复默认") }
         }
     }
 }

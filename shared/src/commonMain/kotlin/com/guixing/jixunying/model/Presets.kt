@@ -202,3 +202,6 @@ object MemberTemplates {
         Template("文青", "✍️", 0xFFEC4899, "文案和写作，擅长润色、起标题、写故事，风格灵活。"),
     )
 }
+
+/** 显示用的版本号（和 androidApp 的 versionName、desktopApp 的 packageVersion 一起改）。 */
+const val APP_VERSION = "1.2.0"

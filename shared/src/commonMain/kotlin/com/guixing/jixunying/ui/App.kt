@@ -96,6 +96,39 @@ class AppController(val hub: Hub, val backend: Backend, val scope: CoroutineScop
 
     fun toast(text: String) { scope.launch { snackbar.showSnackbar(text) } }
 
+    private val settingsLock = kotlinx.coroutines.sync.Mutex()
+
+    /**
+     * 改设置：在「最新」的设置上改一处、马上保存（设置页都不用再点「保存」）。
+     * 排队执行，每次都拿最新状态，手机遥控电脑时连着改两处也不会互相覆盖。
+     */
+    fun updateSettings(transform: (com.guixing.jixunying.model.Settings) -> com.guixing.jixunying.model.Settings) {
+        scope.launch {
+            settingsLock.lock()
+            try {
+                val r = backend.call(Command.SaveSettings(transform(backend.store.state.value.settings)))
+                if (!r.ok) snackbar.showSnackbar(r.message.ifBlank { "保存失败" }, duration = SnackbarDuration.Long)
+            } finally {
+                settingsLock.unlock()
+            }
+        }
+    }
+
+    fun updateProfile(transform: (com.guixing.jixunying.model.UserProfile) -> com.guixing.jixunying.model.UserProfile) {
+        scope.launch {
+            settingsLock.lock()
+            try {
+                val r = backend.call(Command.SaveProfile(transform(backend.store.state.value.profile)))
+                if (!r.ok) snackbar.showSnackbar(r.message.ifBlank { "保存失败" }, duration = SnackbarDuration.Long)
+            } finally {
+                settingsLock.unlock()
+            }
+        }
+    }
+
+    /** 手机上：设置首页（列表）还是某一页。电脑上左边一直有列表，用不到。 */
+    var settingsHome by mutableStateOf(false)
+
     fun openConversation(id: String) {
         currentConvId = id
         settingsTab = null
@@ -103,7 +136,12 @@ class AppController(val hub: Hub, val backend: Backend, val scope: CoroutineScop
         if (!backend.store.hasMessages(id)) run(Command.LoadMessages(id))
     }
 
-    fun openSettings(tab: SettingsTab = SettingsTab.PROVIDERS) { settingsTab = tab; page = null }
+    /** 不指定哪一页：手机上先进设置首页（列表），电脑上默认第一页。 */
+    fun openSettings(tab: SettingsTab? = null) {
+        settingsTab = tab ?: SettingsTab.PROVIDERS
+        settingsHome = tab == null
+        page = null
+    }
 
     fun openPage(p: MainPage) { page = p; settingsTab = null }
 }
@@ -126,6 +164,9 @@ fun App(hub: Hub, platform: Platform, debugStart: String? = null) {
                         debugStart?.let { s ->
                             if (s.startsWith("settings")) c.settingsTab = SettingsTab.entries.firstOrNull { it.name == s.substringAfter(':', "").substringBefore('#') } ?: SettingsTab.PROVIDERS
                             if (s == "newchat") c.showNewChat = true
+                            if (s == "docs") c.page = MainPage.DOCS
+                            if (s == "settingshome") c.openSettings()
+                            if (s.startsWith("conv:")) c.currentConvId = s.removePrefix("conv:").substringBefore('#')
                             c.debugDialog = s.substringAfter('#', "")
                         }
                     }
@@ -170,9 +211,13 @@ private fun MainLayout(ctl: AppController) {
         } else {
             val drawer = rememberDrawerState(DrawerValue.Closed)
             val scope = rememberCoroutineScope()
-            // 返回键：先关侧栏，再关设置页 / 文档页，最后才交给系统（退出）
+            // 返回键：先关侧栏；在设置的某一页就回设置首页；再关设置 / 文档页；最后才交给系统（退出）
             LocalPlatform.current.BackHandler(drawer.isOpen || ctl.settingsTab != null || ctl.page != null) {
-                if (drawer.isOpen) scope.launch { drawer.close() } else { ctl.settingsTab = null; ctl.page = null }
+                when {
+                    drawer.isOpen -> scope.launch { drawer.close() }
+                    ctl.settingsTab != null && !ctl.settingsHome -> ctl.settingsHome = true
+                    else -> { ctl.settingsTab = null; ctl.page = null }
+                }
             }
             ModalNavigationDrawer(
                 drawerState = drawer,

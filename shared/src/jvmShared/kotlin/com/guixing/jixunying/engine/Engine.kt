@@ -367,6 +367,15 @@ class Engine(
             }
             if (before.enabled != state.settings.relay.enabled || before.brokers != state.settings.relay.brokers) onRelaySettingsChanged?.invoke()
             if (docsBefore != state.settings.docs) rescanDocs()
+            // 微信助理换了谁回答 / 联网开关：已有的「微信对话」也一起换（以前只对新对话生效，容易以为没改成）
+            val wx = state.settings.weixin
+            if (wx.memberIds.isNotEmpty() && state.conversations.any { it.channel.startsWith("weixin:") && (it.memberIds != wx.memberIds || it.webSearch != wx.webSearch) }) {
+                updateState { s ->
+                    s.copy(conversations = s.conversations.map {
+                        if (it.channel.startsWith("weixin:")) it.copy(memberIds = wx.memberIds.filter { id -> s.member(id) != null }, webSearch = wx.webSearch) else it
+                    })
+                }
+            }
             CommandResult()
         }
         is Command.DocSearch -> {
@@ -920,6 +929,10 @@ class Engine(
 
         if (provider == null || member.modelId.isBlank()) {
             updateMessage(convId, msg.id) { it.copy(status = MsgStatus.ERROR, error = "「${member.name}」还没配置模型：到 设置→AI 成员 里给它选服务商和模型") }
+            return null
+        }
+        if (!provider.enabled) {
+            updateMessage(convId, msg.id) { it.copy(status = MsgStatus.ERROR, error = "服务商「${provider.name}」已停用：到 设置→模型服务 把它的开关打开，「${member.name}」才能回答") }
             return null
         }
         if (provider.apiKey.isBlank() && !provider.baseUrl.contains("127.0.0.1") && !provider.baseUrl.contains("localhost")) {

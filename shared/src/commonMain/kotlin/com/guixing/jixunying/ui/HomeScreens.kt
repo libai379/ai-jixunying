@@ -76,6 +76,8 @@ fun WelcomeScreen(ctl: AppController, wide: Boolean, openDrawer: () -> Unit) {
             Spacer(Modifier.height(32.dp))
             Column(Modifier.widthIn(max = 560.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 StepCard(1, "添加模型服务", "选 DeepSeek、智谱、Kimi、通义、豆包、OpenAI、Claude… 填上 API Key", state.providers.isNotEmpty()) {
+                    // 还没有服务商时直接弹出「添加服务商」，不用再找按钮
+                    if (state.providers.isEmpty()) ctl.debugDialog = "add"
                     ctl.openSettings(SettingsTab.PROVIDERS)
                 }
                 StepCard(2, "创建 AI 成员", "给模型起个名字、定个位，比如「老钱：数据分析」「杠精：专门挑错」", state.members.isNotEmpty()) {
@@ -85,9 +87,14 @@ fun WelcomeScreen(ctl: AppController, wide: Boolean, openDrawer: () -> Unit) {
                     if (state.members.isNotEmpty()) ctl.showNewChat = true else ctl.openSettings(SettingsTab.MEMBERS)
                 }
                 val platform = LocalPlatform.current
-                if (platform.isDesktop) StepCard(4, "（可选）手机联机", "手机扫一下二维码，在哪儿都能用手机遥控这台电脑", state.devices.isNotEmpty()) {
-                    ctl.openSettings(SettingsTab.DEVICES)
-                } else if (!ctl.remoteMode) StepCard(0, "已经在电脑上配好了？", "扫电脑上的二维码配对，再一键把电脑上的模型服务和成员导入手机", ctl.hub.remote.value != null) {
+                if (platform.isDesktop) {
+                    StepCard(4, "（可选）手机联机", "手机扫一下二维码，在哪儿都能用手机遥控这台电脑", state.devices.isNotEmpty()) {
+                        ctl.openSettings(SettingsTab.DEVICES)
+                    }
+                    StepCard(5, "（可选）绑定微信", "在手机微信里给助理发消息，这台电脑上的 AI 回答", state.weixin.bound) {
+                        ctl.openSettings(SettingsTab.WEIXIN)
+                    }
+                } else if (!ctl.remoteMode) StepCard(0, "已经在电脑上配好了？", "扫电脑上的二维码配对，再一键把电脑上的模型服务和成员同步到手机", ctl.hub.remote.value != null) {
                     ctl.openSettings(SettingsTab.DEVICES)
                 }
             }

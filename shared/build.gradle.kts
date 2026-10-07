@@ -50,6 +50,8 @@ kotlin {
                 implementation(libs.moquette)
                 // 测试里用假的模型服务器
                 implementation(libs.ktor.server.cio)
+                // 离屏渲染界面截图（ShotsTest，检查界面用）
+                implementation(compose.desktop.currentOs)
             }
         }
         androidMain {
