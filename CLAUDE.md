@@ -49,6 +49,8 @@
 - 安卓模拟器：pixel6_api34（启动前 unset 掉 HTTP(S)_PROXY）；adb input text 只能输英文，配对码可以用它粘贴
 - 打包桌面：./gradlew :desktopApp:packageExe（产物在 desktopApp/build/compose/binaries/main/exe/）。需要带 jpackage 的 JDK，路径在 gradle.properties 的 packageJdk；版本号在 desktopApp/build.gradle.kts，每次发版要加，否则覆盖安装会提示已安装
 - 打包安卓：./gradlew :androidApp:assembleDebug（用专用签名）
+- 给用户打开桌面版：先 :desktopApp:createDistributable，把 desktopApp/build/compose/binaries/main/app/ai-jixunying 复制到 G:\DevCache\ai-jixunying-app 再运行（直接运行 build 目录里的会占住文件，下次打包失败）
+- 渲染：Main.kt 默认 skiko.renderApi=OPENGL（DirectX 在用户电脑上会让字闪，见教训库 26）。用户正在用的窗口只截图，不要模拟鼠标键盘
 - 交付：复制到 F:\apk-out\，文件名 AI集训营.exe / AI集训营.apk，不带版本号和日期，汇报时报文件时间
 
 ## 用户偏好

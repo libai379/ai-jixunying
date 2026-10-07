@@ -30,6 +30,8 @@ compose.desktop {
                 menu = true
                 shortcut = true
                 dirChooser = true
+                // 装到当前用户目录，不用管理员权限
+                perUserInstall = true
                 menuGroup = "AI集训营"
                 upgradeUuid = "6f1b8c0e-6c3a-4f1e-9a52-3c1f6b2a7d11"
             }

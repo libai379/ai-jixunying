@@ -13,6 +13,12 @@ import com.guixing.jixunying.ui.App
 import java.awt.Frame
 
 fun main() {
+    // Windows 上默认用 DirectX 渲染，部分显卡 / 驱动下每次重画（打字、鼠标悬停、打开弹窗）文字会闪。
+    // 官方建议改用 OpenGL（https://github.com/JetBrains/compose-multiplatform/issues/553）。
+    // 想换回来可以设环境变量 SKIKO_RENDER_API 或启动参数 -Dskiko.renderApi=DIRECT3D。
+    if (System.getProperty("skiko.renderApi") == null && System.getenv("SKIKO_RENDER_API") == null) {
+        System.setProperty("skiko.renderApi", "OPENGL")
+    }
     val storage = Storage(Storage.defaultRoot())
     val engine = Engine(storage)
     // 联机服务：连公共中转，手机在哪儿都能连进来

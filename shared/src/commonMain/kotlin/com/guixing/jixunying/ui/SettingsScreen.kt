@@ -34,6 +34,7 @@ import androidx.compose.material.icons.rounded.Brush
 import androidx.compose.material.icons.rounded.Cloud
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Edit
+import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.Groups
 import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.Language
@@ -473,7 +474,7 @@ private fun MemberDialog(ctl: AppController, state: AppState, initial: Member, i
         Spacer(Modifier.weight(1f))
         TextButton(onClose) { Text("取消") }
         Button(enabled = m.name.isNotBlank(), onClick = {
-            ctl.run(Command.SaveMember(m.copy(name = m.name.trim().replace("@", ""), temperature = temp.trim().toDoubleOrNull())), "已保存")
+            ctl.run(Command.SaveMember(m.copy(name = m.name.trim().replace("@", "").take(16), temperature = temp.trim().toDoubleOrNull())), "已保存")
             onClose()
         }) { Text("保存") }
     }) {
@@ -483,7 +484,7 @@ private fun MemberDialog(ctl: AppController, state: AppState, initial: Member, i
                 Spacer(Modifier.width(14.dp))
                 Column(Modifier.weight(1f)) {
                     FieldLabel("名字", "群里用 @名字 叫它")
-                    AppTextField(m.name, { m = m.copy(name = it.take(12)) })
+                    AppTextField(m.name, { m = m.copy(name = it) })
                 }
             }
             Spacer(Modifier.height(10.dp))
@@ -521,21 +522,9 @@ private fun MemberDialog(ctl: AppController, state: AppState, initial: Member, i
                 }
             }
             Spacer(Modifier.height(10.dp))
-            FieldLabel("模型")
+            FieldLabel("模型", "可以直接输入，也可以点右边的箭头选")
             if (provider != null) {
-                SelectBox(m.modelId.ifBlank { "选择模型" }) { close ->
-                    provider.models.filter { !it.imageGen }.forEach { md ->
-                        androidx.compose.material3.DropdownMenuItem({
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Text(md.id, style = MaterialTheme.typography.bodyMedium)
-                                if (md.vision) { Spacer(Modifier.width(6.dp)); Pill("看图") }
-                                Evals.label(md.id)?.let { Spacer(Modifier.width(6.dp)); Pill(it, Ext.c.success) }
-                            }
-                        }, onClick = { m = m.copy(modelId = md.id); close() })
-                    }
-                }
-                Spacer(Modifier.height(6.dp))
-                AppTextField(m.modelId, { m = m.copy(modelId = it.trim()) }, placeholder = "也可以直接填模型名")
+                ModelPicker(m.modelId, { m = m.copy(modelId = it.trim()) }, provider.models.filter { !it.imageGen }, "例如 deepseek-flash")
             }
             Spacer(Modifier.height(10.dp))
             FieldLabel("温度（可选）", "留空用模型默认值；有的模型只接受固定值（如 kimi-k3 只能 1）")
@@ -563,7 +552,7 @@ private fun ProfilePage(ctl: AppController, state: AppState) {
             Spacer(Modifier.width(14.dp))
             Column(Modifier.weight(1f)) {
                 FieldLabel("称呼")
-                AppTextField(p.name, { p = p.copy(name = it.take(16)) })
+                AppTextField(p.name, { p = p.copy(name = it) })
             }
         }
         Spacer(Modifier.height(10.dp))
@@ -579,7 +568,7 @@ private fun ProfilePage(ctl: AppController, state: AppState) {
         FieldLabel("关于我", "职业、所在城市、关心什么、希望怎么被回答")
         AppTextField(p.about, { p = p.copy(about = it) }, singleLine = false, minLines = 4, placeholder = "例如：在北京做产品经理，回答请先给结论，少用术语")
         Spacer(Modifier.height(12.dp))
-        Button(onClick = { ctl.run(Command.SaveProfile(p), "已保存") }) { Text("保存") }
+        Button(onClick = { ctl.run(Command.SaveProfile(p.copy(name = p.name.trim().take(16))), "已保存") }) { Text("保存") }
     }
 }
 
@@ -670,14 +659,9 @@ private fun ImagePage(ctl: AppController, state: AppState) {
             }
         }
         Spacer(Modifier.height(10.dp))
-        FieldLabel("模型")
+        FieldLabel("模型", "可以直接输入，也可以点右边的箭头选")
         if (provider != null) {
-            val list = provider.models.filter { it.imageGen }
-            if (list.isNotEmpty()) SelectBox(ig.modelId.ifBlank { "选择模型" }) { close ->
-                list.forEach { md -> androidx.compose.material3.DropdownMenuItem({ Text(md.id) }, onClick = { ig = ig.copy(modelId = md.id); close() }) }
-            }
-            Spacer(Modifier.height(6.dp))
-            AppTextField(ig.modelId, { ig = ig.copy(modelId = it.trim()) }, placeholder = "或者直接填模型名，如 cogview-4")
+            ModelPicker(ig.modelId, { ig = ig.copy(modelId = it.trim()) }, provider.models.filter { it.imageGen }, "例如 cogview-3-flash")
         }
         Spacer(Modifier.height(10.dp))
         FieldLabel("默认尺寸")
@@ -746,5 +730,31 @@ private fun AboutPage(ctl: AppController) {
                 "· 所有模型都按 OpenAI 兼容协议接入。",
             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+    }
+}
+
+/** 模型名输入框：能直接打字，右边箭头点开是这个服务商已知的模型（带看图、测评标记）。 */
+@Composable
+private fun ModelPicker(value: String, onChange: (String) -> Unit, options: List<com.guixing.jixunying.model.ModelInfo>, placeholder: String) {
+    var open by remember { mutableStateOf(false) }
+    Box {
+        AppTextField(value, onChange, placeholder = placeholder, trailing = if (options.isEmpty()) null else {
+            {
+                IconButton(onClick = { open = true }) {
+                    Icon(Icons.Rounded.ExpandMore, "选择模型", Modifier.size(20.dp))
+                }
+            }
+        })
+        androidx.compose.material3.DropdownMenu(open, { open = false }, modifier = Modifier.widthIn(min = 320.dp).heightIn(max = 420.dp)) {
+            options.forEach { md ->
+                androidx.compose.material3.DropdownMenuItem({
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(md.id, style = MaterialTheme.typography.bodyMedium)
+                        if (md.vision) { Spacer(Modifier.width(6.dp)); Pill("看图") }
+                        Evals.label(md.id)?.let { Spacer(Modifier.width(6.dp)); Pill(it, Ext.c.success) }
+                    }
+                }, onClick = { onChange(md.id); open = false })
+            }
+        }
     }
 }
