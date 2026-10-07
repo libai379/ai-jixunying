@@ -53,6 +53,13 @@ sealed interface Command {
     /** 搜所有对话的聊天内容。结果 data 是 List<HistoryHit> 的 JSON。 */
     @Serializable data class SearchHistory(val query: String, val limit: Int = 30) : Command
 
+    /** 搜本机文档；关键词留空 = 最近修改的。结果 data 是 List<DocHit> 的 JSON。 */
+    @Serializable data class DocSearch(val query: String, val limit: Int = 50) : Command
+    /** 马上重新扫一遍文档。 */
+    @Serializable data object DocRescan : Command
+    /** 把本机的一个文档变成附件（「问 AI」用）。结果 data 是 Attachment 的 JSON。 */
+    @Serializable data class DocAttach(val path: String) : Command
+
     /** 换一个新的配对二维码（旧的立即失效）。 */
     @Serializable data object NewPairingCode : Command
     @Serializable data class RemoveDevice(val id: String) : Command

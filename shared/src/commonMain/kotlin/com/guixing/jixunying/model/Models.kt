@@ -122,6 +122,46 @@ data class MemoryItem(
     val pinned: Boolean = false,
 )
 
+/** 本机文档（AI 能搜、能读）。 */
+@Serializable
+data class DocSettings(
+    val enabled: Boolean = true,
+    /** 要收录的文件夹；空 = 默认（电脑：文档、桌面、下载；手机：整个存储）。 */
+    val folders: List<String> = emptyList(),
+    /** 电脑上：把微信收到的文件（Documents\WeChat Files、xwechat_files 里的 file 文件夹）也收进来。 */
+    val includeWeixin: Boolean = false,
+)
+
+/** 文档索引的情况（界面显示用）。 */
+@Serializable
+data class DocIndexInfo(
+    val count: Int = 0,
+    val scanning: Boolean = false,
+    /** 正在扫的文件夹 / 进度说明。 */
+    val progress: String = "",
+    val scannedAt: Long = 0,
+    /** 实际收录的文件夹。 */
+    val roots: List<String> = emptyList(),
+    /** 这台电脑上找到的微信文件夹（不管开没开）。 */
+    val weixinRoots: List<String> = emptyList(),
+    /** 安卓：还没给「所有文件访问」权限。 */
+    val needPermission: Boolean = false,
+)
+
+/** 文档搜索的一条结果。 */
+@Serializable
+data class DocHit(
+    val path: String,
+    val name: String,
+    val folder: String,
+    val size: Long,
+    val mtime: Long,
+    /** 抽出的文字有多少字；0 = 读不出文字（只能按文件名找）。 */
+    val chars: Int,
+    val snippet: String = "",
+    val note: String = "",
+)
+
 @Serializable
 data class Settings(
     val search: SearchSettings = SearchSettings(),
@@ -132,6 +172,7 @@ data class Settings(
     /** 一次用户发言最多引发几轮 AI 之间的 @ 接力，防止无限互聊。 */
     val maxMentionChain: Int = 3,
     val memory: MemorySettings = MemorySettings(),
+    val docs: DocSettings = DocSettings(),
 )
 
 @Serializable
@@ -243,6 +284,8 @@ data class AppState(
     val relayStatus: String = "",
     /** 关于用户的长期记忆。 */
     val memories: List<MemoryItem> = emptyList(),
+    /** 本机文档索引的情况（界面显示用）。 */
+    val docs: DocIndexInfo = DocIndexInfo(),
 ) {
     fun member(id: String) = members.firstOrNull { it.id == id }
     fun provider(id: String) = providers.firstOrNull { it.id == id }

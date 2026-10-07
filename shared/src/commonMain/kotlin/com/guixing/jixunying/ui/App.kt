@@ -47,9 +47,31 @@ enum class SettingsTab(val title: String) {
     DEVICES("联机"), APPEARANCE("外观"), ABOUT("关于"),
 }
 
+/** 主区域除了对话和设置以外的页面。 */
+enum class MainPage { DOCS }
+
+/** 要放进某个对话输入框的文件：别的 App 发来的（还没上传），或者文档库里转成的附件。 */
+class Incoming(val files: List<PickedFile> = emptyList(), val attachments: List<com.guixing.jixunying.model.Attachment> = emptyList()) {
+    val names: List<String> get() = files.map { it.name } + attachments.map { it.name }
+}
+
 /** 界面级状态：当前操作哪台设备、打开哪个对话、是否在设置页。 */
 class AppController(val hub: Hub, val backend: Backend, val scope: CoroutineScope, val snackbar: SnackbarHostState) {
     var currentConvId by mutableStateOf<String?>(null)
+    var page by mutableStateOf<MainPage?>(null)
+    /** 等用户选「发到哪个对话」的文件。 */
+    var incoming by mutableStateOf<Incoming?>(null)
+    /** 已经选好对话、等那个对话的输入框收下的文件。 */
+    var composerInbox by mutableStateOf<Pair<String, Incoming>?>(null)
+    /** 要填进某个对话输入框的文字（空对话里点了建议问题）。 */
+    var composerDraft by mutableStateOf<Pair<String, String>?>(null)
+
+    fun deliverIncoming(convId: String) {
+        val inc = incoming ?: return
+        incoming = null
+        composerInbox = convId to inc
+        openConversation(convId)
+    }
     /** 打开对话后要滚到的消息（从搜索结果点进来时）。 */
     var focusMessageId by mutableStateOf<String?>(null)
     var settingsTab by mutableStateOf<SettingsTab?>(null)
@@ -77,10 +99,13 @@ class AppController(val hub: Hub, val backend: Backend, val scope: CoroutineScop
     fun openConversation(id: String) {
         currentConvId = id
         settingsTab = null
+        page = null
         if (!backend.store.hasMessages(id)) run(Command.LoadMessages(id))
     }
 
-    fun openSettings(tab: SettingsTab = SettingsTab.PROVIDERS) { settingsTab = tab }
+    fun openSettings(tab: SettingsTab = SettingsTab.PROVIDERS) { settingsTab = tab; page = null }
+
+    fun openPage(p: MainPage) { page = p; settingsTab = null }
 }
 
 @Composable
@@ -107,6 +132,14 @@ fun App(hub: Hub, platform: Platform, debugStart: String? = null) {
                 }
                 LaunchedEffect(backend) {
                     backend.store.notices.collect { snackbar.showSnackbar(it.text, duration = if (it.error) SnackbarDuration.Long else SnackbarDuration.Short) }
+                }
+                // 别的 App 发来的文件（安卓：微信里「用其他应用打开」）：问发到哪个对话
+                val incomingFiles by platform.incomingFiles.collectAsState()
+                LaunchedEffect(incomingFiles) {
+                    if (incomingFiles.isNotEmpty()) {
+                        ctl.incoming = Incoming(files = incomingFiles)
+                        platform.clearIncoming()
+                    }
                 }
                 // 默认打开最近的对话
                 LaunchedEffect(backend, state.conversations.isNotEmpty()) {
@@ -137,9 +170,9 @@ private fun MainLayout(ctl: AppController) {
         } else {
             val drawer = rememberDrawerState(DrawerValue.Closed)
             val scope = rememberCoroutineScope()
-            // 返回键：先关侧栏，再关设置页，最后才交给系统（退出）
-            LocalPlatform.current.BackHandler(drawer.isOpen || ctl.settingsTab != null) {
-                if (drawer.isOpen) scope.launch { drawer.close() } else ctl.settingsTab = null
+            // 返回键：先关侧栏，再关设置页 / 文档页，最后才交给系统（退出）
+            LocalPlatform.current.BackHandler(drawer.isOpen || ctl.settingsTab != null || ctl.page != null) {
+                if (drawer.isOpen) scope.launch { drawer.close() } else { ctl.settingsTab = null; ctl.page = null }
             }
             ModalNavigationDrawer(
                 drawerState = drawer,
@@ -164,6 +197,7 @@ private fun MainContent(ctl: AppController, wide: Boolean, openDrawer: () -> Uni
         Box(Modifier.weight(1f)) {
             when {
                 tab != null -> SettingsScreen(ctl, tab, wide, openDrawer)
+                ctl.page == MainPage.DOCS -> DocsScreen(ctl, wide, openDrawer)
                 state.providers.isEmpty() || state.members.isEmpty() -> WelcomeScreen(ctl, wide, openDrawer)
                 ctl.currentConvId != null && state.conversation(ctl.currentConvId!!) != null -> ChatScreen(ctl, ctl.currentConvId!!, wide, openDrawer)
                 else -> EmptyChatScreen(ctl, wide, openDrawer)
@@ -171,4 +205,5 @@ private fun MainContent(ctl: AppController, wide: Boolean, openDrawer: () -> Uni
         }
     }
     if (ctl.showNewChat) NewChatDialog(ctl)
+    ctl.incoming?.let { SendToDialog(ctl, it) }
 }

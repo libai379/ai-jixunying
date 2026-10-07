@@ -182,7 +182,7 @@ private fun MessageList(ctl: AppController, state: AppState, conv: Conversation,
         if (justSent || lastVisible >= info.totalItemsCount - 3 || messages.size <= 2) listState.animateScrollToItem(messages.size)
     }
     if (messages.isEmpty()) {
-        ChatEmptyHint(state, conv)
+        ChatEmptyHint(state, conv) { t -> ctl.composerDraft = conv.id to t }
         return
     }
     val focusManager = androidx.compose.ui.platform.LocalFocusManager.current
@@ -212,7 +212,7 @@ private fun MessageList(ctl: AppController, state: AppState, conv: Conversation,
 }
 
 @Composable
-private fun ChatEmptyHint(state: AppState, conv: Conversation) {
+private fun ChatEmptyHint(state: AppState, conv: Conversation, onTip: (String) -> Unit) {
     val members = conv.memberIds.mapNotNull { state.member(it) }
     Column(Modifier.fillMaxSize().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
         Row(horizontalArrangement = Arrangement.spacedBy((-8).dp)) { members.take(5).forEach { MemberAvatar(it, 48.dp) } }
@@ -226,11 +226,12 @@ private fun ChatEmptyHint(state: AppState, conv: Conversation) {
             style = MaterialTheme.typography.bodyMedium, color = Ext.c.subtle,
         )
         Spacer(Modifier.height(20.dp))
-        val tips = listOf("今天有什么值得关注的科技新闻？", "帮我把这份文档总结成 5 条要点", "画一只在月球上喝茶的橘猫", "比较一下这几个方案的优缺点")
-        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        // 点一下就填进输入框（以前看着能点，其实点了没反应）
+        val tips = listOf("今天有什么值得关注的科技新闻？", "帮我把这份文档总结成 5 条要点", "画一只在月球上喝茶的橘猫", "我电脑里最近改过哪些文档？")
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp), horizontalAlignment = Alignment.CenterHorizontally) {
             tips.chunked(2).forEach { row ->
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    row.forEach { Pill(it, MaterialTheme.colorScheme.onSurfaceVariant) }
+                    row.forEach { t -> Pill(t, MaterialTheme.colorScheme.primary) { onTip(t) } }
                 }
             }
         }
@@ -531,7 +532,7 @@ private fun DocChip(a: Attachment, onRemove: (() -> Unit)? = null) {
     }
 }
 
-private fun docColor(ext: String) = when (ext) {
+fun docColor(ext: String) = when (ext) {
     "PDF" -> Color(0xFFE5484D)
     "DOCX", "DOC" -> Color(0xFF2B6CEB)
     "XLSX", "XLS", "CSV" -> Color(0xFF16A34A)
@@ -619,6 +620,36 @@ private fun Composer(ctl: AppController, state: AppState, conv: Conversation, ru
                     uploading--
                     if (att == null) ctl.toast("「${f.name}」上传失败")
                 }
+            }
+        }
+    }
+
+    // 空对话里点了建议问题：填进输入框，用户可以改了再发
+    val draft = ctl.composerDraft
+    LaunchedEffect(draft, conv.id) {
+        val (cid, t) = draft ?: return@LaunchedEffect
+        if (cid != conv.id) return@LaunchedEffect
+        ctl.composerDraft = null
+        text = TextFieldValue(t, TextRange(t.length))
+    }
+
+    // 从「我的文档」或别的 App（微信「用其他应用打开」）送来的文件，放进输入框，等用户写问题
+    val inbox = ctl.composerInbox
+    LaunchedEffect(inbox, conv.id) {
+        val (cid, inc) = inbox ?: return@LaunchedEffect
+        if (cid != conv.id) return@LaunchedEffect
+        ctl.composerInbox = null
+        inc.attachments.forEach { pending.add(PendingFile(it.name, it)) }
+        inc.files.forEach { f ->
+            val p = PendingFile(f.name)
+            pending.add(p)
+            uploading++
+            scope.launch {
+                val att = ctl.backend.upload(f.name, f.mime, f.bytes)
+                val idx = pending.indexOf(p)
+                if (idx >= 0) pending[idx] = PendingFile(f.name, att, att == null)
+                uploading--
+                if (att == null) ctl.toast("「${f.name}」上传失败")
             }
         }
     }

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 「我的文档」里点「打开」时，把手机存储里的文件交给别的 App -->
+<paths>
+    <external-path name="storage" path="." />
+    <files-path name="app" path="." />
+</paths>

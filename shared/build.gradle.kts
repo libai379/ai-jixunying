@@ -61,3 +61,8 @@ kotlin {
         }
     }
 }
+
+// 自动测试不去扫开发机上真实的「文档」「桌面」「下载」（文档库的测试自己指定临时文件夹）
+tasks.withType<Test>().configureEach {
+    systemProperty("jxy.docs.autoscan", "false")
+}

@@ -22,6 +22,17 @@ interface Platform {
     fun BackHandler(enabled: Boolean, onBack: () -> Unit) {}
     fun getPref(key: String): String? = null
     fun setPref(key: String, value: String?) {}
+    /** 用系统默认程序打开本机文件。 */
+    fun openFile(path: String): Boolean = false
+    /** 选一个文件夹，返回路径；取消返回 null。 */
+    suspend fun pickFolder(): String? = null
+    /** 安卓：跳到系统设置，让用户给「所有文件访问」权限（读别的 App 存的文档要用）。 */
+    fun requestFileAccess() {}
+    /** 别的 App 用「打开方式 / 分享」发来的文件（比如在微信里点文件 → 用其他应用打开）。 */
+    val incomingFiles: kotlinx.coroutines.flow.StateFlow<List<PickedFile>> get() = NoIncoming
+    fun clearIncoming() {}
 }
+
+private val NoIncoming = kotlinx.coroutines.flow.MutableStateFlow<List<PickedFile>>(emptyList())
 
 val LocalPlatform = staticCompositionLocalOf<Platform> { error("Platform not provided") }

@@ -69,7 +69,12 @@ const val NO_IMAGE_MODEL = "还没有能画图的服务商。到 设置 → 模�
  * 引擎：电脑和手机各有一个，都能单独用。数据、Key、模型调用都在本机。
  * 电脑上的引擎还会通过 RelayHost 接受配对手机的遥控。
  */
-class Engine(private val storage: Storage, private val isPhone: Boolean = false) : Backend {
+class Engine(
+    private val storage: Storage,
+    private val isPhone: Boolean = false,
+    /** 启动后自动扫描本机文档。自动测试里关掉（-Djxy.docs.autoscan=false），免得去扫开发机上真实的文档。 */
+    private val autoScanDocs: Boolean = System.getProperty("jxy.docs.autoscan") != "false",
+) : Backend {
     override val store = ClientStore()
     override val isHost = true
     override val conn: StateFlow<ConnState> = MutableStateFlow(ConnState.Local)
@@ -94,6 +99,9 @@ class Engine(private val storage: Storage, private val isPhone: Boolean = false)
     private val search = WebSearch { state.settings.proxy.trim().ifEmpty { null } }
     private val images = ImageGen { proxyFor(it.useProxy) }
 
+    /** 本机文档库（AI 能搜、能读）。 */
+    private val docs = DocLibrary(java.io.File(storage.root, "docindex").apply { mkdirs() })
+
     /** 联机设置变了（开关、中转列表）时通知外面重启联机服务。 */
     var onRelaySettingsChanged: (() -> Unit)? = null
 
@@ -113,7 +121,46 @@ class Engine(private val storage: Storage, private val isPhone: Boolean = false)
         if (memberMap.isNotEmpty()) remapSenders(memberMap)
         emit(Event.State(state))
         storage.brokenNotes.forEach { emit(Event.Notice(it, error = true)) }
+        // 文档库：启动后稍等一会儿在后台扫一遍，之后每半小时看一次有没有新文件
+        if (autoScanDocs) scope.launch {
+            kotlinx.coroutines.delay(4_000)
+            while (true) {
+                rescanDocs()
+                kotlinx.coroutines.delay(30 * 60_000L)
+            }
+        }
     }
+
+    // ———————————————— 本机文档 ————————————————
+
+    fun docRoots(): List<java.io.File> {
+        val ds = state.settings.docs
+        val base = if (ds.folders.isEmpty()) defaultDocRoots() else ds.folders.map { java.io.File(it) }.filter { it.isDirectory }
+        val wx = if (ds.includeWeixin) weixinDocRoots() else emptyList()
+        return (base + wx).distinctBy { it.path }
+    }
+
+    /** 文档索引的情况只给界面看（和中转状态一样，不单独存盘）。 */
+    private fun refreshDocInfo(progress: String = "", count: Int = docs.count) {
+        val info = com.guixing.jixunying.model.DocIndexInfo(
+            count = count, scanning = docs.isScanning || progress.isNotEmpty(), progress = progress, scannedAt = docs.scannedAt,
+            roots = docRoots().map { it.path }, weixinRoots = weixinDocRoots().map { it.path }, needPermission = docAccessMissing(),
+        )
+        if (state.docs == info) return
+        synchronized(stateLock) { state = state.copy(docs = info) }
+        emit(Event.State(state))
+    }
+
+    fun rescanDocs() {
+        if (!state.settings.docs.enabled) { refreshDocInfo(); return }
+        scope.launch(Dispatchers.IO) {
+            refreshDocInfo("准备扫描…")
+            runCatching { docs.scan(docRoots()) { p, n -> refreshDocInfo(p, n) } }
+            refreshDocInfo()
+        }
+    }
+
+    private fun docsUsable() = state.settings.docs.enabled && docs.count > 0
 
     /** 成员合并后，聊天记录里的发言人跟着改到保留的那一份。 */
     private fun remapSenders(map: Map<String, String>) {
@@ -312,13 +359,30 @@ class Engine(private val storage: Storage, private val isPhone: Boolean = false)
         is Command.SaveProfile -> { updateState { it.copy(profile = c.profile) }; CommandResult() }
         is Command.SaveSettings -> {
             val before = state.settings.relay
+            val docsBefore = state.settings.docs
             updateState { s ->
                 val oldKeys = s.settings.search.apiKeys
                 val keys = c.settings.search.apiKeys.mapValues { (k, v) -> if (isMaskedKey(v)) oldKeys[k].orEmpty() else v }
                 s.copy(settings = c.settings.copy(search = c.settings.search.copy(apiKeys = keys)))
             }
             if (before.enabled != state.settings.relay.enabled || before.brokers != state.settings.relay.brokers) onRelaySettingsChanged?.invoke()
+            if (docsBefore != state.settings.docs) rescanDocs()
             CommandResult()
+        }
+        is Command.DocSearch -> {
+            if (docs.count == 0 && !docs.isScanning) rescanDocs()
+            val hits = if (c.query.isBlank()) docs.recent(c.limit) else withContext(Dispatchers.IO) { docs.search(c.query, c.limit) }
+            CommandResult(data = AppJson.encodeToString(kotlinx.serialization.builtins.ListSerializer(com.guixing.jixunying.model.DocHit.serializer()), hits))
+        }
+        is Command.DocRescan -> { rescanDocs(); CommandResult() }
+        is Command.DocAttach -> {
+            val e = docs.find(c.path) ?: return CommandResult(false, "文档库里没有这个文件")
+            val f = java.io.File(e.path)
+            if (!f.isFile) return CommandResult(false, "文件已经不在了：${e.path}")
+            if (f.length() > 50L * 1024 * 1024) return CommandResult(false, "「${f.name}」超过 50MB，太大了")
+            val att = upload(f.name, if (DocExtract.isImage(f.name, "")) DocExtract.imageMime(f.name, "") else "application/octet-stream",
+                withContext(Dispatchers.IO) { f.readBytes() }) ?: return CommandResult(false, "「${f.name}」读取失败")
+            CommandResult(data = AppJson.encodeToString(Attachment.serializer(), att))
         }
         is Command.CreateConversation -> {
             val conv = Conversation(
@@ -806,14 +870,16 @@ class Engine(private val storage: Storage, private val isPhone: Boolean = false)
         val native = if (wantSearch && toolsOk) nativeSearchOf(provider, model.id) else NativeSearch.NONE
         val fnSearch = wantSearch && native == NativeSearch.NONE
         val memOn = state.settings.memory.enabled
-        val useTools = toolsOk && (wantSearch || hasImageModel || memOn)
+        val docsOn = docsUsable()
+        val useTools = toolsOk && (wantSearch || hasImageModel || memOn || docsOn)
 
         try {
             val working = mutableListOf<JsonObject>()
             val sys = Prompts.system(state, conv, member, canSearch = wantSearch, canDraw = hasImageModel && useTools,
                 canSeeImages = model.vision, independentRound = independent, calledBy = calledBy,
                 nativeSearch = native != NativeSearch.NONE, hasImageModel = hasImageModel,
-                memories = if (memOn) Recorder.forPrompt(state.memories) else emptyList(), canRemember = memOn && useTools)
+                memories = if (memOn) Recorder.forPrompt(state.memories) else emptyList(), canRemember = memOn && useTools,
+                docCount = if (docsOn && useTools) docs.count else 0, deviceLabel = if (isPhone) "这台手机" else "这台电脑")
             working += buildJsonObject { put("role", "system"); put("content", sys) }
             working += buildHistory(convId, member, cutoffId, excludeId = msg.id, vision = model.vision)
 
@@ -828,7 +894,7 @@ class Engine(private val storage: Storage, private val isPhone: Boolean = false)
                 }
             }
 
-            val tools = if (useTools) toolDefs(fnSearch, fetch = wantSearch, draw = hasImageModel, native = native, memory = memOn) else null
+            val tools = if (useTools) toolDefs(fnSearch, fetch = wantSearch, draw = hasImageModel, native = native, memory = memOn, docs = docsOn) else null
             val extra = if (native == NativeSearch.QWEN) buildJsonObject {
                 put("enable_search", true)
                 putJsonObject("search_options") {
@@ -921,7 +987,7 @@ class Engine(private val storage: Storage, private val isPhone: Boolean = false)
         }
     }
 
-    private fun toolDefs(search: Boolean, fetch: Boolean, draw: Boolean, native: NativeSearch, memory: Boolean = false): JsonArray = buildJsonArray {
+    private fun toolDefs(search: Boolean, fetch: Boolean, draw: Boolean, native: NativeSearch, memory: Boolean = false, docs: Boolean = false): JsonArray = buildJsonArray {
         when (native) {
             NativeSearch.KIMI -> add(buildJsonObject {
                 put("type", "builtin_function")
@@ -970,6 +1036,16 @@ class Engine(private val storage: Storage, private val isPhone: Boolean = false)
                 }, listOf("text"))
             fn("search_history", "搜索以前所有对话的聊天记录。用户提到「上次」「之前说过」「以前聊的」，或者需要回忆更早的原话时使用。返回匹配的片段（对话标题、日期、谁说的）。",
                 buildJsonObject { put("query", prop("关键词，越具体越好")) }, listOf("query"))
+        }
+        if (docs) {
+            fn("search_documents", "搜索用户这台设备上的文档（PDF、Word、Excel、PPT、文本等），按文件名和内容匹配。" +
+                "用户问到他自己的文件、资料、合同、报告、表格、笔记时用。关键词留空返回最近修改的文档。",
+                buildJsonObject { put("query", prop("关键词：文件名里的词或内容里的词，可以留空")) }, emptyList())
+            fn("read_document", "读一个文档的文字内容。path 用 search_documents 返回的完整路径。一次最多返回约 1 万字，没读完会提示 start 接着读。",
+                buildJsonObject {
+                    put("path", prop("文档的完整路径"))
+                    put("start", prop("可选，从第几个字开始读，默认 0"))
+                }, listOf("path"))
         }
     }
 
@@ -1042,6 +1118,39 @@ class Engine(private val storage: Storage, private val isPhone: Boolean = false)
                 updateMessage(convId, msgId, persist = false) { it.copy(tools = it.tools + ToolStep("history", q, ok = hits.isNotEmpty())) }
                 if (hits.isEmpty()) "以前的聊天里没找到和「$q」相关的内容。如实告诉用户。"
                 else hits.joinToString("\n\n") { h -> "[${h.convTitle} · ${dayOf(h.time)} · ${h.sender}] ${h.snippet}" }
+            }
+            "search_documents" -> {
+                val q = args.str("query").orEmpty().trim()
+                val hits = withContext(Dispatchers.IO) { if (q.isBlank()) docs.recent(10) else docs.search(q, 10) }
+                updateMessage(convId, msgId, persist = false) {
+                    it.copy(tools = it.tools + ToolStep("doc", if (q.isBlank()) "看了最近的文档" else "搜文档「$q」· ${hits.size} 个", ok = hits.isNotEmpty()))
+                }
+                if (hits.isEmpty()) "没找到相关的文档（文档库里一共 ${docs.count} 个文件）。如实告诉用户，可以建议换个关键词，或者到「我的文档」里看看收录了哪些文件夹。"
+                else buildString {
+                    hits.forEachIndexed { i, h ->
+                        appendLine("${i + 1}. 《${h.name}》")
+                        appendLine("   路径：${h.path}")
+                        appendLine("   修改于 ${dayOf(h.mtime)}" + if (h.chars > 0) "，${h.chars} 字" else "，${h.note.ifBlank { "读不出文字" }}")
+                        if (h.snippet.isNotBlank()) appendLine("   片段：${h.snippet}")
+                    }
+                    append("要看全文就用 read_document，path 填上面的路径。回答时说明出自哪个文件。")
+                }
+            }
+            "read_document" -> {
+                val p = args.str("path").orEmpty().ifBlank { return "参数错误：缺少 path" }
+                val e = docs.find(p) ?: return "文档库里没有「$p」。只能读 search_documents 找到的文件，先搜一下。"
+                val text = withContext(Dispatchers.IO) { docs.text(e.path) }
+                updateMessage(convId, msgId, persist = false) { it.copy(tools = it.tools + ToolStep("doc", "读《${e.name}》", ok = text != null)) }
+                if (text == null) "《${e.name}》读不出文字：${e.note.ifBlank { "可能是扫描件或老格式" }}。如实告诉用户。"
+                else {
+                    val s = (args.str("start")?.trim()?.toIntOrNull() ?: 0).coerceIn(0, text.length)
+                    val end = minOf(text.length, s + 10_000)
+                    buildString {
+                        appendLine("《${e.name}》（${e.path}）共 ${text.length} 字，下面是第 ${s + 1}～$end 字：")
+                        appendLine(text.substring(s, end))
+                        if (end < text.length) append("（后面还有 ${text.length - end} 字；要接着读就再调 read_document，start=$end）")
+                    }
+                }
             }
             else -> "没有这个工具：${tc.name}"
         }

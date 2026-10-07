@@ -105,12 +105,21 @@ class EngineTest {
                     val sawTool = msgs.any { it.jsonObject["role"]?.jsonPrimitive?.content == "tool" }
                     val drew = msgs.any { it.jsonObject["role"]?.jsonPrimitive?.content == "tool" && "图片已生成" in it.jsonObject["content"].toString() }
                     val remembered = msgs.any { it.jsonObject["role"]?.jsonPrimitive?.content == "tool" && "记住" in it.jsonObject["content"].toString() }
+                    val toolTexts = msgs.map { it.jsonObject }.filter { it["role"]?.jsonPrimitive?.content == "tool" }
+                        .map { (it["content"] as? JsonPrimitive)?.contentOrNull.orEmpty() }
                     // 只看用户最新的那一句（连续几句会合并成一条）
                     val latest = lastText.substringAfterLast("【")
                     call.respondTextWriter(ContentType.Text.EventStream) {
                         fun chunk(delta: String, extra: String = "") { write("data: {$extra\"choices\":[{\"index\":0,\"delta\":$delta}]}\n\n"); flush() }
                         fun say(text: String) = text.chunked(3).forEach {
                             chunk(Json.encodeToString(JsonObject.serializer(), JsonObject(mapOf("content" to JsonPrimitive(it)))))
+                        }
+                        fun callTool(name: String, args: Map<String, String>) {
+                            val argsJson = JsonObject(args.mapValues { JsonPrimitive(it.value) }).toString()
+                            val fn = JsonObject(mapOf("name" to JsonPrimitive(name), "arguments" to JsonPrimitive(argsJson)))
+                            val call = JsonObject(mapOf("index" to JsonPrimitive(0), "id" to JsonPrimitive("t_$name"), "type" to JsonPrimitive("function"), "function" to fn))
+                            chunk(JsonObject(mapOf("tool_calls" to JsonArray(listOf(call)))).toString())
+                            write("data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n")
                         }
                         when {
                             // —— 记录员 ——
@@ -123,6 +132,14 @@ class EngineTest {
                                 write("data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n")
                             }
                             remembered -> say("记住了。")
+                            // 问自己的文档：先搜，再按搜到的路径读，读完再答
+                            hasTool("search_documents") && latest.contains("合同") && !sawTool -> callTool("search_documents", mapOf("query" to "付款日期"))
+                            toolTexts.any { "字，下面是" in it } -> say("合同里写的付款日期是 " + Regex("付款日期：(\\S+)").find(toolTexts.last())!!.groupValues[1])
+                            hasTool("read_document") && toolTexts.any { "路径：" in it } ->
+                                callTool("read_document", mapOf("path" to Regex("路径：(.+)").find(toolTexts.first { "路径：" in it })!!.groupValues[1].trim()))
+                            // 想读文档库以外的文件
+                            hasTool("read_document") && latest.contains("偷看") && !sawTool -> callTool("read_document", mapOf("path" to latest.substringAfter("偷看").trim()))
+                            toolTexts.any { "文档库里没有" in it } -> say("读不了。")
                             // Kimi 官方搜索：先回一个 $web_search 调用，客户端原样交回参数后再回答
                             model == "kimi-fake" && !sawTool -> {
                                 chunk("""{"tool_calls":[{"index":0,"id":"ws_1","type":"builtin_function","function":{"name":"${'$'}web_search","arguments":"{\"search_result\":{\"search_id\":\"abc\"}}"}}]}""")
@@ -476,6 +493,43 @@ class EngineTest {
         val tidy = e.call(Command.TidyMemories)
         assertTrue(tidy.ok, tidy.message)
         assertEquals(listOf("喜欢简短的回答"), e.state.memories.map { it.text })
+    }
+
+    /** 本机文档：收录指定文件夹（跳过 node_modules 这类），能按内容搜；AI 先搜再读再答；文档库以外的文件读不了。 */
+    @Test
+    fun localDocumentsSearchAndRead() = runBlocking {
+        val (e, ms) = engineWithMembers("小智")
+        val folder = File(dir, "我的资料").apply { mkdirs() }
+        File(folder, "合同.txt").writeText("甲方：某某公司\n付款日期：2026年11月30日\n违约金：合同金额的百分之五", Charsets.UTF_8)
+        File(folder, "周报.md").writeText("本周完成了登录页改版", Charsets.UTF_8)
+        File(folder, "node_modules").mkdirs()
+        File(folder, "node_modules/依赖说明.txt").writeText("不该收录", Charsets.UTF_8)
+        val secret = File(dir, "secret.txt").apply { writeText("机密", Charsets.UTF_8) }
+        e.call(Command.SaveSettings(e.state.settings.copy(docs = com.guixing.jixunying.model.DocSettings(folders = listOf(folder.path)))))
+        withTimeout(10_000) { while (e.state.docs.count < 2 || e.state.docs.scanning) delay(50) }
+        assertEquals(2, e.state.docs.count, "node_modules 里的不收")
+
+        val ser = kotlinx.serialization.builtins.ListSerializer(com.guixing.jixunying.model.DocHit.serializer())
+        val hits = AppJson.decodeFromString(ser, e.call(Command.DocSearch("付款日期")).data)
+        assertEquals("合同.txt", hits.first().name)
+        assertTrue("2026年11月30日" in hits.first().snippet, hits.first().snippet)
+        assertEquals(2, AppJson.decodeFromString(ser, e.call(Command.DocSearch("")).data).size, "不填关键词 = 最近的文档")
+
+        val conv = e.call(Command.CreateConversation(listOf(ms[0].id))).data
+        e.call(Command.UpdateConversation(e.state.conversation(conv)!!.copy(webSearch = false)))
+        e.call(Command.SendMessage(conv, "我那份合同里写的付款日期是哪天"))
+        waitIdle(e, conv, 1)
+        val ai = e.store.messages.value[conv]!!.last()
+        assertEquals("合同里写的付款日期是 2026年11月30日", ai.content, ai.error)
+        assertEquals(listOf("doc", "doc"), ai.tools.map { it.kind })
+        assertTrue("文档" in systemOf(requests.first { runCatching { memberName(it) }.getOrNull() == "小智" }))
+
+        e.call(Command.SendMessage(conv, "偷看 ${secret.path}"))
+        waitIdle(e, conv, 2)
+        assertEquals("读不了。", e.store.messages.value[conv]!!.last().content)
+
+        val att = AppJson.decodeFromString(com.guixing.jixunying.model.Attachment.serializer(), e.call(Command.DocAttach(hits.first().path)).data)
+        assertTrue(att.textChars > 0)
     }
 
     /** @ 了不在这个对话里的成员：把他拉进来，由他回答（以前会悄悄换成对话里的别人答）。 */

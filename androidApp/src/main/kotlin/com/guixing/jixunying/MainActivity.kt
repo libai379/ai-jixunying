@@ -68,17 +68,66 @@ class MainActivity : ComponentActivity() {
     private var pickResult: CompletableDeferred<List<Uri>>? = null
     private var saveResult: CompletableDeferred<Uri?>? = null
     private var scanResult: CompletableDeferred<String?>? = null
+    private var folderResult: CompletableDeferred<Uri?>? = null
 
     private val pickAny = registerForActivityResult(ActivityResultContracts.GetMultipleContents()) { pickResult?.complete(it) }
     private val saveDoc = registerForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { saveResult?.complete(it) }
     private val scan = registerForActivityResult(ScanContract()) { scanResult?.complete(it.contents) }
+    private val pickTree = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { folderResult?.complete(it) }
+
+    /** 别的 App 发来的文件（微信里点文件 → 用其他应用打开，或者分享）。 */
+    private val incoming = kotlinx.coroutines.flow.MutableStateFlow<List<PickedFile>>(emptyList())
 
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
         val hub = (application as JxyApp).hub
         setContent { App(hub, platform) }
+        if (savedInstanceState == null) handleIncoming(intent)
     }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        handleIncoming(intent)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // 从系统设置给了「所有文件访问」权限回来：马上扫一遍文档
+        (application as JxyApp).hub.local.let { local ->
+            if (local is com.guixing.jixunying.engine.Engine && local.state.docs.needPermission && !com.guixing.jixunying.engine.docAccessMissing()) local.rescanDocs()
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun handleIncoming(intent: Intent?) {
+        intent ?: return
+        val uris: List<Uri> = when (intent.action) {
+            Intent.ACTION_VIEW -> listOfNotNull(intent.data)
+            Intent.ACTION_SEND -> listOfNotNull(
+                if (Build.VERSION.SDK_INT >= 33) intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java) else intent.getParcelableExtra(Intent.EXTRA_STREAM),
+            )
+            Intent.ACTION_SEND_MULTIPLE ->
+                (if (Build.VERSION.SDK_INT >= 33) intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM, Uri::class.java) else intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM)).orEmpty()
+            else -> emptyList()
+        }
+        val sharedText = if (intent.action == Intent.ACTION_SEND && uris.isEmpty()) intent.getStringExtra(Intent.EXTRA_TEXT) else null
+        if (uris.isEmpty() && sharedText.isNullOrBlank()) return
+        Thread {
+            val files = uris.mapNotNull(::readUri) +
+                listOfNotNull(sharedText?.let { PickedFile("分享的文字.txt", "text/plain", it.toByteArray()) })
+            if (files.isNotEmpty()) incoming.value = files
+        }.start()
+    }
+
+    private fun readUri(uri: Uri): PickedFile? = runCatching {
+        val name = contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+            if (c.moveToFirst()) c.getString(0) else null
+        } ?: uri.lastPathSegment?.substringAfterLast('/') ?: "file"
+        val mime = contentResolver.getType(uri) ?: "application/octet-stream"
+        val bytes = contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: return@runCatching null
+        PickedFile(name, mime, bytes)
+    }.getOrNull()
 
     private val platform = object : Platform {
         override val isDesktop = false
@@ -89,18 +138,41 @@ class MainActivity : ComponentActivity() {
             pickResult = d
             pickAny.launch(if (imagesOnly) "image/*" else "*/*")
             val uris = d.await()
-            return withContext(Dispatchers.IO) {
-                uris.mapNotNull { uri ->
-                    runCatching {
-                        val name = contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
-                            if (c.moveToFirst()) c.getString(0) else null
-                        } ?: uri.lastPathSegment ?: "file"
-                        val mime = contentResolver.getType(uri) ?: "application/octet-stream"
-                        val bytes = contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: return@runCatching null
-                        PickedFile(name, mime, bytes)
-                    }.getOrNull()
-                }
+            return withContext(Dispatchers.IO) { uris.mapNotNull(::readUri) }
+        }
+
+        override val incomingFiles get() = incoming
+        override fun clearIncoming() { incoming.value = emptyList() }
+
+        override fun openFile(path: String): Boolean = runCatching {
+            val f = File(path)
+            val uri = androidx.core.content.FileProvider.getUriForFile(this@MainActivity, "$packageName.files", f)
+            val mime = android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(f.extension.lowercase()) ?: "*/*"
+            startActivity(Intent(Intent.ACTION_VIEW).setDataAndType(uri, mime).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION))
+            true
+        }.getOrDefault(false)
+
+        override fun requestFileAccess() {
+            if (Build.VERSION.SDK_INT < 30) return
+            runCatching {
+                startActivity(Intent(android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:$packageName")))
+            }.onFailure {
+                runCatching { startActivity(Intent(android.provider.Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)) }
             }
+        }
+
+        /** 系统文件夹选择器返回的是 content:// 地址，换成文件路径（主存储是 /storage/emulated/0）。 */
+        override suspend fun pickFolder(): String? {
+            val d = CompletableDeferred<Uri?>()
+            folderResult = d
+            pickTree.launch(null)
+            val uri = d.await() ?: return null
+            val docId = runCatching { android.provider.DocumentsContract.getTreeDocumentId(uri) }.getOrNull() ?: return null
+            val vol = docId.substringBefore(':')
+            val rel = docId.substringAfter(':', "")
+            @Suppress("DEPRECATION")
+            val base = if (vol == "primary") android.os.Environment.getExternalStorageDirectory().path else "/storage/$vol"
+            return if (rel.isEmpty()) base else "$base/$rel"
         }
 
         override fun decodeImage(bytes: ByteArray): ImageBitmap? = runCatching {

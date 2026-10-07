@@ -31,6 +31,19 @@ actual fun shrinkImageToJpeg(bytes: ByteArray, maxSide: Int, maxBytes: Int): Byt
     return ByteArrayOutputStream().also { bmp.compress(Bitmap.CompressFormat.JPEG, 88, it) }.toByteArray()
 }
 
+@Suppress("DEPRECATION")
+private val storageRoot get() = android.os.Environment.getExternalStorageDirectory()
+
+actual fun defaultDocRoots(): List<java.io.File> =
+    if (docAccessMissing()) emptyList() else listOf(storageRoot).filter { it.isDirectory && it.canRead() }
+
+/** 微信「保存到手机」的文件在 Download/WeiXin；收到但没保存的在微信自己的目录里，别的 App 读不到。 */
+actual fun weixinDocRoots(): List<java.io.File> =
+    listOf("Download/WeiXin", "Download/WeChat", "Documents/WeiXin").map { java.io.File(storageRoot, it) }.filter { it.isDirectory }
+
+actual fun docAccessMissing(): Boolean =
+    android.os.Build.VERSION.SDK_INT >= 30 && !android.os.Environment.isExternalStorageManager()
+
 actual fun extractPdfText(bytes: ByteArray): Pair<String?, String> {
     PDDocument.load(bytes).use { doc ->
         val text = PDFTextStripper().getText(doc).trim()

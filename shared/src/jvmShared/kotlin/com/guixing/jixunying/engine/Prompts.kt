@@ -38,6 +38,9 @@ object Prompts {
         memories: List<com.guixing.jixunying.model.MemoryItem> = emptyList(),
         /** 能用 remember / search_history 工具。 */
         canRemember: Boolean = false,
+        /** 本机文档库里有几个文档（0 = 不能查文档）。 */
+        docCount: Int = 0,
+        deviceLabel: String = "这台电脑",
     ): String {
         val profile = state.profile
         val others = conv.memberIds.filter { it != me.id }.mapNotNull { state.member(it) }
@@ -113,6 +116,9 @@ object Prompts {
             if (canDraw) appendLine("- 你可以画图：用户要图片、要改图时调用 generate_image，提示词要具体（主体、风格、构图、光线、色彩）；用户说「改成……」就在上一张的基础上调整描述重新画。画完简单说明即可，不用把图再描述一遍。可以一边聊一边画。")
             else if (hasImageModel) appendLine("- 你这个模型不会调用工具，没法自己画图。用户要图时，请他点输入框上的「直接画图」，再描述画面。")
             else appendLine("- 你现在不能画图：用户还没接入能画图的服务商。用户要图时告诉他：到 设置 → 模型服务 添加任意一家能画图的平台并填 Key（智谱开放平台的 cogview-3-flash 免费，MiniMax 的 image-01、豆包 Seedream 也行），加好之后直接说「画一张……」就行，不用别的设置。")
+            if (docCount > 0) {
+                appendLine("- 你能查${profile.name}${deviceLabel}上的文档（收录了 $docCount 个）：问到他自己的文件、资料、合同、报告、表格、笔记里的内容时，先用 search_documents 找，再用 read_document 读原文，回答时说明出自哪个文件。不要说你看不到用户的文件。")
+            }
             if (canRemember) {
                 appendLine("- 你能记事：用户说「记住……」，或者说出了以后的对话也用得上的个人信息（身份、职业、所在地、偏好、对回答方式的要求、长期项目）时，调用 remember 记下来，记完简单说一句「记住了」。密码、Key、证件号之类不要记。")
                 appendLine("- 你能翻以前的聊天：用户说「上次」「之前说过」「以前聊的」时，先用 search_history 搜以前的聊天记录再回答，别凭印象编。")

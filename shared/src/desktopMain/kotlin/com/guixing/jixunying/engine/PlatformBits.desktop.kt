@@ -25,6 +25,33 @@ actual fun shrinkImageToJpeg(bytes: ByteArray, maxSide: Int, maxBytes: Int): Byt
     return ByteArrayOutputStream().also { ImageIO.write(out, "jpg", it) }.toByteArray()
 }
 
+private val home get() = java.io.File(System.getProperty("user.home"))
+
+/** 文档文件夹可能被 OneDrive 接管（「OneDrive\文档」），两种都看。 */
+private fun documentsDirs() = listOf("Documents", "OneDrive/Documents", "OneDrive/文档").map { java.io.File(home, it) }.filter { it.isDirectory }
+
+actual fun defaultDocRoots(): List<java.io.File> =
+    (documentsDirs() + listOf("Desktop", "OneDrive/Desktop", "OneDrive/桌面", "Downloads").map { java.io.File(home, it) })
+        .filter { it.isDirectory }
+        .distinctBy { runCatching { it.canonicalPath }.getOrDefault(it.path) }
+
+actual fun weixinDocRoots(): List<java.io.File> {
+    val out = mutableListOf<java.io.File>()
+    for (d in documentsDirs()) {
+        // 微信 3.x
+        java.io.File(d, "WeChat Files").listFiles()?.filter { it.isDirectory }?.forEach { acc ->
+            java.io.File(acc, "FileStorage/File").takeIf { it.isDirectory }?.let(out::add)
+        }
+        // 微信 4.x
+        java.io.File(d, "xwechat_files").listFiles()?.filter { it.isDirectory }?.forEach { acc ->
+            java.io.File(acc, "msg/file").takeIf { it.isDirectory }?.let(out::add)
+        }
+    }
+    return out
+}
+
+actual fun docAccessMissing(): Boolean = false
+
 actual fun extractPdfText(bytes: ByteArray): Pair<String?, String> {
     Loader.loadPDF(bytes).use { doc ->
         val text = PDFTextStripper().getText(doc).trim()

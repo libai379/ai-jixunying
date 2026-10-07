@@ -25,6 +25,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Edit
+import androidx.compose.material.icons.rounded.FolderOpen
 import androidx.compose.material.icons.rounded.Groups
 import androidx.compose.material.icons.rounded.MoreHoriz
 import androidx.compose.material.icons.rounded.PhoneAndroid
@@ -153,7 +154,7 @@ fun Sidebar(ctl: AppController, modifier: Modifier, onNavigate: () -> Unit) {
                     Text(label, style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, modifier = Modifier.padding(start = 10.dp, top = 12.dp, bottom = 4.dp))
                 }
                 items(convs, key = { it.id }) { c ->
-                    ConversationRow(ctl, state, c, selected = c.id == ctl.currentConvId && ctl.settingsTab == null) {
+                    ConversationRow(ctl, state, c, selected = c.id == ctl.currentConvId && ctl.settingsTab == null && ctl.page == null) {
                         ctl.openConversation(c.id); onNavigate()
                     }
                 }
@@ -161,6 +162,12 @@ fun Sidebar(ctl: AppController, modifier: Modifier, onNavigate: () -> Unit) {
         }
 
         Column(Modifier.padding(vertical = 10.dp)) {
+            NavRow(Icons.Rounded.FolderOpen, "我的文档", when {
+                !state.settings.docs.enabled -> "已关闭"
+                state.docs.needPermission -> "要授权"
+                state.docs.scanning -> "扫描中…"
+                else -> "${state.docs.count} 个"
+            }, dot = if (state.docs.needPermission) Ext.c.warning else null) { ctl.openPage(MainPage.DOCS); onNavigate() }
             NavRow(Icons.Rounded.Groups, "AI 成员", "${state.members.size} 位") { ctl.openSettings(SettingsTab.MEMBERS); onNavigate() }
             val platform = LocalPlatform.current
             val remote by ctl.hub.remote.collectAsState()

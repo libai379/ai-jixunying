@@ -319,10 +319,29 @@ fun PhoneDevicesPage(ctl: AppController) {
 fun formatTime(millis: Long): String {
     val diff = nowMillis() - millis
     return when {
+        millis <= 0 -> "还没有"
         diff < 120_000 -> "刚刚"
         diff < 3_600_000 -> "${diff / 60_000} 分钟前"
         diff < 86_400_000 -> "${diff / 3_600_000} 小时前"
-        else -> "${diff / 86_400_000} 天前"
+        diff < 30 * 86_400_000L -> "${diff / 86_400_000} 天前"
+        else -> dateText(millis)
     }
+}
+
+/** 北京时间的日期，例如「2025年10月3日」（公共代码里没有时区库，按 UTC+8 自己算）。 */
+fun dateText(millis: Long): String {
+    fun floorDiv(a: Long, b: Long) = if (a >= 0) a / b else -((-a + b - 1) / b)
+    val days = floorDiv(millis + 8 * 3_600_000L, 86_400_000L)
+    // Howard Hinnant 的 civil_from_days
+    val z = days + 719_468
+    val era = floorDiv(z, 146_097L)
+    val doe = z - era * 146_097
+    val yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365
+    val doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
+    val mp = (5 * doy + 2) / 153
+    val d = doy - (153 * mp + 2) / 5 + 1
+    val m = if (mp < 10) mp + 3 else mp - 9
+    val y = yoe + era * 400 + if (m <= 2) 1 else 0
+    return "${y}年${m}月${d}日"
 }
 

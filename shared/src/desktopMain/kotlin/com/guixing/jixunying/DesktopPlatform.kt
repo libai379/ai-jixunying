@@ -56,6 +56,18 @@ class DesktopPlatform(private val window: () -> Frame?) : Platform {
         List(m.height) { y -> BooleanArray(m.width) { x -> m.get(x, y) } }
     }.getOrNull()
 
+    override fun openFile(path: String): Boolean = runCatching { Desktop.getDesktop().open(File(path)); true }.getOrDefault(false)
+
+    override suspend fun pickFolder(): String? = withContext(Dispatchers.Swing) {
+        // 文件夹选择框用 Windows 自己的样式，别用 Java 默认那套
+        runCatching { javax.swing.UIManager.setLookAndFeel(javax.swing.UIManager.getSystemLookAndFeelClassName()) }
+        val chooser = javax.swing.JFileChooser().apply {
+            fileSelectionMode = javax.swing.JFileChooser.DIRECTORIES_ONLY
+            dialogTitle = "选择要收录的文件夹"
+        }
+        if (chooser.showOpenDialog(window()) == javax.swing.JFileChooser.APPROVE_OPTION) chooser.selectedFile?.path else null
+    }
+
     private val prefs = java.util.prefs.Preferences.userRoot().node("ai-jixunying")
     override fun getPref(key: String): String? = prefs.get(key, null)
     override fun setPref(key: String, value: String?) {
