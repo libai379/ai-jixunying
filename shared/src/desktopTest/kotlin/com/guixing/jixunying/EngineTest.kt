@@ -98,7 +98,11 @@ class EngineTest {
                     val name = memberName(req)
                     val tools = req["tools"] as? JsonArray
                     val hasFnSearch = tools?.any { it.jsonObject["function"]?.jsonObject?.get("name")?.jsonPrimitive?.content == "web_search" } == true
+                    val hasDraw = tools?.any { it.jsonObject["function"]?.jsonObject?.get("name")?.jsonPrimitive?.content == "generate_image" } == true
                     val sawTool = msgs.any { it.jsonObject["role"]?.jsonPrimitive?.content == "tool" }
+                    val drew = msgs.any { it.jsonObject["role"]?.jsonPrimitive?.content == "tool" && "图片已生成" in it.jsonObject["content"].toString() }
+                    // 只看用户最新的那一句（连续几句会合并成一条）
+                    val latest = lastText.substringAfterLast("【")
                     call.respondTextWriter(ContentType.Text.EventStream) {
                         fun chunk(delta: String, extra: String = "") { write("data: {$extra\"choices\":[{\"index\":0,\"delta\":$delta}]}\n\n"); flush() }
                         fun say(text: String) = text.chunked(3).forEach {
@@ -121,6 +125,12 @@ class EngineTest {
                                 chunk("""{"content":""}""", """"search_info":{"search_results":[{"index":2,"title":"第二","url":"https://q.example/2"},{"index":1,"title":"第一","url":"https://q.example/1"}]},""")
                                 say("千问答[1]。")
                             }
+                            // 聊天里要图：先调 generate_image，拿到结果再说话
+                            hasDraw && latest.contains("画") && !sawTool -> {
+                                chunk("""{"tool_calls":[{"index":0,"id":"img_1","type":"function","function":{"name":"generate_image","arguments":"{\"prompt\":\"一只慢吞吞的猫\"}"}}]}""")
+                                write("data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n")
+                            }
+                            drew -> say("画好了。")
                             hasFnSearch && lastText.contains("天气") && !sawTool -> {
                                 chunk("""{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"web_search","arguments":""}}]}""")
                                 chunk("""{"tool_calls":[{"index":0,"function":{"arguments":"{\"query\":\"北京天气\"}"}}]}""")
@@ -142,7 +152,10 @@ class EngineTest {
                 }
                 // —— 画图 ——
                 post("/v1/images/generations") {
-                    imageRequests += "openai:" + call.receiveText()
+                    val body = call.receiveText()
+                    imageRequests += "openai:" + body
+                    // 「慢」字的图故意画 2 秒，用来测画图时还能接着聊
+                    if ("慢" in body) delay(2_000)
                     call.respondText("""{"data":[{"b64_json":"$pngB64"}]}""", ContentType.Application.Json)
                 }
                 get("/img/1.png") { call.respondBytes(png, ContentType.Image.PNG) }
@@ -353,6 +366,34 @@ class EngineTest {
         assertTrue(imageRequests.any { it.startsWith("minimax:") && "\"aspect_ratio\":\"1:1\"" in it })
         assertTrue(imageRequests.any { it.startsWith("kling:Bearer ey") }, "AK:SK 要签成 JWT")
         assertTrue(imageRequests.any { it.startsWith("modelscope:true:") })
+    }
+
+    /** 边聊边画：聊天里让 AI 画图，图在 AI 的回复里；图还没画完时接着发下一句，也能马上回答。 */
+    @Test
+    fun chatAndDrawTogether() = runBlocking {
+        val (e, ms) = engineWithMembers("小智")
+        e.call(Command.SaveProvider(ProviderConfig("pimg", "zhipu", "画图", "${base()}/v1", "k", listOf(ModelInfo("cogview-3-flash", imageGen = true, tools = false)))))
+        e.call(Command.SaveSettings(e.state.settings.copy(imageGen = ImageGenSettings("pimg", "cogview-3-flash", "1024x1024"))))
+        val conv = e.call(Command.CreateConversation(listOf(ms[0].id))).data
+        e.call(Command.UpdateConversation(e.state.conversation(conv)!!.copy(webSearch = false)))
+        e.call(Command.SendMessage(conv, "帮我画一只猫"))
+        delay(400)
+        e.call(Command.SendMessage(conv, "顺便问一下你是谁"))
+        // 第二句不用等画完：画图要 2 秒，第二句应该先答完
+        withTimeout(1_500) {
+            while (e.store.messages.value[conv].orEmpty().none { it.role == Role.AI && it.content == "我是小智。" && it.status == MsgStatus.DONE }) delay(30)
+        }
+        waitIdle(e, conv, 2)
+        val ai = e.store.messages.value[conv]!!.filter { it.role == Role.AI }
+        val drawn = ai.single { it.attachments.isNotEmpty() }
+        assertEquals(MsgStatus.DONE, drawn.status, drawn.error)
+        assertEquals(com.guixing.jixunying.model.AttachmentKind.GENERATED_IMAGE, drawn.attachments.single().kind)
+        assertEquals("画好了。", drawn.content)
+        assertContentEquals(png, e.fileBytes(drawn.attachments.single().id))
+        assertTrue(requests.any { "你可以画图" in systemOf(it) })
+        // 第二句的上下文里不该有第一句还没说完的半截回答
+        val second = requests.first { r -> "顺便问一下你是谁" in r["messages"].toString() }
+        assertFalse("画好了" in second["messages"].toString())
     }
 
     @Test

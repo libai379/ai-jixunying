@@ -29,7 +29,6 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.rounded.ArrowForward
 import androidx.compose.material.icons.rounded.AlternateEmail
 import androidx.compose.material.icons.rounded.ArrowUpward
 import androidx.compose.material.icons.rounded.AttachFile
@@ -194,7 +193,7 @@ private fun ChatEmptyHint(state: AppState, conv: Conversation) {
         Spacer(Modifier.height(8.dp))
         Text(
             if (members.size > 1) "直接提问，大家各自独立回答；用 @名字 点名某位回答，@所有人 让全员回答。\nAI 之间也会互相 @、互相纠错。"
-            else "可以发图片、PDF、Word、Excel 等文件；打开「联网」它会先搜再答；打开「画图」直接出图。",
+            else "可以发图片、PDF、Word、Excel 等文件；打开「联网」它会先搜再答；想要图直接说「画一张……」。",
             style = MaterialTheme.typography.bodyMedium, color = Ext.c.subtle,
         )
         Spacer(Modifier.height(20.dp))
@@ -548,13 +547,16 @@ private fun Composer(ctl: AppController, state: AppState, conv: Conversation, ru
         }
     }
 
+    // AI 还在回答或画图时也能接着发：新消息另起一轮，不用等
     fun send() {
-        if (running || uploading > 0) return
+        if (uploading > 0) return
         val ids = pending.mapNotNull { it.att?.id }
         if (text.text.isBlank() && ids.isEmpty()) return
         ctl.run(Command.SendMessage(conv.id, text.text, ids, drawImage = drawMode))
         text = TextFieldValue("")
         pending.clear()
+        // 「直接画图」只管这一条，发完回到正常聊天
+        drawMode = false
     }
 
     Column(Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 14.dp, top = 4.dp), horizontalAlignment = Alignment.CenterHorizontally) {
@@ -615,7 +617,7 @@ private fun Composer(ctl: AppController, state: AppState, conv: Conversation, ru
                     Box(Modifier.fillMaxWidth().heightIn(min = 26.dp, max = 200.dp)) {
                         if (text.text.isEmpty()) Text(
                             when {
-                                drawMode -> "描述你想要的画面，比如：水墨风格的江南小镇，清晨薄雾"
+                                drawMode -> "直接画图：描述画面，比如「水墨风格的江南小镇，清晨薄雾」（只画这一张，发完回到聊天）"
                                 members.size > 1 -> if (platform.isDesktop) "发消息…  @名字 点名回答，Enter 发送，Shift+Enter 换行" else "发消息…  @名字 点名回答"
                                 else -> if (platform.isDesktop) "发消息，可以附图片和文档…  Enter 发送，Shift+Enter 换行" else "发消息，可以附图片和文档"
                             },
@@ -646,19 +648,32 @@ private fun Composer(ctl: AppController, state: AppState, conv: Conversation, ru
                             ctl.run(Command.UpdateConversation(conv.copy(webSearch = !conv.webSearch)))
                         }
                         Spacer(Modifier.width(6.dp))
-                        ToggleChip("画图", Icons.Rounded.Brush, drawMode) { drawMode = !drawMode }
+                        ToggleChip("直接画图", Icons.Rounded.Brush, drawMode) { drawMode = !drawMode }
                         Spacer(Modifier.weight(1f))
+                        // 有回答 / 画图在进行时，停止按钮单独放在发送键旁边，不挡着发新消息
+                        if (running) {
+                            Row(
+                                Modifier.clip(RoundedCornerShape(50)).border(1.dp, Ext.c.border, RoundedCornerShape(50))
+                                    .clickable { ctl.run(Command.Stop(conv.id)) }.padding(horizontal = 10.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Icon(Icons.Rounded.Stop, null, Modifier.size(15.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Spacer(Modifier.width(3.dp))
+                                Text("停止", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                            Spacer(Modifier.width(8.dp))
+                        }
                         val canSend = (text.text.isNotBlank() || pending.any { it.att != null }) && uploading == 0
                         Box(
                             Modifier.size(36.dp).clip(CircleShape)
-                                .background(if (running) MaterialTheme.colorScheme.onSurface else if (canSend) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceContainerHighest)
-                                .clickable(enabled = running || canSend) { if (running) ctl.run(Command.Stop(conv.id)) else send() },
+                                .background(if (canSend) (if (drawMode) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary) else MaterialTheme.colorScheme.surfaceContainerHighest)
+                                .clickable(enabled = canSend) { send() },
                             contentAlignment = Alignment.Center,
                         ) {
                             Icon(
-                                if (running) Icons.Rounded.Stop else if (drawMode) Icons.AutoMirrored.Rounded.ArrowForward else Icons.Rounded.ArrowUpward,
-                                if (running) "停止" else "发送", Modifier.size(19.dp),
-                                tint = if (running) MaterialTheme.colorScheme.surface else if (canSend) MaterialTheme.colorScheme.onPrimary else Ext.c.subtle,
+                                if (drawMode) Icons.Rounded.Brush else Icons.Rounded.ArrowUpward,
+                                if (drawMode) "画图" else "发送", Modifier.size(19.dp),
+                                tint = if (canSend) MaterialTheme.colorScheme.onPrimary else Ext.c.subtle,
                             )
                         }
                     }

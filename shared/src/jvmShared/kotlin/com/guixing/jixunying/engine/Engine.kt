@@ -773,8 +773,9 @@ class Engine(private val storage: Storage, private val isPhone: Boolean = false)
     private fun buildHistory(convId: String, me: Member, cutoffId: String?, excludeId: String, vision: Boolean): List<JsonObject> {
         val all = snapshot(convId)
         val end = cutoffId?.let { id -> all.indexOfFirst { it.id == id } + 1 }?.takeIf { it > 0 } ?: all.size
+        // 还在生成中的回答（别人这一轮没说完的半句话、正在画的图）不算进上下文
         val usable = all.subList(0, end).filter {
-            it.id != excludeId && it.role != Role.SYSTEM && it.status != MsgStatus.ERROR &&
+            it.id != excludeId && it.role != Role.SYSTEM && it.status != MsgStatus.ERROR && it.status != MsgStatus.STREAMING &&
                 (it.content.isNotBlank() || it.attachments.isNotEmpty())
         }
         val profile = state.profile
