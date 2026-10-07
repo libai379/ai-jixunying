@@ -36,6 +36,7 @@ import androidx.compose.material.icons.rounded.Cloud
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.ExpandMore
+import androidx.compose.material.icons.rounded.Forum
 import androidx.compose.material.icons.rounded.Groups
 import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.Language
@@ -97,6 +98,7 @@ private fun tabIcon(t: SettingsTab): ImageVector = when (t) {
     SettingsTab.MEMORY -> Icons.Rounded.Psychology
     SettingsTab.SEARCH -> Icons.Rounded.Language
     SettingsTab.IMAGE -> Icons.Rounded.Brush
+    SettingsTab.WEIXIN -> Icons.Rounded.Forum
     SettingsTab.DEVICES -> Icons.Rounded.PhoneAndroid
     SettingsTab.APPEARANCE -> Icons.Rounded.Palette
     SettingsTab.ABOUT -> Icons.Rounded.Info
@@ -164,6 +166,7 @@ private fun SettingsPage(ctl: AppController, state: AppState, tab: SettingsTab) 
                 SettingsTab.MEMORY -> MemoryPage(ctl, state)
                 SettingsTab.SEARCH -> SearchPage(ctl, state)
                 SettingsTab.IMAGE -> ImagePage(ctl, state)
+                SettingsTab.WEIXIN -> WeixinPage(ctl, state)
                 SettingsTab.DEVICES -> DevicesPage(ctl, state)
                 SettingsTab.APPEARANCE -> AppearancePage(ctl, state)
                 SettingsTab.ABOUT -> AboutPage(ctl)

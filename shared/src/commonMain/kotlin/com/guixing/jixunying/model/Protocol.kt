@@ -60,6 +60,13 @@ sealed interface Command {
     /** 把本机的一个文档变成附件（「问 AI」用）。结果 data 是 Attachment 的 JSON。 */
     @Serializable data class DocAttach(val path: String) : Command
 
+    /** 微信助理：开始扫码绑定（结果 data 是绑定链接）。 */
+    @Serializable data object WeixinLogin : Command
+    /** 微信助理：手机上提示输入数字时，把数字交给电脑。 */
+    @Serializable data class WeixinVerify(val code: String) : Command
+    /** 微信助理：解除绑定。 */
+    @Serializable data object WeixinLogout : Command
+
     /** 换一个新的配对二维码（旧的立即失效）。 */
     @Serializable data object NewPairingCode : Command
     @Serializable data class RemoveDevice(val id: String) : Command

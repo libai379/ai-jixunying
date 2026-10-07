@@ -25,6 +25,10 @@ fun main() {
     val relay = RelayHost(engine)
     engine.onRelaySettingsChanged = { Thread { relay.restart() }.start() }
     Thread { relay.restart() }.start()
+    // 微信助理（官方 ClawBot）：绑定过就自动连上
+    val weixin = com.guixing.jixunying.engine.WeixinBridge(engine, java.io.File(storage.root, "weixin"))
+    engine.weixin = weixin
+    weixin.start()
 
     var frame: Frame? = null
     val platform = DesktopPlatform { frame }
@@ -33,7 +37,7 @@ fun main() {
     application {
         val state = rememberWindowState(size = DpSize(1280.dp, 820.dp))
         Window(
-            onCloseRequest = { relay.stop(); exitApplication() },
+            onCloseRequest = { relay.stop(); weixin.stop(); exitApplication() },
             title = "AI集训营",
             icon = AppIcon,
             state = state,

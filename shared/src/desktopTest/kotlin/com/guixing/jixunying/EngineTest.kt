@@ -64,6 +64,13 @@ import kotlin.test.assertTrue
 class EngineTest {
     private val requests = Collections.synchronizedList(mutableListOf<JsonObject>())
     private val imageRequests = Collections.synchronizedList(mutableListOf<String>())
+    // 假微信
+    private val wxInbox = java.util.concurrent.ConcurrentLinkedQueue<String>()
+    private val wxSent = Collections.synchronizedList(mutableListOf<String>())
+    private val wxTyping = Collections.synchronizedList(mutableListOf<String>())
+    private val wxHeaders = Collections.synchronizedList(mutableListOf<String>())
+    private val qrPolls = java.util.concurrent.atomic.AtomicInteger()
+    private val wxKey = ByteArray(16) { (it * 7 + 3).toByte() }
     private lateinit var fake: EmbeddedServer<*, *>
     private var port = 0
     private lateinit var dir: File
@@ -190,6 +197,38 @@ class EngineTest {
                     call.respondText("""{"data":[{"b64_json":"$pngB64"}]}""", ContentType.Application.Json)
                 }
                 get("/img/1.png") { call.respondBytes(png, ContentType.Image.PNG) }
+                // —— 假的微信 iLink 接口和 CDN ——
+                post("/ilink/bot/get_bot_qrcode") { call.respondText("""{"qrcode":"qr1","qrcode_img_content":"https://liteapp.weixin.qq.com/q/qr1"}""", ContentType.Application.Json) }
+                get("/ilink/bot/get_qrcode_status") {
+                    wxHeaders += call.request.headers["iLink-App-Id"].orEmpty()
+                    val n = qrPolls.incrementAndGet()
+                    call.respondText(if (n == 1) """{"status":"scaned"}"""
+                        else """{"status":"confirmed","bot_token":"tok","ilink_bot_id":"bot1@im.bot","ilink_user_id":"me@im.wechat","baseurl":"http://127.0.0.1:$port"}""",
+                        ContentType.Application.Json)
+                }
+                post("/ilink/bot/msg/notifystart") { call.respondText("{}", ContentType.Application.Json) }
+                post("/ilink/bot/msg/notifystop") { call.respondText("{}", ContentType.Application.Json) }
+                post("/ilink/bot/getupdates") {
+                    wxHeaders += "auth=" + call.request.headers["Authorization"] + ";type=" + call.request.headers["AuthorizationType"] + ";uin=" + call.request.headers["X-WECHAT-UIN"]
+                    call.receiveText()
+                    val batch = wxInbox.poll()
+                    if (batch == null) { delay(300); call.respondText("""{"ret":0,"msgs":[],"get_updates_buf":"b0"}""", ContentType.Application.Json) }
+                    else call.respondText("""{"ret":0,"msgs":[$batch],"get_updates_buf":"b${wxInbox.size}"}""", ContentType.Application.Json)
+                }
+                post("/ilink/bot/getconfig") { call.receiveText(); call.respondText("""{"ret":0,"typing_ticket":"tt"}""", ContentType.Application.Json) }
+                post("/ilink/bot/sendtyping") { wxTyping += call.receiveText(); call.respondText("""{"ret":0}""", ContentType.Application.Json) }
+                post("/ilink/bot/sendmessage") { wxSent += call.receiveText(); call.respondText("""{"ret":0,"message_id":12345678901234567890}""", ContentType.Application.Json) }
+                post("/ilink/bot/getuploadurl") { wxSent += "upload:" + call.receiveText(); call.respondText("""{"ret":0,"upload_param":"up1"}""", ContentType.Application.Json) }
+                get("/c2c/download") {
+                    // 微信 CDN 上的东西都是 AES-128-ECB 加密的
+                    call.respondBytes(com.guixing.jixunying.engine.WeixinBridge.aesEcb(png, wxKey, encrypt = true), ContentType.Application.OctetStream)
+                }
+                post("/c2c/upload") {
+                    val body = call.receiveText().length
+                    wxSent += "cdn:" + call.request.queryParameters["encrypted_query_param"] + ":" + body
+                    call.response.headers.append("x-encrypted-param", "dl1")
+                    call.respondText("")
+                }
                 // 画不出来的服务商（比如 Key 没开通画图），用来测自动换下一个
                 post("/bad/v1/images/generations") {
                     imageRequests += "bad:" + call.receiveText()
@@ -530,6 +569,69 @@ class EngineTest {
 
         val att = AppJson.decodeFromString(com.guixing.jixunying.model.Attachment.serializer(), e.call(Command.DocAttach(hits.first().path)).data)
         assertTrue(att.textChars > 0)
+    }
+
+    /**
+     * 微信助理：扫码绑定 → 收文字、收加密图片 → AI 回答发回微信（带 context_token、正在输入）→ 画的图加密上传后发回 → /新对话。
+     * 假的 iLink 接口和 CDN 在 setUp 里。
+     */
+    @Test
+    fun weixinBridgeEndToEnd() = runBlocking {
+        val (e, ms) = engineWithMembers("小智")
+        e.call(Command.SaveProvider(ProviderConfig("pimg", "zhipu", "画图", "${base()}/v1", "k", listOf(ModelInfo("cogview-3-flash", imageGen = true, tools = false)))))
+        val bridge = com.guixing.jixunying.engine.WeixinBridge(e, File(dir, "weixin"), loginBase = base(), cdnBase = "${base()}/c2c")
+        e.weixin = bridge
+        bridge.start()
+        assertTrue(e.state.weixinCapable)
+
+        val login = e.call(Command.WeixinLogin)
+        assertTrue(login.ok, login.message)
+        assertEquals("https://liteapp.weixin.qq.com/q/qr1", login.data)
+        withTimeout(10_000) { while (!e.state.weixin.status.startsWith("已连接")) delay(50) }
+        assertTrue(e.state.weixin.bound)
+        assertEquals("bot", wxHeaders.first())
+        assertTrue(wxHeaders.any { it.startsWith("auth=Bearer tok;type=ilink_bot_token;uin=") })
+
+        fun msg(id: Long, items: String) = """{"message_id":$id,"from_user_id":"u1@im.wechat","to_user_id":"bot1@im.bot","message_type":1,"context_token":"ctx$id","item_list":[$items]}"""
+        val keyB64 = Base64.getEncoder().encodeToString(wxKey)
+        wxInbox += msg(98765432109876543, """{"type":1,"text_item":{"text":"你好"}}""")
+        wxInbox += msg(2, """{"type":2,"image_item":{"media":{"encrypt_query_param":"img1","aes_key":"$keyB64","encrypt_type":1}}},{"type":1,"text_item":{"text":"看看这张"}}""")
+        wxInbox += msg(3, """{"type":1,"text_item":{"text":"帮我画一只猫"}}""")
+        wxInbox += msg(4, """{"type":1,"text_item":{"text":"/新对话"}}""")
+        withTimeout(20_000) { while (wxSent.none { "换个新话题" in it }) delay(50) }
+
+        val conv = e.state.conversations.filter { it.channel == "weixin:u1@im.wechat" }
+        assertEquals(2, conv.size, "/新对话 新开了一个")
+        val first = conv.last()
+        e.call(Command.LoadMessages(first.id))
+        val msgs = e.store.messages.value[first.id]!!
+        assertEquals("你好", msgs.first().content)
+        val img = msgs.first { it.content == "看看这张" }.attachments.single()
+        assertContentEquals(png, e.fileBytes(img.id), "图片下载后解密")
+
+        val texts = wxSent.filter { it.startsWith("{") }.map { Json.parseToJsonElement(it).jsonObject["msg"]!!.jsonObject }
+        val firstReply = texts.first()
+        assertEquals("u1@im.wechat", firstReply["to_user_id"]!!.jsonPrimitive.content)
+        assertEquals("ctx98765432109876543", firstReply["context_token"]!!.jsonPrimitive.content, "回复带上对方那条消息的 context_token（大整数不丢精度）")
+        assertEquals("我是小智。", firstReply["item_list"]!!.jsonArray[0].jsonObject["text_item"]!!.jsonObject["text"]!!.jsonPrimitive.content)
+        assertTrue(texts.any { it["item_list"]!!.jsonArray[0].jsonObject["type"]!!.jsonPrimitive.content == "2" }, "画的图发回微信")
+        assertTrue(wxSent.any { it.startsWith("cdn:up1:") }, "图片先加密传到 CDN")
+        assertTrue(wxTyping.any { "\"status\":1" in it } && wxTyping.any { "\"status\":2" in it }, "正在输入 → 取消")
+
+        e.call(Command.WeixinLogout)
+        assertFalse(e.state.weixin.bound)
+        bridge.stop()
+    }
+
+    @Test
+    fun weixinPlainTextAndChunks() {
+        val md = "## 结论\n**押金**要退\n- 第一条\n- 第二条\n[链接](https://a.example/x)\n| 列1 | 列2 |\n|---|---|\n| a | b |\n`代码`"
+        assertEquals("结论\n押金要退\n• 第一条\n• 第二条\n链接（https://a.example/x）\n| 列1 | 列2 |\n| a | b |\n代码",
+            com.guixing.jixunying.engine.WeixinBridge.plainText(md))
+        val long = (1..50).joinToString("\n") { "第${it}段" + "字".repeat(60) }
+        val parts = com.guixing.jixunying.engine.WeixinBridge.chunks(long, 1800)
+        assertTrue(parts.size >= 2 && parts.all { it.length <= 1800 })
+        assertEquals(long.replace("\n", ""), parts.joinToString("").replace("\n", ""))
     }
 
     /** @ 了不在这个对话里的成员：把他拉进来，由他回答（以前会悄悄换成对话里的别人答）。 */

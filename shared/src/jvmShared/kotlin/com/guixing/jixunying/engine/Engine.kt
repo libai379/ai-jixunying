@@ -441,6 +441,9 @@ class Engine(
         is Command.TidyMemories -> tidyMemories()
         is Command.SearchHistory -> CommandResult(data = AppJson.encodeToString(
             kotlinx.serialization.builtins.ListSerializer(com.guixing.jixunying.model.HistoryHit.serializer()), searchHistory(c.query, c.limit)))
+        is Command.WeixinLogin -> weixin?.login() ?: CommandResult(false, "微信助理只能接在电脑上：到电脑上的 设置 → 微信 扫码绑定")
+        is Command.WeixinVerify -> weixin?.verify(c.code) ?: CommandResult(false, "这台设备没有接微信助理")
+        is Command.WeixinLogout -> weixin?.logout() ?: CommandResult(false, "这台设备没有接微信助理")
         is Command.NewPairingCode -> {
             previousSecret = null
             updateState { it.copy(pairingSecret = newSecret()) }
@@ -727,10 +730,11 @@ class Engine(
         return out.toList()
     }
 
-    private suspend fun runTurn(convId: String, trigger: Message) {
-        val conv = state.conversation(convId) ?: return
+    /** 跑一轮：该回答的成员回答，被 @ 的接着说。返回这一轮所有 AI 的发言（微信助理要把它们发回去）。 */
+    private suspend fun runTurn(convId: String, trigger: Message): List<Message> {
+        val conv = state.conversation(convId) ?: return emptyList()
         val members = conv.memberIds.mapNotNull(state::member)
-        if (members.isEmpty()) return
+        if (members.isEmpty()) return emptyList()
         val everyone = Regex("@(所有人|全体成员|全体|大家|all)", RegexOption.IGNORE_CASE).containsMatchIn(trigger.content)
         val mentioned = parseMentions(trigger.content, members)
         val targets = when {
@@ -748,21 +752,82 @@ class Engine(
         } else {
             targets.mapNotNull { m -> reply(convId, m, null, independent = false, calledBy = null) }
         }
+        val all = produced.toMutableList()
 
         // AI 之间互相 @：被 @ 的接着说，最多接力 maxMentionChain 轮
         var depth = 0
         while (produced.isNotEmpty() && depth < state.settings.maxMentionChain) {
             depth++
             val next = mutableListOf<Message>()
-            val currentMembers = state.conversation(convId)?.memberIds?.mapNotNull(state::member) ?: return
+            val currentMembers = state.conversation(convId)?.memberIds?.mapNotNull(state::member) ?: return all
             for (msg in produced) {
                 val speaker = state.member(msg.senderId) ?: continue
                 val called = parseMentions(msg.content, currentMembers).filter { it.id != speaker.id }
                 for (m in called) reply(convId, m, null, independent = false, calledBy = speaker.name)?.let(next::add)
             }
             produced = next
+            all += next
         }
+        return all
     }
+
+    // ———————————————— 外部渠道（微信助理） ————————————————
+
+    /** 微信助理接在这台电脑上时由 Main.kt 设置。 */
+    @Volatile var weixin: WeixinBridge? = null
+        set(value) {
+            field = value
+            synchronized(stateLock) { state = state.copy(weixinCapable = value != null) }
+            emit(Event.State(state))
+        }
+
+    fun setWeixinInfo(info: com.guixing.jixunying.model.WeixinInfo) {
+        if (state.weixin == info) return
+        synchronized(stateLock) { state = state.copy(weixin = info) }
+        emit(Event.State(state))
+    }
+
+    /** 某个渠道（比如某个微信用户）最近的那个对话；没有就新建一个。 */
+    fun channelConversation(channel: String, title: String, memberIds: List<String>, webSearch: Boolean): String {
+        state.conversations.filter { it.channel == channel }.maxByOrNull { it.updatedAt }?.let { return it.id }
+        return newChannelConversation(channel, title, memberIds, webSearch)
+    }
+
+    fun newChannelConversation(channel: String, title: String, memberIds: List<String>, webSearch: Boolean): String {
+        val conv = Conversation(newId(), title, memberIds.filter { state.member(it) != null }, webSearch = webSearch,
+            createdAt = now(), updatedAt = now(), channel = channel)
+        convs[conv.id] = mutableListOf()
+        updateState { it.copy(conversations = listOf(conv) + it.conversations) }
+        emit(Event.Messages(conv.id, emptyList()))
+        return conv.id
+    }
+
+    /**
+     * 外部渠道来的一句话：放进对话、等这一轮答完，返回 AI 的回答（最终内容）。
+     * 和界面上发消息走同一套（@ 拉人、工具、记忆都一样）；界面上能看到，也能点「停止」。
+     */
+    suspend fun channelTurn(convId: String, text: String, attachmentIds: List<String>): List<Message> {
+        var conv = state.conversation(convId) ?: return emptyList()
+        val invited = parseMentions(text, state.members).filter { it.id !in conv.memberIds }
+        if (invited.isNotEmpty()) {
+            updateState { s -> s.copy(conversations = s.conversations.map { if (it.id == conv.id) it.copy(memberIds = it.memberIds + invited.map { m -> m.id }) else it }) }
+            conv = state.conversation(convId) ?: return emptyList()
+        }
+        if (conv.memberIds.isEmpty()) return emptyList()
+        val atts = attachmentIds.mapNotNull { storage.fileMeta(it) }
+        val userMsg = Message(newId(), convId, Role.USER, USER_ID, text.trim(), attachments = atts, createdAt = now())
+        addMessage(userMsg)
+        touchConversation(convId, null)
+        val job = scope.async { runTurn(convId, userMsg) }
+        running.getOrPut(convId) { ConcurrentHashMap.newKeySet() }.add(job)
+        job.invokeOnCompletion { running[convId]?.remove(job) }
+        val produced = try { job.await() } catch (e: CancellationException) { if (!job.isCancelled) throw e; emptyList() }
+        scope.launch { afterTurn(convId) }
+        val ids = produced.map { it.id }.toSet()
+        return snapshot(convId).filter { it.id in ids }
+    }
+
+    fun memberName(id: String) = state.member(id)?.name
 
     private suspend fun regenerate(convId: String, messageId: String): CommandResult {
         val all = snapshot(convId)

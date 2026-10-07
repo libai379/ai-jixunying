@@ -162,6 +162,32 @@ data class DocHit(
     val note: String = "",
 )
 
+/**
+ * 微信助理（腾讯官方 ClawBot / iLink 协议，和 WorkBuddy 的「微信助理」一样）：
+ * 电脑上扫码绑定后，用户在微信里给它发消息，电脑上的 AI 成员回答，回复发回微信。
+ */
+@Serializable
+data class WeixinSettings(
+    val enabled: Boolean = true,
+    /** 谁来回答微信消息（一位 = 单聊；多位 = 群聊，每人的回答各发一条）。空 = 第一位成员。 */
+    val memberIds: List<String> = emptyList(),
+    val webSearch: Boolean = true,
+)
+
+/** 微信助理的状态（界面显示用，不含凭证）。 */
+@Serializable
+data class WeixinInfo(
+    val bound: Boolean = false,
+    /** 给人看的状态：未绑定 / 等待扫码 / 已扫码，请在手机上确认 / 已连接 / 会话过期，请重新绑定…… */
+    val status: String = "",
+    /** 绑定用的链接：编成二维码给手机微信扫，或者发到微信里点开。 */
+    val loginLink: String = "",
+    /** 要在手机上输入的数字（微信提示「输入手机微信显示的数字」时）。 */
+    val needVerifyCode: Boolean = false,
+    val boundAt: Long = 0,
+    val lastMessageAt: Long = 0,
+)
+
 @Serializable
 data class Settings(
     val search: SearchSettings = SearchSettings(),
@@ -173,6 +199,7 @@ data class Settings(
     val maxMentionChain: Int = 3,
     val memory: MemorySettings = MemorySettings(),
     val docs: DocSettings = DocSettings(),
+    val weixin: WeixinSettings = WeixinSettings(),
 )
 
 @Serializable
@@ -197,6 +224,8 @@ data class Conversation(
     val pinned: Boolean = false,
     /** 前面有多少条消息已经压缩成摘要（界面上提示用）。 */
     val summarized: Int = 0,
+    /** 来自哪里：空 = 本应用里聊的；"weixin:<微信用户编号>" = 微信助理的对话。 */
+    val channel: String = "",
 ) {
     val isGroup: Boolean get() = memberIds.size > 1
 }
@@ -286,6 +315,10 @@ data class AppState(
     val memories: List<MemoryItem> = emptyList(),
     /** 本机文档索引的情况（界面显示用）。 */
     val docs: DocIndexInfo = DocIndexInfo(),
+    /** 微信助理的情况（界面显示用；手机上没有，一直是空的）。 */
+    val weixin: WeixinInfo = WeixinInfo(),
+    /** 这台设备能不能接微信助理（电脑端能）。 */
+    val weixinCapable: Boolean = false,
 ) {
     fun member(id: String) = members.firstOrNull { it.id == id }
     fun provider(id: String) = providers.firstOrNull { it.id == id }

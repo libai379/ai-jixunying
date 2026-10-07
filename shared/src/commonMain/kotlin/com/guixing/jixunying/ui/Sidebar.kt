@@ -237,7 +237,8 @@ private fun ConversationRow(ctl: AppController, state: AppState, c: Conversation
         Column(Modifier.weight(1f)) {
             Text(c.title, style = MaterialTheme.typography.bodyMedium, fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
                 maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text(if (members.size > 1) "群聊 · " + members.joinToString("、") { it.name } else members.firstOrNull()?.name ?: "未选成员",
+            Text((if (c.channel.startsWith("weixin:")) "微信 · " else "") +
+                (if (members.size > 1) "群聊 · " + members.joinToString("、") { it.name } else members.firstOrNull()?.name ?: "未选成员"),
                 style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
         Box {
