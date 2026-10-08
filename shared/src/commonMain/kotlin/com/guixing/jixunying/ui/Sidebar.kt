@@ -191,7 +191,11 @@ fun Sidebar(ctl: AppController, modifier: Modifier, onNavigate: () -> Unit) {
                     ctl.openSettings(SettingsTab.DEVICES); onNavigate()
                 }
             }
-            NavRow(Icons.Rounded.Settings, "设置", null) { ctl.openSettings(); onNavigate() }
+            // 记录员后台出了错：设置旁边提示一下，点进去直接到「记忆」看原因
+            val bgBad = state.bgProblems.isNotEmpty()
+            NavRow(Icons.Rounded.Settings, "设置", if (bgBad) "后台出错" else null, dot = if (bgBad) MaterialTheme.colorScheme.error else null) {
+                ctl.openSettings(if (bgBad) SettingsTab.MEMORY else null); onNavigate()
+            }
         }
     }
 }

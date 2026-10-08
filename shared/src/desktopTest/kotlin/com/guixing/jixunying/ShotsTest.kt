@@ -87,6 +87,13 @@ class ShotsTest {
             ),
             settings = Settings(proxy = "127.0.0.1:10809", docs = DocSettings(folders = listOf(docsDir.path))),
             hostId = "h1", pairingSecret = Base64.getEncoder().encodeToString(ByteArray(16) { 1 }),
+            // 记录员后台出过错：设置 → 记忆、立场档案页、侧栏「设置」上都要看得到
+            bgProblems = listOf(
+                com.guixing.jixunying.model.BgProblem(com.guixing.jixunying.model.BgJob.STANCES,
+                    "API Key 不对或已失效（HTTP 401）：{\"error\":{\"message\":\"Invalid API key\"}}", now - 300_000, "绳子剪几段", times = 2),
+                com.guixing.jixunying.model.BgProblem(com.guixing.jixunying.model.BgJob.ADDRESSING,
+                    "10 秒内没判断出来：记录员 mimo-v2.6-flash 太慢，可以在 设置 → 记忆 换个快一点的", now - 60_000, "租房合同要注意什么"),
+            ),
         ))
         val doc = Attachment("a1", "租房合同.docx", "application/octet-stream", 946, AttachmentKind.DOCUMENT, textChars = 56)
         st.putFile(doc, ByteArray(10), "房屋租赁合同 月租金 4800 元")

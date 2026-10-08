@@ -327,6 +327,8 @@ data class AppState(
     val weixin: WeixinInfo = WeixinInfo(),
     /** 这台设备能不能接微信助理（电脑端能）。 */
     val weixinCapable: Boolean = false,
+    /** 记录员后台活出的错（成功一次就清掉），见 Background.kt。 */
+    val bgProblems: List<BgProblem> = emptyList(),
 ) {
     fun member(id: String) = members.firstOrNull { it.id == id }
     fun provider(id: String) = providers.firstOrNull { it.id == id }

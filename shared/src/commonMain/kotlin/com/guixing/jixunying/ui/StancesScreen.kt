@@ -79,6 +79,7 @@ fun StancesScreen(ctl: AppController, wide: Boolean, openDrawer: () -> Unit) {
             Column(Modifier.widthIn(max = 860.dp)) {
                 PageHeader("立场档案", "群聊里大家独立作答时，记录员记下每位成员一开始怎么说；之后谁改了口、为什么改（被说服、跟风、迎合你、自己查证）也记下来。" +
                     "你在议题上标一下谁说对了，就能看出谁首答准、谁容易被带偏。")
+                BgProblemsCard(ctl, state.bgProblems.filter { it.job == com.guixing.jixunying.model.BgJob.STANCES })
                 SectionCard {
                     SwitchRow("记立场档案", "群聊每轮答完由记录员" + (recorder?.let { "（$it）" } ?: "") + "看一遍，一次只花很少的 token；单聊不记", state.settings.memory.stances) { on ->
                         ctl.updateSettings { it.copy(memory = it.memory.copy(stances = on)) }

@@ -7,6 +7,7 @@ import com.guixing.jixunying.engine.DocExtract
 import com.guixing.jixunying.engine.Engine
 import com.guixing.jixunying.engine.Storage
 import com.guixing.jixunying.model.AppJson
+import com.guixing.jixunying.model.BgJob
 import com.guixing.jixunying.model.Command
 import com.guixing.jixunying.model.Event
 import com.guixing.jixunying.model.ImageGenSettings
@@ -61,6 +62,7 @@ import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /** 用一个假的模型服务器把引擎跑一遍；联机用进程内的 MQTT 服务器（Moquette）代替公共中转。 */
@@ -100,6 +102,11 @@ class EngineTest {
                     // 不认切换思考参数的服务（用 Key 区分）
                     if (call.request.headers["Authorization"] == "Bearer refuse-thinking" && req.containsKey("thinking")) {
                         call.respondText("""{"error":{"message":"Unrecognized request argument supplied: thinking"}}""", ContentType.Application.Json, HttpStatusCode.BadRequest)
+                        return@post
+                    }
+                    // Key 失效的服务商（测记录员后台出错）
+                    if (call.request.headers["Authorization"] == "Bearer bad-key") {
+                        call.respondText("""{"error":{"message":"Invalid API key"}}""", ContentType.Application.Json, HttpStatusCode.Unauthorized)
                         return@post
                     }
                     // 智谱的写法：中文、不带字段名（code 1210）
@@ -459,6 +466,62 @@ class EngineTest {
         assertEquals(MsgStatus.DONE, zhipu.status, zhipu.error)
         assertEquals("low", zhipuReqs.first()["reasoning_effort"]!!.jsonPrimitive.content)
         assertFalse(zhipuReqs.last().containsKey("thinking") || zhipuReqs.last().containsKey("reasoning_effort"), "去掉思考参数重试")
+    }
+
+    /**
+     * 记录员后台出错（Key 失效）：记进 bgProblems、同一样活只提示一次，聊天照常（点名判断不了就当对大家说）；
+     * 换回好用的记录员，成功一次就清掉；「知道了」能收起。
+     */
+    @Test
+    fun backgroundErrorsAreReported() = runBlocking {
+        val (e, ms) = engineWithMembers("甲", "乙", "丙")
+        val notes = Collections.synchronizedList(mutableListOf<String>())
+        e.addListener { if (it is Event.Notice && it.error) notes += it.text }
+        e.call(Command.SaveProvider(ProviderConfig("pbad", "custom", "坏 Key", "${base()}/v1", "bad-key", listOf(ModelInfo("fake-chat")))))
+        suspend fun recorder(pid: String) =
+            e.call(Command.SaveSettings(e.state.settings.copy(memory = e.state.settings.memory.copy(recorderProviderId = pid, recorderModelId = if (pid.isEmpty()) "" else "fake-chat"))))
+        recorder("pbad")
+        val conv = e.call(Command.CreateConversation(ms.map { it.id })).data
+        e.call(Command.UpdateConversation(e.state.conversation(conv)!!.copy(webSearch = false)))
+        fun problem(job: BgJob) = e.state.bgProblems.firstOrNull { it.job == job }
+        suspend fun until(what: String, ok: () -> Boolean) = withTimeout(10_000) { while (!ok()) delay(50) }.also { assertTrue(ok(), what) }
+        fun noticesAbout(label: String) = notes.count { "「$label」" in it }
+
+        // 第一句：要问记录员是在叫谁 → Key 失效 → 当对大家说，三位都答；立场档案也记不上
+        e.call(Command.SendMessage(conv, "让乙来算一下 1.5 和 1.12 哪个大"))
+        waitIdle(e, conv, 3)
+        assertEquals(3, e.store.messages.value[conv]!!.count { it.role == Role.AI }, "判断不了就当对大家说")
+        until("点名判断出错要记下") { problem(BgJob.ADDRESSING) != null }
+        until("立场档案出错要记下") { problem(BgJob.STANCES) != null }
+        assertTrue("API Key 不对" in problem(BgJob.ADDRESSING)!!.reason, problem(BgJob.ADDRESSING)!!.reason)
+        assertEquals(1, noticesAbout("点名判断"), notes.toString())
+        assertEquals(1, noticesAbout("立场档案"), notes.toString())
+
+        // 再错一次：次数加一，半小时内不再弹提示
+        e.call(Command.SendMessage(conv, "让乙再算一遍"))
+        waitIdle(e, conv, 6)
+        until("连续两次") { problem(BgJob.ADDRESSING)?.times == 2 && problem(BgJob.STANCES)?.times == 2 }
+        assertEquals(1, noticesAbout("点名判断"), notes.toString())
+        assertEquals(1, noticesAbout("立场档案"), notes.toString())
+
+        // 换回好用的记录员：点名判断成功一次就清掉，这次只有丙回答
+        recorder("")
+        e.call(Command.SendMessage(conv, "让丙来说说"))
+        waitIdle(e, conv, 7)
+        assertNull(problem(BgJob.ADDRESSING))
+        assertEquals("丙", e.state.member(e.store.messages.value[conv]!!.last { it.role == Role.AI }.senderId)!!.name)
+        // 大家都答的一题：立场档案记上了，错也清掉
+        e.call(Command.SendMessage(conv, "1.5 和 1.12 哪个大"))
+        waitIdle(e, conv, 10)
+        until("立场档案恢复") { problem(BgJob.STANCES) == null }
+
+        // 「知道了」：收起
+        recorder("pbad")
+        e.call(Command.SendMessage(conv, "让乙来算一下"))
+        waitIdle(e, conv, 13)
+        until("又出错") { problem(BgJob.ADDRESSING) != null }
+        e.call(Command.DismissBgProblem(BgJob.ADDRESSING))
+        assertNull(problem(BgJob.ADDRESSING))
     }
 
     @Test

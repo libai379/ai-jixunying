@@ -20,6 +20,8 @@
   没在 设置→画图 指定时自动挑（model/ImagePick.kt，2026-10-08 用户定「默认千问」：画质优先，千问图像第一、免费 cogview-3-flash 垫底；按预设推断同一个 Key 能调的画图模型；Engine.paintAuto 失败换下一个，Key 失效 / 欠费整家跳过）。
 - 点名（engine/Stances.kt 的 Addressing）：群里没 @ 时，开头直接喊名字的程序认，其他出现成员名字的问记录员模型，只让被叫到的回答；开头喊了对话外的成员会拉进来。
 - 立场档案（model/Stances.kt 数据和统计，engine/Stances.kt 的 StanceJudge 写给记录员的说明，Engine.judgeStances）：群聊每轮答完记录员后台判断——开议题、记首答、记改口和原因；存 stances.json，界面用 StanceList / StanceMark / StanceDelete 指令；侧栏「立场档案」页（ui/StancesScreen.kt）。成员的提示词里不提立场档案（不能让它们知道被记录）。
+- 思考（model/Thinking.kt，2026-10-08）：每位成员「默认 / 快速 / 深度」。各家切换参数不一样（DeepSeek thinking.type + reasoning_effort、MiniMax-M3 只认 adaptive / disabled、GLM-5.3 关不掉只能调强度、千问 enable_thinking……），出处在 docs/参考资料.md「切换思考的参数」；没查到的平台两样都灰掉、不传参数；模型报 400 不认就自动去掉重试（LlmClient 的 thinking）。
+- 后台出错提示（engine/Background.kt，2026-10-08）：记录员的四样后台活（压缩聊天、挑记忆、点名判断、立场档案）出错时记进 AppState.bgProblems，弹一次提示（同一样半小时内只弹一次），设置 → 记忆、立场档案页、侧栏「设置」上常驻显示，成功一次自动消失。
 - 说话规矩写在 engine/Prompts.kt：正经回答为主、幽默点到为止、不知道就说不知道、时效信息先搜再答并标出处。
 - 记忆（engine/Memory.kt，2026-10-08）：记录员（model/RecorderPick.kt，默认 mimo-v2.6-flash）把太长的聊天压成摘要，全群一份，存 convs\<id>.memo.json；长期记忆 AppState.memories 写进每位成员的设定，AI 有 remember 工具，攒够 4 句用户的话自动挑；search_history 工具和侧栏搜索能翻以前的聊天。
 - 本地文档（engine/DocLibrary.kt）：两端各自给文档建索引（存 docindex\），AI 用 search_documents / read_document，只能读收录了的文件；侧栏「我的文档」页。手机要「所有文件访问」权限；手机上微信「用其他应用打开」和系统分享都能把文件交给 AI（MainActivity 的 VIEW / SEND 意图）。

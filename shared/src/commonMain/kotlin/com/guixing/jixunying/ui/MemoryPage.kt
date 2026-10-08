@@ -56,6 +56,8 @@ fun MemoryPage(ctl: AppController, state: AppState) {
     var result by remember { mutableStateOf<Pair<Boolean, String>?>(null) }
 
     PageHeader("记忆", "AI 会记得关于你的事，所有对话、所有成员都能用。对话聊得太长时，记录员会把前面的部分压缩成摘要（大家共用一份）；AI 也能翻以前的聊天记录。")
+    // 记录员在后台出过错（压缩、挑记忆、点名、立场档案）：说清楚原因和怎么修
+    BgProblemsCard(ctl, state.bgProblems, onMemoryPage = true)
 
     SectionCard {
         SwitchRow("长期记忆", "把下面记住的事告诉每位成员；AI 也能主动记、能翻以前的聊天", ms.enabled) { v -> saveMs { it.copy(enabled = v) } }

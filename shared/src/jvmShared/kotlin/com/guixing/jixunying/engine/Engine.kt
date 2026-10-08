@@ -6,6 +6,7 @@ import com.guixing.jixunying.client.ConnState
 import com.guixing.jixunying.model.AppState
 import com.guixing.jixunying.model.Attachment
 import com.guixing.jixunying.model.AttachmentKind
+import com.guixing.jixunying.model.BgJob
 import com.guixing.jixunying.model.Command
 import com.guixing.jixunying.model.CommandResult
 import com.guixing.jixunying.model.Conversation
@@ -105,6 +106,9 @@ class Engine(
     private val llm = LlmClient { proxyFor(it.useProxy) }
     private val search = WebSearch { state.settings.proxy.trim().ifEmpty { null } }
     private val images = ImageGen { proxyFor(it.useProxy) }
+
+    /** 记录员后台活出错时记下来、提示用户（以前悄悄停掉）。 */
+    private val bg = BackgroundWatch({ state }, { f -> updateState(f) }, { emit(Event.Notice(it, error = true)) })
 
     /** 本机文档库（AI 能搜、能读）。 */
     private val docs = DocLibrary(java.io.File(storage.root, "docindex").apply { mkdirs() })
@@ -364,6 +368,7 @@ class Engine(
             CommandResult()
         }
         is Command.SaveProfile -> { updateState { it.copy(profile = c.profile) }; CommandResult() }
+        is Command.DismissBgProblem -> { bg.dismiss(c.job); CommandResult() }
         is Command.SaveSettings -> {
             val before = state.settings.relay
             val docsBefore = state.settings.docs
@@ -610,10 +615,23 @@ class Engine(
         val lock = memoLocks.getOrPut(convId) { kotlinx.coroutines.sync.Mutex() }
         if (!lock.tryLock()) return
         try {
-            runCatching { compactIfLong(convId) }
-            runCatching { extractMemories(convId) }
+            guard(BgJob.COMPACT, convId) { compactIfLong(convId) }
+            guard(BgJob.MEMORY, convId) { extractMemories(convId) }
         } finally {
             lock.unlock()
+        }
+    }
+
+    private fun titleOf(convId: String) = state.conversation(convId)?.title.orEmpty()
+
+    /** 后台活出了异常（Key 失效、欠费、网络……）：记下来、提示用户，不影响聊天。 */
+    private suspend fun guard(job: BgJob, convId: String, block: suspend () -> Unit) {
+        try {
+            block()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            bg.failed(job, friendlyError(e, Recorder.pick(state)?.first), titleOf(convId))
         }
     }
 
@@ -653,15 +671,19 @@ class Engine(
         cut = minOf(cut, fresh.size - 4)
         if (cut <= 0) return false
         val fold = fresh.subList(0, cut)
-        val (p, model) = Recorder.pick(state) ?: return false
+        val (p, model) = Recorder.pick(state) ?: run { bg.failed(BgJob.COMPACT, BackgroundWatch.NO_RECORDER, titleOf(convId)); return false }
         val prompt = Recorder.summarizePrompt(memo.summary, transcriptOf(fold, 3000), state.profile.name)
         val r = withContext(Dispatchers.IO) { llm.chat(p, model, listOf(userMsg(prompt)), null, null) { _, _ -> } }
         val summary = stripThink(r.content).trim()
-        if (summary.length < 20) return false
+        if (summary.length < 20) {
+            bg.failed(BgJob.COMPACT, "记录员没写出摘要：$model 可能不适合当记录员，可以在 设置 → 记忆 换一个", titleOf(convId))
+            return false
+        }
         val next = storage.loadMemo(convId).copy(summary = summary.take(8000), upToTime = fold.last().createdAt,
             summarizedCount = memo.summarizedCount + fold.size, updatedAt = now())
         storage.saveMemo(convId, next)
         updateState { s -> s.copy(conversations = s.conversations.map { if (it.id == convId) it.copy(summarized = next.summarizedCount) else it }) }
+        bg.ok(BgJob.COMPACT)
         return true
     }
 
@@ -672,12 +694,13 @@ class Engine(
         val memo = storage.loadMemo(convId)
         val fresh = snapshot(convId).filter { it.status == MsgStatus.DONE && it.createdAt > memo.scannedUpToTime && it.content.isNotBlank() }
         if (fresh.isEmpty() || (!force && fresh.count { it.role == Role.USER } < 4)) return
-        val (p, model) = Recorder.pick(state) ?: return
+        val (p, model) = Recorder.pick(state) ?: run { bg.failed(BgJob.MEMORY, BackgroundWatch.NO_RECORDER, titleOf(convId)); return }
         val existing = state.memories
         val prompt = Recorder.extractPrompt(existing, transcriptOf(fresh.takeLast(40), 1500), state.profile.name)
         val r = withContext(Dispatchers.IO) { llm.chat(p, model, listOf(userMsg(prompt)), null, null) { _, _ -> } }
         // 看不懂输出就不挪扫描位置，下次再试
-        val items = Recorder.parseItems(r.content) ?: return
+        val items = Recorder.parseItems(r.content) ?: run { bg.failed(BgJob.MEMORY, BackgroundWatch.UNREADABLE, titleOf(convId)); return }
+        bg.ok(BgJob.MEMORY)
         storage.saveMemo(convId, storage.loadMemo(convId).copy(scannedUpToTime = fresh.last().createdAt))
         val changed = applyExtracted(items.take(3), existing, state.conversation(convId)?.title.orEmpty())
         if (changed.isNotEmpty()) emit(Event.Notice("记住了：${changed.first().text}" + (if (changed.size > 1) " 等 ${changed.size} 条" else "") + "（设置 → 记忆 可以查看和修改）"))
@@ -781,7 +804,7 @@ class Engine(
         val everyone = Regex("@(所有人|全体成员|全体|大家|all)", RegexOption.IGNORE_CASE).containsMatchIn(trigger.content)
         val mentioned = parseMentions(trigger.content, members)
         // 没 @ 人、但直接喊了名字（「阿麦，画一张图」「让阿麦来」）：只让被叫到的回答
-        val named = if (everyone || mentioned.isNotEmpty() || members.size < 2) emptyList() else addressed(trigger.content, members)
+        val named = if (everyone || mentioned.isNotEmpty() || members.size < 2) emptyList() else addressed(convId, trigger.content, members)
         val targets = when {
             everyone -> members
             mentioned.isNotEmpty() -> mentioned
@@ -820,26 +843,34 @@ class Engine(
         if (members.size > 1 && all.isNotEmpty()) {
             val independentIds = if (independent) firstAnswers.map { it.id }.toSet() else emptySet()
             val round = all.toList()
-            scope.launch { runCatching { judgeStances(convId, trigger, round, independentIds, calledBy.toMap()) } }
+            scope.launch { guard(BgJob.STANCES, convId) { judgeStances(convId, trigger, round, independentIds, calledBy.toMap()) } }
         }
         return all
     }
 
     /** 点名：没有 @ 时，看是不是直接喊了某几位成员的名字。开头直接喊的程序认；别的说法问记录员的模型，判断不了就当对大家说。 */
-    private suspend fun addressed(text: String, members: List<Member>): List<Member> {
+    private suspend fun addressed(convId: String, text: String, members: List<Member>): List<Member> {
         if (Addressing.namesIn(text, members).isEmpty()) return emptyList()
         Addressing.leading(text, members).takeIf { it.isNotEmpty() }?.let { return it }
-        val (p, model) = Recorder.pick(state) ?: return emptyList()
+        val title = titleOf(convId)
+        val (p, model) = Recorder.pick(state) ?: run { bg.failed(BgJob.ADDRESSING, BackgroundWatch.NO_RECORDER, title); return emptyList() }
         return try {
-            withTimeoutOrNull(10_000) {
-                val r = withContext(Dispatchers.IO) {
+            val r = withTimeoutOrNull(10_000) {
+                withContext(Dispatchers.IO) {
                     llm.chat(p, model, listOf(userMsg(Addressing.prompt(text, members, state.profile.name))), null, null) { _, _ -> }
                 }
-                Addressing.parse(r.content, members)
-            }.orEmpty()
+            }
+            val who = r?.let { Addressing.parse(it.content, members) }
+            when {
+                r == null -> bg.failed(BgJob.ADDRESSING, "10 秒内没判断出来：记录员 $model 太慢，可以在 设置 → 记忆 换个快一点的", title)
+                who == null -> bg.failed(BgJob.ADDRESSING, BackgroundWatch.UNREADABLE, title)
+                else -> bg.ok(BgJob.ADDRESSING)
+            }
+            who.orEmpty()
         } catch (e: CancellationException) {
             throw e
         } catch (e: Throwable) {
+            bg.failed(BgJob.ADDRESSING, friendlyError(e, p), title)
             emptyList()
         }
     }
@@ -875,13 +906,14 @@ class Engine(
             val open = topicsOf(convId).sortedBy { it.createdAt }.takeLast(3)
             val canOpen = said.count { it.id in independentIds } >= 2
             if (open.isEmpty() && !canOpen) return
-            val (p, model) = Recorder.pick(state) ?: return
+            val (p, model) = Recorder.pick(state) ?: run { bg.failed(BgJob.STANCES, BackgroundWatch.NO_RECORDER, titleOf(convId)); return }
             fun nameOf(id: String) = state.member(id)?.name ?: "已移除的成员"
             val items = said.map { m -> StanceJudge.Said(m, nameOf(m.senderId), m.id in independentIds, calledBy[m.id], toolsNote(m)) }
             val prompt = StanceJudge.prompt(open, items, stripThink(ask.content), state.profile.name, ::nameOf, canOpen)
             val r = withContext(Dispatchers.IO) { llm.chat(p, model, listOf(userMsg(prompt)), null, null) { _, _ -> } }
-            val v = StanceJudge.parse(r.content) ?: return
+            val v = StanceJudge.parse(r.content) ?: run { bg.failed(BgJob.STANCES, BackgroundWatch.UNREADABLE, titleOf(convId)); return }
             applyStances(convId, ask, said, independentIds, open, v, canOpen)
+            bg.ok(BgJob.STANCES)
         }
     }
 
