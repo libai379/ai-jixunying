@@ -52,6 +52,8 @@ sealed interface Command {
     @Serializable data object TidyMemories : Command
     /** 花费：period = today / week / month / all。结果 data 是 CostReport 的 JSON。 */
     @Serializable data class GetCosts(val period: String = "month") : Command
+    /** 花费设置（汇率、自填单价）单独保存：旧版手机发来的 SaveSettings 里没有这块，不能让它冲掉。 */
+    @Serializable data class SaveCosts(val costs: CostSettings) : Command
     /** 查各家余额（能查的直接查，查不了的给控制台链接）。结果 data 是 List<BalanceInfo> 的 JSON。 */
     @Serializable data object GetBalances : Command
     /** 后台出错的提示「知道了」：先不显示（再出错还会提示）。 */

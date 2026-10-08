@@ -77,6 +77,8 @@ data class CostLine(
     val overridden: Boolean = false,
     /** 按模型分时：现在算钱用的单价（改单价的对话框拿它预填，币种也照它）。 */
     val price: ModelPrice? = null,
+    /** 价格表里有官方价（没有的话「恢复官方价」要写成「清除自填单价」）。 */
+    val hasOfficial: Boolean = false,
 ) {
     fun total(usdRate: Double) = cny + usd * usdRate
 }

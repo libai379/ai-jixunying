@@ -158,7 +158,11 @@ fun yuan(v: Double): String = when {
     else -> "¥" + kotlin.math.round(v).toLong()
 }
 
-private fun usdText(v: Double) = "$" + (kotlin.math.round(v * 100) / 100).toString()
+private fun usdText(v: Double): String = when {
+    v <= 0.0 -> "$0"
+    v < 0.01 -> "不到 1 美分"
+    else -> "$" + (kotlin.math.round(v * 100) / 100).toString().let { if (it.substringAfter('.', "").length == 1) it + "0" else it }
+}
 
 /** 12345 → 1.2 万；12345678 → 1235 万。 */
 fun tokens(n: Long): String = when {
@@ -336,8 +340,12 @@ private fun BalancesCard(ctl: AppController) {
 
 @Composable
 private fun RateCard(ctl: AppController, rate: Double) {
-    var text by remember { mutableStateOf(rate.toString()) }
-    AutoSave(text, rate.toString()) { v -> v.toDoubleOrNull()?.takeIf { it > 0 }?.let { r -> ctl.updateSettings { it.copy(costs = it.costs.copy(usdRate = r)) } } }
+    // 别处（比如手机）改了汇率，这里跟着变
+    var text by remember(rate) { mutableStateOf(rate.toString()) }
+    val bad = text.toDoubleOrNull()?.let { it <= 0 } ?: true
+    AutoSave(text, rate.toString()) { v ->
+        v.toDoubleOrNull()?.takeIf { it > 0 }?.let { r -> ctl.run(Command.SaveCosts(ctl.backend.store.state.value.settings.costs.copy(usdRate = r)), quiet = true) }
+    }
     SectionCard {
         FieldLabel("美元汇率", "海外服务按美元计价，合计时按这个折成人民币")
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -346,6 +354,7 @@ private fun RateCard(ctl: AppController, rate: Double) {
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
             Text(" 元", style = MaterialTheme.typography.bodyMedium)
         }
+        if (bad) Text("填一个大于 0 的数，比如 7.1", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error)
     }
 }
 
@@ -366,14 +375,16 @@ private fun PriceDialog(ctl: AppController, line: CostLine, current: ModelPrice?
     val valid = if (isImage) num(perImage) != null else num(input) != null && num(output) != null
     AppDialog("改单价 · ${line.label}", onClose, width = 480.dp, actions = {
         if (!official) TextButton({
-            ctl.updateSettings { it.copy(costs = it.costs.copy(overrides = it.costs.overrides - line.priceKey)) }; onClose()
-        }) { Text("恢复官方价") }
+            val costs = ctl.backend.store.state.value.settings.costs
+            ctl.run(Command.SaveCosts(costs.copy(overrides = costs.overrides - line.priceKey)), quiet = true); onClose()
+        }) { Text(if (line.hasOfficial) "恢复官方价" else "清除自填单价") }
         Spacer(Modifier.weight(1f))
         TextButton(onClose) { Text("取消") }
         Button(enabled = valid, onClick = {
             val p = if (isImage) ModelPrice(if (usd) "USD" else "CNY", perImage = num(perImage))
                 else ModelPrice(if (usd) "USD" else "CNY", listOf(PriceTier(input = num(input)!!, cached = num(cached), output = num(output)!!)))
-            ctl.updateSettings { it.copy(costs = it.costs.copy(overrides = it.costs.overrides + (line.priceKey to p))) }
+            val costs = ctl.backend.store.state.value.settings.costs
+            ctl.run(Command.SaveCosts(costs.copy(overrides = costs.overrides + (line.priceKey to p))), quiet = true)
             onClose()
         }) { Text("保存") }
     }) {

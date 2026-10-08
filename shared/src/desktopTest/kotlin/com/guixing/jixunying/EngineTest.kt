@@ -649,6 +649,19 @@ class EngineTest {
         assertTrue(ledger().any { it.kind == "image" && it.model == "fake-nodl" && it.images == 1 }, "画好了的那张记上了")
     }
 
+    /** 汇率、自填单价走 SaveCosts 单独存；旧版手机发来的 SaveSettings（没有这块）不能把它冲掉。 */
+    @Test
+    fun costSettingsSurviveOldClients() = runBlocking {
+        val e = Engine(Storage(dir))
+        val mine = com.guixing.jixunying.model.CostSettings(usdRate = 7.3, overrides = mapOf("custom|my" to com.guixing.jixunying.model.ModelPrice("CNY", perImage = 0.1)))
+        assertTrue(e.call(Command.SaveCosts(mine)).ok)
+        assertFalse(e.call(Command.SaveCosts(mine.copy(usdRate = 0.0))).ok, "汇率 0 不收")
+        // 旧版手机：设置里没有 costs，解出来是默认值
+        e.call(Command.SaveSettings(e.state.settings.copy(darkMode = 2, costs = com.guixing.jixunying.model.CostSettings())))
+        assertEquals(2, e.state.settings.darkMode)
+        assertEquals(mine, e.state.settings.costs)
+    }
+
     @Test
     fun platformNativeSearch() = runBlocking {
         val (e, _) = engineWithMembers("小智")

@@ -383,6 +383,11 @@ class Engine(
         }
         is Command.SaveProfile -> { updateState { it.copy(profile = c.profile) }; CommandResult() }
         is Command.DismissBgProblem -> { bg.dismiss(c.job); CommandResult() }
+        is Command.SaveCosts -> {
+            if (c.costs.usdRate <= 0) return CommandResult(false, "汇率要大于 0")
+            updateState { it.copy(settings = it.settings.copy(costs = c.costs)) }
+            CommandResult()
+        }
         is Command.GetBalances -> {
             val list = coroutineScope {
                 state.providers.filter { it.enabled }.map { p -> async(Dispatchers.IO) { balances.query(p, now()) } }.awaitAll()
@@ -399,7 +404,8 @@ class Engine(
             updateState { s ->
                 val oldKeys = s.settings.search.apiKeys
                 val keys = c.settings.search.apiKeys.mapValues { (k, v) -> if (isMaskedKey(v)) oldKeys[k].orEmpty() else v }
-                s.copy(settings = c.settings.copy(search = c.settings.search.copy(apiKeys = keys)))
+                // 花费设置走 SaveCosts 单独存，这里保留原样（旧版手机发来的设置里没有这块）
+                s.copy(settings = c.settings.copy(search = c.settings.search.copy(apiKeys = keys), costs = s.settings.costs))
             }
             if (before.enabled != state.settings.relay.enabled || before.brokers != state.settings.relay.brokers) onRelaySettingsChanged?.invoke()
             // 关掉了的后台活不会再跑，它以前的出错提示也就不会「成功一次自己消失」：直接清掉
