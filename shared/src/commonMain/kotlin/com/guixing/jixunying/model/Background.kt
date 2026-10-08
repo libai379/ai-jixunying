@@ -25,7 +25,7 @@ enum class BgJob {
     val consequence: String get() = when (this) {
         COMPACT -> "摘要没更新，这个对话发给模型的上下文会越来越长、越来越贵"
         MEMORY -> "这次没挑出要记的事，下次答完会再试"
-        ADDRESSING -> "没认出你在叫谁，这次按对大家说处理了"
+        ADDRESSING -> "没认出你在叫谁，这次按没点名处理了（照这个对话设的回答方式答）"
         STANCES -> "这一轮各位的立场没记上"
     }
 }

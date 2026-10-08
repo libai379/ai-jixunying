@@ -378,6 +378,11 @@ class Engine(
                 s.copy(settings = c.settings.copy(search = c.settings.search.copy(apiKeys = keys)))
             }
             if (before.enabled != state.settings.relay.enabled || before.brokers != state.settings.relay.brokers) onRelaySettingsChanged?.invoke()
+            // 关掉了的后台活不会再跑，它以前的出错提示也就不会「成功一次自己消失」：直接清掉
+            state.settings.memory.let { m ->
+                if (!m.stances) bg.ok(BgJob.STANCES)
+                if (!m.enabled || !m.autoExtract) bg.ok(BgJob.MEMORY)
+            }
             if (docsBefore != state.settings.docs) rescanDocs()
             // 微信助理换了谁回答 / 联网开关：已有的「微信对话」也一起换（以前只对新对话生效，容易以为没改成）
             val wx = state.settings.weixin

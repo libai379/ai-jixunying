@@ -522,6 +522,11 @@ class EngineTest {
         until("又出错") { problem(BgJob.ADDRESSING) != null }
         e.call(Command.DismissBgProblem(BgJob.ADDRESSING))
         assertNull(problem(BgJob.ADDRESSING))
+
+        // 关掉立场档案：它的出错提示直接清掉（不会再跑，也就等不到「成功一次」）
+        until("立场档案又出错") { problem(BgJob.STANCES) != null }
+        e.call(Command.SaveSettings(e.state.settings.copy(memory = e.state.settings.memory.copy(stances = false))))
+        assertNull(problem(BgJob.STANCES))
     }
 
     @Test
