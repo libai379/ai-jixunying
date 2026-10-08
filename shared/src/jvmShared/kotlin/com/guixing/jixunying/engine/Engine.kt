@@ -1682,7 +1682,14 @@ class Engine(
         return "data:$mime;base64," + Base64.getEncoder().encodeToString(data)
     }
 
+    /** 报错原文里如果带出了 Key（比如 Key 里有换行，网络库报错会原样带出），打码。 */
     fun friendlyError(e: Throwable, p: ProviderConfig? = null): String {
+        val key = p?.apiKey?.trim().orEmpty()
+        val text = friendlyErrorRaw(e, p)
+        return if (key.length >= 8) text.replace(key, maskKey(key)) else text
+    }
+
+    private fun friendlyErrorRaw(e: Throwable, p: ProviderConfig?): String {
         if (e is ImageDownloadFailed) return "图片画好了，但下载失败（这张已经扣费）：${e.body.take(200)}"
         if (e is ApiException) {
             val body = e.body.take(300)

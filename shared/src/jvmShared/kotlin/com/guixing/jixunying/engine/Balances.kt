@@ -19,8 +19,9 @@ import kotlinx.serialization.json.jsonObject
 
 /**
  * 查余额：用聊天用的同一个 Key 调各家的余额接口（2026-10-08 查的，出处见 docs/参考资料.md「各家价格和查余额」）。
- * 能查的：DeepSeek、Kimi、硅基流动、阶跃（官方文档写了）；MiniMax、智谱（没写进公开文档的接口，试着查）；OpenRouter（只看这个 Key 的额度）。
- * 查不了的（小米、千问、豆包……）告诉用户去控制台看。
+ * 能查的：DeepSeek、Kimi、硅基流动、阶跃（官方文档写了）；MiniMax（没写进公开文档的接口，官方 CLI 在用）；OpenRouter（只看这个 Key 的额度）。
+ * 查不了的（小米、千问、豆包、智谱……）告诉用户去控制台看。智谱只有控制台登录后用的接口，认不认 API Key 没确认，
+ * 拿去试会把好好的 Key 报成「不对」，所以不查。
  */
 class Balances(private val proxyOf: (ProviderConfig) -> String?) {
 
@@ -37,39 +38,46 @@ class Balances(private val proxyOf: (ProviderConfig) -> String?) {
         val plan: Pair<String, (JsonObject) -> BalanceInfo>? = when {
             platform == "deepseek" -> "${noV1(p)}/user/balance" to { o -> deepSeek(o, base) }
             platform == "kimi" -> "${root(p)}/users/me/balance" to { o -> kimi(o, base, if ("moonshot.ai" in u) "USD" else "CNY") }
-            platform == "siliconflow" -> "${root(p)}/user/info" to { o -> siliconFlow(o, base) }
+            platform == "siliconflow" -> "${root(p)}/user/info" to { o -> siliconFlow(o, base, if ("siliconflow.com" in u) "USD" else "CNY") }
             platform == "stepfun" -> "${root(p)}/accounts" to { o -> stepFun(o, base) }
             platform == "minimax" -> "${noV1(p)}/account/query_balance" to { o -> miniMax(o, base, if ("minimax.io" in u) "USD" else "CNY") }
-            platform == "zhipu" && "bigmodel.cn" in u -> "https://open.bigmodel.cn/api/biz/account/query-customer-account-report" to { o -> zhipu(o, base) }
             platform == "openrouter" -> "${root(p)}/key" to { o -> openRouter(o, base) }
             else -> null
         }
         if (plan == null) return base.copy(text = "这家没有用 API Key 查余额的接口，到控制台看")
-        if (p.apiKey.isBlank()) return base.copy(supported = true, text = "还没填 API Key")
+        // 非公开接口：出错时也要标出来，401 / 403 说「不认 API Key」而不是「Key 不对」
+        val unofficial = platform == "minimax"
+        val b = base.copy(supported = true, unofficial = unofficial)
+        val key = p.apiKey.trim()
+        if (key.isEmpty()) return b.copy(text = "还没填 API Key")
+        // Key 里混进了换行之类的字符：网络库的报错会把整个 Key 带出来，提前拦下
+        if (key.any { it < ' ' }) return b.copy(text = "Key 里有换行或看不见的字符，到 设置 → 模型服务 重新粘贴一遍")
         val (url, parse) = plan
         return try {
             withTimeout(15_000) {
                 val resp = Http.client(proxyOf(p)).get(url) {
-                    header("Authorization", "Bearer ${p.apiKey.trim()}")
+                    header("Authorization", "Bearer $key")
                     header("Accept", "application/json")
                 }
                 val text = resp.bodyAsText()
                 if (resp.status.value !in 200..299) {
                     val why = when (resp.status.value) {
-                        401, 403 -> "Key 不对、失效，或者这个 Key 没有查余额的权限"
-                        404 -> "接口不存在（可能改了）"
+                        401, 403 -> if (unofficial) "这个接口不认这个 Key（订阅套餐的 Key 查不了），到控制台看" else "Key 不对、失效，或者这个 Key 没有查余额的权限"
+                        404 -> "接口不存在（可能改了），到控制台看"
                         else -> "查询失败"
                     }
-                    return@withTimeout base.copy(supported = true, text = "$why（HTTP ${resp.status.value}）")
+                    return@withTimeout b.copy(text = "$why（HTTP ${resp.status.value}）")
                 }
                 val o = runCatching { Json.parse(text).jsonObject }.getOrNull()
-                    ?: return@withTimeout base.copy(supported = true, text = "返回的内容看不懂")
-                parse(o)
+                    ?: return@withTimeout b.copy(text = "返回的内容看不懂")
+                parse(o).let { if (unofficial) it.copy(unofficial = true) else it }
             }
         } catch (e: kotlinx.coroutines.CancellationException) {
-            if (e is kotlinx.coroutines.TimeoutCancellationException) base.copy(supported = true, text = "查询超时") else throw e
+            if (e is kotlinx.coroutines.TimeoutCancellationException) b.copy(text = "查询超时") else throw e
         } catch (e: Throwable) {
-            base.copy(supported = true, text = "网络连不上：${e.message?.take(80) ?: e::class.simpleName}")
+            // 报错原文里不能带出 Key（会显示在页面上、传到手机）
+            val msg = (e.message ?: e::class.simpleName.orEmpty()).replace(key, com.guixing.jixunying.model.maskKey(key)).take(80)
+            b.copy(text = "网络连不上：$msg")
         }
     }
 
@@ -103,10 +111,10 @@ class Balances(private val proxyOf: (ProviderConfig) -> String?) {
     }
 
     /** {"data":{"totalBalance":"88.88","chargeBalance":"88.00","balance":"0.88"}}（balance 像是赠送部分，官方没写） */
-    private fun siliconFlow(o: JsonObject, base: BalanceInfo): BalanceInfo {
+    private fun siliconFlow(o: JsonObject, base: BalanceInfo, cur: String): BalanceInfo {
         val d = o["data"].obj() ?: return base.copy(supported = true, text = "返回里没有余额")
         val total = d.num("totalBalance") ?: return base.copy(supported = true, text = "返回里没有余额")
-        return ok(base, total, "CNY")
+        return ok(base, total, cur)
     }
 
     /** {"object":"account","balance":12.3,"total_cash_balance":20,"total_voucher_balance":5,"type":"prepaid"} */
@@ -123,13 +131,6 @@ class Balances(private val proxyOf: (ProviderConfig) -> String?) {
         val voucher = o.num("voucher_balance") ?: 0.0
         val owed = o.num("owed_amount") ?: 0.0
         return ok(base, avail, cur, listOfNotNull(if (voucher > 0) "代金券 ${money(voucher, cur)}" else null, if (owed > 0) "欠费 ${money(owed, cur)}" else null).joinToString("，"), unofficial = true)
-    }
-
-    /** {"code":200,"data":{"availableBalance":12.3,"balance":12.3,...}}（控制台用的接口；资源包另算，不在这里） */
-    private fun zhipu(o: JsonObject, base: BalanceInfo): BalanceInfo {
-        val d = o["data"].obj() ?: return base.copy(supported = true, unofficial = true, text = "查不了（${o.str("msg") ?: "智谱没有公开的查余额接口"}），到控制台看")
-        val avail = d.num("availableBalance") ?: d.num("balance") ?: return base.copy(supported = true, unofficial = true, text = "返回里没有余额")
-        return ok(base, avail, "CNY", "现金余额，资源包另算", unofficial = true)
     }
 
     /** {"data":{"limit":10,"limit_remaining":7.5,"usage":2.5}}：只是这个 Key 的额度，不是账户余额 */

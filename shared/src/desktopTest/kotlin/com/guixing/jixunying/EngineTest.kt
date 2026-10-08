@@ -616,6 +616,13 @@ class EngineTest {
         assertEquals(12.3, list["pm"]!!.amount); assertTrue(list["pm"]!!.unofficial)
         assertFalse(list["pi"]!!.supported); assertTrue(list["pi"]!!.consoleUrl.startsWith("https://"), "查不了的给控制台链接")
         assertFalse(list["pb"]!!.ok); assertTrue("Key 不对" in list["pb"]!!.text, list["pb"]!!.text)
+
+        // Key 里混进换行：提前拦下，报错里不带出 Key；智谱没有能用 API Key 查的接口，给控制台链接
+        e.call(Command.SaveProvider(ProviderConfig("pw", "deepseek", "换行 Key", "${base()}/ds", "sk-abcdef\n123456", listOf(ModelInfo("deepseek-flash")))))
+        e.call(Command.SaveProvider(ProviderConfig("pz", "zhipu", "智谱", "https://open.bigmodel.cn/api/paas/v4", "abcd.efgh", listOf(ModelInfo("GLM-5.3-Flash")))))
+        val more = AppJson.decodeFromString(kotlinx.serialization.builtins.ListSerializer(com.guixing.jixunying.model.BalanceInfo.serializer()), e.call(Command.GetBalances).data).associateBy { it.providerId }
+        assertTrue("换行" in more["pw"]!!.text && "sk-abcdef" !in more["pw"]!!.text, more["pw"]!!.text)
+        assertFalse(more["pz"]!!.supported); assertTrue(more["pz"]!!.consoleUrl.isNotBlank())
     }
 
     /** 已经扣钱的也要记：回了一块再出错的请求、画好了但下载失败的图。 */

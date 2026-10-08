@@ -72,9 +72,14 @@ fun CostsScreen(ctl: AppController, wide: Boolean, openDrawer: () -> Unit) {
     val state by ctl.backend.store.state.collectAsState()
     var period by remember { mutableStateOf("month") }
     var tick by remember { mutableIntStateOf(0) }
+    var error by remember { mutableStateOf<String?>(null) }
     val report by produceState<CostReport?>(null, period, tick, state.settings.costs, ctl.backend) {
+        error = null
         val r = ctl.backend.call(Command.GetCosts(period))
-        value = if (r.ok) runCatching { AppJson.decodeFromString(CostReport.serializer(), r.data) }.getOrNull() else null
+        val got = if (r.ok) runCatching { AppJson.decodeFromString(CostReport.serializer(), r.data) }.getOrNull() else null
+        // 遥控的电脑没响应、或者是不认这个指令的老版本：说清楚，别一直转圈
+        if (got == null) error = r.message.ifBlank { "没算出来（电脑上的 AI集训营 可能是老版本，更新一下）" }
+        value = got
     }
     var editing by remember { mutableStateOf<CostLine?>(null) }
 
@@ -93,7 +98,11 @@ fun CostsScreen(ctl: AppController, wide: Boolean, openDrawer: () -> Unit) {
                 Segmented(PERIODS, period) { period = it }
                 Spacer(Modifier.height(12.dp))
                 val r = report
-                if (r == null) {
+                val err = error
+                if (r == null && err != null) {
+                    TestResultBox(false, err) { tick++ }
+                    TextButton({ tick++ }) { Text("再试一次") }
+                } else if (r == null) {
                     Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
                         CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp); Spacer(Modifier.width(8.dp))
                         Text("正在算…", style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
@@ -286,6 +295,7 @@ private fun ModelBreakdown(r: CostReport, onEdit: (CostLine) -> Unit) {
 private fun BalancesCard(ctl: AppController) {
     var busy by remember { mutableStateOf(false) }
     var result by remember(ctl.remoteMode) { mutableStateOf(lastBalances[ctl.remoteMode]) }
+    var failed by remember { mutableStateOf<String?>(null) }
     val platform = LocalPlatform.current
     SectionCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -295,9 +305,10 @@ private fun BalancesCard(ctl: AppController) {
                     style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
             }
             Button(enabled = !busy, onClick = {
-                busy = true
+                busy = true; failed = null
                 ctl.run(Command.GetBalances, quiet = true) { r ->
                     busy = false
+                    if (!r.ok) failed = r.message.ifBlank { "没查成（电脑上的 AI集训营 可能是老版本）" }
                     if (r.ok) runCatching { AppJson.decodeFromString(ListSerializer(BalanceInfo.serializer()), r.data) }.getOrNull()?.let {
                         val got = nowMillis() to it
                         result = got; lastBalances[ctl.remoteMode] = got
@@ -305,6 +316,7 @@ private fun BalancesCard(ctl: AppController) {
                 }
             }) { Text(if (busy) "正在查…" else if (result == null) "查余额" else "再查一次") }
         }
+        failed?.let { TestResultBox(false, it) { failed = null } }
         result?.second?.forEach { b ->
             HorizontalDivider(color = Ext.c.border, modifier = Modifier.padding(vertical = 6.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
