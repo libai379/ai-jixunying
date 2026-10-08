@@ -48,7 +48,7 @@ enum class SettingsTab(val title: String) {
 }
 
 /** 主区域除了对话和设置以外的页面。 */
-enum class MainPage { DOCS, STANCES }
+enum class MainPage { DOCS, STANCES, COSTS }
 
 /** 要放进某个对话输入框的文件：别的 App 发来的（还没上传），或者文档库里转成的附件。 */
 class Incoming(val files: List<PickedFile> = emptyList(), val attachments: List<com.guixing.jixunying.model.Attachment> = emptyList()) {
@@ -166,6 +166,7 @@ fun App(hub: Hub, platform: Platform, debugStart: String? = null) {
                             if (s == "newchat") c.showNewChat = true
                             if (s == "docs") c.page = MainPage.DOCS
                             if (s == "stances") c.page = MainPage.STANCES
+                            if (s == "costs") c.page = MainPage.COSTS
                             if (s == "settingshome") c.openSettings()
                             if (s.startsWith("conv:")) c.currentConvId = s.removePrefix("conv:").substringBefore('#')
                             c.debugDialog = s.substringAfter('#', "")
@@ -245,6 +246,7 @@ private fun MainContent(ctl: AppController, wide: Boolean, openDrawer: () -> Uni
                 tab != null -> SettingsScreen(ctl, tab, wide, openDrawer)
                 ctl.page == MainPage.DOCS -> DocsScreen(ctl, wide, openDrawer)
                 ctl.page == MainPage.STANCES -> StancesScreen(ctl, wide, openDrawer)
+                ctl.page == MainPage.COSTS -> CostsScreen(ctl, wide, openDrawer)
                 state.providers.isEmpty() || state.members.isEmpty() -> WelcomeScreen(ctl, wide, openDrawer)
                 ctl.currentConvId != null && state.conversation(ctl.currentConvId!!) != null -> ChatScreen(ctl, ctl.currentConvId!!, wide, openDrawer)
                 else -> EmptyChatScreen(ctl, wide, openDrawer)

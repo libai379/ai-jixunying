@@ -564,6 +564,10 @@ class EngineTest {
         waitIdle(e, conv, 4)
         until("立场档案记上") { ledger().any { it.kind == "stances" && it.convId == conv } }
         assertEquals(4, ledger().count { it.kind == "chat" })
+        // 花费页的指令能用（假模型价格表里没有，都算「没价格」）
+        val costs = AppJson.decodeFromString(com.guixing.jixunying.model.CostReport.serializer(), e.call(Command.GetCosts("all")).data)
+        assertEquals(ledger().size, costs.total.calls)
+        assertTrue(costs.byMember.any { it.label == "丙" } && costs.byMember.any { it.label == "记录员（后台）" }, costs.byMember.toString())
 
         // 直接画图：记一张
         e.call(Command.SendMessage(conv, "一只猫", drawImage = true))

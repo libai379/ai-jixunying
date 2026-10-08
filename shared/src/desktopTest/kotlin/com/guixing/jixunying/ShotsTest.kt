@@ -95,6 +95,25 @@ class ShotsTest {
                     "10 秒内没判断出来：记录员 mimo-v2.6-flash 太慢，可以在 设置 → 记忆 换个快一点的", now - 60_000, "租房合同要注意什么"),
             ),
         ))
+        // 花费页：最近十来天的账（四位成员、记录员、画图、一条价格表里没有的）
+        com.guixing.jixunying.engine.Ledger(File(root, "usage")).apply {
+            fun r(daysAgo: Int, kind: String, pid: String, platform: String, model: String, prompt: Int, cached: Int, out: Int, member: String = "", images: Int = 0) =
+                com.guixing.jixunying.model.UsageRecord(now - daysAgo * 86_400_000L - 3_600_000L, kind, pid, "", platform, model, prompt, cached, out, images, member)
+            addAll((0..9).flatMap { d ->
+                listOf(
+                    r(d, "chat", "pd", "deepseek", "deepseek-flash", 60_000 + d * 9_000, 40_000, 9_000 + d * 700, "ma"),
+                    r(d, "chat", "pm", "minimax", "MiniMax-M3", 50_000, 20_000, 12_000 + d * 400, "mb"),
+                    r(d, "chat", "pz", "zhipu", "GLM-5.3-Flash", 45_000, 30_000, 30_000, "mc"),
+                    r(d, "chat", "pi", "mimo", "mimo-v2.6-flash", 40_000, 25_000, 26_000, "md"),
+                    r(d, "stances", "pi", "mimo", "mimo-v2.6-flash", 6_000, 0, 600),
+                )
+            }.sortedBy { it.at } + listOf(
+                r(2, "image", "pq", "qwen", "qwen-image-3.0", 0, 0, 0, images = 2),
+                r(1, "chat", "px", "custom", "my-local-model", 3_000, 0, 800, "ma"),
+                r(0, "addressing", "pi", "mimo", "mimo-v2.6-flash", 0, 0, 0),
+            ))
+            backfilled = true
+        }
         val doc = Attachment("a1", "租房合同.docx", "application/octet-stream", 946, AttachmentKind.DOCUMENT, textChars = 56)
         st.putFile(doc, ByteArray(10), "房屋租赁合同 月租金 4800 元")
         val cat = Attachment("a2", "图片_1.png", "image/png", png.size.toLong(), AttachmentKind.GENERATED_IMAGE, note = "月球上喝茶的橘猫")
@@ -187,12 +206,12 @@ class ShotsTest {
         val phone = PhonePlatform()
 
         val wide = listOf(
-            "chat" to "conv:c1", "chat-image" to "conv:c3", "newchat" to "newchat", "docs" to "docs",
+            "chat" to "conv:c1", "chat-image" to "conv:c3", "newchat" to "newchat", "docs" to "docs", "costs" to "costs",
             "stances" to "stances", "chat-stances" to "conv:c5", "chat-stances-dialog" to "conv:c5#stances",
         ) + com.guixing.jixunying.ui.SettingsTab.entries.map { "settings-" + it.name.lowercase() to "settings:${it.name}" } +
             listOf("provider-add" to "settings:PROVIDERS#add")
         for ((name, start) in wide) shoot("desktop-$name", 1280, 820, 1f, hub, desktop, start)
-        val narrow = listOf("chat" to "conv:c1", "docs" to "docs", "stances" to "stances", "chat-stances" to "conv:c5",
+        val narrow = listOf("chat" to "conv:c1", "docs" to "docs", "stances" to "stances", "chat-stances" to "conv:c5", "costs" to "costs",
             "settings-home" to "settingshome", "settings-image" to "settings:IMAGE",
             "settings-memory" to "settings:MEMORY", "settings-weixin" to "settings:WEIXIN", "settings-providers" to "settings:PROVIDERS",
             "settings-search" to "settings:SEARCH", "settings-profile" to "settings:PROFILE")
@@ -213,6 +232,8 @@ class ShotsTest {
         shoot("desktop-dark-chat-stances", 1280, 820, 1f, hub, desktop, "conv:c5")
         shoot("phone-dark-settings-home", 824, 1784, 2f, hub, phone, "settingshome")
         shoot("desktop-dark-member-edit", 1280, 820, 1f, hub, desktop, "settings:MEMBERS#edit")
+        shoot("desktop-dark-costs", 1280, 820, 1f, hub, desktop, "costs")
+        shoot("desktop-costs-tall", 1280, 2000, 1f, hub, desktop, "costs")
 
         // 编辑成员弹窗整个画出来（窗口拉高），看「思考」下面那行说明：阿德（深度），再把阿智（GLM-5.3 关不掉思考，快速 = 少想）挪到第一个
         kotlinx.coroutines.runBlocking { e.call(com.guixing.jixunying.model.Command.SaveSettings(e.state.settings.copy(darkMode = 1))) }

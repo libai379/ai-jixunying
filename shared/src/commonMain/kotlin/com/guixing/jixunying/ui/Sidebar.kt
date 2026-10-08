@@ -27,6 +27,7 @@ import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.FolderOpen
 import androidx.compose.material.icons.rounded.Groups
+import androidx.compose.material.icons.rounded.Payments
 import androidx.compose.material.icons.rounded.Insights
 import androidx.compose.material.icons.rounded.MoreHoriz
 import androidx.compose.material.icons.rounded.PhoneAndroid
@@ -173,6 +174,7 @@ fun Sidebar(ctl: AppController, modifier: Modifier, onNavigate: () -> Unit) {
                 ctl.openPage(MainPage.STANCES); onNavigate()
             }
             NavRow(Icons.Rounded.Groups, "AI 成员", "${state.members.size} 位") { ctl.openSettings(SettingsTab.MEMBERS); onNavigate() }
+            NavRow(Icons.Rounded.Payments, "花费", null) { ctl.openPage(MainPage.COSTS); onNavigate() }
             val platform = LocalPlatform.current
             val remote by ctl.hub.remote.collectAsState()
             val remoteConn = remote?.conn?.collectAsState()?.value
