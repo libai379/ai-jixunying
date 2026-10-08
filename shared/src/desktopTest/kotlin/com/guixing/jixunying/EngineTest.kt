@@ -102,6 +102,11 @@ class EngineTest {
                         call.respondText("""{"error":{"message":"Unrecognized request argument supplied: thinking"}}""", ContentType.Application.Json, HttpStatusCode.BadRequest)
                         return@post
                     }
+                    // 智谱的写法：中文、不带字段名（code 1210）
+                    if (call.request.headers["Authorization"] == "Bearer refuse-thinking-cn" && req.containsKey("thinking")) {
+                        call.respondText("""{"error":{"code":"1210","message":"该模型始终思考，不支持关闭思考；请使用 low、high 或 max。"}}""", ContentType.Application.Json, HttpStatusCode.BadRequest)
+                        return@post
+                    }
                     if (req.containsKey("temperature")) {
                         call.respondText("""{"error":{"message":"invalid temperature: only 1 is allowed"}}""", ContentType.Application.Json, HttpStatusCode.BadRequest)
                         return@post
@@ -446,6 +451,14 @@ class EngineTest {
         val (_, againReqs) = ask("mr")
         assertFalse(againReqs.single().containsKey("thinking"))
         assertEquals(1, notes.count { "不认「快速」" in it }, notes.toString())
+
+        // 中文报错、不带字段名（智谱 1210）也认得出
+        e.call(Command.SaveProvider(ProviderConfig("pz", "zhipu", "智谱", "${base()}/v1", "refuse-thinking-cn", listOf(ModelInfo("GLM-5.3-Flash")))))
+        e.call(Command.SaveMember(Member("mz", "谱", providerId = "pz", modelId = "GLM-5.3-Flash", thinking = ThinkingMode.FAST)))
+        val (zhipu, zhipuReqs) = ask("mz")
+        assertEquals(MsgStatus.DONE, zhipu.status, zhipu.error)
+        assertEquals("low", zhipuReqs.first()["reasoning_effort"]!!.jsonPrimitive.content)
+        assertFalse(zhipuReqs.last().containsKey("thinking") || zhipuReqs.last().containsKey("reasoning_effort"), "去掉思考参数重试")
     }
 
     @Test

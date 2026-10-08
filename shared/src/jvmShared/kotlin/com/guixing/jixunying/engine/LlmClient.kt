@@ -113,12 +113,14 @@ class LlmClient(private val proxyOf: (ProviderConfig) -> String?) {
         val t = e.body.lowercase()
         val hasNative = "enable_search" in body ||
             (body["tools"] as? JsonArray)?.any { (it as? JsonObject)?.str("type") != "function" } == true
-        // 报错里点名了我们发的思考字段（「unknown parameter: thinking」「enable_thinking is not supported」之类）
+        // 报错里点名了我们发的思考字段（「unknown parameter: thinking」「enable_thinking is not supported」之类）；
+        // 智谱的报错是中文、不带字段名：「该模型始终思考，不支持关闭思考；请使用 low、high 或 max。」
         val sentThinking = THINKING_KEYS.filter { it in body }
+        val aboutThinking = sentThinking.any { it in t || it.replace('_', ' ') in t } || "思考" in t
         return when {
             "temperature" in t && "temperature" in body -> "temperature"
             "stream_options" in t || "include_usage" in t -> "stream_options"
-            sentThinking.isNotEmpty() && "reasoning_content" !in t && sentThinking.any { it in t || it.replace('_', ' ') in t } -> "thinking"
+            sentThinking.isNotEmpty() && "reasoning_content" !in t && aboutThinking -> "thinking"
             hasNative && ("enable_search" in t || "search_options" in t || "web_search" in t || "builtin" in t || "search" in t) -> "native_search"
             ("tool" in t || "function" in t) && "tools" in body -> "tools"
             else -> null
