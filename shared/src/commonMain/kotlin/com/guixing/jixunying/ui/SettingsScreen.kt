@@ -85,6 +85,9 @@ import com.guixing.jixunying.model.Evals
 import com.guixing.jixunying.model.ImagePick
 import com.guixing.jixunying.model.Member
 import com.guixing.jixunying.model.MemberTemplates
+import com.guixing.jixunying.model.Thinking
+import com.guixing.jixunying.model.ThinkingMode
+import com.guixing.jixunying.model.ThinkingRule
 import com.guixing.jixunying.model.Presets
 import com.guixing.jixunying.model.ProviderConfig
 import com.guixing.jixunying.model.SearchEngine
@@ -485,8 +488,15 @@ private fun MembersPage(ctl: AppController, state: AppState) {
                     Column(Modifier.weight(1f)) {
                         Text(m.name, style = MaterialTheme.typography.titleSmall)
                         if (p == null || m.modelId.isBlank()) Text("未配置模型", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.error)
-                        else Text("${m.modelId} · ${p.name}", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary,
-                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        else Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("${m.modelId} · ${p.name}", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+                            // 选了快速 / 深度、并且这个模型真能切换时才标
+                            if (m.thinking != ThinkingMode.AUTO && Thinking.available(Thinking.rule(p, m.modelId), m.thinking)) {
+                                Spacer(Modifier.width(6.dp))
+                                Pill(Thinking.label(m.thinking), if (m.thinking == ThinkingMode.FAST) Ext.c.success else MaterialTheme.colorScheme.primary)
+                            }
+                        }
                         Evals.label(m.modelId)?.let { Text(it, style = MaterialTheme.typography.labelSmall, color = Ext.c.success) }
                         if (m.bio.isNotBlank()) Text(m.bio, style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle, maxLines = 2, overflow = TextOverflow.Ellipsis)
                     }
@@ -598,6 +608,9 @@ private fun MemberDialog(ctl: AppController, state: AppState, initial: Member, i
                 ModelPicker(m.modelId, { m = m.copy(modelId = it.trim()) }, provider.models.filter { !it.imageGen }, "例如 deepseek-flash")
             }
             Spacer(Modifier.height(10.dp))
+            FieldLabel("思考", "快速 = 不先想直接答；深度 = 想透再答")
+            ThinkingPicker(m.thinking, Thinking.rule(provider, m.modelId)) { m = m.copy(thinking = it) }
+            Spacer(Modifier.height(10.dp))
             FieldLabel("温度（可选）", "留空用模型默认值；有的模型只接受固定值（如 kimi-k3 只能 1）")
             AppTextField(temp, { temp = it.filter { c -> c.isDigit() || c == '.' }.take(4) }, placeholder = "留空", keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
         }
@@ -609,6 +622,34 @@ private fun MemberDialog(ctl: AppController, state: AppState, initial: Member, i
                 colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)) { Text("删除") }
         }) { Text("「${initial.name}」会从所有对话里移除，以前的发言保留。", style = MaterialTheme.typography.bodyMedium) }
     }
+}
+
+/** 默认 / 快速 / 深度 三选一；这个模型用不了的那项灰掉，下面一行说清楚选了会怎样。 */
+@Composable
+private fun ThinkingPicker(mode: ThinkingMode, rule: ThinkingRule, onPick: (ThinkingMode) -> Unit) {
+    val primary = MaterialTheme.colorScheme.primary
+    val shape = RoundedCornerShape(10.dp)
+    Row(Modifier.fillMaxWidth().clip(shape).border(1.dp, Ext.c.border, shape)) {
+        ThinkingMode.entries.forEachIndexed { i, opt ->
+            val ok = Thinking.available(rule, opt)
+            val sel = mode == opt
+            if (i > 0) Box(Modifier.width(1.dp).height(44.dp).background(Ext.c.border))
+            Column(
+                Modifier.weight(1f).height(44.dp).background(if (sel) primary.copy(alpha = 0.12f) else Color.Transparent)
+                    .clickable(enabled = ok || sel) { onPick(opt) },
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center,
+            ) {
+                Text(Thinking.label(opt), style = MaterialTheme.typography.labelLarge,
+                    color = when { sel -> primary; ok -> MaterialTheme.colorScheme.onSurface; else -> Ext.c.subtle.copy(alpha = 0.5f) })
+                Text(when (opt) { ThinkingMode.AUTO -> "模型自己定"; ThinkingMode.FAST -> if (ok) "不先想" else "不支持"; ThinkingMode.DEEP -> if (ok) "想透再答" else "不支持" },
+                    style = MaterialTheme.typography.labelSmall, color = if (ok || sel) Ext.c.subtle else Ext.c.subtle.copy(alpha = 0.5f))
+            }
+        }
+    }
+    Spacer(Modifier.height(6.dp))
+    Text(Thinking.explain(rule, mode), style = MaterialTheme.typography.bodySmall,
+        color = if (Thinking.available(rule, mode)) Ext.c.subtle else MaterialTheme.colorScheme.error)
 }
 
 // ———————————————— 我的资料 ————————————————

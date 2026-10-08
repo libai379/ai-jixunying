@@ -27,6 +27,7 @@ import com.guixing.jixunying.model.StanceEntry
 import com.guixing.jixunying.model.StanceOption
 import com.guixing.jixunying.model.StanceTopic
 import com.guixing.jixunying.model.Stances
+import com.guixing.jixunying.model.Thinking
 import com.guixing.jixunying.model.ToolStep
 import com.guixing.jixunying.model.USER_ID
 import com.guixing.jixunying.model.Usage
@@ -1160,6 +1161,9 @@ class Engine(
         }
         val model = provider.models.firstOrNull { it.id == member.modelId }
             ?: ModelInfo(member.modelId, vision = Presets.guessVision(member.modelId))
+        // 快速 / 深度：按这家的参数切换思考；关不掉、开不了的不传，回答上也不标
+        val thinking = if (llm.thinkingDropped(provider, model.id)) null else Thinking.params(Thinking.rule(provider, model.id), member.thinking)
+        if (thinking != null) updateMessage(convId, msg.id, persist = false) { it.copy(modelLabel = it.modelLabel + " · " + Thinking.label(member.thinking)) }
         val hasImageModel = ImagePick.resolve(state).isNotEmpty()
         val wantSearch = conv.webSearch
         val toolsOk = model.tools && !llm.toolsDropped(provider, model.id)
@@ -1216,7 +1220,7 @@ class Engine(
             while (true) {
                 rounds++
                 val before = snapshot(convId).firstOrNull { it.id == msg.id }?.content?.length ?: 0
-                val r = llm.chat(provider, model.id, working, member.temperature, tools, extra, onSources) { c, rs -> appendDelta(convId, msg.id, c, rs) }
+                val r = llm.chat(provider, model.id, working, member.temperature, tools, extra, onSources, thinking) { c, rs -> appendDelta(convId, msg.id, c, rs) }
                 usage = Usage(usage.prompt + r.usage.prompt, usage.completion + r.usage.completion, usage.cached + r.usage.cached, usage.millis + r.usage.millis)
                 if (r.toolCalls.isEmpty() || rounds >= 8) break
                 // 这一轮说的是「我去查一下」「这页打不开，换个词再搜」之类的过程话，挪进推理过程，正文只留最后的回答
@@ -1250,8 +1254,12 @@ class Engine(
                     }
                 }
             }
+            // 模型不认切换思考的参数：这次去掉参数答完了，标签恢复原样，告诉用户一声（之后这个模型都按默认）
+            val thinkingRefused = thinking != null && llm.thinkingDropped(provider, model.id)
+            if (thinkingRefused) emit(Event.Notice("「${member.name}」用的 ${model.id} 不认「${Thinking.label(member.thinking)}」的参数，这次按它默认的方式回答了"))
             val done = updateMessage(convId, msg.id) {
-                it.copy(content = cleanReply(it.content, member), status = MsgStatus.DONE, usage = usage)
+                it.copy(content = cleanReply(it.content, member), status = MsgStatus.DONE, usage = usage,
+                    modelLabel = if (thinkingRefused) Prompts.modelLabel(state, member) else it.modelLabel)
             }
             return done
         } catch (e: CancellationException) {

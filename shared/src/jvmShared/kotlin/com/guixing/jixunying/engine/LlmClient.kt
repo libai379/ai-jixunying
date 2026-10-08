@@ -38,6 +38,9 @@ class ChatResult(
 
 class ApiException(val status: Int, val body: String) : Exception("HTTP $status：${body.take(400)}")
 
+/** 切换思考可能用到的请求字段（各家不一样，见 model/Thinking.kt）。 */
+private val THINKING_KEYS = listOf("thinking", "enable_thinking", "thinking_budget", "reasoning_effort", "reasoning", "reasoning_split", "chat_template_kwargs")
+
 /** OpenAI 兼容的 /chat/completions，流式。国内外各家都走这一套。 */
 class LlmClient(private val proxyOf: (ProviderConfig) -> String?) {
 
@@ -50,6 +53,7 @@ class LlmClient(private val proxyOf: (ProviderConfig) -> String?) {
      * @param tools 函数工具 + 平台内置工具（Kimi 的 builtin_function、智谱的 web_search）
      * @param extra 额外放进请求体的字段（千问的 enable_search 等）
      * @param onSources 平台内置搜索返回的出处（智谱 web_search、千问 search_info）
+     * @param thinking 切换思考的字段（见 model/Thinking.kt）；模型不认就去掉重试，并记住
      */
     suspend fun chat(
         provider: ProviderConfig,
@@ -59,6 +63,7 @@ class LlmClient(private val proxyOf: (ProviderConfig) -> String?) {
         tools: JsonArray?,
         extra: JsonObject? = null,
         onSources: (List<SearchSource>) -> Unit = {},
+        thinking: JsonObject? = null,
         onDelta: (content: String, reasoning: String) -> Unit,
     ): ChatResult {
         val key = provider.id + "|" + model
@@ -77,6 +82,7 @@ class LlmClient(private val proxyOf: (ProviderConfig) -> String?) {
                 if (temperature != null && "temperature" !in dropped) put("temperature", temperature)
                 if (!usableTools.isNullOrEmpty() && "tools" !in dropped) put("tools", JsonArray(usableTools))
                 if (extra != null && "native_search" !in dropped) extra.forEach { (k, v) -> put(k, v) }
+                if (thinking != null && "thinking" !in dropped) thinking.forEach { (k, v) -> put(k, v) }
             }
             try {
                 return stream(provider, body, onSources, onDelta)
@@ -98,14 +104,21 @@ class LlmClient(private val proxyOf: (ProviderConfig) -> String?) {
     fun nativeSearchDropped(provider: ProviderConfig, model: String) =
         droppedParams[provider.id + "|" + model]?.contains("native_search") == true
 
+    /** 这个模型不认切换思考的参数（报过 400），之后按它自己的默认方式回答。 */
+    fun thinkingDropped(provider: ProviderConfig, model: String) =
+        droppedParams[provider.id + "|" + model]?.contains("thinking") == true
+
     private fun guessBadParam(e: ApiException, body: JsonObject): String? {
         if (e.status !in listOf(400, 422)) return null
         val t = e.body.lowercase()
         val hasNative = "enable_search" in body ||
             (body["tools"] as? JsonArray)?.any { (it as? JsonObject)?.str("type") != "function" } == true
+        // 报错里点名了我们发的思考字段（「unknown parameter: thinking」「enable_thinking is not supported」之类）
+        val sentThinking = THINKING_KEYS.filter { it in body }
         return when {
             "temperature" in t && "temperature" in body -> "temperature"
             "stream_options" in t || "include_usage" in t -> "stream_options"
+            sentThinking.isNotEmpty() && "reasoning_content" !in t && sentThinking.any { it in t || it.replace('_', ' ') in t } -> "thinking"
             hasNative && ("enable_search" in t || "search_options" in t || "web_search" in t || "builtin" in t || "search" in t) -> "native_search"
             ("tool" in t || "function" in t) && "tools" in body -> "tools"
             else -> null

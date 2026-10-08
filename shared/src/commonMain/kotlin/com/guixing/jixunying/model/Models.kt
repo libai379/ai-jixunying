@@ -36,6 +36,8 @@ data class Member(
     val bio: String = "",
     /** 留空表示不传，用模型默认值（有的模型只接受固定 temperature）。 */
     val temperature: Double? = null,
+    /** 快速（关掉思考）/ 深度（想透再答）/ 默认（不传参数，按模型自己的习惯）。各家怎么切换见 Thinking.kt。 */
+    val thinking: ThinkingMode = ThinkingMode.AUTO,
 )
 
 /** 用户自己（主持人）。 */
