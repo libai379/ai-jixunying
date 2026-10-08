@@ -235,8 +235,13 @@ class EngineTest {
                     call.respondText("""{"error":{"message":"model not enabled for this key"}}""", ContentType.Application.Json, HttpStatusCode.Forbidden)
                 }
                 post("/api/v1/services/aigc/multimodal-generation/generation") {
-                    imageRequests += "dashscope:" + call.request.headers["X-DashScope-Async"] + ":" + call.receiveText()
-                    call.respondText("""{"output":{"task_id":"t1","task_status":"PENDING"}}""", ContentType.Application.Json)
+                    val async = call.request.headers["X-DashScope-Async"]
+                    imageRequests += "dashscope:" + async + ":" + call.receiveText()
+                    // 和真的千问AI平台一样（2026-10-08 实测）：千问图像不支持异步，回 403；同步直接给结果
+                    if (async == "enable") call.respondText("""{"code":"AccessDenied","message":"current user api does not support asynchronous calls"}""",
+                        ContentType.Application.Json, HttpStatusCode.Forbidden)
+                    else call.respondText("""{"output":{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":[{"image":"http://127.0.0.1:$port/img/1.png"}]}}]}}""",
+                        ContentType.Application.Json)
                 }
                 get("/api/v1/tasks/t1") {
                     call.respondText("""{"output":{"task_id":"t1","task_status":"SUCCEEDED","choices":[{"message":{"content":[{"image":"http://127.0.0.1:$port/img/1.png"}]}}]}}""", ContentType.Application.Json)
@@ -437,7 +442,8 @@ class EngineTest {
             val att = m.attachments.single()
             assertContentEquals(png, e.fileBytes(att.id), preset)
         }
-        assertTrue(imageRequests.any { it.startsWith("dashscope:enable:") && "1024*1024" in it })
+        assertTrue(imageRequests.any { it.startsWith("dashscope:null:") && "1024*1024" in it }, "千问图像按官方文档走同步")
+        assertTrue(imageRequests.none { it.startsWith("dashscope:enable:") }, "不先试异步（千问AI平台会回 403）")
         assertTrue(imageRequests.any { it.startsWith("minimax:") && "\"aspect_ratio\":\"1:1\"" in it })
         assertTrue(imageRequests.any { it.startsWith("kling:Bearer ey") }, "AK:SK 要签成 JWT")
         assertTrue(imageRequests.any { it.startsWith("modelscope:true:") })

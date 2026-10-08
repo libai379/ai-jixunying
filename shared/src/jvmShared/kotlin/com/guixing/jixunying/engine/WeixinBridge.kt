@@ -80,7 +80,7 @@ class WeixinBridge(
         /** 协议按官方插件这个版本对齐（请求头 iLink-App-ClientVersion 由它算出来）。 */
         const val CHANNEL_VERSION = "2.4.9"
         const val APP_ID = "bot"
-        const val BOT_AGENT = "AIJixunying/1.2.0"
+        const val BOT_AGENT = "AIJixunying/1.2.1"
         /** 会话过期（要重新扫码），官方插件遇到后暂停一小时。 */
         const val STALE_TOKEN = -14
         /** 一条微信消息最长发多少字，再长就拆开。 */

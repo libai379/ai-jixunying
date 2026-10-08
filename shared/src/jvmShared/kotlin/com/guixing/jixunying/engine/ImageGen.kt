@@ -167,11 +167,15 @@ class ImageGen(private val proxyOf: (ProviderConfig) -> String?) {
             contentType(ContentType.Application.Json)
             setBody(body.toString())
         }
-        var resp = submit(async = true)
-        if (resp.status.value == 400) {
+        // 千问图像、新版万相（multimodal-generation、image-generation）官方文档是同步调用；老的 text2image 只能异步。
+        // 先按文档的方式来，被拒而且报错说的是同步 / 异步的问题，就换另一种再试一次。
+        // 千问AI平台对不支持异步的接口回 403「current user api does not support asynchronous calls」（2026-10-08 实测），不只是 400。
+        val preferAsync = !(qwenStyle || newWan)
+        var resp = submit(async = preferAsync)
+        if (resp.status.value == 400 || resp.status.value == 403) {
             val text = resp.bodyAsText()
-            // 个别模型只支持同步
-            resp = if (text.contains("async", ignoreCase = true) || text.contains("异步")) submit(async = false) else throw ApiException(400, text)
+            val aboutMode = text.contains("async", ignoreCase = true) || text.contains("synchronous", ignoreCase = true) || text.contains("异步") || text.contains("同步")
+            resp = if (aboutMode) submit(async = !preferAsync) else throw ApiException(resp.status.value, text)
         }
         var o = resp.jsonOrThrow()
         val taskId = (o["output"] as? JsonObject)?.str("task_id")
