@@ -41,6 +41,10 @@ class ThinkingTest {
         // Kimi K3 关不掉，快速 = 强度 low；K2.6 能关
         assertEquals("""{"reasoning_effort":"low"}""", fast("moonshot", "kimi-k3"))
         assertEquals("""{"thinking":{"type":"disabled"}}""", fast("moonshot", "kimi-k2.6"))
+        // 火山方舟豆包：能关；关的时候不能带 reasoning_effort；画图模型 seedream 不算
+        assertEquals("""{"thinking":{"type":"disabled"}}""", fast("ark", "doubao-seed-2-1-pro-260628"))
+        assertNull(deep("ark", "doubao-seed-2-1-pro-260628"), "默认已是最高档")
+        assertFalse(Thinking.rule(p("ark"), "doubao-seedream-5-0-260128").known)
         // MiniMax M2.x 关不掉
         assertFalse(Thinking.available(Thinking.rule(p("minimax"), "MiniMax-M2.7"), ThinkingMode.FAST))
         // 自定义服务商填的官方地址也认得出

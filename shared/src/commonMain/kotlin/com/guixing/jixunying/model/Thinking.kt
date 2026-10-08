@@ -185,6 +185,12 @@ private object Rules {
             m.startsWith("moonshot-v1") -> NEVER
             else -> Thinking.UNKNOWN
         }
+        // 火山方舟豆包 Seed 2.x：默认开思考（强度 high，这个模型的最高有效档），thinking.type 能关；
+        // 关的时候不能再带 reasoning_effort（只许 minimal），所以快速只发 disabled。注意 doubao-seedream 是画图模型
+        "ark" -> when {
+            m.startsWith("doubao-seed-") -> ThinkingRule(fast = obj(type("disabled")), deep = EMPTY, thinksByDefault = true)
+            else -> Thinking.UNKNOWN
+        }
         else -> Thinking.UNKNOWN
     }
 }
