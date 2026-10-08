@@ -16,6 +16,7 @@ import java.nio.file.StandardCopyOption
  *   convs\<id>.json       每个会话的聊天记录
  *   files\<id>            附件和生成的图片，旁边 <id>.json 是元数据
  *   stances.json          立场档案（群聊里各位成员的立场和改口）
+ *   usage\年-月.jsonl     账本：每次调用模型、每张图一行（花费页用，见 Ledger.kt）
  * 读坏了的文件不覆盖，改名成 .broken-时间 留着，再从空白开始。
  */
 class Storage(val root: File) {

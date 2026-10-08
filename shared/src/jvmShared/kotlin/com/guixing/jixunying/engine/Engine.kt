@@ -32,6 +32,8 @@ import com.guixing.jixunying.model.Thinking
 import com.guixing.jixunying.model.ToolStep
 import com.guixing.jixunying.model.USER_ID
 import com.guixing.jixunying.model.Usage
+import com.guixing.jixunying.model.UsageKinds
+import com.guixing.jixunying.model.UsageRecord
 import com.guixing.jixunying.model.isMaskedKey
 import com.guixing.jixunying.model.maskKey
 import kotlinx.coroutines.CancellationException
@@ -43,6 +45,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
@@ -107,6 +110,9 @@ class Engine(
     private val search = WebSearch { state.settings.proxy.trim().ifEmpty { null } }
     private val images = ImageGen { proxyFor(it.useProxy) }
 
+    /** 账本：每次调用模型、每张图记一条，花费页用（见 Ledger.kt、model/Costs.kt）。 */
+    private val ledger = Ledger(java.io.File(storage.root, "usage"))
+
     /** 记录员后台活出错时记下来、提示用户（以前悄悄停掉）。 */
     private val bg = BackgroundWatch({ state }, { f -> updateState(f) }, { emit(Event.Notice(it, error = true)) })
 
@@ -132,6 +138,8 @@ class Engine(
         if (memberMap.isNotEmpty()) remapSenders(memberMap)
         emit(Event.State(state))
         storage.brokenNotes.forEach { emit(Event.Notice(it, error = true)) }
+        llm.onUsage = { p, model, u, tag -> recordUsage(p, model, u, tag?.kind ?: UsageKinds.OTHER, tag) }
+        if (!ledger.backfilled) scope.launch { runCatching { backfillLedger() } }
         // 文档库：启动后稍等一会儿在后台扫一遍，之后每半小时看一次有没有新文件
         if (autoScanDocs) scope.launch {
             kotlinx.coroutines.delay(4_000)
@@ -333,7 +341,7 @@ class Engine(
         }
         is Command.TestProvider -> {
             val p = state.provider(c.providerId) ?: return CommandResult(false, "服务商不存在")
-            val r = withContext(Dispatchers.IO) {
+            val r = withContext(Dispatchers.IO + UsageTag(UsageKinds.TEST)) {
                 llm.chat(p, c.modelId, listOf(buildJsonObject { put("role", "user"); put("content", "用一句话（不超过 20 个字）介绍你是谁、什么模型。") }), null, null) { _, _ -> }
             }
             val said = r.content.ifBlank { r.reasoning }.replace(Regex("<think>[\\s\\S]*?</think>"), "").trim()
@@ -347,7 +355,7 @@ class Engine(
                 ImageChoice(p.id, p.name, c.modelId, free = false, inferred = false, note = "")
             }
             val t0 = now()
-            val r = paintAuto(c.prompt.ifBlank { "一只坐在窗台上晒太阳的橘猫，水彩画风格，暖色调" }, "1024x1024", only)
+            val r = withContext(UsageTag(UsageKinds.TEST)) { paintAuto(c.prompt.ifBlank { "一只坐在窗台上晒太阳的橘猫，水彩画风格，暖色调" }, "1024x1024", only) }
             CommandResult(message = "用 ${r.label} 画好了（${"%.1f".format((now() - t0) / 1000.0)} 秒）",
                 data = AppJson.encodeToString(Attachment.serializer(), r.att))
         }
@@ -611,6 +619,44 @@ class Engine(
         return CommandResult()
     }
 
+    // ———————————————— 记账 ————————————————
+
+    private fun recordUsage(p: ProviderConfig, model: String, u: Usage, kind: String, tag: UsageTag?, images: Int = 0) {
+        runCatching {
+            ledger.add(UsageRecord(now(), kind, p.id, p.name, Thinking.platformOf(p), model, u.prompt, u.cached, u.completion, images,
+                tag?.memberId.orEmpty(), tag?.convId.orEmpty()))
+        }
+    }
+
+    /**
+     * 第一次用上记账时，把以前聊天记录里已有的用量补记进来（成员回答带着 usage，画的图有模型标签），花费页一打开就有历史。
+     * 那时没记记录员的后台活，补不回来。
+     */
+    private fun backfillLedger() {
+        val out = mutableListOf<UsageRecord>()
+        for (c in state.conversations) {
+            for (m in storage.loadMessages(c.id)) {
+                if (m.role != Role.AI || m.status != MsgStatus.DONE) continue
+                // 标签是「模型（服务商名）」，后面可能带「· 快速 / · 深度」
+                val model = m.modelLabel.substringBefore("（").trim()
+                val pname = m.modelLabel.substringAfter("（", "").substringBefore("）").trim()
+                if (model.isEmpty()) continue
+                val p = state.providers.firstOrNull { it.name == pname } ?: state.member(m.senderId)?.let { state.provider(it.providerId) }
+                val platform = p?.let(Thinking::platformOf).orEmpty()
+                val images = m.attachments.count { it.kind == AttachmentKind.GENERATED_IMAGE }
+                val u = m.usage
+                if (m.senderId == PAINTER_ID) {
+                    if (images > 0) out += UsageRecord(m.createdAt, UsageKinds.IMAGE, p?.id.orEmpty(), pname, platform, model, images = images, convId = c.id, backfill = true)
+                } else if (u != null) {
+                    out += UsageRecord(m.createdAt, UsageKinds.CHAT, p?.id.orEmpty(), pname, platform, model, u.prompt, u.cached, u.completion,
+                        memberId = m.senderId, convId = c.id, backfill = true)
+                }
+            }
+        }
+        ledger.addAll(out.sortedBy { it.at })
+        ledger.backfilled = true
+    }
+
     // ———————————————— 记忆 ————————————————
 
     private val memoLocks = ConcurrentHashMap<String, kotlinx.coroutines.sync.Mutex>()
@@ -632,7 +678,7 @@ class Engine(
     /** 后台活出了异常（Key 失效、欠费、网络……）：记下来、提示用户，不影响聊天。 */
     private suspend fun guard(job: BgJob, convId: String, block: suspend () -> Unit) {
         try {
-            block()
+            withContext(UsageTag(job.name.lowercase(), convId = convId)) { block() }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Throwable) {
@@ -757,7 +803,7 @@ class Engine(
         val items = state.memories.filterNot { it.pinned }
         if (items.size < 2) return CommandResult(message = "记忆不多，不用整理")
         val (p, model) = Recorder.pick(state) ?: return CommandResult(false, "没有能用的模型来整理（先在 模型服务 里配一个）")
-        val r = withContext(Dispatchers.IO) { llm.chat(p, model, listOf(userMsg(Recorder.tidyPrompt(items))), null, null) { _, _ -> } }
+        val r = withContext(Dispatchers.IO + UsageTag("memory")) { llm.chat(p, model, listOf(userMsg(Recorder.tidyPrompt(items))), null, null) { _, _ -> } }
         val out = Recorder.parseItems(r.content) ?: return CommandResult(false, "记录员的输出看不懂，没有改动")
         if (out.isEmpty()) return CommandResult(false, "记录员一条都没留，不像话，没有改动")
         val next = out.map { e ->
@@ -861,7 +907,7 @@ class Engine(
         val (p, model) = Recorder.pick(state) ?: run { bg.failed(BgJob.ADDRESSING, BackgroundWatch.NO_RECORDER, title); return emptyList() }
         return try {
             val r = withTimeoutOrNull(10_000) {
-                withContext(Dispatchers.IO) {
+                withContext(Dispatchers.IO + UsageTag("addressing", convId = convId)) {
                     llm.chat(p, model, listOf(userMsg(Addressing.prompt(text, members, state.profile.name))), null, null) { _, _ -> }
                 }
             }
@@ -1155,7 +1201,7 @@ class Engine(
         val msg = Message(newId(), convId, Role.AI, PAINTER_ID, status = MsgStatus.STREAMING, createdAt = now())
         addMessage(msg)
         try {
-            val r = paintAuto(userMsg.content)
+            val r = withContext(UsageTag(UsageKinds.IMAGE, convId = convId)) { paintAuto(userMsg.content) }
             updateMessage(convId, msg.id) {
                 it.copy(attachments = listOf(r.att), content = r.revisedPrompt?.let { rp -> "按描述画好了。\n\n> $rp" } ?: "按描述画好了。",
                     status = MsgStatus.DONE, modelLabel = r.label)
@@ -1170,6 +1216,10 @@ class Engine(
 
     private suspend fun paint(target: Pair<ProviderConfig, String>, prompt: String, size: String? = null): Pair<Attachment, String?> {
         val r = images.generate(target.first, target.second, prompt, size ?: state.settings.imageGen.size)
+        // 画成一张记一张（成员在聊天里画的记在成员账上；测试画的算测试）
+        currentCoroutineContext()[UsageTag].let { tag ->
+            recordUsage(target.first, target.second, Usage(), if (tag?.kind == UsageKinds.TEST) UsageKinds.TEST else UsageKinds.IMAGE, tag, images = 1)
+        }
         val ext = r.mime.substringAfter('/').replace("jpeg", "jpg")
         val att = Attachment(newId(), "图片_${System.currentTimeMillis() % 1_000_000}.$ext", r.mime, r.bytes.size.toLong(), AttachmentKind.GENERATED_IMAGE, note = prompt.take(200))
         storage.putFile(att, r.bytes, null)
@@ -1254,7 +1304,8 @@ class Engine(
             var usage = Usage()
             var rounds = 0
             var toolUses = 0
-            while (true) {
+            // 这一段里调模型、画图都记在这位成员的账上
+            withContext(UsageTag(UsageKinds.CHAT, member.id, convId)) { while (true) {
                 rounds++
                 val before = snapshot(convId).firstOrNull { it.id == msg.id }?.content?.length ?: 0
                 val r = llm.chat(provider, model.id, working, member.temperature, tools, extra, onSources, thinking) { c, rs -> appendDelta(convId, msg.id, c, rs) }
@@ -1290,7 +1341,7 @@ class Engine(
                         put("content", result)
                     }
                 }
-            }
+            } }
             // 模型不认切换思考的参数：这次去掉参数答完了，标签恢复原样，告诉用户一声（之后这个模型都按默认）
             val thinkingRefused = thinking != null && llm.thinkingDropped(provider, model.id)
             if (thinkingRefused) emit(Event.Notice("「${member.name}」用的 ${model.id} 不认「${Thinking.label(member.thinking)}」的参数，这次按它默认的方式回答了"))

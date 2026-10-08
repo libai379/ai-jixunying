@@ -529,6 +529,46 @@ class EngineTest {
         assertNull(problem(BgJob.STANCES))
     }
 
+    /** 记账：成员回答、记录员的后台活、画图都记一条；第一次启动时把以前聊天记录里的用量补记进来（只补一次）。 */
+    @Test
+    fun ledgerRecordsEveryCall() = runBlocking {
+        val (e, ms) = engineWithMembers("甲", "乙", "丙")
+        e.call(Command.SaveProvider(ProviderConfig("pimg", "custom", "画图", "${base()}/v1", "k", listOf(ModelInfo("fake-image", tools = false, imageGen = true)))))
+        val conv = e.call(Command.CreateConversation(ms.map { it.id })).data
+        e.call(Command.UpdateConversation(e.state.conversation(conv)!!.copy(webSearch = false)))
+        fun ledger() = com.guixing.jixunying.engine.Ledger(File(dir, "usage")).since()
+        suspend fun until(what: String, ok: () -> Boolean) = withTimeout(10_000) { while (!ok()) delay(50) }.also { assertTrue(ok(), what) }
+
+        // 「让丙来说说」：点名判断记一条，只有丙回答，记在丙账上
+        e.call(Command.SendMessage(conv, "让丙来说说"))
+        waitIdle(e, conv, 1)
+        until("点名和回答都记上") { ledger().map { it.kind }.containsAll(listOf("addressing", "chat")) }
+        val chat = ledger().single { it.kind == "chat" }
+        assertEquals("m2", chat.memberId, "点名点的是丙")
+        assertEquals(conv, chat.convId)
+        assertEquals(10, chat.prompt); assertEquals(5, chat.completion)
+        assertEquals("p1", chat.providerId); assertEquals("fake-chat", chat.model)
+        // 大家都答的一题：三条回答 + 立场档案记录员
+        e.call(Command.SendMessage(conv, "1.5 和 1.12 哪个大"))
+        waitIdle(e, conv, 4)
+        until("立场档案记上") { ledger().any { it.kind == "stances" && it.convId == conv } }
+        assertEquals(4, ledger().count { it.kind == "chat" })
+
+        // 直接画图：记一张
+        e.call(Command.SendMessage(conv, "一只猫", drawImage = true))
+        until("画图记一张") { ledger().any { it.kind == "image" && it.images == 1 && it.model == "fake-image" && it.convId == conv } }
+
+        // 补记：把账本删掉，重新打开，以前那条带 usage 的回答和那张图会补进来（标着 backfill），再开一次不重复补
+        File(dir, "usage").deleteRecursively()
+        val e2 = Engine(Storage(dir))
+        until("补记") { ledger().count { it.backfill && it.kind == "chat" && it.prompt == 10 } == 4 && ledger().any { it.backfill && it.kind == "image" } }
+        val n = ledger().size
+        Engine(Storage(dir))
+        delay(500)
+        assertEquals(n, ledger().size, "只补一次")
+        assertTrue(e2.state.members.isNotEmpty())
+    }
+
     @Test
     fun platformNativeSearch() = runBlocking {
         val (e, _) = engineWithMembers("小智")

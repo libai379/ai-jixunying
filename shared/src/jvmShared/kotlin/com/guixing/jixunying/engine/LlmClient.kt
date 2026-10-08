@@ -25,6 +25,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.currentCoroutineContext
 
 class ToolCall(val id: String, val name: String, val arguments: String, val type: String = "function")
 
@@ -43,6 +44,9 @@ private val THINKING_KEYS = listOf("thinking", "enable_thinking", "thinking_budg
 
 /** OpenAI 兼容的 /chat/completions，流式。国内外各家都走这一套。 */
 class LlmClient(private val proxyOf: (ProviderConfig) -> String?) {
+
+    /** 每次调用成功后记账（Engine 设置；UsageTag 说明算谁的账）。 */
+    @Volatile var onUsage: ((ProviderConfig, String, Usage, UsageTag?) -> Unit)? = null
 
     /** 某个模型不接受的参数，出过一次 400 就记住，以后不再传。见教训库第 1、2 条。 */
     private val droppedParams = ConcurrentHashMap<String, MutableSet<String>>()
@@ -85,7 +89,11 @@ class LlmClient(private val proxyOf: (ProviderConfig) -> String?) {
                 if (thinking != null && "thinking" !in dropped) thinking.forEach { (k, v) -> put(k, v) }
             }
             try {
-                return stream(provider, body, onSources, onDelta)
+                val r = stream(provider, body, onSources, onDelta)
+                // 没返回用量的也记一条（花费页会说「有几次没返回用量，没算进去」）
+                val tag = currentCoroutineContext()[UsageTag]
+                runCatching { onUsage?.invoke(provider, model, r.usage, tag) }
+                return r
             } catch (e: ApiException) {
                 attempt++
                 val bad = guessBadParam(e, body)
