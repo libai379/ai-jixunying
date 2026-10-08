@@ -723,12 +723,12 @@ private fun ImagePage(ctl: AppController, state: AppState) {
                 style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
             Spacer(Modifier.height(6.dp))
             listOf(
-                "智谱开放平台：cogview-3-flash 免费",
-                "MiniMax：image-01",
+                "千问AI平台 / 阿里百炼：千问图像（推荐，画里的中文字写得准）、通义万相",
                 "火山方舟：豆包 Seedream（即梦同款）",
-                "阿里百炼 / 千问AI平台：千问图像、通义万相",
+                "MiniMax：image-01",
                 "硅基流动：可图 Kolors、Qwen-Image",
                 "魔搭 ModelScope：每天有免费额度",
+                "智谱开放平台：cogview-3-flash 免费，但写不好字",
             ).forEach { Text("· $it", style = MaterialTheme.typography.bodySmall) }
             Spacer(Modifier.height(10.dp))
             Button(onClick = { ctl.openSettings(SettingsTab.PROVIDERS) }) { Text("去添加服务商") }
@@ -738,8 +738,10 @@ private fun ImagePage(ctl: AppController, state: AppState) {
     SectionCard {
         FieldLabel("用哪个画图模型", "点一下就换，马上生效")
         val first = candidates.first()
+        val qwenFirst = "qwen-image" in first.modelId.lowercase()
         RadioRow(auto, "自动（推荐）",
-            "现在会用 ${first.modelId}（${first.providerName}，${first.note}）。画失败了会自动换下一个。") {
+            (if (qwenFirst) "画质优先，千问图像排第一。" else "画质优先（配了千问AI平台或阿里百炼，就先用画字最准的千问图像）。") +
+                "现在会用 ${first.modelId}（${first.providerName}，${first.note}）。画失败了（比如余额用完）会自动换下一家。") {
             save { it.copy(providerId = "", modelId = "") }
         }
         candidates.forEach { c ->
@@ -849,7 +851,7 @@ private fun AboutPage(ctl: AppController) {
             Spacer(Modifier.width(12.dp))
             Column {
                 Text("AI集训营", style = MaterialTheme.typography.titleMedium)
-                Text("多模型助手 · 群聊 · 联网 · 画图 · 读文档 · 记忆 · 微信助理", style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
+                Text("多模型助手 · 群聊 · 立场档案 · 联网 · 画图 · 读文档 · 记忆 · 微信助理", style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
             }
         }
         Spacer(Modifier.height(12.dp))

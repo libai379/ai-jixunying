@@ -23,8 +23,6 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -80,7 +78,7 @@ class WeixinBridge(
         /** 协议按官方插件这个版本对齐（请求头 iLink-App-ClientVersion 由它算出来）。 */
         const val CHANNEL_VERSION = "2.4.9"
         const val APP_ID = "bot"
-        const val BOT_AGENT = "AIJixunying/1.2.1"
+        const val BOT_AGENT = "AIJixunying/1.3.0"
         /** 会话过期（要重新扫码），官方插件遇到后暂停一小时。 */
         const val STALE_TOKEN = -14
         /** 一条微信消息最长发多少字，再长就拆开。 */
@@ -147,7 +145,8 @@ class WeixinBridge(
     private var monitorJob: Job? = null
     private var loginJob: Job? = null
     @Volatile private var pendingVerify: String? = null
-    private val userLocks = ConcurrentHashMap<String, Mutex>()
+    /** 每个人一条队列、一个处理者：连发几条时严格按收到的顺序答（以前每条各自抢锁，先发的可能后答）。 */
+    private val queues = ConcurrentHashMap<String, kotlinx.coroutines.channels.Channel<JsonObject>>()
     private val typingTickets = ConcurrentHashMap<String, String>()
     private val seen = java.util.Collections.synchronizedSet(LinkedHashSet<String>())
     @Volatile private var info = WeixinInfo(bound = account != null, status = if (account != null) "正在连接…" else "未绑定", boundAt = account?.boundAt ?: 0)
@@ -367,7 +366,7 @@ class WeixinBridge(
                         store(cursorFile, WeixinCursor.serializer(), cursor)
                     }
                     if (!info.status.startsWith("已连接")) update(info.copy(bound = true, status = "已连接：在微信里给助理发消息就行"))
-                    resp.arr("msgs")?.forEach { m -> (m as? JsonObject)?.let { msg -> scope.launch { handle(msg) } } }
+                    resp.arr("msgs")?.forEach { m -> (m as? JsonObject)?.let(::handle) }
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Throwable) {
@@ -382,8 +381,8 @@ class WeixinBridge(
     private fun msgId(m: JsonObject): String? =
         m.str("message_id") ?: m.arr("item_list")?.firstNotNullOfOrNull { (it as? JsonObject)?.str("msg_id") }
 
-    /** 一条微信消息：转成文字 + 附件，交给 AI，答完发回去。同一个人的消息按顺序处理。 */
-    private suspend fun handle(m: JsonObject) {
+    /** 一条微信消息：先在收消息的循环里过一遍（是不是本人、收过没有），再排进这个人的队列，按顺序转给 AI、答完发回去。 */
+    private fun handle(m: JsonObject) {
         val from = m.str("from_user_id") ?: return
         if ((m.int("message_type") ?: 1) != 1) return
         // 只回答扫码绑定的本人（和官方插件的默认规则一样）。别人能给这个助理发消息，
@@ -399,7 +398,22 @@ class WeixinBridge(
             store(cursorFile, WeixinCursor.serializer(), cursor)
         }
         update(info.copy(lastMessageAt = System.currentTimeMillis()))
-        userLocks.getOrPut(from) { Mutex() }.withLock { process(from, m) }
+        // 只有收消息的循环会调到这里（一个协程），getOrPut 不会并发建出两个处理者
+        queues.getOrPut(from) {
+            kotlinx.coroutines.channels.Channel<JsonObject>(kotlinx.coroutines.channels.Channel.UNLIMITED).also { ch ->
+                scope.launch {
+                    for (msg in ch) {
+                        try {
+                            process(from, msg)
+                        } catch (e: CancellationException) {
+                            // 整个助理在关：退出；只是这一条被取消：接着处理下一条（处理者没了，后面的消息就永远没人管）
+                            if (!isActive) throw e
+                        } catch (_: Throwable) {
+                        }
+                    }
+                }
+            }
+        }.trySend(m)
     }
 
     private suspend fun process(from: String, m: JsonObject) {

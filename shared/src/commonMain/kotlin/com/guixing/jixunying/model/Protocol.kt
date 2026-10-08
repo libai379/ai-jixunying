@@ -67,6 +67,13 @@ sealed interface Command {
     /** 微信助理：解除绑定。 */
     @Serializable data object WeixinLogout : Command
 
+    /** 立场档案：取议题（convId 留空 = 全部对话的）。结果 data 是 List<StanceTopic> 的 JSON。 */
+    @Serializable data class StanceList(val convId: String = "") : Command
+    /** 立场档案：标对错。verdict 是立场的 key，或 StanceTopic.NONE / OPEN，空 = 取消标记。 */
+    @Serializable data class StanceMark(val topicId: String, val verdict: String) : Command
+    /** 立场档案：删掉一个议题（记录员认错了的）。 */
+    @Serializable data class StanceDelete(val topicId: String) : Command
+
     /** 换一个新的配对二维码（旧的立即失效）。 */
     @Serializable data object NewPairingCode : Command
     @Serializable data class RemoveDevice(val id: String) : Command

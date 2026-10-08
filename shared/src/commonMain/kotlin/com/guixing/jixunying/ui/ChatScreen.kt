@@ -115,23 +115,27 @@ fun ChatScreen(ctl: AppController, convId: String, wide: Boolean, openDrawer: ()
     val conv = state.conversation(convId) ?: return
     val messages = allMessages[convId].orEmpty()
     var showConvSettings by remember { mutableStateOf(ctl.debugDialog == "convsettings") }
+    // 立场档案：这个对话记过议题才去取；点了某条回答下的立场标签就打开它
+    val topics = if (conv.stanceTopics > 0) rememberStanceTopics(ctl, convId, conv.stanceAt) else emptyList()
+    var stanceDialog by remember { mutableStateOf<String?>(if (ctl.debugDialog == "stances") "" else null) }
     // 不管从哪条路打开的对话，聊天记录没加载就补上（以前有的入口只切了对话、没加载，显示成空的）
     LaunchedEffect(convId, ctl.backend) {
         if (!ctl.backend.store.hasMessages(convId)) ctl.run(Command.LoadMessages(convId), quiet = true)
     }
 
     Column(Modifier.fillMaxSize()) {
-        ChatTopBar(state, conv, wide, openDrawer) { showConvSettings = true }
+        ChatTopBar(state, conv, wide, openDrawer, onStances = if (conv.stanceTopics > 0) ({ stanceDialog = "" }) else null) { showConvSettings = true }
         Box(Modifier.weight(1f).fillMaxWidth()) {
-            MessageList(ctl, state, conv, messages)
+            MessageList(ctl, state, conv, messages, topics) { stanceDialog = it }
         }
         Composer(ctl, state, conv, running = messages.any { it.status == MsgStatus.STREAMING })
     }
     if (showConvSettings) ConversationSettingsDialog(ctl, state, conv) { showConvSettings = false }
+    stanceDialog?.let { focus -> ConversationStancesDialog(ctl, state, conv, topics, focus.ifEmpty { null }) { stanceDialog = null } }
 }
 
 @Composable
-private fun ChatTopBar(state: AppState, conv: Conversation, wide: Boolean, openDrawer: () -> Unit, onSettings: () -> Unit) {
+private fun ChatTopBar(state: AppState, conv: Conversation, wide: Boolean, openDrawer: () -> Unit, onStances: (() -> Unit)?, onSettings: () -> Unit) {
     val members = conv.memberIds.mapNotNull { state.member(it) }
     Row(
         Modifier.fillMaxWidth().height(60.dp).padding(horizontal = 12.dp),
@@ -149,6 +153,10 @@ private fun ChatTopBar(state: AppState, conv: Conversation, wide: Boolean, openD
                 style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, maxLines = 1, overflow = TextOverflow.Ellipsis,
             )
         }
+        if (onStances != null) {
+            Pill("立场 ${conv.stanceTopics}", MaterialTheme.colorScheme.primary, onClick = onStances)
+            Spacer(Modifier.width(8.dp))
+        }
         Row(
             Modifier.clip(RoundedCornerShape(50)).border(1.dp, Ext.c.border, RoundedCornerShape(50)).clickable(onClick = onSettings)
                 .padding(start = 6.dp, end = 10.dp, top = 4.dp, bottom = 4.dp),
@@ -164,8 +172,10 @@ private fun ChatTopBar(state: AppState, conv: Conversation, wide: Boolean, openD
 }
 
 @Composable
-private fun MessageList(ctl: AppController, state: AppState, conv: Conversation, messages: List<Message>) {
+private fun MessageList(ctl: AppController, state: AppState, conv: Conversation, messages: List<Message>,
+                        topics: List<com.guixing.jixunying.model.StanceTopic>, onStance: (String) -> Unit) {
     val listState = rememberLazyListState()
+    val stanceOf = remember(topics) { topics.flatMap { t -> t.entries.map { e -> e.messageId to (t to e) } }.groupBy({ it.first }, { it.second }) }
     val last = messages.lastOrNull()
     // 从侧栏搜索结果点进来：滚到那条消息
     LaunchedEffect(ctl.focusMessageId, messages.size) {
@@ -209,7 +219,7 @@ private fun MessageList(ctl: AppController, state: AppState, conv: Conversation,
         }
         items(messages, key = { it.id }) { m ->
             Box(Modifier.widthIn(max = 860.dp).fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
-                if (m.role == Role.USER) UserMessage(ctl, state, m) else AiMessage(ctl, state, m)
+                if (m.role == Role.USER) UserMessage(ctl, state, m) else AiMessage(ctl, state, m, stanceOf[m.id].orEmpty(), onStance)
             }
         }
         item { Spacer(Modifier.height(24.dp)) }
@@ -226,7 +236,8 @@ private fun ChatEmptyHint(state: AppState, conv: Conversation, onTip: (String) -
             style = MaterialTheme.typography.titleLarge)
         Spacer(Modifier.height(8.dp))
         Text(
-            if (members.size > 1) "直接提问，大家各自独立回答；用 @名字 点名某位回答，@所有人 让全员回答。\nAI 之间也会互相 @、互相纠错。"
+            if (members.size > 1) "直接提问，大家各自独立回答；想让某位回答就喊名字（「${members.first().name}，……」）或 @${members.first().name}，@所有人 让全员回答。\n" +
+                "AI 之间也会互相 @、互相纠错；有答案的问题，谁一开始怎么说、后来谁改了口，记在「立场档案」里。"
             else "可以发图片、PDF、Word、Excel 等文件；打开「联网」它会先搜再答；想要图直接说「画一张……」。",
             style = MaterialTheme.typography.bodyMedium, color = Ext.c.subtle,
         )
@@ -262,7 +273,9 @@ private fun UserMessage(ctl: AppController, state: AppState, m: Message) {
 }
 
 @Composable
-private fun AiMessage(ctl: AppController, state: AppState, m: Message) {
+private fun AiMessage(ctl: AppController, state: AppState, m: Message,
+                      stances: List<Pair<com.guixing.jixunying.model.StanceTopic, com.guixing.jixunying.model.StanceEntry>> = emptyList(),
+                      onStance: (String) -> Unit = {}) {
     val member = state.member(m.senderId)
     val painter = m.senderId == PAINTER
     val (body, thinkInline) = remember(m.content) { splitThink(m.content) }
@@ -277,6 +290,11 @@ private fun AiMessage(ctl: AppController, state: AppState, m: Message) {
                 Text(if (painter) "画图助手" else member?.name ?: "已移除的成员", style = MaterialTheme.typography.titleSmall)
                 Spacer(Modifier.width(8.dp))
                 if (m.modelLabel.isNotBlank()) Pill(m.modelLabel, Ext.c.subtle)
+            }
+            // 立场档案：这条回答在哪个议题上是什么立场、是不是改口（点开看这道题大家怎么说）
+            stances.forEach { (t, e) ->
+                Spacer(Modifier.height(4.dp))
+                StanceChip(t, e) { onStance(t.id) }
             }
             Spacer(Modifier.height(6.dp))
             ToolStepsView(m.tools, streaming = m.status == MsgStatus.STREAMING)
@@ -747,7 +765,7 @@ private fun Composer(ctl: AppController, state: AppState, conv: Conversation, ru
                         if (text.text.isEmpty()) Text(
                             when {
                                 drawMode -> "直接画图：描述画面，比如「水墨风格的江南小镇，清晨薄雾」（只画这一张，发完回到聊天）"
-                                members.size > 1 -> if (platform.isDesktop) "发消息…  @名字 点名回答，Enter 发送，Shift+Enter 换行" else "发消息…  @名字 点名回答"
+                                members.size > 1 -> if (platform.isDesktop) "发消息…  喊名字或 @名字 点名回答，Enter 发送，Shift+Enter 换行" else "发消息…  喊名字或 @ 点名"
                                 else -> if (platform.isDesktop) "发消息，可以附图片和文档…  Enter 发送，Shift+Enter 换行" else "发消息，可以附图片和文档"
                             },
                             style = MaterialTheme.typography.bodyLarge, color = Ext.c.subtle, maxLines = 1, overflow = TextOverflow.Ellipsis,

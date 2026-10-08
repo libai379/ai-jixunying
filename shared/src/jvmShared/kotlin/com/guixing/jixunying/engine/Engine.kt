@@ -23,6 +23,10 @@ import com.guixing.jixunying.model.ProviderConfig
 import com.guixing.jixunying.model.ReplyMode
 import com.guixing.jixunying.model.Role
 import com.guixing.jixunying.model.SearchSource
+import com.guixing.jixunying.model.StanceEntry
+import com.guixing.jixunying.model.StanceOption
+import com.guixing.jixunying.model.StanceTopic
+import com.guixing.jixunying.model.Stances
 import com.guixing.jixunying.model.ToolStep
 import com.guixing.jixunying.model.USER_ID
 import com.guixing.jixunying.model.Usage
@@ -40,7 +44,9 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -62,8 +68,8 @@ const val PAINTER_ID = "tool:image"
 /** 一次回答最多调几次工具（搜索、读网页、画图）。 */
 const val MAX_TOOL_USES = 8
 
-const val NO_IMAGE_MODEL = "还没有能画图的服务商。到 设置 → 模型服务 添加任意一家能画图的平台并填 Key：智谱开放平台（cogview-3-flash 免费）、" +
-    "MiniMax（image-01）、火山方舟（豆包 Seedream）、阿里百炼（通义万相）等都行。加好以后在聊天里说「画一张……」就会自动用它，不用别的设置。"
+const val NO_IMAGE_MODEL = "还没有能画图的服务商。到 设置 → 模型服务 添加任意一家能画图的平台并填 Key：千问AI平台或阿里百炼（千问图像，画里的中文字写得准）、" +
+    "火山方舟（豆包 Seedream）、MiniMax（image-01）、智谱开放平台（cogview-3-flash 免费，但写不好字）等都行。加好以后在聊天里说「画一张……」就会自动用它，不用别的设置。"
 
 /**
  * 引擎：电脑和手机各有一个，都能单独用。数据、Key、模型调用都在本机。
@@ -414,6 +420,7 @@ class Engine(
             val atts = snapshot(c.id).flatMap { m -> m.attachments.map { it.id } }
             convs.remove(c.id)
             storage.deleteConversation(c.id, atts)
+            if (synchronized(stanceBook) { stanceBook.removeAll { it.convId == c.id } }) storage.saveStances(synchronized(stanceBook) { stanceBook.toList() })
             updateState { s -> s.copy(conversations = s.conversations.filterNot { it.id == c.id }) }
             emit(Event.ConversationRemoved(c.id))
             CommandResult()
@@ -430,6 +437,7 @@ class Engine(
             removed?.attachments?.filter { it.kind == AttachmentKind.GENERATED_IMAGE }?.forEach { storage.deleteFile(it.id) }
             save(c.convId)
             emit(Event.MessageRemoved(c.convId, c.messageId))
+            dropStanceMessage(c.convId, c.messageId)
             CommandResult()
         }
         is Command.Regenerate -> regenerate(c.convId, c.messageId)
@@ -453,6 +461,27 @@ class Engine(
         is Command.WeixinLogin -> weixin?.login() ?: CommandResult(false, "微信助理只能接在电脑上：到电脑上的 设置 → 微信 扫码绑定")
         is Command.WeixinVerify -> weixin?.verify(c.code) ?: CommandResult(false, "这台设备没有接微信助理")
         is Command.WeixinLogout -> weixin?.logout() ?: CommandResult(false, "这台设备没有接微信助理")
+        is Command.StanceList -> {
+            val list = synchronized(stanceBook) { stanceBook.filter { c.convId.isBlank() || it.convId == c.convId } }
+            CommandResult(data = AppJson.encodeToString(kotlinx.serialization.builtins.ListSerializer(StanceTopic.serializer()), list))
+        }
+        is Command.StanceMark -> {
+            val convId = synchronized(stanceBook) {
+                val i = stanceBook.indexOfFirst { it.id == c.topicId }
+                val t = stanceBook.getOrNull(i)
+                val ok = t != null && (c.verdict.isEmpty() || c.verdict == StanceTopic.NONE || c.verdict == StanceTopic.OPEN || t.option(c.verdict) != null)
+                if (t == null || !ok) null else { stanceBook[i] = t.copy(verdict = c.verdict, updatedAt = now()); t.convId }
+            } ?: return CommandResult(false, "这个议题已经不在了，或者没有这个立场")
+            saveStances(setOf(convId))
+            CommandResult()
+        }
+        is Command.StanceDelete -> {
+            val convId = synchronized(stanceBook) {
+                stanceBook.firstOrNull { it.id == c.topicId }?.also { t -> stanceBook.removeAll { it.id == t.id } }?.convId
+            } ?: return CommandResult(false, "这个议题已经不在了")
+            saveStances(setOf(convId))
+            CommandResult()
+        }
         is Command.NewPairingCode -> {
             previousSecret = null
             updateState { it.copy(pairingSecret = newSecret()) }
@@ -549,8 +578,8 @@ class Engine(
     private suspend fun send(c: Command.SendMessage): CommandResult {
         var conv = state.conversation(c.convId) ?: return CommandResult(false, "对话不存在")
         if (c.text.isBlank() && c.attachmentIds.isEmpty()) return CommandResult(false, "空消息")
-        // @ 了不在这个对话里的成员：直接拉进来让他回答（以前会悄悄换成别人答）
-        val invited = if (c.drawImage) emptyList() else parseMentions(c.text, state.members).filter { it.id !in conv.memberIds }
+        // @ 了（或者开头直接喊了）不在这个对话里的成员：直接拉进来让他回答（以前会悄悄换成别人答）
+        val invited = if (c.drawImage) emptyList() else outsidersCalled(c.text, conv)
         if (invited.isNotEmpty()) {
             updateState { s -> s.copy(conversations = s.conversations.map { if (it.id == conv.id) it.copy(memberIds = it.memberIds + invited.map { m -> m.id }) else it }) }
             conv = state.conversation(conv.id) ?: return CommandResult(false, "对话不存在")
@@ -728,6 +757,10 @@ class Engine(
             .take(limit).map { it.second }
     }
 
+    /** @ 了、或者开头直接喊了名字（「阿麦，……」）、但不在这个对话里的成员。 */
+    private fun outsidersCalled(text: String, conv: Conversation): List<Member> =
+        (parseMentions(text, state.members) + Addressing.leading(text, state.members)).distinct().filter { it.id !in conv.memberIds }
+
     /** 找出文字里 @ 了哪些成员，按出现顺序；名字有包含关系时取最长的。 */
     fun parseMentions(text: String, members: List<Member>): List<Member> {
         val out = LinkedHashSet<Member>()
@@ -746,9 +779,12 @@ class Engine(
         if (members.isEmpty()) return emptyList()
         val everyone = Regex("@(所有人|全体成员|全体|大家|all)", RegexOption.IGNORE_CASE).containsMatchIn(trigger.content)
         val mentioned = parseMentions(trigger.content, members)
+        // 没 @ 人、但直接喊了名字（「阿麦，画一张图」「让阿麦来」）：只让被叫到的回答
+        val named = if (everyone || mentioned.isNotEmpty() || members.size < 2) emptyList() else addressed(trigger.content, members)
         val targets = when {
             everyone -> members
             mentioned.isNotEmpty() -> mentioned
+            named.isNotEmpty() -> named
             members.size == 1 -> members
             conv.replyMode == ReplyMode.MENTION_ONLY -> listOf(members.first())
             else -> members
@@ -761,7 +797,9 @@ class Engine(
         } else {
             targets.mapNotNull { m -> reply(convId, m, null, independent = false, calledBy = null) }
         }
+        val firstAnswers = produced
         val all = produced.toMutableList()
+        val calledBy = mutableMapOf<String, String>()
 
         // AI 之间互相 @：被 @ 的接着说，最多接力 maxMentionChain 轮
         var depth = 0
@@ -772,12 +810,169 @@ class Engine(
             for (msg in produced) {
                 val speaker = state.member(msg.senderId) ?: continue
                 val called = parseMentions(msg.content, currentMembers).filter { it.id != speaker.id }
-                for (m in called) reply(convId, m, null, independent = false, calledBy = speaker.name)?.let(next::add)
+                for (m in called) reply(convId, m, null, independent = false, calledBy = speaker.name)?.let { next += it; calledBy[it.id] = speaker.name }
             }
             produced = next
             all += next
         }
+        // 立场档案：群聊每轮答完，记录员在后台看一遍（不耽误下一句）
+        if (members.size > 1 && all.isNotEmpty()) {
+            val independentIds = if (independent) firstAnswers.map { it.id }.toSet() else emptySet()
+            val round = all.toList()
+            scope.launch { runCatching { judgeStances(convId, trigger, round, independentIds, calledBy.toMap()) } }
+        }
         return all
+    }
+
+    /** 点名：没有 @ 时，看是不是直接喊了某几位成员的名字。开头直接喊的程序认；别的说法问记录员的模型，判断不了就当对大家说。 */
+    private suspend fun addressed(text: String, members: List<Member>): List<Member> {
+        if (Addressing.namesIn(text, members).isEmpty()) return emptyList()
+        Addressing.leading(text, members).takeIf { it.isNotEmpty() }?.let { return it }
+        val (p, model) = Recorder.pick(state) ?: return emptyList()
+        return try {
+            withTimeoutOrNull(10_000) {
+                val r = withContext(Dispatchers.IO) {
+                    llm.chat(p, model, listOf(userMsg(Addressing.prompt(text, members, state.profile.name))), null, null) { _, _ -> }
+                }
+                Addressing.parse(r.content, members)
+            }.orEmpty()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            emptyList()
+        }
+    }
+
+    // ———————————————— 立场档案 ————————————————
+
+    private val stanceBook: MutableList<StanceTopic> by lazy { storage.loadStances() }
+    private val stanceLocks = ConcurrentHashMap<String, kotlinx.coroutines.sync.Mutex>()
+
+    private fun topicsOf(convId: String) = synchronized(stanceBook) { stanceBook.filter { it.convId == convId } }
+
+    /** 存盘，并更新对话上的议题数和变化时间（界面看到变了就重新取）。 */
+    private fun saveStances(convIds: Set<String>) {
+        val all = synchronized(stanceBook) { stanceBook.toList() }
+        storage.saveStances(all)
+        val counts = convIds.associateWith { id -> all.count { it.convId == id } }
+        updateState { s -> s.copy(conversations = s.conversations.map { c -> counts[c.id]?.let { n -> c.copy(stanceTopics = n, stanceAt = now()) } ?: c }) }
+    }
+
+    /**
+     * 每轮答完：记录员看一遍，开新议题，或者记下已有议题上谁改了口、为什么改。
+     * 同一个对话按顺序来（上一轮记好了，下一轮才看得到）。
+     */
+    private suspend fun judgeStances(convId: String, ask: Message, round: List<Message>, independentIds: Set<String>, calledBy: Map<String, String>) {
+        if (!state.settings.memory.stances) return
+        val lock = stanceLocks.getOrPut(convId) { kotlinx.coroutines.sync.Mutex() }
+        lock.withLock {
+            val current = snapshot(convId).associateBy { it.id }
+            val said = round.mapNotNull { current[it.id] }.filter {
+                it.role == Role.AI && it.status == MsgStatus.DONE && it.senderId != PAINTER_ID && stripThink(it.content).isNotBlank()
+            }
+            if (said.isEmpty()) return
+            val open = topicsOf(convId).sortedBy { it.createdAt }.takeLast(3)
+            val canOpen = said.count { it.id in independentIds } >= 2
+            if (open.isEmpty() && !canOpen) return
+            val (p, model) = Recorder.pick(state) ?: return
+            fun nameOf(id: String) = state.member(id)?.name ?: "已移除的成员"
+            val items = said.map { m -> StanceJudge.Said(m, nameOf(m.senderId), m.id in independentIds, calledBy[m.id], toolsNote(m)) }
+            val prompt = StanceJudge.prompt(open, items, stripThink(ask.content), state.profile.name, ::nameOf, canOpen)
+            val r = withContext(Dispatchers.IO) { llm.chat(p, model, listOf(userMsg(prompt)), null, null) { _, _ -> } }
+            val v = StanceJudge.parse(r.content) ?: return
+            applyStances(convId, ask, said, independentIds, open, v, canOpen)
+        }
+    }
+
+    private fun toolsNote(m: Message): String {
+        val used = m.tools.mapNotNull { t ->
+            when (t.kind) {
+                "search" -> if (t.ok) "联网搜索「${t.input.take(30)}」" else null
+                "fetch" -> "读了网页"
+                "doc" -> "查了本机文档"
+                "history" -> "翻了以前的聊天"
+                else -> null
+            }
+        }.distinct()
+        return if (used.isEmpty()) "" else "回答前" + used.joinToString("、")
+    }
+
+    private fun applyStances(convId: String, ask: Message, said: List<Message>, independentIds: Set<String>, open: List<StanceTopic>,
+                             v: StanceJudge.Verdict, canOpen: Boolean) {
+        val speakers = said.map { it.senderId }.toSet()
+        fun idOf(name: String): String? {
+            val n = name.trim().removePrefix("@")
+            if (n.isEmpty()) return null
+            return state.members.filter { it.name.equals(n, ignoreCase = true) }.let { same -> same.firstOrNull { it.id in speakers } ?: same.firstOrNull() }?.id
+        }
+        val now = now()
+        var touched = false
+        // 已有议题：照记录员的判断追加表态
+        for ((idx, ups) in v.updates.groupBy { it.topic }) {
+            val base = open.getOrNull(idx - 1) ?: continue
+            val options = base.options.toMutableList()
+            val added = mutableListOf<StanceEntry>()
+            for (u in ups) {
+                val mid = idOf(u.member)?.takeIf { it in speakers } ?: continue
+                val msg = said.last { it.senderId == mid }
+                if (base.entries.any { it.messageId == msg.id } || added.any { it.memberId == mid }) continue
+                var key = u.stance
+                if (key != StanceTopic.UNCLEAR && options.none { it.key == key }) {
+                    if (u.newText.isBlank()) key = StanceTopic.UNCLEAR else options += StanceOption(key, u.newText)
+                }
+                val prev = base.latestOf(mid)
+                // 记录员说「没变」就以它为准（有时同一个结论会被它写成新字母）
+                val (finalKey, why) = when {
+                    prev == null -> key to ""
+                    u.why == Stances.HOLD || key == prev.option -> prev.option to Stances.HOLD
+                    else -> key to u.why
+                }
+                val by = if (why.isEmpty() || why == Stances.HOLD) "" else idOf(u.by)?.takeIf { it != mid }.orEmpty()
+                added += StanceEntry(mid, msg.id, ask.id, finalKey, first = false, why = why, by = by, reason = u.reason, doubted = v.userDoubt, time = msg.createdAt)
+            }
+            if (added.isEmpty()) continue
+            synchronized(stanceBook) {
+                val i = stanceBook.indexOfFirst { it.id == base.id }
+                if (i >= 0) {
+                    val cur = stanceBook[i]
+                    stanceBook[i] = cur.copy(options = cur.options + options.filter { o -> cur.options.none { it.key == o.key } },
+                        entries = cur.entries + added, updatedAt = now)
+                    touched = true
+                }
+            }
+        }
+        // 新议题：每位成员的首答
+        val nt = v.newTopic
+        if (canOpen && nt != null) {
+            val options = nt.options.distinctBy { it.first }.map { StanceOption(it.first, it.second) }
+            val entries = nt.stances.mapNotNull { (name, key) ->
+                val mid = idOf(name)?.takeIf { it in speakers } ?: return@mapNotNull null
+                val msg = said.firstOrNull { it.senderId == mid && it.id in independentIds } ?: said.last { it.senderId == mid }
+                val k = if (key == StanceTopic.UNCLEAR || options.any { it.key == key }) key else StanceTopic.UNCLEAR
+                StanceEntry(mid, msg.id, ask.id, k, first = msg.id in independentIds, time = msg.createdAt)
+            }.distinctBy { it.memberId }
+            if (entries.size >= 2) {
+                synchronized(stanceBook) { stanceBook += StanceTopic(newId(), convId, ask.id, nt.question, options, entries, createdAt = now, updatedAt = now) }
+                touched = true
+            }
+        }
+        if (touched) saveStances(setOf(convId))
+    }
+
+    /** 消息删了（或重新生成）：它的表态也去掉；议题一条表态都不剩就删掉。 */
+    private fun dropStanceMessage(convId: String, messageId: String) {
+        val changed = synchronized(stanceBook) {
+            var any = false
+            for (i in stanceBook.indices.reversed()) {
+                val t = stanceBook[i]
+                if (t.convId != convId || t.entries.none { it.messageId == messageId }) continue
+                val left = t.entries.filterNot { it.messageId == messageId }
+                if (left.isEmpty()) stanceBook.removeAt(i) else stanceBook[i] = t.copy(entries = left, updatedAt = now())
+                any = true
+            }
+            any
+        }
+        if (changed) saveStances(setOf(convId))
     }
 
     // ———————————————— 外部渠道（微信助理） ————————————————
@@ -823,7 +1018,7 @@ class Engine(
      */
     suspend fun channelTurn(convId: String, text: String, attachmentIds: List<String>): List<Message> {
         var conv = state.conversation(convId) ?: return emptyList()
-        val invited = parseMentions(text, state.members).filter { it.id !in conv.memberIds }
+        val invited = outsidersCalled(text, conv)
         if (invited.isNotEmpty()) {
             updateState { s -> s.copy(conversations = s.conversations.map { if (it.id == conv.id) it.copy(memberIds = it.memberIds + invited.map { m -> m.id }) else it }) }
             conv = state.conversation(convId) ?: return emptyList()
@@ -854,6 +1049,7 @@ class Engine(
         synchronized(list) { list.removeAll { it.id == messageId } }
         emit(Event.MessageRemoved(convId, messageId))
         save(convId)
+        dropStanceMessage(convId, messageId)
         val prev = all.getOrNull(idx - 1)
         launchFor(convId) {
             if (old.senderId == PAINTER_ID) {
@@ -872,18 +1068,23 @@ class Engine(
     private class Painted(val att: Attachment, val revisedPrompt: String?, val label: String)
 
     /**
-     * 画一张图。设置里指定了模型就只用它；自动模式按候选顺序试（免费的智谱 cogview-3-flash 优先），
-     * 一个失败换下一个，最多试三个。
+     * 画一张图。设置里指定了模型就只用它；自动模式按候选顺序试（千问图像优先，见 ImagePick），
+     * 一个失败换下一个，最多试三个。某家是 Key 失效或欠费，这家别的画图模型也不用试了，直接换下一家。
      */
     private suspend fun paintAuto(prompt: String, size: String? = null, only: ImageChoice? = null): Painted {
         val all = only?.let { listOf(it) } ?: ImagePick.resolve(state)
         if (all.isEmpty()) throw IllegalStateException(NO_IMAGE_MODEL)
         fun key(c: ImageChoice) = c.providerId + "|" + c.modelId
         val recentlyFailed = all.filter { (imageFailures[key(it)] ?: 0L) > now() - 30 * 60_000 }
-        val order = (all - recentlyFailed.toSet() + recentlyFailed).take(3)
+        val order = all - recentlyFailed.toSet() + recentlyFailed
+        val tried = mutableListOf<ImageChoice>()
+        val deadProviders = mutableSetOf<String>()
         var first: Throwable? = null
         for (c in order) {
+            if (tried.size >= 3) break
+            if (c.providerId in deadProviders) continue
             val p = state.provider(c.providerId) ?: continue
+            tried += c
             try {
                 val (att, revised) = paint(p to c.modelId, prompt, size)
                 imageFailures.remove(key(c))
@@ -892,12 +1093,24 @@ class Engine(
                 throw e
             } catch (e: Throwable) {
                 imageFailures[key(c)] = now()
+                if (accountProblem(e)) {
+                    deadProviders += c.providerId
+                    all.filter { it.providerId == c.providerId }.forEach { imageFailures[key(it)] = now() }
+                }
                 if (first == null) first = e
             }
         }
         val e = first ?: IllegalStateException(NO_IMAGE_MODEL)
-        if (order.size <= 1) throw e
-        throw IllegalStateException("试了 ${order.joinToString("、") { it.modelId }}，都没画成。第一个的错误：${friendlyError(e)}", e)
+        if (tried.size <= 1) throw e
+        throw IllegalStateException("试了 ${tried.joinToString("、") { it.modelId }}，都没画成。第一个的错误：${friendlyError(e)}", e)
+    }
+
+    /** Key 失效或欠费：整家都用不了，不是某个模型的问题。 */
+    private fun accountProblem(e: Throwable): Boolean {
+        if (e !is ApiException) return false
+        val lower = e.body.lowercase()
+        return e.status == 401 || e.status == 402 || "arrearage" in lower || "good standing" in lower || "insufficient" in lower ||
+            "balance" in lower || "余额" in e.body || "欠费" in e.body || "invalid api key" in lower || "invalidapikey" in lower
     }
 
     private suspend fun drawDirect(convId: String, userMsg: Message) {
@@ -1355,7 +1568,8 @@ class Engine(
             val hint = when {
                 e.status == 401 || (e.status == 403 && "key" in lower) || "invalid api key" in lower || "login fail" in lower ||
                     "unauthorized" in lower || "authentication" in lower || "令牌" in body -> "API Key 不对或已失效"
-                e.status == 402 || "insufficient" in lower || "余额" in body || "balance" in lower || "quota" in lower -> "余额或额度不足"
+                e.status == 402 || "insufficient" in lower || "余额" in body || "欠费" in body || "balance" in lower || "quota" in lower ||
+                    "arrearage" in lower || "good standing" in lower -> "余额或额度不足"
                 e.status == 404 -> "模型名或接口地址不对"
                 e.status == 429 -> "请求太频繁或额度用完了，稍后再试"
                 e.status >= 500 -> "服务商那边出错了，稍后再试"

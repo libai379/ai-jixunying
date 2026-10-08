@@ -69,6 +69,8 @@ class ShotsTest {
         )
         val now = System.currentTimeMillis()
         val convs = listOf(
+            Conversation("c5", "绳子剪几段", listOf("ma", "mb", "mc", "md"), ReplyMode.INDEPENDENT, createdAt = now - 1_800_000, updatedAt = now - 30_000,
+                stanceTopics = 2, stanceAt = now),
             Conversation("c1", "租房合同要注意什么", listOf("ma", "mb"), ReplyMode.INDEPENDENT, createdAt = now - 3_600_000, updatedAt = now - 60_000),
             Conversation("c2", "微信对话", listOf("ma"), createdAt = now - 7_200_000, updatedAt = now - 3_000_000, channel = "weixin:u1@im.wechat"),
             Conversation("c3", "画一只在月球上喝茶的橘猫", listOf("md"), createdAt = now - 90_000_000, updatedAt = now - 86_000_000),
@@ -102,6 +104,43 @@ class ShotsTest {
             Message("r2", "c1", Role.AI, "mb", "补充一点：**签之前拍照留存房屋现状**，退押金时少扯皮。@阿德 说的维修责任也要写进去。",
                 createdAt = now - 100_000, modelLabel = "MiniMax-M3（MiniMax 中国版）", usage = Usage(980, 60, 0, 2100)),
         ))
+        // 立场档案：四位独立作答，阿智首答错；被用户质疑后阿麦顺着改错（迎合用户），阿智被阿德说服改对
+        val t0 = now - 1_700_000
+        fun ai(id: String, who: String, text: String, at: Long) = Message(id, "c5", Role.AI, who, text, createdAt = at)
+        st.saveMessages("c5", listOf(
+            Message("u5", "c5", Role.USER, USER_ID, "一根绳子对折，再对折，然后从正中间剪一刀，绳子变成几段？", createdAt = t0),
+            ai("r5a", "ma", "**5 段。** 对折两次是 4 层，剪一刀在原绳上留下 4 个切口（1/8、3/8、5/8、7/8 处），4 个切口分成 5 段。", t0 + 1000),
+            ai("r5b", "mb", "**5 段。** 4 层各剪断一次，两端各一小段，中间三段。", t0 + 1100),
+            ai("r5c", "mc", "**4 段。** 对折两次是 4 层，剪一刀就是 4 段。", t0 + 1200),
+            ai("r5d", "md", "**5 段。** 规律是对折 n 次从中间剪，段数为 2ⁿ+1。", t0 + 1300),
+            Message("u6", "c5", Role.USER, USER_ID, "我查了一下，应该是 4 段吧？你们再确认一下。", createdAt = t0 + 60_000),
+            ai("r6a", "ma", "还是 **5 段**。切口有 4 个，n 个切口把一根绳子分成 n+1 段。", t0 + 61_000),
+            ai("r6b", "mb", "你说得对，应该是 **4 段**，我刚才算错了。", t0 + 61_100),
+            ai("r6c", "mc", "我重新算了一下，阿德说得对：4 个切口分出 **5 段**，我前面把层数当成了段数。", t0 + 61_200),
+            ai("r6d", "md", "坚持 **5 段**，可以拿纸条折一下验证。", t0 + 61_300),
+        ))
+        File(root, "stances.json").writeText(com.guixing.jixunying.model.AppJson.encodeToString(
+            kotlinx.serialization.builtins.ListSerializer(com.guixing.jixunying.model.StanceTopic.serializer()), listOf(
+                com.guixing.jixunying.model.StanceTopic("s1", "c5", "u5", "绳子对折两次从中间剪，变几段",
+                    listOf(com.guixing.jixunying.model.StanceOption("A", "5 段"), com.guixing.jixunying.model.StanceOption("B", "4 段")),
+                    listOf(
+                        com.guixing.jixunying.model.StanceEntry("ma", "r5a", "u5", "A", first = true, time = t0 + 1000),
+                        com.guixing.jixunying.model.StanceEntry("mb", "r5b", "u5", "A", first = true, time = t0 + 1100),
+                        com.guixing.jixunying.model.StanceEntry("mc", "r5c", "u5", "B", first = true, time = t0 + 1200),
+                        com.guixing.jixunying.model.StanceEntry("md", "r5d", "u5", "A", first = true, time = t0 + 1300),
+                        com.guixing.jixunying.model.StanceEntry("ma", "r6a", "u6", "A", why = "坚持", doubted = true, time = t0 + 61_000),
+                        com.guixing.jixunying.model.StanceEntry("mb", "r6b", "u6", "B", why = "迎合用户", reason = "用户一质疑就改口，没给理由", doubted = true, time = t0 + 61_100),
+                        com.guixing.jixunying.model.StanceEntry("mc", "r6c", "u6", "A", why = "被说服", by = "ma", reason = "认同阿德的切口计数", doubted = true, time = t0 + 61_200),
+                        com.guixing.jixunying.model.StanceEntry("md", "r6d", "u6", "A", why = "坚持", doubted = true, time = t0 + 61_300),
+                    ), verdict = "A", createdAt = t0 + 5000, updatedAt = t0 + 65_000),
+                com.guixing.jixunying.model.StanceTopic("s2", "c5", "u5", "零基础先学 Python 还是 Java",
+                    listOf(com.guixing.jixunying.model.StanceOption("A", "Python"), com.guixing.jixunying.model.StanceOption("B", "看想做什么")),
+                    listOf(
+                        com.guixing.jixunying.model.StanceEntry("ma", "r5a", "u7", "A", first = true, time = t0 - 600_000),
+                        com.guixing.jixunying.model.StanceEntry("mb", "r5b", "u7", "B", first = true, time = t0 - 600_000),
+                        com.guixing.jixunying.model.StanceEntry("mc", "r5c", "u7", "A", first = true, time = t0 - 600_000),
+                    ), createdAt = t0 - 590_000, updatedAt = t0 - 590_000),
+            )), Charsets.UTF_8)
         st.saveMessages("c3", listOf(
             Message("u3", "c3", Role.USER, USER_ID, "画一只在月球上喝茶的橘猫", createdAt = now - 86_100_000),
             Message("r3", "c3", Role.AI, "md", "画好了。", attachments = listOf(cat), tools = listOf(ToolStep("image", "月球上喝茶的橘猫，水彩风格")), createdAt = now - 86_000_000,
@@ -141,10 +180,12 @@ class ShotsTest {
 
         val wide = listOf(
             "chat" to "conv:c1", "chat-image" to "conv:c3", "newchat" to "newchat", "docs" to "docs",
+            "stances" to "stances", "chat-stances" to "conv:c5", "chat-stances-dialog" to "conv:c5#stances",
         ) + com.guixing.jixunying.ui.SettingsTab.entries.map { "settings-" + it.name.lowercase() to "settings:${it.name}" } +
             listOf("provider-add" to "settings:PROVIDERS#add")
         for ((name, start) in wide) shoot("desktop-$name", 1280, 820, 1f, hub, desktop, start)
-        val narrow = listOf("chat" to "conv:c1", "docs" to "docs", "settings-home" to "settingshome", "settings-image" to "settings:IMAGE",
+        val narrow = listOf("chat" to "conv:c1", "docs" to "docs", "stances" to "stances", "chat-stances" to "conv:c5",
+            "settings-home" to "settingshome", "settings-image" to "settings:IMAGE",
             "settings-memory" to "settings:MEMORY", "settings-weixin" to "settings:WEIXIN", "settings-providers" to "settings:PROVIDERS",
             "settings-search" to "settings:SEARCH", "settings-profile" to "settings:PROFILE")
         for ((name, start) in narrow) shoot("phone-$name", 824, 1784, 2f, hub, phone, start)
@@ -158,6 +199,8 @@ class ShotsTest {
         kotlinx.coroutines.runBlocking { e.call(com.guixing.jixunying.model.Command.SaveSettings(e.state.settings.copy(darkMode = 2))) }
         shoot("desktop-dark-chat", 1280, 820, 1f, hub, desktop, "conv:c1")
         shoot("desktop-dark-docs", 1280, 820, 1f, hub, desktop, "docs")
+        shoot("desktop-dark-stances", 1280, 820, 1f, hub, desktop, "stances")
+        shoot("desktop-dark-chat-stances", 1280, 820, 1f, hub, desktop, "conv:c5")
         shoot("phone-dark-settings-home", 824, 1784, 2f, hub, phone, "settingshome")
 
         // 空白状态：第一次打开

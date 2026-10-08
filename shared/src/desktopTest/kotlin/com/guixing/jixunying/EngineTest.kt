@@ -2,6 +2,7 @@ package com.guixing.jixunying
 
 import com.guixing.jixunying.client.ConnState
 import com.guixing.jixunying.client.Hub
+import com.guixing.jixunying.engine.Addressing
 import com.guixing.jixunying.engine.DocExtract
 import com.guixing.jixunying.engine.Engine
 import com.guixing.jixunying.engine.Storage
@@ -133,6 +134,18 @@ class EngineTest {
                             "你是聊天记录员" in firstText -> say("## 话题\n测试话题\n## 已经定下的结论\n摘要里的结论")
                             "找出值得长期记住的" in firstText -> say("""好的：[{"text":"在北京做产品经理","kind":"关于我","replaces":null}]""")
                             "下面是关于一位用户的长期记忆" in firstText -> say("""[{"text":"喜欢简短的回答","kind":"偏好","from":[1,2]}]""")
+                            // 点名：只有「让丙……」是在叫人，其他算对大家说
+                            "判断这句话是想让哪几位成员来回答" in firstText -> say(if ("让丙" in firstText) """好的：{"to":["丙"]}""" else """{"to":[]}""")
+                            // 立场档案：第二轮乙看到大家都说 A 就改了（跟风），甲没变；第一轮开新议题
+                            "立场档案" in firstText && "之前已经记下的议题" in firstText -> say(
+                                """{"updates":[{"topic":1,"member":"甲","stance":"A","why":"没变","by":"","reason":"还是说 1.5 大"},""" +
+                                    """{"topic":1,"member":"乙","stance":"A","why":"跟风","by":"甲","reason":"看到大家都说 1.5 大就改了"}],"userDoubt":true,"newTopic":null}""")
+                            "立场档案" in firstText && "哪个大" in firstText -> say(
+                                """```json
+                                |{"newTopic":{"question":"1.5 和 1.12 哪个大","options":[{"key":"A","text":"1.5 大"},{"key":"B","text":"1.12 大"}],
+                                |"stances":[{"member":"甲","stance":"A"},{"member":"乙","stance":"B"},{"member":"丙","stance":"A"}]}}
+                                |```""".trimMargin())
+                            "立场档案" in firstText -> say("""{"newTopic":null}""")
                             // 用户说「记住」：调 remember
                             hasTool("remember") && latest.contains("记住") && !sawTool -> {
                                 chunk("""{"tool_calls":[{"index":0,"id":"mem_1","type":"function","function":{"name":"remember","arguments":"{\"text\":\"喜欢简短的回答\",\"kind\":\"偏好\"}"}}]}""")
@@ -237,6 +250,12 @@ class EngineTest {
                 post("/api/v1/services/aigc/multimodal-generation/generation") {
                     val async = call.request.headers["X-DashScope-Async"]
                     imageRequests += "dashscope:" + async + ":" + call.receiveText()
+                    // 欠费的账号（百炼官方错误码 Arrearage）
+                    if (call.request.headers["Authorization"] == "Bearer broke") {
+                        call.respondText("""{"code":"Arrearage","message":"Access denied, please make sure your account is in good standing."}""",
+                            ContentType.Application.Json, HttpStatusCode.BadRequest)
+                        return@post
+                    }
                     // 和真的千问AI平台一样（2026-10-08 实测）：千问图像不支持异步，回 403；同步直接给结果
                     if (async == "enable") call.respondText("""{"code":"AccessDenied","message":"current user api does not support asynchronous calls"}""",
                         ContentType.Application.Json, HttpStatusCode.Forbidden)
@@ -330,7 +349,8 @@ class EngineTest {
         waitIdle(e, conv, 2)
         val ai = e.store.messages.value[conv]!!.filter { it.role == Role.AI }
         assertEquals(setOf("我是甲。", "我是乙。"), ai.map { it.content }.toSet())
-        requests.forEach { r ->
+        // 只看成员的请求（答完以后记录员会看一遍立场，它当然看得到两人的回答）
+        requests.filter { runCatching { memberName(it) }.isSuccess }.forEach { r ->
             val all = r["messages"].toString()
             assertFalse("我是甲。" in all || "我是乙。" in all, "独立作答不该看到别人的本轮回答")
             assertTrue("独立作答" in systemOf(r))
@@ -450,17 +470,20 @@ class EngineTest {
     }
 
     /**
-     * 没在 设置→画图 指定模型时自动挑：免费的智谱 cogview-3-flash 优先（服务商模型列表里没有也按预设推断），
-     * 画不出来就换下一个（MiniMax 的 image-01）；刚失败过的排到后面，下次直接用能用的。
+     * 没在 设置→画图 指定模型时自动挑，画质优先：千问图像排第一（用户定的默认），免费的 cogview-3-flash 垫底
+     * （服务商模型列表里没有的也按预设推断）。千问欠费：千问家别的模型不再试，直接换下一家；
+     * 智谱画不出来就换 MiniMax 的 image-01；刚失败过的排到后面，下次直接用能用的。
      */
     @Test
     fun imageAutoPickAndFallback() = runBlocking {
         val (e, ms) = engineWithMembers("小智")
+        e.call(Command.SaveProvider(ProviderConfig("pq", "qianwen", "千问", "${base()}/compatible-mode/v1", "broke",
+            listOf(ModelInfo("qwen-image-3.0", imageGen = true, tools = false)))))
         e.call(Command.SaveProvider(ProviderConfig("pz", "zhipu", "智谱", "${base()}/bad/v1", "k", listOf(ModelInfo("glm-fake")))))
         e.call(Command.SaveProvider(ProviderConfig("pm", "minimax", "MiniMax", "${base()}/mm/v1", "k", listOf(ModelInfo("MiniMax-M3")))))
         val picks = com.guixing.jixunying.model.ImagePick.resolve(e.state)
-        assertEquals(listOf("cogview-3-flash", "cogview-4-250304", "image-01"), picks.map { it.modelId })
-        assertTrue(picks.first().free)
+        assertEquals(listOf("qwen-image-3.0", "wan2.7-image", "cogview-4-250304", "image-01", "cogview-3-flash"), picks.map { it.modelId })
+        assertTrue(picks.last().free)
 
         val conv = e.call(Command.CreateConversation(listOf(ms[0].id))).data
         e.call(Command.SendMessage(conv, "一只猫", drawImage = true))
@@ -468,7 +491,8 @@ class EngineTest {
         val m = e.store.messages.value[conv]!!.last()
         assertEquals(MsgStatus.DONE, m.status, m.error)
         assertEquals("image-01（MiniMax）", m.modelLabel)
-        assertEquals(listOf("bad", "bad", "minimax"), imageRequests.map { it.substringBefore(':') }, "cogview-3-flash、cogview-4 都失败后换 MiniMax")
+        assertEquals(listOf("dashscope", "bad", "minimax"), imageRequests.map { it.substringBefore(':') },
+            "千问欠费就跳过万相（同一个 Key），智谱失败后换 MiniMax")
 
         imageRequests.clear()
         val r = e.call(Command.TestImage())
@@ -656,6 +680,102 @@ class EngineTest {
         val ai = e.store.messages.value[conv]!!.filter { it.role == Role.AI }
         assertEquals(listOf("m1"), ai.map { it.senderId }, "只有被 @ 的乙回答")
         assertEquals("我是乙。", ai.single().content)
+    }
+
+    /**
+     * 点名：不带 @、开头直接喊名字的，程序直接认，只有他回答（不问模型）；
+     * 「让丙说两句」这种交给记录员的模型判断；只是提到名字（「乙说得对吗」）的，大家照常都答。
+     */
+    @Test
+    fun nameCallAnswersOnlyThatMember() = runBlocking {
+        val (e, ms) = engineWithMembers("甲", "乙", "丙")
+        val conv = e.call(Command.CreateConversation(ms.map { it.id })).data
+        e.call(Command.UpdateConversation(e.state.conversation(conv)!!.copy(webSearch = false)))
+        fun aiOf(after: Int) = e.store.messages.value[conv]!!.filter { it.role == Role.AI }.drop(after).map { it.content }
+        fun dispatcherAsked() = requests.count { "判断这句话是想让哪几位成员来回答" in it.toString() }
+
+        e.call(Command.SendMessage(conv, "乙，你好"))
+        waitIdle(e, conv, 1)
+        assertEquals(listOf("我是乙。"), aiOf(0))
+        assertEquals(0, dispatcherAsked(), "开头直接喊名字，不用问模型")
+
+        e.call(Command.SendMessage(conv, "让丙说两句"))
+        waitIdle(e, conv, 2)
+        assertEquals(listOf("我是丙。"), aiOf(1))
+        assertEquals(1, dispatcherAsked())
+
+        e.call(Command.SendMessage(conv, "乙说得对吗？"))
+        waitIdle(e, conv, 5)
+        assertEquals(setOf("我是甲。", "我是乙。", "我是丙。"), aiOf(2).toSet(), "只是提到乙，大家都答")
+        assertEquals(2, dispatcherAsked())
+
+        // 程序直接认的几种说法
+        val m = ms
+        assertEquals(listOf(m[0], m[1]), Addressing.leading("甲和乙，你们比一下", m))
+        assertEquals(listOf(m[1]), Addressing.leading("乙你怎么看", m))
+        assertEquals(emptyList(), Addressing.leading("乙说得对吗", m), "名字后面直接跟话，可能只是在提他")
+        assertEquals(emptyList(), Addressing.leading("甲，乙说得对吗", m), "后面又提到别人，交给模型")
+
+        // 开头喊了不在这个对话里的成员：和 @ 一样，拉进来由他回答
+        val solo = e.call(Command.CreateConversation(listOf(ms[0].id))).data
+        e.call(Command.UpdateConversation(e.state.conversation(solo)!!.copy(webSearch = false)))
+        e.call(Command.SendMessage(solo, "丙，你来说说"))
+        waitIdle(e, solo, 1)
+        assertEquals(listOf("m0", "m2"), e.state.conversation(solo)!!.memberIds)
+        assertEquals(listOf("我是丙。"), e.store.messages.value[solo]!!.filter { it.role == Role.AI }.map { it.content })
+    }
+
+    /**
+     * 立场档案：独立作答后记录员开议题、记首答；下一轮乙看到大家都说 A 就改了（跟风），甲没变（坚持）；
+     * 用户标 A 对之后，能算出首答准确率、坚持、跟风、被纠正、说服别人；删消息、删对话时档案跟着清。
+     */
+    @Test
+    fun stanceArchiveRecordsChanges() = runBlocking {
+        val (e, ms) = engineWithMembers("甲", "乙", "丙")
+        val conv = e.call(Command.CreateConversation(ms.map { it.id })).data
+        e.call(Command.UpdateConversation(e.state.conversation(conv)!!.copy(webSearch = false)))
+        val ser = kotlinx.serialization.builtins.ListSerializer(com.guixing.jixunying.model.StanceTopic.serializer())
+        suspend fun topics() = AppJson.decodeFromString(ser, e.call(Command.StanceList(conv)).data)
+
+        e.call(Command.SendMessage(conv, "1.5 和 1.12 哪个大？"))
+        waitIdle(e, conv, 3)
+        withTimeout(5_000) { while (e.state.conversation(conv)!!.stanceTopics < 1) delay(50) }
+        val t1 = topics().single()
+        assertEquals("1.5 和 1.12 哪个大", t1.question)
+        assertEquals(listOf("A", "B", "A"), ms.map { m -> t1.entries.single { it.memberId == m.id }.option })
+        assertTrue(t1.entries.all { it.first }, "独立作答的是首答")
+        val judgeReq = requests.first { "立场档案" in it.toString() }.toString()
+        assertTrue("独立作答" in judgeReq && "我是乙。" in judgeReq)
+
+        e.call(Command.SendMessage(conv, "真的吗？再想想"))
+        waitIdle(e, conv, 6)
+        withTimeout(5_000) { while (topics().single().entries.size < 5) delay(50) }
+        val t2 = topics().single()
+        val yi = t2.entries.last { it.memberId == ms[1].id }
+        assertEquals("A", yi.option)
+        assertEquals(com.guixing.jixunying.model.Stances.FOLLOW, yi.why)
+        assertEquals(ms[0].id, yi.by)
+        assertEquals(com.guixing.jixunying.model.Stances.HOLD, t2.entries.last { it.memberId == ms[0].id }.why)
+
+        assertFalse(e.call(Command.StanceMark(t2.id, "Z")).ok, "没有这个立场")
+        assertTrue(e.call(Command.StanceMark(t2.id, "A")).ok)
+        val cards = com.guixing.jixunying.model.Stances.cards(topics(), ms.map { it.id })
+        val (jia, yiCard, bing) = cards
+        assertEquals(1 to 1, jia.firstRight to jia.judged)
+        assertEquals(1 to 1, jia.held to jia.challenged, "乙当时跟他不一样，他坚持了")
+        assertEquals(1, jia.convinced)
+        assertEquals(0, yiCard.firstRight)
+        assertEquals(1, yiCard.follow)
+        assertEquals(1, yiCard.corrected, "本来错、后来改对")
+        assertEquals(0, yiCard.misled)
+        assertEquals(1 to 0, bing.firstRight to bing.challenged)
+
+        // 删掉乙第二轮的回答：那条表态也去掉
+        e.call(Command.DeleteMessage(conv, yi.messageId))
+        assertEquals(4, topics().single().entries.size)
+        // 删对话：档案跟着删
+        e.call(Command.DeleteConversation(conv))
+        assertEquals(0, AppJson.decodeFromString(ser, e.call(Command.StanceList()).data).size)
     }
 
     /** 边聊边画：聊天里让 AI 画图，图在 AI 的回复里；图还没画完时接着发下一句，也能马上回答。 */

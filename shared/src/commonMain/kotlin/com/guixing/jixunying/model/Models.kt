@@ -107,6 +107,8 @@ data class MemorySettings(
     val recorderModelId: String = "",
     /** 一个对话没压缩的部分超过多少字就压缩。 */
     val compressAt: Int = 24_000,
+    /** 立场档案：群聊每轮答完，记录员记下各位成员的立场和改口（见 Stances.kt）。 */
+    val stances: Boolean = true,
 )
 
 @Serializable
@@ -226,6 +228,10 @@ data class Conversation(
     val summarized: Int = 0,
     /** 来自哪里：空 = 本应用里聊的；"weixin:<微信用户编号>" = 微信助理的对话。 */
     val channel: String = "",
+    /** 这个对话记了几个议题（立场档案），界面据此显示入口。 */
+    val stanceTopics: Int = 0,
+    /** 立场档案最近一次变化的时间，界面看到它变了就重新取。 */
+    val stanceAt: Long = 0,
 ) {
     val isGroup: Boolean get() = memberIds.size > 1
 }

@@ -27,6 +27,7 @@ import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.FolderOpen
 import androidx.compose.material.icons.rounded.Groups
+import androidx.compose.material.icons.rounded.Insights
 import androidx.compose.material.icons.rounded.MoreHoriz
 import androidx.compose.material.icons.rounded.PhoneAndroid
 import androidx.compose.material.icons.rounded.PushPin
@@ -168,6 +169,9 @@ fun Sidebar(ctl: AppController, modifier: Modifier, onNavigate: () -> Unit) {
                 state.docs.scanning -> "扫描中…"
                 else -> "${state.docs.count} 个"
             }, dot = if (state.docs.needPermission) Ext.c.warning else null) { ctl.openPage(MainPage.DOCS); onNavigate() }
+            NavRow(Icons.Rounded.Insights, "立场档案", state.conversations.sumOf { it.stanceTopics }.let { if (it == 0) "还没有" else "$it 题" }) {
+                ctl.openPage(MainPage.STANCES); onNavigate()
+            }
             NavRow(Icons.Rounded.Groups, "AI 成员", "${state.members.size} 位") { ctl.openSettings(SettingsTab.MEMBERS); onNavigate() }
             val platform = LocalPlatform.current
             val remote by ctl.hub.remote.collectAsState()

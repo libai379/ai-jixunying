@@ -14,12 +14,27 @@ data class ImageChoice(
 )
 
 /**
- * 画图用哪个模型。用户在 设置 → 画图 指定了就用指定的；没指定（自动）就从已经配好 Key 的服务商里挑：
- * 免费的排最前，其次是用户自己列出来的画图模型，最后是按预设推断的（比如 MiniMax 的 Key 也能调 image-01）。
+ * 画图用哪个模型。用户在 设置 → 画图 指定了就用指定的；没指定（自动）就从已经配好 Key 的服务商里挑，画质优先：
+ * 千问图像排第一（用户定的默认：画里的中文字写得准，免费的 cogview-3-flash 会把字画成鬼画符），
+ * 其次是 Seedream、gpt-image、混元 3.0、万相、可灵这些一线模型，再是其他收费的，免费的垫底兜底。
+ * 同一档里，用户自己列出来的画图模型排在按预设推断的前面（比如 MiniMax 的 Key 也能调 image-01）。
  */
 object ImagePick {
 
     private val freeModels = setOf("cogview-3-flash")
+
+    private val topModels = listOf("seedream", "gpt-image", "hy-image", "wan2", "kling")
+
+    /** 画质档次，越小越靠前。 */
+    private fun tier(model: String): Int {
+        val id = model.lowercase()
+        return when {
+            "qwen-image" in id -> 0
+            id in freeModels -> 3
+            topModels.any { it in id } -> 1
+            else -> 2
+        }
+    }
 
     fun usable(p: ProviderConfig) = p.enabled && (p.apiKey.isNotBlank() || isLocalUrl(p.baseUrl))
 
@@ -58,11 +73,7 @@ object ImagePick {
             (listed + preset.filter { it !in listed }).distinct().forEach { id ->
                 val free = id.lowercase() in freeModels
                 val inferred = id !in listed
-                val rank = when {
-                    free -> 0
-                    !inferred -> 1_000 + pi
-                    else -> 2_000 + pi
-                }
+                val rank = tier(id) * 10_000 + (if (inferred) 1_000 else 0) + pi
                 out += rank to ImageChoice(p.id, p.name, id, free, inferred, noteOf(p, id, free))
             }
         }

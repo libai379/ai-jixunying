@@ -4,6 +4,7 @@ import com.guixing.jixunying.model.AppJson
 import com.guixing.jixunying.model.AppState
 import com.guixing.jixunying.model.Attachment
 import com.guixing.jixunying.model.Message
+import com.guixing.jixunying.model.StanceTopic
 import kotlinx.serialization.builtins.ListSerializer
 import java.io.File
 import java.nio.file.Files
@@ -14,6 +15,7 @@ import java.nio.file.StandardCopyOption
  *   state.json            服务商、成员、设置、会话列表
  *   convs\<id>.json       每个会话的聊天记录
  *   files\<id>            附件和生成的图片，旁边 <id>.json 是元数据
+ *   stances.json          立场档案（群聊里各位成员的立场和改口）
  * 读坏了的文件不覆盖，改名成 .broken-时间 留着，再从空白开始。
  */
 class Storage(val root: File) {
@@ -82,6 +84,23 @@ class Storage(val root: File) {
 
     fun saveMemo(convId: String, memo: ConvMemo) = synchronized(this) {
         writeAtomic(File(convDir, "${safe(convId)}.memo.json"), AppJson.encodeToString(ConvMemo.serializer(), memo))
+    }
+
+    private val stanceSer = ListSerializer(StanceTopic.serializer())
+
+    /** 立场档案（全部对话的议题）。读坏了改名留着，从空白开始。 */
+    fun loadStances(): MutableList<StanceTopic> {
+        val f = File(root, "stances.json")
+        if (!f.exists()) return mutableListOf()
+        return try {
+            AppJson.decodeFromString(stanceSer, f.readText(Charsets.UTF_8)).toMutableList()
+        } catch (e: Throwable) {
+            quarantine(f, e); mutableListOf()
+        }
+    }
+
+    fun saveStances(list: List<StanceTopic>) = synchronized(this) {
+        writeAtomic(File(root, "stances.json"), AppJson.encodeToString(stanceSer, list))
     }
 
     fun putFile(att: Attachment, bytes: ByteArray, extractedText: String?) {
