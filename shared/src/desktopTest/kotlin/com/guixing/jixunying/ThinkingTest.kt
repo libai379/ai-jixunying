@@ -45,6 +45,16 @@ class ThinkingTest {
         assertEquals("""{"thinking":{"type":"disabled"}}""", fast("ark", "doubao-seed-2-1-pro-260628"))
         assertNull(deep("ark", "doubao-seed-2-1-pro-260628"), "默认已是最高档")
         assertFalse(Thinking.rule(p("ark"), "doubao-seedream-5-0-260128").known)
+        // 海外和其他平台（助手查的官方文档）
+        assertEquals("""{"reasoning_effort":"minimal"}""", fast("openai", "gpt-5"))
+        assertTrue(Thinking.rule(p("openai"), "gpt-5-mini").fastOnlyLess)
+        assertEquals("""{"reasoning_effort":"none"}""", fast("gemini", "gemini-2.5-flash"))
+        assertEquals("""{"reasoning_effort":"low"}""", fast("gemini", "gemini-2.5-pro"), "2.5 Pro 关不掉，none 会 400")
+        assertEquals("""{"reasoning":{"effort":"high"}}""", deep("openrouter", "openai/gpt-5"))
+        assertEquals("""{"enable_thinking":false}""", fast("siliconflow", "deepseek-ai/DeepSeek-V3.2"))
+        assertEquals("ollama", Thinking.platformOf(p("custom", "http://127.0.0.1:11434/v1")))
+        assertFalse(Thinking.rule(p("anthropic"), "claude-sonnet-5-5").known, "Claude 兼容接口说法不一致，先不收")
+        assertFalse(Thinking.available(Thinking.rule(p("xai"), "grok-4"), ThinkingMode.FAST), "最早的 grok-4 不接受 reasoning_effort")
         // MiniMax M2.x 关不掉
         assertFalse(Thinking.available(Thinking.rule(p("minimax"), "MiniMax-M2.7"), ThinkingMode.FAST))
         // 自定义服务商填的官方地址也认得出

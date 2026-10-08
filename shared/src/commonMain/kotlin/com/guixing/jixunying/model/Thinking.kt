@@ -98,6 +98,11 @@ object Thinking {
             p.presetId == "anthropic" || "api.anthropic.com" in u -> "anthropic"
             p.presetId == "openrouter" || "openrouter.ai" in u -> "openrouter"
             p.presetId == "xai" || "api.x.ai" in u -> "xai"
+            p.presetId.startsWith("tokenhub") || "tencentmaas" in u -> "tokenhub"
+            p.presetId == "qianfan" || "qianfan.baidubce" in u -> "qianfan"
+            p.presetId == "stepfun" || "api.stepfun.com" in u -> "stepfun"
+            p.presetId == "longcat" || "longcat.chat" in u -> "longcat"
+            p.presetId == "ollama" || ":11434" in u -> "ollama"
             else -> p.presetId
         }
     }
@@ -183,6 +188,55 @@ private object Rules {
             m.startsWith("kimi-k2.7-code") || "thinking" in m -> ALWAYS
             m.startsWith("kimi-k2.6") || m.startsWith("kimi-k2.5") -> typeSwitch(true)
             m.startsWith("moonshot-v1") -> NEVER
+            else -> Thinking.UNKNOWN
+        }
+        // 以下几家是助手按官方文档查的（2026-10-08），把握稍差一点；不认的话会自动去掉参数重试
+        "openai" -> when {
+            // gpt-5 / gpt-5-mini 关不掉，最低 minimal、最高 high（none 是 gpt-5.1 以后才有）
+            m == "gpt-5" || m.startsWith("gpt-5-") -> ThinkingRule(obj(effort("minimal")), obj(effort("high")), true, fastOnlyLess = true)
+            Regex("^o\\d").containsMatchIn(m) -> ThinkingRule(obj(effort("low")), obj(effort("high")), true, fastOnlyLess = true)
+            m.startsWith("gpt-4") -> NEVER
+            else -> Thinking.UNKNOWN
+        }
+        "gemini" -> when {
+            // 2.5 Pro 关不掉（none 报 400），最低 low；2.5 Flash 能关
+            m.startsWith("gemini-2.5-pro") -> ThinkingRule(obj(effort("low")), obj(effort("high")), true, fastOnlyLess = true)
+            m.startsWith("gemini-2.5-flash") && "lite" !in m -> ThinkingRule(obj(effort("none")), obj(effort("high")), true)
+            else -> Thinking.UNKNOWN
+        }
+        "xai" -> when {
+            "non-reasoning" in m -> NEVER
+            // 最早的 grok-4 不接受 reasoning_effort；4.5 以后 low…xhigh（4.5 把 xhigh 当 high）
+            m == "grok-4" || m.startsWith("grok-4-0709") || "-reasoning" in m -> ALWAYS
+            Regex("^grok-4\\.\\d").containsMatchIn(m) -> ThinkingRule(obj(effort("low")), obj(effort("xhigh")), true, fastOnlyLess = true)
+            else -> Thinking.UNKNOWN
+        }
+        // OpenRouter 统一的 reasoning 字段；一定要想的模型会拒绝 none（自动去掉重试）
+        "openrouter" -> ThinkingRule(obj("reasoning" to obj("effort" to JsonPrimitive("none"))), obj("reasoning" to obj("effort" to JsonPrimitive("high"))), null)
+        // 硅基流动：多数推理模型认 enable_thinking
+        "siliconflow" -> flagSwitch(null)
+        // Ollama 本机：none 一定安全；不会思考的模型要求思考会报 400（自动去掉）
+        "ollama" -> ThinkingRule(obj(effort("none")), obj(effort("high")), null)
+        "tokenhub" -> when {
+            m.startsWith("hy3") || m.startsWith("hy4") -> typeSwitch(true)
+            m.startsWith("deepseek-v4") || m.startsWith("deepseek/deepseek") -> typeSwitch(true, effort("max"))
+            m.startsWith("glm-5.3") -> ThinkingRule(fast = obj(type("enabled"), effort("low")), deep = EMPTY, thinksByDefault = true, fastOnlyLess = true)
+            m.startsWith("kimi-k3") -> ThinkingRule(fast = obj(effort("low")), deep = EMPTY, thinksByDefault = true, fastOnlyLess = true)
+            else -> Thinking.UNKNOWN
+        }
+        "qianfan" -> when {
+            m.startsWith("ernie-x1") -> ALWAYS
+            "thinking" in m -> flagSwitch(true)
+            else -> Thinking.UNKNOWN
+        }
+        "stepfun" -> when {
+            m == "step-3.5-flash" -> ALWAYS
+            m.startsWith("step-3.5-flash-") || m.startsWith("step-3.7") || m.startsWith("step-5") ->
+                ThinkingRule(obj(effort("low")), obj(effort("high")), true, fastOnlyLess = true)
+            else -> Thinking.UNKNOWN
+        }
+        "longcat" -> when {
+            m.startsWith("longcat-2") -> typeSwitch(true)
             else -> Thinking.UNKNOWN
         }
         // 火山方舟豆包 Seed 2.x：默认开思考（强度 high，这个模型的最高有效档），thinking.type 能关；
