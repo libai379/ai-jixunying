@@ -60,8 +60,8 @@ import kotlinx.serialization.builtins.ListSerializer
 
 private val PERIODS = listOf("today" to "今天", "week" to "本周", "month" to "本月", "all" to "全部")
 
-/** 上次查到的余额（离开页面再回来还在，不用每次都查）。 */
-private var lastBalances: Pair<Long, List<BalanceInfo>>? = null
+/** 上次查到的余额（离开页面再回来还在，不用每次都查）。本机和遥控的电脑各记各的。 */
+private val lastBalances = mutableMapOf<Boolean, Pair<Long, List<BalanceInfo>>>()
 
 /**
  * 花费页：按各家官方价格和每次调用的用量估算花了多少（不是账单）。
@@ -285,7 +285,7 @@ private fun ModelBreakdown(r: CostReport, onEdit: (CostLine) -> Unit) {
 @Composable
 private fun BalancesCard(ctl: AppController) {
     var busy by remember { mutableStateOf(false) }
-    var result by remember { mutableStateOf(lastBalances) }
+    var result by remember(ctl.remoteMode) { mutableStateOf(lastBalances[ctl.remoteMode]) }
     val platform = LocalPlatform.current
     SectionCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -299,7 +299,8 @@ private fun BalancesCard(ctl: AppController) {
                 ctl.run(Command.GetBalances, quiet = true) { r ->
                     busy = false
                     if (r.ok) runCatching { AppJson.decodeFromString(ListSerializer(BalanceInfo.serializer()), r.data) }.getOrNull()?.let {
-                        result = nowMillis() to it; lastBalances = result
+                        val got = nowMillis() to it
+                        result = got; lastBalances[ctl.remoteMode] = got
                     }
                 }
             }) { Text(if (busy) "正在查…" else if (result == null) "查余额" else "再查一次") }
@@ -340,10 +341,12 @@ private fun RateCard(ctl: AppController, rate: Double) {
 @Composable
 private fun PriceDialog(ctl: AppController, line: CostLine, current: ModelPrice?, onClose: () -> Unit) {
     val official = current == null
-    val isImage = line.images > 0 && line.prompt + line.completion == 0L
-    var usd by remember { mutableStateOf(current?.currency == "USD") }
-    var perImage by remember { mutableStateOf(current?.perImage?.toString().orEmpty()) }
-    val tier = current?.tiers?.firstOrNull()
+    // 预填现在算钱用的单价（改过的就是改过的，没改过就是官方价），币种也照它，免得把美元价当人民币填
+    val base = current ?: line.price
+    val isImage = (base?.perImage != null && base.tiers.isEmpty()) || (line.images > 0 && line.prompt + line.completion == 0L)
+    var usd by remember { mutableStateOf(base?.currency == "USD") }
+    var perImage by remember { mutableStateOf(base?.perImage?.toString().orEmpty()) }
+    val tier = base?.tiers?.firstOrNull()
     var input by remember { mutableStateOf(tier?.input?.toString().orEmpty()) }
     var cached by remember { mutableStateOf(tier?.cached?.toString().orEmpty()) }
     var output by remember { mutableStateOf(tier?.output?.toString().orEmpty()) }

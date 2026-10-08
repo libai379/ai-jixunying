@@ -75,6 +75,8 @@ data class CostLine(
     /** 按模型分时：改单价用的键（Prices.key）；用户改过价时 overridden = true。 */
     val priceKey: String = "",
     val overridden: Boolean = false,
+    /** 按模型分时：现在算钱用的单价（改单价的对话框拿它预填，币种也照它）。 */
+    val price: ModelPrice? = null,
 ) {
     fun total(usdRate: Double) = cny + usd * usdRate
 }

@@ -64,6 +64,13 @@ class CostsTest {
         val mine = mapOf(Prices.key("custom", "My-Model") to ModelPrice("CNY", listOf(PriceTier(input = 1.0, output = 1.0))))
         near(2.0, Prices.cost(rec(0, "custom", "my-model", 1_000_000, 0, 1_000_000), Prices.of("custom", "my-model", mine)))
         assertTrue("空闲时段半价" in Prices.describe(ds!!))
+        // 百炼国际版按美元，表里没有：不能拿国内人民币价去算
+        assertNull(Prices.of("qwen", "qwen3-max", baseUrl = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"))
+        // 免费的：画图也是 0，不是「没价格」
+        near(0.0, Prices.cost(rec(0, "modelscope", "black-forest-labs/flux", images = 1, kind = "image"), Prices.of("modelscope", "black-forest-labs/flux")))
+        // 补记的老记录一律按第一档（几轮工具调用的输入加在一起了）
+        near(0.045 * 2.5, Prices.cost(rec(0, "qwen", "qwen3-max", 45_000).copy(backfill = true), Prices.of("qwen", "qwen3-max")))
+        near(0.045 * 4.0, Prices.cost(rec(0, "qwen", "qwen3-max", 45_000), Prices.of("qwen", "qwen3-max")))
     }
 
     @Test
@@ -94,6 +101,9 @@ class CostsTest {
             val m = r.byModel.first { it.label == "my-model" }
             assertTrue("价格表里没有" in m.priceText)
             assertEquals(listOf("2026-10-07", "2026-10-08"), r.daily.map { it.key })
+            // 中间没用的日子也占一格：全部 = 9 月 30 日到 10 月 8 日
+            assertEquals(9, CostReporter(ledger, { state }, { now }).report("all").daily.size)
+            assertEquals("qwen", r.byModel.first { it.label == "qwen-image-3.0" }.price!!.let { if (it.perImage == 0.18) "qwen" else "?" })
             // 全部：上个月那条也算上；补记标记没有
             near(10.18 + 2.0, CostReporter(ledger, { state }, { now }).report("all").total.cny)
             assertEquals(bj(2026, 10, 8, 0), CostReporter(ledger, { state }, { now }).periodStart("today"))

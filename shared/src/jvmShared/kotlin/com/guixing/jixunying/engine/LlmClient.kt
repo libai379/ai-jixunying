@@ -37,7 +37,10 @@ class ChatResult(
     val finishReason: String?,
 )
 
-class ApiException(val status: Int, val body: String) : Exception("HTTP $status：${body.take(400)}")
+open class ApiException(val status: Int, val body: String) : Exception("HTTP $status：${body.take(400)}")
+
+/** 服务商已经画好（已经扣了钱），只是图片下载失败：照样记账。 */
+class ImageDownloadFailed(status: Int, body: String) : ApiException(status, body)
 
 /** 切换思考可能用到的请求字段（各家不一样，见 model/Thinking.kt）。 */
 private val THINKING_KEYS = listOf("thinking", "enable_thinking", "thinking_budget", "reasoning_effort", "reasoning", "reasoning_split", "chat_template_kwargs")
@@ -88,13 +91,21 @@ class LlmClient(private val proxyOf: (ProviderConfig) -> String?) {
                 if (extra != null && "native_search" !in dropped) extra.forEach { (k, v) -> put(k, v) }
                 if (thinking != null && "thinking" !in dropped) thinking.forEach { (k, v) -> put(k, v) }
             }
+            // 服务商接下了这次请求（回了 2xx）：之后就算中途停止、超时、断流，输入也已经扣了钱，要记一条
+            val accepted = java.util.concurrent.atomic.AtomicBoolean(false)
             try {
-                val r = stream(provider, body, onSources, onDelta)
+                val r = stream(provider, body, onSources, onDelta) { accepted.set(true) }
                 // 没返回用量的也记一条（花费页会说「有几次没返回用量，没算进去」）
                 val tag = currentCoroutineContext()[UsageTag]
                 runCatching { onUsage?.invoke(provider, model, r.usage, tag) }
                 return r
-            } catch (e: ApiException) {
+            } catch (e: Throwable) {
+                if (accepted.get()) {
+                    val tag = currentCoroutineContext()[UsageTag]
+                    runCatching { onUsage?.invoke(provider, model, Usage(), tag) }
+                    throw e
+                }
+                if (e !is ApiException) throw e
                 attempt++
                 val bad = guessBadParam(e, body)
                 if (bad != null && attempt <= 4) {
@@ -140,6 +151,7 @@ class LlmClient(private val proxyOf: (ProviderConfig) -> String?) {
         body: JsonObject,
         onSources: (List<SearchSource>) -> Unit,
         onDelta: (String, String) -> Unit,
+        onAccepted: () -> Unit = {},
     ): ChatResult {
         val started = System.currentTimeMillis()
         val content = StringBuilder()
@@ -163,6 +175,9 @@ class LlmClient(private val proxyOf: (ProviderConfig) -> String?) {
             setBody(body.toString())
         }.execute { resp ->
             if (resp.status.value !in 200..299) throw ApiException(resp.status.value, resp.bodyAsText())
+            // 第一块正常数据到了才算服务商接下了（MiniMax 会在 200 里用 base_resp 报错，那种不算，照常走重试）
+            var accepted = false
+            fun accept() { if (!accepted) { accepted = true; onAccepted() } }
             val ct = resp.headers["Content-Type"].orEmpty()
             if (!ct.contains("event-stream")) {
                 // 有的服务商忽略 stream，直接回整段 JSON
@@ -171,6 +186,7 @@ class LlmClient(private val proxyOf: (ProviderConfig) -> String?) {
                     ?: throw ApiException(resp.status.value, text)
                 obj["error"]?.let { throw ApiException(resp.status.value, it.toString()) }
                 checkBaseResp(obj)
+                accept()
                 checkSources(obj)
                 val msg = obj["choices"]?.jsonArray?.firstOrNull()?.jsonObject?.get("message")?.jsonObject
                 val c = msg?.str("content").orEmpty()
@@ -190,9 +206,12 @@ class LlmClient(private val proxyOf: (ProviderConfig) -> String?) {
                 val obj = runCatching { Json.parse(data).jsonObject }.getOrNull() ?: continue
                 obj["error"]?.let { throw ApiException(200, it.toString()) }
                 checkBaseResp(obj)
+                accept()
                 parseUsage(obj["usage"])?.let { usage = it }
                 checkSources(obj)
                 val choice = obj["choices"]?.jsonArray?.firstOrNull()?.jsonObject ?: continue
+                // Kimi 等把用量放在 choices[0].usage 里
+                parseUsage(choice["usage"])?.let { usage = it }
                 choice.str("finish_reason")?.let { finish = it }
                 val delta = choice["delta"]?.jsonObject ?: continue
                 val c = delta.str("content").orEmpty()
@@ -259,7 +278,8 @@ class LlmClient(private val proxyOf: (ProviderConfig) -> String?) {
         val p = u["prompt_tokens"]?.jsonPrimitive?.intOrNull ?: 0
         val c = u["completion_tokens"]?.jsonPrimitive?.intOrNull ?: 0
         val cached = u["prompt_cache_hit_tokens"]?.jsonPrimitive?.intOrNull
-            ?: (u["prompt_tokens_details"] as? JsonObject)?.get("cached_tokens")?.jsonPrimitive?.intOrNull ?: 0
+            ?: (u["prompt_tokens_details"] as? JsonObject)?.get("cached_tokens")?.jsonPrimitive?.intOrNull
+            ?: u["cached_tokens"]?.jsonPrimitive?.intOrNull ?: 0
         return Usage(p, c, cached)
     }
 

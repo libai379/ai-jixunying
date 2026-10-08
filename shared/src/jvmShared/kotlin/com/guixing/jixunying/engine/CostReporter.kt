@@ -38,8 +38,8 @@ class CostReporter(private val ledger: Ledger, private val stateOf: () -> AppSta
         class Acc(val key: String, val label: String, val sub: String = "") {
             var cny = 0.0; var usd = 0.0; var calls = 0; var images = 0
             var prompt = 0L; var cached = 0L; var completion = 0L; var unpriced = 0; var noUsage = 0
-            var priceText = ""; var priceKey = ""; var overridden = false
-            fun line() = CostLine(key, label, sub, cny, usd, calls, images, prompt, cached, completion, unpriced, noUsage, priceText, priceKey, overridden)
+            var priceText = ""; var priceKey = ""; var overridden = false; var price: com.guixing.jixunying.model.ModelPrice? = null
+            fun line() = CostLine(key, label, sub, cny, usd, calls, images, prompt, cached, completion, unpriced, noUsage, priceText, priceKey, overridden, price)
         }
         val total = Acc("total", "合计")
         val members = LinkedHashMap<String, Acc>()
@@ -77,6 +77,7 @@ class CostReporter(private val ledger: Ledger, private val stateOf: () -> AppSta
                 Acc(modelKey, r.model, p?.name ?: r.provider).also { a ->
                     a.priceKey = modelKey
                     a.overridden = modelKey in overrides
+                    a.price = price
                     a.priceText = price?.let(Prices::describe) ?: "价格表里没有这个模型（可以自己填单价）"
                 }
             })
@@ -92,11 +93,25 @@ class CostReporter(private val ledger: Ledger, private val stateOf: () -> AppSta
             byMember = members.values.map { it.line() }.byMoney(),
             byModel = models.values.map { it.line() }.byMoney(),
             byKind = kinds.values.map { it.line() }.byMoney(),
-            daily = days.values.map { it.line() }.takeLast(31),
+            daily = calendar(from, days) { Acc(it, it) }.map { it.line() },
             usdRate = rate,
             firstAt = all.firstOrNull()?.at ?: 0L,
             backfillUntil = all.lastOrNull { it.backfill }?.at ?: 0L,
         )
+    }
+
+    /**
+     * 按天的柱子要按日历排：没用的日子也占一格（不然 10 月 1 日和 8 日看着像挨着的两天）。
+     * 最多最近 31 天；「全部」也只看最近 31 天。
+     */
+    private fun <A> calendar(from: Long, days: Map<String, A>, make: (String) -> A): List<A> {
+        if (days.isEmpty()) return emptyList()
+        val today = Instant.ofEpochMilli(clock()).atZone(Ledger.BEIJING).toLocalDate()
+        val first = days.keys.minOf { LocalDate.parse(it) }
+        var d = maxOf(first, today.minusDays(30), if (from > 0) Instant.ofEpochMilli(from).atZone(Ledger.BEIJING).toLocalDate() else first)
+        val out = mutableListOf<A>()
+        while (!d.isAfter(today)) { out += days[d.toString()] ?: make(d.toString()); d = d.plusDays(1) }
+        return out
     }
 
     /** 测试和界面用：单条记录的钱（原币种）。 */

@@ -143,7 +143,9 @@ class Engine(
         emit(Event.State(state))
         storage.brokenNotes.forEach { emit(Event.Notice(it, error = true)) }
         llm.onUsage = { p, model, u, tag -> recordUsage(p, model, u, tag?.kind ?: UsageKinds.OTHER, tag) }
-        if (!ledger.backfilled) scope.launch { runCatching { backfillLedger() } }
+        // 补记只补引擎启动以前的（启动以后的回答已经实时记过，免得记两遍）
+        val backfillBefore = now()
+        if (!ledger.backfilled) scope.launch { runCatching { backfillLedger(backfillBefore) } }
         // 文档库：启动后稍等一会儿在后台扫一遍，之后每半小时看一次有没有新文件
         if (autoScanDocs) scope.launch {
             kotlinx.coroutines.delay(4_000)
@@ -646,25 +648,30 @@ class Engine(
      * 第一次用上记账时，把以前聊天记录里已有的用量补记进来（成员回答带着 usage，画的图有模型标签），花费页一打开就有历史。
      * 那时没记记录员的后台活，补不回来。
      */
-    private fun backfillLedger() {
+    private fun backfillLedger(before: Long) {
         val out = mutableListOf<UsageRecord>()
+        // 成员在聊天里画的图，消息上没记是哪个画图模型：按现在自动挑的第一个算（估计）
+        val guess = ImagePick.resolve(state).firstOrNull()?.let { c -> state.provider(c.providerId)?.let { it to c.modelId } }
         for (c in state.conversations) {
             for (m in storage.loadMessages(c.id)) {
-                if (m.role != Role.AI || m.status != MsgStatus.DONE) continue
-                // 标签是「模型（服务商名）」，后面可能带「· 快速 / · 深度」
+                if (m.role != Role.AI || m.status != MsgStatus.DONE || m.createdAt >= before) continue
+                // 标签是「模型（服务商名）」，服务商名自己可能带全角括号（「千问AI平台（阿里）」），后面可能带「· 快速」
                 val model = m.modelLabel.substringBefore("（").trim()
-                val pname = m.modelLabel.substringAfter("（", "").substringBefore("）").trim()
-                if (model.isEmpty()) continue
-                val p = state.providers.firstOrNull { it.name == pname } ?: state.member(m.senderId)?.let { state.provider(it.providerId) }
+                val p = state.providers.firstOrNull { model.isNotEmpty() && m.modelLabel.startsWith("$model（${it.name}）") }
+                    ?: state.member(m.senderId)?.let { state.provider(it.providerId) }
+                    ?: state.providers.firstOrNull { pp -> pp.models.any { it.id == model && it.imageGen } }
+                val pname = p?.name ?: m.modelLabel.substringAfter("（", "").substringBeforeLast("）")
                 val platform = p?.let(Thinking::platformOf).orEmpty()
                 val images = m.attachments.count { it.kind == AttachmentKind.GENERATED_IMAGE }
-                val u = m.usage
                 if (m.senderId == PAINTER_ID) {
-                    if (images > 0) out += UsageRecord(m.createdAt, UsageKinds.IMAGE, p?.id.orEmpty(), pname, platform, model, images = images, convId = c.id, backfill = true)
-                } else if (u != null) {
-                    out += UsageRecord(m.createdAt, UsageKinds.CHAT, p?.id.orEmpty(), pname, platform, model, u.prompt, u.cached, u.completion,
-                        memberId = m.senderId, convId = c.id, backfill = true)
+                    if (images > 0 && model.isNotEmpty()) out += UsageRecord(m.createdAt, UsageKinds.IMAGE, p?.id.orEmpty(), pname, platform, model, images = images, convId = c.id, backfill = true)
+                    continue
                 }
+                val u = m.usage
+                if (u != null && model.isNotEmpty()) out += UsageRecord(m.createdAt, UsageKinds.CHAT, p?.id.orEmpty(), pname, platform, model, u.prompt, u.cached, u.completion,
+                    memberId = m.senderId, convId = c.id, backfill = true)
+                if (images > 0) out += UsageRecord(m.createdAt, UsageKinds.IMAGE, guess?.first?.id.orEmpty(), guess?.first?.name.orEmpty(),
+                    guess?.first?.let(Thinking::platformOf).orEmpty(), guess?.second.orEmpty(), images = images, memberId = m.senderId, convId = c.id, backfill = true)
             }
         }
         ledger.addAll(out.sortedBy { it.at })
@@ -1229,11 +1236,15 @@ class Engine(
     }
 
     private suspend fun paint(target: Pair<ProviderConfig, String>, prompt: String, size: String? = null): Pair<Attachment, String?> {
-        val r = images.generate(target.first, target.second, prompt, size ?: state.settings.imageGen.size)
-        // 画成一张记一张（成员在聊天里画的记在成员账上；测试画的算测试）
-        currentCoroutineContext()[UsageTag].let { tag ->
-            recordUsage(target.first, target.second, Usage(), if (tag?.kind == UsageKinds.TEST) UsageKinds.TEST else UsageKinds.IMAGE, tag, images = 1)
+        // 画成一张记一张（成员在聊天里画的记在成员账上；测试画的算测试）。画好了只是下载失败的也已经扣钱，照样记
+        val tag = currentCoroutineContext()[UsageTag]
+        fun bill() = recordUsage(target.first, target.second, Usage(), if (tag?.kind == UsageKinds.TEST) UsageKinds.TEST else UsageKinds.IMAGE, tag, images = 1)
+        val r = try {
+            images.generate(target.first, target.second, prompt, size ?: state.settings.imageGen.size)
+        } catch (e: ImageDownloadFailed) {
+            bill(); throw e
         }
+        bill()
         val ext = r.mime.substringAfter('/').replace("jpeg", "jpg")
         val att = Attachment(newId(), "图片_${System.currentTimeMillis() % 1_000_000}.$ext", r.mime, r.bytes.size.toLong(), AttachmentKind.GENERATED_IMAGE, note = prompt.take(200))
         storage.putFile(att, r.bytes, null)
@@ -1672,6 +1683,7 @@ class Engine(
     }
 
     fun friendlyError(e: Throwable, p: ProviderConfig? = null): String {
+        if (e is ImageDownloadFailed) return "图片画好了，但下载失败（这张已经扣费）：${e.body.take(200)}"
         if (e is ApiException) {
             val body = e.body.take(300)
             val lower = body.lowercase()

@@ -119,6 +119,14 @@ class EngineTest {
                         return@post
                     }
                     val model = req["model"]!!.jsonPrimitive.content
+                    // 先正常回一块、再报错（服务商已经接下了这次请求，输入已经扣钱）
+                    if (model == "fake-midfail") {
+                        call.respondTextWriter(ContentType.Text.EventStream) {
+                            write("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"半句\"}}]}\n\n")
+                            write("data: {\"error\":{\"message\":\"boom\"}}\n\n"); flush()
+                        }
+                        return@post
+                    }
                     val msgs = req["messages"]!!.jsonArray
                     val last = msgs.last().jsonObject
                     val lastText = (last["content"] as? JsonPrimitive)?.contentOrNull.orEmpty()
@@ -271,6 +279,11 @@ class EngineTest {
                     wxSent += "cdn:" + call.request.queryParameters["encrypted_query_param"] + ":" + body
                     call.response.headers.append("x-encrypted-param", "dl1")
                     call.respondText("")
+                }
+                // 画好了给了地址，但地址下载不下来（已经扣钱）
+                post("/nodl/v1/images/generations") {
+                    imageRequests += "nodl:" + call.receiveText()
+                    call.respondText("""{"data":[{"url":"http://127.0.0.1:$port/img/missing.png"}]}""", ContentType.Application.Json)
                 }
                 // 画不出来的服务商（比如 Key 没开通画图），用来测自动换下一个
                 post("/bad/v1/images/generations") {
@@ -544,7 +557,8 @@ class EngineTest {
     @Test
     fun ledgerRecordsEveryCall() = runBlocking {
         val (e, ms) = engineWithMembers("甲", "乙", "丙")
-        e.call(Command.SaveProvider(ProviderConfig("pimg", "custom", "画图", "${base()}/v1", "k", listOf(ModelInfo("fake-image", tools = false, imageGen = true)))))
+        // 服务商名带全角括号（预设名「千问AI平台（阿里）」就是这样），补记时也要认得出
+        e.call(Command.SaveProvider(ProviderConfig("pimg", "custom", "画图（测试）", "${base()}/v1", "k", listOf(ModelInfo("fake-image", tools = false, imageGen = true)))))
         val conv = e.call(Command.CreateConversation(ms.map { it.id })).data
         e.call(Command.UpdateConversation(e.state.conversation(conv)!!.copy(webSearch = false)))
         fun ledger() = com.guixing.jixunying.engine.Ledger(File(dir, "usage")).since()
@@ -577,6 +591,7 @@ class EngineTest {
         File(dir, "usage").deleteRecursively()
         val e2 = Engine(Storage(dir))
         until("补记") { ledger().count { it.backfill && it.kind == "chat" && it.prompt == 10 } == 4 && ledger().any { it.backfill && it.kind == "image" } }
+        assertEquals("pimg", ledger().first { it.backfill && it.kind == "image" }.providerId, "带全角括号的服务商名也认得出")
         val n = ledger().size
         Engine(Storage(dir))
         delay(500)
@@ -601,6 +616,30 @@ class EngineTest {
         assertEquals(12.3, list["pm"]!!.amount); assertTrue(list["pm"]!!.unofficial)
         assertFalse(list["pi"]!!.supported); assertTrue(list["pi"]!!.consoleUrl.startsWith("https://"), "查不了的给控制台链接")
         assertFalse(list["pb"]!!.ok); assertTrue("Key 不对" in list["pb"]!!.text, list["pb"]!!.text)
+    }
+
+    /** 已经扣钱的也要记：回了一块再出错的请求、画好了但下载失败的图。 */
+    @Test
+    fun billedFailuresAreRecorded() = runBlocking {
+        val (e, ms) = engineWithMembers("小智")
+        fun ledger() = com.guixing.jixunying.engine.Ledger(File(dir, "usage")).since()
+        e.call(Command.SaveProvider(ProviderConfig("pf", "custom", "半路出错", "${base()}/v1", "k", listOf(ModelInfo("fake-midfail")))))
+        e.call(Command.SaveMember(ms[0].copy(providerId = "pf", modelId = "fake-midfail")))
+        val conv = e.call(Command.CreateConversation(listOf(ms[0].id))).data
+        e.call(Command.UpdateConversation(e.state.conversation(conv)!!.copy(webSearch = false)))
+        e.call(Command.SendMessage(conv, "你好"))
+        waitIdle(e, conv, 1)
+        assertEquals(MsgStatus.ERROR, e.store.messages.value[conv]!!.last().status)
+        assertTrue(ledger().any { it.model == "fake-midfail" && it.kind == "chat" && it.prompt == 0 }, "记一条没用量的：${ledger()}")
+
+        e.call(Command.SaveProvider(ProviderConfig("pn", "custom", "下载不了", "${base()}/nodl/v1", "k", listOf(ModelInfo("fake-nodl", tools = false, imageGen = true)))))
+        e.call(Command.SaveSettings(e.state.settings.copy(imageGen = e.state.settings.imageGen.copy(providerId = "pn", modelId = "fake-nodl"))))
+        e.call(Command.SendMessage(conv, "一只猫", drawImage = true))
+        waitIdle(e, conv, 2)
+        val painted = e.store.messages.value[conv]!!.last()
+        assertEquals(MsgStatus.ERROR, painted.status)
+        assertTrue("已经扣费" in painted.error, painted.error)
+        assertTrue(ledger().any { it.kind == "image" && it.model == "fake-nodl" && it.images == 1 }, "画好了的那张记上了")
     }
 
     @Test

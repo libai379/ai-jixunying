@@ -38,7 +38,7 @@ object Prices {
     private fun cny(input: Double, cached: Double?, output: Double, note: String = "") = ModelPrice("CNY", listOf(t(input, cached, output)), note = note)
     private fun usd(input: Double, cached: Double?, output: Double, note: String = "") = ModelPrice("USD", listOf(t(input, cached, output)), note = note)
     private fun img(price: Double, currency: String = "CNY", note: String = "") = ModelPrice(currency, perImage = price, note = note)
-    private val FREE = ModelPrice("CNY", listOf(t(0.0, 0.0, 0.0)), note = "免费")
+    private val FREE = ModelPrice("CNY", listOf(t(0.0, 0.0, 0.0)), perImage = 0.0, note = "免费")
     private val FREE_IMAGE = ModelPrice("CNY", perImage = 0.0, note = "免费")
 
     fun key(platform: String, model: String) = platform + "|" + model.trim().lowercase()
@@ -86,6 +86,8 @@ object Prices {
             else -> null
         }
         "qwen" -> when {
+            // 百炼国际版按美元另有价格，没查
+            "dashscope-intl" in url || "alibabacloud" in url -> null
             m.startsWith("qwen3.8-max") -> cny(12.0, 1.5, 36.0)
             // qwen3-max、qwen-plus 按整次请求的输入长度分档
             m.startsWith("qwen3-max") -> ModelPrice("CNY", listOf(t(2.5, 0.5, 10.0, 32_000), t(4.0, 0.8, 16.0, 128_000), t(7.0, 1.4, 28.0)))
@@ -172,7 +174,9 @@ object Prices {
     fun cost(r: UsageRecord, price: ModelPrice?): Double? {
         price ?: return null
         if (r.images > 0) return price.perImage?.let { it * r.images }
-        val tier = price.tiers.firstOrNull { r.prompt <= it.upTo } ?: price.tiers.lastOrNull() ?: return null
+        // 补记的老记录把一次回答里几轮工具调用的输入加在一起了，按它挑档会偏贵：老记录一律按第一档
+        val tier = (if (r.backfill) price.tiers.firstOrNull() else price.tiers.firstOrNull { r.prompt <= it.upTo })
+            ?: price.tiers.lastOrNull() ?: return null
         val cached = r.cached.coerceIn(0, r.prompt)
         val miss = r.prompt - cached
         var yuan = (miss * tier.input + cached * (tier.cached ?: tier.input) + r.completion * tier.output) / 1_000_000.0

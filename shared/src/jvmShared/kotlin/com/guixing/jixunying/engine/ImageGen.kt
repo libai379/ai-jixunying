@@ -100,10 +100,17 @@ class ImageGen(private val proxyOf: (ProviderConfig) -> String?) {
         return runCatching { Json.parse(text).jsonObject }.getOrNull() ?: throw ApiException(status.value, "返回不是 JSON：" + text.take(200))
     }
 
-    private suspend fun download(client: HttpClient, url: String): Pair<ByteArray, String> {
+    /** 服务商已经画好、给了地址（已经扣钱）才会走到这里；下载失败也要让上面知道这张算过钱。 */
+    private suspend fun download(client: HttpClient, url: String): Pair<ByteArray, String> = try {
         val img = client.get(url)
-        if (img.status.value !in 200..299) throw ApiException(img.status.value, "图片下载失败")
-        return img.bodyAsBytes() to (img.headers["Content-Type"]?.substringBefore(';')?.takeIf { it.startsWith("image/") } ?: "image/png")
+        if (img.status.value !in 200..299) throw ImageDownloadFailed(img.status.value, "图片下载失败")
+        img.bodyAsBytes() to (img.headers["Content-Type"]?.substringBefore(';')?.takeIf { it.startsWith("image/") } ?: "image/png")
+    } catch (e: kotlinx.coroutines.CancellationException) {
+        throw e
+    } catch (e: ImageDownloadFailed) {
+        throw e
+    } catch (e: Throwable) {
+        throw ImageDownloadFailed(502, "图片下载失败：${e.message ?: e::class.simpleName}")
     }
 
     private fun sniffMime(b64: String) = when {
