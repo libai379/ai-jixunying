@@ -1163,7 +1163,7 @@ class Engine(
             ?: ModelInfo(member.modelId, vision = Presets.guessVision(member.modelId))
         // 快速 / 深度：按这家的参数切换思考；关不掉、开不了的不传，回答上也不标
         val thinking = if (llm.thinkingDropped(provider, model.id)) null else Thinking.params(Thinking.rule(provider, model.id), member.thinking)
-        if (thinking != null) updateMessage(convId, msg.id, persist = false) { it.copy(modelLabel = it.modelLabel + " · " + Thinking.label(member.thinking)) }
+        if (thinking != null) updateMessage(convId, msg.id, persist = false) { it.copy(modelLabel = it.modelLabel + "· " + Thinking.label(member.thinking)) }
         val hasImageModel = ImagePick.resolve(state).isNotEmpty()
         val wantSearch = conv.webSearch
         val toolsOk = model.tools && !llm.toolsDropped(provider, model.id)

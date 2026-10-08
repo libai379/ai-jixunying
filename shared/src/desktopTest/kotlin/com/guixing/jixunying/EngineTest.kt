@@ -8,6 +8,7 @@ import com.guixing.jixunying.engine.Engine
 import com.guixing.jixunying.engine.Storage
 import com.guixing.jixunying.model.AppJson
 import com.guixing.jixunying.model.Command
+import com.guixing.jixunying.model.Event
 import com.guixing.jixunying.model.ImageGenSettings
 import com.guixing.jixunying.model.Member
 import com.guixing.jixunying.model.ModelInfo
@@ -18,6 +19,7 @@ import com.guixing.jixunying.model.RelaySettings
 import com.guixing.jixunying.model.ReplyMode
 import com.guixing.jixunying.model.Role
 import com.guixing.jixunying.model.SearchEngine
+import com.guixing.jixunying.model.ThinkingMode
 import com.guixing.jixunying.relay.RelayHost
 import com.guixing.jixunying.relay.RelayLink
 import com.guixing.jixunying.relay.pairWithHost
@@ -95,6 +97,11 @@ class EngineTest {
                 post("/v1/chat/completions") {
                     val req = Json.parseToJsonElement(call.receiveText()).jsonObject
                     requests += req
+                    // 不认切换思考参数的服务（用 Key 区分）
+                    if (call.request.headers["Authorization"] == "Bearer refuse-thinking" && req.containsKey("thinking")) {
+                        call.respondText("""{"error":{"message":"Unrecognized request argument supplied: thinking"}}""", ContentType.Application.Json, HttpStatusCode.BadRequest)
+                        return@post
+                    }
                     if (req.containsKey("temperature")) {
                         call.respondText("""{"error":{"message":"invalid temperature: only 1 is allowed"}}""", ContentType.Application.Json, HttpStatusCode.BadRequest)
                         return@post
@@ -390,6 +397,55 @@ class EngineTest {
         assertTrue(requests.drop(1).none { it.containsKey("temperature") })
         val toolMsg = requests.last()["messages"]!!.jsonArray.map { it.jsonObject }.first { it["role"]?.jsonPrimitive?.content == "tool" }
         assertTrue("搜索失败" in toolMsg["content"]!!.jsonPrimitive.content)
+    }
+
+    /** 快速 / 深度：按这家的写法带参数，默认什么都不传；模型不认就去掉重试、标签恢复、提示一次，之后不再传。 */
+    @Test
+    fun thinkingFastAndDeep() = runBlocking {
+        val (e, _) = engineWithMembers("小智")
+        val notes = Collections.synchronizedList(mutableListOf<String>())
+        e.addListener { if (it is Event.Notice) notes += it.text }
+        e.call(Command.SaveProvider(ProviderConfig("pd", "deepseek", "DeepSeek", "${base()}/v1", "k", listOf(ModelInfo("deepseek-flash")))))
+        e.call(Command.SaveProvider(ProviderConfig("pr", "deepseek", "不认参数的", "${base()}/v1", "refuse-thinking", listOf(ModelInfo("deepseek-flash")))))
+        e.call(Command.SaveMember(Member("mf", "快", providerId = "pd", modelId = "deepseek-flash", thinking = ThinkingMode.FAST)))
+        e.call(Command.SaveMember(Member("ms", "深", providerId = "pd", modelId = "deepseek-flash", thinking = ThinkingMode.DEEP)))
+        e.call(Command.SaveMember(Member("ma", "默", providerId = "pd", modelId = "deepseek-flash")))
+        e.call(Command.SaveMember(Member("mr", "倔", providerId = "pr", modelId = "deepseek-flash", thinking = ThinkingMode.FAST)))
+
+        suspend fun ask(memberId: String): Pair<com.guixing.jixunying.model.Message, List<JsonObject>> {
+            val conv = e.call(Command.CreateConversation(listOf(memberId))).data
+            e.call(Command.UpdateConversation(e.state.conversation(conv)!!.copy(webSearch = false)))
+            requests.clear()
+            e.call(Command.SendMessage(conv, "你好"))
+            waitIdle(e, conv, 1)
+            return e.store.messages.value[conv]!!.last() to requests.toList()
+        }
+
+        val (fast, fastReqs) = ask("mf")
+        assertEquals(MsgStatus.DONE, fast.status, fast.error)
+        assertEquals("""{"type":"disabled"}""", fastReqs.single()["thinking"].toString())
+        assertTrue(fast.modelLabel.endsWith("）· 快速"), fast.modelLabel)
+
+        val (deep, deepReqs) = ask("ms")
+        assertEquals("""{"type":"enabled"}""", deepReqs.single()["thinking"].toString())
+        assertEquals("max", deepReqs.single()["reasoning_effort"]!!.jsonPrimitive.content)
+        assertTrue(deep.modelLabel.endsWith("）· 深度"), deep.modelLabel)
+
+        val (auto, autoReqs) = ask("ma")
+        assertFalse(autoReqs.single().containsKey("thinking") || autoReqs.single().containsKey("reasoning_effort"), "默认什么都不传")
+        assertFalse("·" in auto.modelLabel, auto.modelLabel)
+
+        // 不认参数：第一次 400，去掉重试答完；标签不带「快速」，提示一次
+        val (refused, refusedReqs) = ask("mr")
+        assertEquals(MsgStatus.DONE, refused.status, refused.error)
+        assertEquals("我是倔。", refused.content)
+        assertEquals(listOf(true, false), refusedReqs.map { it.containsKey("thinking") })
+        assertFalse("快速" in refused.modelLabel, refused.modelLabel)
+        assertEquals(1, notes.count { "不认「快速」" in it }, notes.toString())
+        // 记住了：下次直接不传，也不再提示
+        val (_, againReqs) = ask("mr")
+        assertFalse(againReqs.single().containsKey("thinking"))
+        assertEquals(1, notes.count { "不认「快速」" in it }, notes.toString())
     }
 
     @Test

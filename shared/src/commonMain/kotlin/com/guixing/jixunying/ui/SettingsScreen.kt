@@ -642,7 +642,14 @@ private fun ThinkingPicker(mode: ThinkingMode, rule: ThinkingRule, onPick: (Thin
             ) {
                 Text(Thinking.label(opt), style = MaterialTheme.typography.labelLarge,
                     color = when { sel -> primary; ok -> MaterialTheme.colorScheme.onSurface; else -> Ext.c.subtle.copy(alpha = 0.5f) })
-                Text(when (opt) { ThinkingMode.AUTO -> "模型自己定"; ThinkingMode.FAST -> if (ok) "不先想" else "不支持"; ThinkingMode.DEEP -> if (ok) "想透再答" else "不支持" },
+                Text(when {
+                    opt == ThinkingMode.AUTO -> "模型自己定"
+                    !ok -> "不支持"
+                    opt == ThinkingMode.DEEP -> "想透再答"
+                    rule.fastOnlyLess -> "少想一点"
+                    rule.fast?.isEmpty() == true -> "本来就不想"
+                    else -> "不先想"
+                },
                     style = MaterialTheme.typography.labelSmall, color = if (ok || sel) Ext.c.subtle else Ext.c.subtle.copy(alpha = 0.5f))
             }
         }

@@ -62,10 +62,11 @@ class ShotsTest {
             ProviderConfig("pi", "mimo", "小米 MiMo", "https://api.xiaomimimo.com/v1", "sk-mimo-xxxx", listOf(ModelInfo("mimo-v2.6-flash"))),
         )
         val members = listOf(
-            Member("ma", "阿德", "🧠", 0xFF5B6CFF, "pd", "deepseek-flash", "全能助手，回答准确、条理清楚，遇到事实问题先查证再说。"),
+            Member("ma", "阿德", "🧠", 0xFF5B6CFF, "pd", "deepseek-flash", "全能助手，回答准确、条理清楚，遇到事实问题先查证再说。",
+                thinking = com.guixing.jixunying.model.ThinkingMode.DEEP),
             Member("mb", "阿麦", "🤖", 0xFFEC4899, "pm", "MiniMax-M3", "写作和总结"),
-            Member("mc", "阿智", "📊", 0xFF0EA5E9, "pz", "GLM-5.3-Flash"),
-            Member("md", "阿米", "🍵", 0xFF10B981, "pi", "mimo-v2.6-flash"),
+            Member("mc", "阿智", "📊", 0xFF0EA5E9, "pz", "GLM-5.3-Flash", thinking = com.guixing.jixunying.model.ThinkingMode.FAST),
+            Member("md", "阿米", "🍵", 0xFF10B981, "pi", "mimo-v2.6-flash", thinking = com.guixing.jixunying.model.ThinkingMode.FAST),
         )
         val now = System.currentTimeMillis()
         val convs = listOf(
@@ -100,7 +101,7 @@ class ShotsTest {
                     ToolStep("doc", "读《租房合同.docx》"),
                     ToolStep("search", "租房押金 规定", listOf(SearchSource("住房租赁条例解读", "https://www.gov.cn/zhengce/a", "押金不得超过……"), SearchSource("押金退还纠纷", "https://news.example.com/b"))),
                 ),
-                createdAt = now - 110_000, modelLabel = "deepseek-flash（DeepSeek 4.1 Flash）", usage = Usage(1345, 420, 128, 4800)),
+                createdAt = now - 110_000, modelLabel = "deepseek-flash（DeepSeek 4.1 Flash）· 深度", usage = Usage(1345, 420, 128, 4800)),
             Message("r2", "c1", Role.AI, "mb", "补充一点：**签之前拍照留存房屋现状**，退押金时少扯皮。@阿德 说的维修责任也要写进去。",
                 createdAt = now - 100_000, modelLabel = "MiniMax-M3（MiniMax 中国版）", usage = Usage(980, 60, 0, 2100)),
         ))
@@ -194,6 +195,8 @@ class ShotsTest {
         shoot("desktop-convsettings", 1280, 820, 1f, hub, desktop, "conv:c1#convsettings")
         shoot("desktop-member-edit", 1280, 820, 1f, hub, desktop, "settings:MEMBERS#edit")
         shoot("phone-convsettings", 824, 1784, 2f, hub, phone, "conv:c1#convsettings")
+        shoot("phone-settings-members", 824, 1784, 2f, hub, phone, "settings:MEMBERS")
+        shoot("phone-member-edit", 824, 1784, 2f, hub, phone, "settings:MEMBERS#edit")
         shoot("phone-devices", 824, 1784, 2f, hub, phone, "settings:DEVICES")
         // 深色
         kotlinx.coroutines.runBlocking { e.call(com.guixing.jixunying.model.Command.SaveSettings(e.state.settings.copy(darkMode = 2))) }
@@ -202,6 +205,19 @@ class ShotsTest {
         shoot("desktop-dark-stances", 1280, 820, 1f, hub, desktop, "stances")
         shoot("desktop-dark-chat-stances", 1280, 820, 1f, hub, desktop, "conv:c5")
         shoot("phone-dark-settings-home", 824, 1784, 2f, hub, phone, "settingshome")
+        shoot("desktop-dark-member-edit", 1280, 820, 1f, hub, desktop, "settings:MEMBERS#edit")
+
+        // 编辑成员弹窗整个画出来（窗口拉高），看「思考」下面那行说明：阿德（深度），再把阿智（GLM-5.3 关不掉思考，快速 = 少想）挪到第一个
+        kotlinx.coroutines.runBlocking { e.call(com.guixing.jixunying.model.Command.SaveSettings(e.state.settings.copy(darkMode = 1))) }
+        shoot("desktop-member-edit-tall", 1280, 1500, 1f, hub, desktop, "settings:MEMBERS#edit")
+        kotlinx.coroutines.runBlocking {
+            listOf("ma", "mb").forEach { id ->
+                val m = e.state.member(id)!!
+                e.call(com.guixing.jixunying.model.Command.DeleteMember(id))
+                e.call(com.guixing.jixunying.model.Command.SaveMember(m))
+            }
+        }
+        shoot("desktop-member-edit-glm", 1280, 1500, 1f, hub, desktop, "settings:MEMBERS#edit")
 
         // 空白状态：第一次打开
         val empty = Engine(Storage(File(tmp, "empty")))
