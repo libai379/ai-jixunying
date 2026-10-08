@@ -44,3 +44,55 @@ object UsageKinds {
         else -> "其他"
     }
 }
+
+/** 花费设置：美元折人民币的汇率；用户改过的单价（键见 Prices.key）。 */
+@Serializable
+data class CostSettings(
+    val usdRate: Double = 7.1,
+    val overrides: Map<String, ModelPrice> = emptyMap(),
+)
+
+/**
+ * 花费页的一行（一位成员 / 一个模型 / 一种用途 / 一天）。人民币和美元分开记，显示时按汇率合计。
+ * @param unpriced 价格表里没有这个模型的调用次数（没算进钱里）
+ * @param noUsage 服务商没返回用量的调用次数（没算进钱里）
+ */
+@Serializable
+data class CostLine(
+    val key: String,
+    val label: String,
+    val sub: String = "",
+    val cny: Double = 0.0,
+    val usd: Double = 0.0,
+    val calls: Int = 0,
+    val images: Int = 0,
+    val prompt: Long = 0,
+    val cached: Long = 0,
+    val completion: Long = 0,
+    val unpriced: Int = 0,
+    val noUsage: Int = 0,
+    val priceText: String = "",
+    /** 按模型分时：改单价用的键（Prices.key）；用户改过价时 overridden = true。 */
+    val priceKey: String = "",
+    val overridden: Boolean = false,
+) {
+    fun total(usdRate: Double) = cny + usd * usdRate
+}
+
+/** 一段时间的花费（Command.CostReport 的结果）。 */
+@Serializable
+data class CostReport(
+    /** today / week / month / all */
+    val period: String,
+    val from: Long,
+    val total: CostLine,
+    val byMember: List<CostLine> = emptyList(),
+    val byModel: List<CostLine> = emptyList(),
+    val byKind: List<CostLine> = emptyList(),
+    /** 按天（北京时间），最近的在后面，最多 31 天。 */
+    val daily: List<CostLine> = emptyList(),
+    val usdRate: Double = 7.1,
+    /** 账本里最早一条的时间；补记的老记录最晚到哪天（那之前没有记录员后台活的账）。 */
+    val firstAt: Long = 0,
+    val backfillUntil: Long = 0,
+)

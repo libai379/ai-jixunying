@@ -204,6 +204,7 @@ data class Settings(
     val memory: MemorySettings = MemorySettings(),
     val docs: DocSettings = DocSettings(),
     val weixin: WeixinSettings = WeixinSettings(),
+    val costs: CostSettings = CostSettings(),
 )
 
 @Serializable

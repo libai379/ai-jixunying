@@ -50,6 +50,8 @@ sealed interface Command {
     @Serializable data class DeleteMemory(val id: String) : Command
     /** 让记录员合并重复、矛盾的记忆。 */
     @Serializable data object TidyMemories : Command
+    /** 花费：period = today / week / month / all。结果 data 是 CostReport 的 JSON。 */
+    @Serializable data class GetCosts(val period: String = "month") : Command
     /** 后台出错的提示「知道了」：先不显示（再出错还会提示）。 */
     @Serializable data class DismissBgProblem(val job: BgJob) : Command
     /** 搜所有对话的聊天内容。结果 data 是 List<HistoryHit> 的 JSON。 */

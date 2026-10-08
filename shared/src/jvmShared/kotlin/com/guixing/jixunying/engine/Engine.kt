@@ -113,6 +113,9 @@ class Engine(
     /** 账本：每次调用模型、每张图记一条，花费页用（见 Ledger.kt、model/Costs.kt）。 */
     private val ledger = Ledger(java.io.File(storage.root, "usage"))
 
+    /** 花费页：按账本和价格表估算。 */
+    private val costs = CostReporter(ledger, { state })
+
     /** 记录员后台活出错时记下来、提示用户（以前悄悄停掉）。 */
     private val bg = BackgroundWatch({ state }, { f -> updateState(f) }, { emit(Event.Notice(it, error = true)) })
 
@@ -377,6 +380,10 @@ class Engine(
         }
         is Command.SaveProfile -> { updateState { it.copy(profile = c.profile) }; CommandResult() }
         is Command.DismissBgProblem -> { bg.dismiss(c.job); CommandResult() }
+        is Command.GetCosts -> {
+            val r = withContext(Dispatchers.IO) { costs.report(c.period) }
+            CommandResult(data = AppJson.encodeToString(com.guixing.jixunying.model.CostReport.serializer(), r))
+        }
         is Command.SaveSettings -> {
             val before = state.settings.relay
             val docsBefore = state.settings.docs
