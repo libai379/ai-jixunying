@@ -220,6 +220,17 @@ class EngineTest {
                         flush()
                     }
                 }
+                // —— 查余额（各家的格式照官方文档 / 官方 CLI）——
+                get("/ds/user/balance") {
+                    call.respondText("""{"is_available":true,"balance_infos":[{"currency":"CNY","total_balance":"110.00","granted_balance":"10.00","topped_up_balance":"100.00"}]}""", ContentType.Application.Json)
+                }
+                get("/bad/user/balance") { call.respondText("""{"error":{"message":"Authentication Fails"}}""", ContentType.Application.Json, HttpStatusCode.Unauthorized) }
+                get("/v1/users/me/balance") {
+                    call.respondText("""{"code":0,"data":{"available_balance":49.58,"voucher_balance":46.58,"cash_balance":3.0},"scode":"0x0","status":true}""", ContentType.Application.Json)
+                }
+                get("/mm/account/query_balance") {
+                    call.respondText("""{"available_amount":"12.30","cash_balance":"10.00","voucher_balance":"2.30","owed_amount":"0","base_resp":{"status_code":0,"status_msg":"success"}}""", ContentType.Application.Json)
+                }
                 // —— 画图 ——
                 post("/v1/images/generations") {
                     val body = call.receiveText()
@@ -567,6 +578,25 @@ class EngineTest {
         delay(500)
         assertEquals(n, ledger().size, "只补一次")
         assertTrue(e2.state.members.isNotEmpty())
+    }
+
+    /** 查余额：能查的平台用同一个 Key 查（格式各家不一样），Key 不对说清楚，查不了的给控制台链接。 */
+    @Test
+    fun balances() = runBlocking {
+        val e = Engine(Storage(dir))
+        e.call(Command.SaveProvider(ProviderConfig("pd", "deepseek", "DeepSeek", "${base()}/ds", "k", listOf(ModelInfo("deepseek-flash")))))
+        e.call(Command.SaveProvider(ProviderConfig("pk", "moonshot", "Kimi", "${base()}/v1", "k", listOf(ModelInfo("kimi-k3")))))
+        e.call(Command.SaveProvider(ProviderConfig("pm", "minimax", "MiniMax", "${base()}/mm/v1", "k", listOf(ModelInfo("MiniMax-M3")))))
+        e.call(Command.SaveProvider(ProviderConfig("pi", "mimo", "小米", "${base()}/v1", "k", listOf(ModelInfo("mimo-v2.6-flash")))))
+        e.call(Command.SaveProvider(ProviderConfig("pb", "deepseek", "坏 Key", "${base()}/bad", "bad", listOf(ModelInfo("deepseek-flash")))))
+        val r = e.call(Command.GetBalances)
+        assertTrue(r.ok, r.message)
+        val list = AppJson.decodeFromString(kotlinx.serialization.builtins.ListSerializer(com.guixing.jixunying.model.BalanceInfo.serializer()), r.data).associateBy { it.providerId }
+        assertEquals(110.0, list["pd"]!!.amount); assertTrue("赠送 ¥10.00" in list["pd"]!!.text, list["pd"]!!.text)
+        assertEquals(49.58, list["pk"]!!.amount); assertTrue("代金券" in list["pk"]!!.text)
+        assertEquals(12.3, list["pm"]!!.amount); assertTrue(list["pm"]!!.unofficial)
+        assertFalse(list["pi"]!!.supported); assertTrue(list["pi"]!!.consoleUrl.startsWith("https://"), "查不了的给控制台链接")
+        assertFalse(list["pb"]!!.ok); assertTrue("Key 不对" in list["pb"]!!.text, list["pb"]!!.text)
     }
 
     @Test

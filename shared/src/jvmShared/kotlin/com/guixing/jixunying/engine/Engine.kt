@@ -113,8 +113,9 @@ class Engine(
     /** 账本：每次调用模型、每张图记一条，花费页用（见 Ledger.kt、model/Costs.kt）。 */
     private val ledger = Ledger(java.io.File(storage.root, "usage"))
 
-    /** 花费页：按账本和价格表估算。 */
+    /** 花费页：按账本和价格表估算；能查余额的平台查余额。 */
     private val costs = CostReporter(ledger, { state })
+    private val balances = Balances { proxyFor(it.useProxy) }
 
     /** 记录员后台活出错时记下来、提示用户（以前悄悄停掉）。 */
     private val bg = BackgroundWatch({ state }, { f -> updateState(f) }, { emit(Event.Notice(it, error = true)) })
@@ -380,6 +381,12 @@ class Engine(
         }
         is Command.SaveProfile -> { updateState { it.copy(profile = c.profile) }; CommandResult() }
         is Command.DismissBgProblem -> { bg.dismiss(c.job); CommandResult() }
+        is Command.GetBalances -> {
+            val list = coroutineScope {
+                state.providers.filter { it.enabled }.map { p -> async(Dispatchers.IO) { balances.query(p, now()) } }.awaitAll()
+            }
+            CommandResult(data = AppJson.encodeToString(kotlinx.serialization.builtins.ListSerializer(com.guixing.jixunying.model.BalanceInfo.serializer()), list))
+        }
         is Command.GetCosts -> {
             val r = withContext(Dispatchers.IO) { costs.report(c.period) }
             CommandResult(data = AppJson.encodeToString(com.guixing.jixunying.model.CostReport.serializer(), r))

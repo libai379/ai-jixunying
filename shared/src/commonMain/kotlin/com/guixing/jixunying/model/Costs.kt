@@ -96,3 +96,25 @@ data class CostReport(
     val firstAt: Long = 0,
     val backfillUntil: Long = 0,
 )
+
+/**
+ * 一家服务商的余额（Command.GetBalances 的结果之一）。
+ * @param supported 这家有能用 API Key 查余额的接口
+ * @param amount 可用余额（查到才有）
+ * @param text 给人看的：「可用 ¥12.34（其中赠送 ¥2.00）」或者查不了的原因
+ * @param consoleUrl 查不了时去哪看
+ * @param unofficial 用的是没写进公开文档的接口（可能哪天就不能用了）
+ */
+@Serializable
+data class BalanceInfo(
+    val providerId: String,
+    val provider: String,
+    val supported: Boolean,
+    val ok: Boolean = false,
+    val amount: Double? = null,
+    val currency: String = "CNY",
+    val text: String = "",
+    val consoleUrl: String = "",
+    val unofficial: Boolean = false,
+    val at: Long = 0,
+)
