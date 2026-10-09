@@ -111,6 +111,15 @@ data class MemorySettings(
     val compressAt: Int = 24_000,
     /** 立场档案：群聊每轮答完，记录员记下各位成员的立场和改口（见 Stances.kt）。 */
     val stances: Boolean = true,
+    /** 立场档案的裁判用哪个模型；留空自动挑（deepseek-flash 优先）。 */
+    val judgeProviderId: String = "",
+    val judgeModelId: String = "",
+    /** 裁判看到的回答隐去成员名字（换成甲乙丙丁），防止看名字偏袒。 */
+    val judgeAnonymous: Boolean = true,
+    /** AI 核实：开新议题后，裁判单独判一次谁对（能查就用 web_search）。 */
+    val aiVerify: Boolean = true,
+    /** 统计「准确率」时，用户没标的题按 AI 核实的结论算（用户标的永远优先）。 */
+    val countAiVerdict: Boolean = true,
 )
 
 @Serializable

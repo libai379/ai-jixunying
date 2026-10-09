@@ -2,7 +2,7 @@ package com.guixing.jixunying.model
 
 import kotlinx.serialization.Serializable
 
-/** 记录员在后台干的四样活。 */
+/** 记录员在后台干的活（四样）+ 裁判的 AI 核实。 */
 @Serializable
 enum class BgJob {
     /** 聊太长时把前面的聊天压成摘要。 */
@@ -12,13 +12,16 @@ enum class BgJob {
     /** 群里没 @、直接喊名字时，判断是在叫谁。 */
     ADDRESSING,
     /** 群聊每轮答完，记下各位的立场和改口。 */
-    STANCES;
+    STANCES,
+    /** 立场档案开新议题后，裁判判一次谁对。 */
+    AI_VERIFY;
 
     val label: String get() = when (this) {
         COMPACT -> "压缩聊天"
         MEMORY -> "挑长期记忆"
         ADDRESSING -> "点名判断"
         STANCES -> "立场档案"
+        AI_VERIFY -> "AI 核实"
     }
 
     /** 出错了会怎样（让人知道要不要管它）。 */
@@ -27,6 +30,7 @@ enum class BgJob {
         MEMORY -> "这次没挑出要记的事，下次答完会再试"
         ADDRESSING -> "没认出你在叫谁，这次按没点名处理了（照这个对话设的回答方式答）"
         STANCES -> "这一轮各位的立场没记上"
+        AI_VERIFY -> "没能判断谁对，这道题不会影响「准确率」统计"
     }
 }
 

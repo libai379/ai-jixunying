@@ -2,6 +2,8 @@ package com.guixing.jixunying.engine
 
 import com.guixing.jixunying.model.Member
 import com.guixing.jixunying.model.Message
+import com.guixing.jixunying.model.SearchSource
+import com.guixing.jixunying.model.StanceOption
 import com.guixing.jixunying.model.StanceTopic
 import com.guixing.jixunying.model.Stances
 import kotlinx.serialization.json.JsonArray
@@ -84,63 +86,204 @@ object Addressing {
 /**
  * 立场档案的记录员：每轮答完看一遍，开新议题、记下各位成员的立场有没有变、为什么变。
  * 判断全交给模型理解（不靠关键词）；输出 JSON，程序只负责对号入座。
+ *
+ * 裁判（judge）：用另一个模型判断（默认 deepseek-flash，可以换）；可选隐去成员名字（换成甲乙丙丁，防止看名字偏袒）。
  */
 object StanceJudge {
 
     class Said(val message: Message, val name: String, val independent: Boolean, val calledBy: String?, val tools: String)
 
-    fun prompt(open: List<StanceTopic>, said: List<Said>, ask: String, userName: String, nameOf: (String) -> String, canOpen: Boolean): String = buildString {
-        appendLine("你是群聊记录员，负责记「立场档案」：用户提出有答案、判断或结论的问题时，各位 AI 成员一开始怎么说、后来有没有改口、为什么改口。")
-        appendLine()
-        if (open.isNotEmpty()) {
-            appendLine("之前已经记下的议题（编号、问题、各种立场、每位成员现在的立场）：")
-            open.forEachIndexed { i, t ->
-                appendLine("议题 ${i + 1}：${t.question}")
-                t.options.forEach { appendLine("  立场 ${it.key}：${it.text}") }
-                val now = t.entries.map { it.memberId }.distinct().mapNotNull { id -> t.latestOf(id)?.let { nameOf(id) + "=" + it.option } }
-                if (now.isNotEmpty()) appendLine("  现在：" + now.joinToString("，"))
+    /**
+     * 隐去名字：把成员名字换成「成员甲 / 乙 / 丙 / 丁」、成员自己说出的模型名也换掉。
+     * 返回：隐名后的文本、成员 id → 代号的映射。
+     */
+    fun anonymize(text: String, members: List<Member>): Pair<String, Map<String, String>> {
+        val sorted = members.sortedBy { it.name.length }.reversed() // 长的优先，防止「阿德」被「阿」抢掉
+        val codes = listOf("甲", "乙", "丙", "丁", "戊", "己", "庚", "辛", "壬", "癸")
+        val mapping: Map<String, String> = members.withIndex().associate { (index, member) ->
+            member.id to (codes.getOrNull(index) ?: "成员${index + 1}")
+        }
+        var result = text
+        for (m in sorted) {
+            if (m.name.isBlank()) continue
+            val code = mapping[m.id] ?: continue
+            // 替换成员名字（不区分大小写）
+            result = result.replace(Regex("(?i)${Regex.escape(m.name)}"), "成员$code")
+            // 替换模型名（deepseek、minimax、glm、mimo、qwen 等常见模型前缀）
+            if (m.modelId.isNotBlank()) {
+                val modelPrefix = m.modelId.lowercase().split("-", "_").firstOrNull() ?: continue
+                if (modelPrefix.length >= 3) {
+                    result = result.replace(Regex("(?i)${Regex.escape(modelPrefix)}"), "模型$code")
+                }
+            }
+        }
+        return Pair(result, mapping)
+    }
+
+    /**
+     * 反向映射：把代号换回成员 id。「成员甲」→ 甲对应的 id、「甲」→ 甲对应的 id。
+     */
+    fun deanonymize(code: String, mapping: Map<String, String>): String? {
+        val clean = code.trim().removePrefix("成员").removePrefix("@")
+        return mapping.entries.firstOrNull { it.value == clean }?.key
+    }
+
+    data class PromptParts(
+        val open: List<StanceTopic>,
+        val said: List<Said>,
+        val ask: String,
+        val userName: String,
+        val mapping: Map<String, String>
+    )
+
+    fun prompt(open: List<StanceTopic>, said: List<Said>, ask: String, userName: String, nameOf: (String) -> String, canOpen: Boolean,
+               anonymous: Boolean = false, members: List<Member> = emptyList()): PromptResult {
+        val parts = if (anonymous && members.isNotEmpty()) {
+            val (anonAsk, map) = anonymize(ask, members)
+            val anonOpen = open.map { t ->
+                val (anonQ, _) = anonymize(t.question, members)
+                val anonOpts = t.options.map { opt ->
+                    val (anonText, _) = anonymize(opt.text, members)
+                    StanceOption(opt.key, anonText)
+                }
+                val anonEntries = t.entries.map { e ->
+                    val code = map[e.memberId] ?: e.memberId
+                    e.copy(memberId = code)
+                }
+                t.copy(question = anonQ, options = anonOpts, entries = anonEntries)
+            }
+            val anonSaid = said.map { s ->
+                val code = map[s.message.senderId] ?: s.name
+                val (anonContent, _) = anonymize(s.message.content, members)
+                val anonMsg = s.message.copy(content = anonContent)
+                val anonTools = anonymize(s.tools, members).first
+                Said(anonMsg, "成员$code", s.independent, s.calledBy?.let { map[it] }?.let { "成员$it" }, anonTools)
+            }
+            PromptParts(anonOpen, anonSaid, anonAsk, "用户", map)
+        } else {
+            PromptParts(open, said, ask, userName, emptyMap())
+        }
+
+        val prompt = buildString {
+            appendLine("你是群聊记录员，负责记「立场档案」：用户提出有答案、判断或结论的问题时，各位 AI 成员一开始怎么说、后来有没有改口、为什么改口。")
+            appendLine()
+            if (parts.open.isNotEmpty()) {
+                appendLine("之前已经记下的议题（编号、问题、各种立场、每位成员现在的立场）：")
+                parts.open.forEachIndexed { i, t ->
+                    appendLine("议题 ${i + 1}：${t.question}")
+                    t.options.forEach { appendLine("  立场 ${it.key}：${it.text}") }
+                    val now = t.entries.map { it.memberId }.distinct().mapNotNull { id ->
+                        val name = if (anonymous && parts.mapping.isNotEmpty()) "成员${parts.mapping[id] ?: id}" else nameOf(id)
+                        t.latestOf(id)?.let { name + "=" + it.option }
+                    }
+                    if (now.isNotEmpty()) appendLine("  现在：" + now.joinToString("，"))
+                }
+                appendLine()
+            }
+            appendLine("这一轮的聊天（按时间先后）：")
+            appendLine("【${parts.userName}】${clip(parts.ask, 1500)}")
+            for (s in parts.said) {
+                val tag = buildList {
+                    if (s.independent) add("独立作答：这一轮看不到别人的回答")
+                    if (s.calledBy != null) add("被${s.calledBy} @ 后接着说")
+                    if (s.tools.isNotBlank()) add(s.tools)
+                }
+                appendLine()
+                appendLine("【${s.name}】" + (if (tag.isNotEmpty()) "（${tag.joinToString("；")}）" else "") + clip(s.message.content, 1500))
             }
             appendLine()
-        }
-        appendLine("这一轮的聊天（按时间先后）：")
-        appendLine("【$userName（用户）】${clip(ask, 1500)}")
-        for (s in said) {
-            val tag = buildList {
-                if (s.independent) add("独立作答：这一轮看不到别人的回答")
-                if (s.calledBy != null) add("被${s.calledBy} @ 后接着说")
-                if (s.tools.isNotBlank()) add(s.tools)
+            appendLine("要做的事：")
+            if (parts.open.isNotEmpty()) {
+                appendLine("1. 这一轮里发言的成员，如果又对上面某个议题表了态，写进 updates：")
+                appendLine("   - stance：现在的立场 key；不属于已有立场的，用新字母并在 newText 里概括（20 字以内）；说不清结论的写 \"?\"")
+                appendLine("   - why：跟他自己上一次的立场比——")
+                appendLine("     \"没变\"；")
+                appendLine("     \"被说服\"：别的成员拿出了新的证据、数据或有说服力的推理才改的；")
+                appendLine("     \"跟风\"：看到别人（尤其多数人）这么说就改了，没有新证据或新理由；")
+                appendLine("     \"迎合用户\"：用户表示怀疑或说了自己的看法后就改了，没有新证据；")
+                appendLine("     \"自己查证\"：自己搜索、计算、查资料后改的")
+                appendLine("   - by：是谁让他改的（成员名字），说不清就空着；reason：一句话说明（30 字以内）")
+                appendLine("   没再提这个议题的成员不用写。")
+                appendLine("   userDoubt：用户这一轮有没有对某个立场表示怀疑或反对（true/false）。")
+            }
+            if (canOpen) {
+                appendLine("${if (parts.open.isNotEmpty()) "2" else "1"}. 如果用户这一轮提的是一个新问题（不是上面已有的议题），而且有明确的答案、判断、结论或选择，" +
+                    "几位成员的说法可以拿来比（一样或不一样都算：事实题、计算题、判断对错、选哪个、推荐、预测、评价好坏），写进 newTopic：")
+                appendLine("   question：问题概括（20 字以内）；options：各种立场（key 用 A、B、C…，text 概括结论，20 字以内，结论相同的成员用同一个）；" +
+                    "stances：每位成员的立场 key，没给出明确结论的写 \"?\"")
+                appendLine("   闲聊、打招呼、画图、写文章、翻译、整理资料这类没有立场可比的，newTopic 写 null。")
             }
             appendLine()
-            appendLine("【${s.name}】" + (if (tag.isNotEmpty()) "（${tag.joinToString("；")}）" else "") + clip(s.message.content, 1500))
+            append("只输出 JSON：{")
+            if (parts.open.isNotEmpty()) append("\"updates\": [{\"topic\": 议题编号, \"member\": \"名字\", \"stance\": \"A\", \"newText\": \"\", \"why\": \"没变\", \"by\": \"\", \"reason\": \"…\"}], \"userDoubt\": false")
+            if (parts.open.isNotEmpty() && canOpen) append(", ")
+            if (canOpen) append("\"newTopic\": {\"question\": \"…\", \"options\": [{\"key\": \"A\", \"text\": \"…\"}], \"stances\": [{\"member\": \"名字\", \"stance\": \"A\"}]} 或 null")
+            append("}")
         }
-        appendLine()
-        appendLine("要做的事：")
-        if (open.isNotEmpty()) {
-            appendLine("1. 这一轮里发言的成员，如果又对上面某个议题表了态，写进 updates：")
-            appendLine("   - stance：现在的立场 key；不属于已有立场的，用新字母并在 newText 里概括（20 字以内）；说不清结论的写 \"?\"")
-            appendLine("   - why：跟他自己上一次的立场比——")
-            appendLine("     \"没变\"；")
-            appendLine("     \"被说服\"：别的成员拿出了新的证据、数据或有说服力的推理才改的；")
-            appendLine("     \"跟风\"：看到别人（尤其多数人）这么说就改了，没有新证据或新理由；")
-            appendLine("     \"迎合用户\"：用户表示怀疑或说了自己的看法后就改了，没有新证据；")
-            appendLine("     \"自己查证\"：自己搜索、计算、查资料后改的")
-            appendLine("   - by：是谁让他改的（成员名字），说不清就空着；reason：一句话说明（30 字以内）")
-            appendLine("   没再提这个议题的成员不用写。")
-            appendLine("   userDoubt：用户这一轮有没有对某个立场表示怀疑或反对（true/false）。")
+
+        return PromptResult(prompt, parts.mapping)
+    }
+
+    data class PromptResult(val prompt: String, val mapping: Map<String, String>)
+
+    /** AI 核实：开新议题后，裁判判一次谁对（能查就用 web_search）。 */
+    fun verifyPrompt(topic: StanceTopic, members: List<Member>, anonymous: Boolean): VerifyPromptResult {
+        val finalQ: String
+        val finalOpts: List<StanceOption>
+        val mapping: Map<String, String>
+
+        if (anonymous) {
+            val (anonQ, map) = anonymize(topic.question, members)
+            val anonOpts = topic.options.map { opt ->
+                val (anonText, _) = anonymize(opt.text, members)
+                StanceOption(opt.key, anonText)
+            }
+            finalQ = anonQ
+            finalOpts = anonOpts
+            mapping = map
+        } else {
+            finalQ = topic.question
+            finalOpts = topic.options
+            mapping = emptyMap()
         }
-        if (canOpen) {
-            appendLine("${if (open.isNotEmpty()) "2" else "1"}. 如果用户这一轮提的是一个新问题（不是上面已有的议题），而且有明确的答案、判断、结论或选择，" +
-                "几位成员的说法可以拿来比（一样或不一样都算：事实题、计算题、判断对错、选哪个、推荐、预测、评价好坏），写进 newTopic：")
-            appendLine("   question：问题概括（20 字以内）；options：各种立场（key 用 A、B、C…，text 概括结论，20 字以内，结论相同的成员用同一个）；" +
-                "stances：每位成员的立场 key，没给出明确结论的写 \"?\"")
-            appendLine("   闲聊、打招呼、画图、写文章、翻译、整理资料这类没有立场可比的，newTopic 写 null。")
+
+        val prompt = buildString {
+            appendLine("以下是群聊里 AI 成员们对一个问题的不同立场，请你判断：")
+            appendLine()
+            appendLine("问题：$finalQ")
+            appendLine()
+            appendLine("各种立场：")
+            finalOpts.forEach { appendLine("  ${it.key}：${it.text}") }
+            appendLine()
+            appendLine("要做的事：")
+            appendLine("1. 如果能确定哪个立场对（或都不对），尽量搜索验证（用 web_search 工具）；")
+            appendLine("2. 给出结论和理由。")
+            appendLine()
+            appendLine("输出 JSON：")
+            appendLine("{")
+            appendLine("  \"verdict\": \"A\" 或 \"none\"（都不对）或 \"open\"（没有对错，观点题）或 \"unclear\"（判断不了），")
+            appendLine("  \"reason\": \"一句话理由（80 字以内）\"")
+            appendLine("}")
         }
-        appendLine()
-        append("只输出 JSON：{")
-        if (open.isNotEmpty()) append("\"updates\": [{\"topic\": 议题编号, \"member\": \"名字\", \"stance\": \"A\", \"newText\": \"\", \"why\": \"没变\", \"by\": \"\", \"reason\": \"…\"}], \"userDoubt\": false")
-        if (open.isNotEmpty() && canOpen) append(", ")
-        if (canOpen) append("\"newTopic\": {\"question\": \"…\", \"options\": [{\"key\": \"A\", \"text\": \"…\"}], \"stances\": [{\"member\": \"名字\", \"stance\": \"A\"}]} 或 null")
-        append("}")
+
+        return VerifyPromptResult(prompt, mapping)
+    }
+
+    data class VerifyPromptResult(val prompt: String, val mapping: Map<String, String>)
+
+    data class VerifyResult(val verdict: String, val reason: String)
+
+    fun parseVerify(raw: String): VerifyResult? {
+        val o = jsonObjectIn(raw) ?: return null
+        val verdict = (o["verdict"] as? JsonPrimitive)?.contentOrNull?.trim()?.lowercase() ?: return null
+        val reason = (o["reason"] as? JsonPrimitive)?.contentOrNull?.trim()?.take(160) ?: ""
+        val finalVerdict = when (verdict) {
+            "none" -> StanceTopic.NONE
+            "open" -> StanceTopic.OPEN
+            "unclear", "?" -> StanceTopic.UNCLEAR
+            else -> verdict.take(3)
+        }
+        return VerifyResult(finalVerdict, reason)
     }
 
     /** 长消息只留开头和结尾（结论常在两头）。 */
@@ -155,20 +298,21 @@ object StanceJudge {
     class NewTopic(val question: String, val options: List<Pair<String, String>>, val stances: List<Pair<String, String>>)
     class Verdict(val updates: List<Update>, val userDoubt: Boolean, val newTopic: NewTopic?)
 
-    fun parse(raw: String): Verdict? {
+    fun parse(raw: String, mapping: Map<String, String> = emptyMap()): Verdict? {
         val o = jsonObjectIn(raw) ?: return null
         fun JsonObject.s(k: String) = (this[k] as? JsonPrimitive)?.contentOrNull?.trim().orEmpty()
+        fun deanon(name: String): String = if (mapping.isEmpty()) name else deanonymize(name, mapping) ?: name
         val updates = (o["updates"] as? JsonArray).orEmpty().mapNotNull { el ->
             val u = el as? JsonObject ?: return@mapNotNull null
             val topic = (u["topic"] as? JsonPrimitive)?.let { it.intOrNull ?: it.contentOrNull?.filter(Char::isDigit)?.toIntOrNull() } ?: return@mapNotNull null
-            val member = u.s("member").removePrefix("@")
+            val member = deanon(u.s("member").removePrefix("@").removePrefix("成员"))
             val stance = u.s("stance").ifBlank { StanceTopic.UNCLEAR }
             if (member.isBlank()) return@mapNotNull null
             val why = when (val w = u.s("why")) {
                 "没变", "坚持", "" -> Stances.HOLD
                 else -> Stances.reasons.firstOrNull { it in w } ?: Stances.HOLD
             }
-            Update(topic, member, stance.take(3), u.s("newText").take(40), why, u.s("by").removePrefix("@"), u.s("reason").take(80))
+            Update(topic, member, stance.take(3), u.s("newText").take(40), why, deanon(u.s("by").removePrefix("@").removePrefix("成员")), u.s("reason").take(80))
         }
         val nt = o["newTopic"] as? JsonObject
         val newTopic = nt?.let { t ->
@@ -180,7 +324,7 @@ object StanceJudge {
             }
             val stances = (t["stances"] as? JsonArray).orEmpty().mapNotNull { el ->
                 val x = el as? JsonObject ?: return@mapNotNull null
-                val n = x.s("member").removePrefix("@")
+                val n = deanon(x.s("member").removePrefix("@").removePrefix("成员"))
                 if (n.isBlank()) null else n to x.s("stance").ifBlank { StanceTopic.UNCLEAR }.take(3)
             }
             if (q.isBlank() || options.isEmpty() || stances.isEmpty()) null else NewTopic(q.take(40), options, stances)

@@ -13,6 +13,7 @@ import com.guixing.jixunying.model.Conversation
 import com.guixing.jixunying.model.Event
 import com.guixing.jixunying.model.ImageChoice
 import com.guixing.jixunying.model.ImagePick
+import com.guixing.jixunying.model.JudgePick
 import com.guixing.jixunying.model.Member
 import com.guixing.jixunying.model.MemoryItem
 import com.guixing.jixunying.model.Message
@@ -58,7 +59,9 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
@@ -984,14 +987,30 @@ class Engine(
             val open = topicsOf(convId).sortedBy { it.createdAt }.takeLast(3)
             val canOpen = said.count { it.id in independentIds } >= 2
             if (open.isEmpty() && !canOpen) return
-            val (p, model) = Recorder.pick(state) ?: run { bg.failed(BgJob.STANCES, BackgroundWatch.NO_RECORDER, titleOf(convId)); return }
+            // 裁判或记录员
+            val (p, model) = JudgePick.pick(state) ?: run { bg.failed(BgJob.STANCES, BackgroundWatch.NO_RECORDER, titleOf(convId)); return }
             fun nameOf(id: String) = state.member(id)?.name ?: "已移除的成员"
             val items = said.map { m -> StanceJudge.Said(m, nameOf(m.senderId), m.id in independentIds, calledBy[m.id], toolsNote(m)) }
-            val prompt = StanceJudge.prompt(open, items, stripThink(ask.content), state.profile.name, ::nameOf, canOpen)
-            val r = withContext(Dispatchers.IO) { llm.chat(p, model, listOf(userMsg(prompt)), null, null) { _, _ -> } }
-            val v = StanceJudge.parse(r.content) ?: run { bg.failed(BgJob.STANCES, BackgroundWatch.UNREADABLE, titleOf(convId)); return }
-            applyStances(convId, ask, said, independentIds, open, v, canOpen)
+            val members = said.map { m -> state.member(m.senderId) }.filterNotNull().distinctBy { it.id }
+            val anonymous = state.settings.memory.judgeAnonymous
+            val promptResult = StanceJudge.prompt(open, items, stripThink(ask.content), state.profile.name, ::nameOf, canOpen, anonymous, members)
+            val r = withContext(Dispatchers.IO) { llm.chat(p, model, listOf(userMsg(promptResult.prompt)), null, null) { _, _ -> } }
+            val v = StanceJudge.parse(r.content, promptResult.mapping) ?: run { bg.failed(BgJob.STANCES, BackgroundWatch.UNREADABLE, titleOf(convId)); return }
+            val newTopicId = applyStances(convId, ask, said, independentIds, open, v, canOpen)
             bg.ok(BgJob.STANCES)
+            // AI 核实：开新议题后，裁判判一次谁对
+            if (newTopicId != null && state.settings.memory.aiVerify) {
+                coroutineScope {
+                    launch(Dispatchers.IO) {
+                        try {
+                            aiVerifyTopic(newTopicId, members)
+                        } catch (e: Exception) {
+                            val friendly = friendlyError(e, p)
+                            bg.failed(BgJob.AI_VERIFY, friendly, titleOf(convId))
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -1009,7 +1028,7 @@ class Engine(
     }
 
     private fun applyStances(convId: String, ask: Message, said: List<Message>, independentIds: Set<String>, open: List<StanceTopic>,
-                             v: StanceJudge.Verdict, canOpen: Boolean) {
+                             v: StanceJudge.Verdict, canOpen: Boolean): String? {
         val speakers = said.map { it.senderId }.toSet()
         fun idOf(name: String): String? {
             val n = name.trim().removePrefix("@")
@@ -1018,6 +1037,7 @@ class Engine(
         }
         val now = now()
         var touched = false
+        var newTopicId: String? = null
         // 已有议题：照记录员的判断追加表态
         for ((idx, ups) in v.updates.groupBy { it.topic }) {
             val base = open.getOrNull(idx - 1) ?: continue
@@ -1063,11 +1083,100 @@ class Engine(
                 StanceEntry(mid, msg.id, ask.id, k, first = msg.id in independentIds, time = msg.createdAt)
             }.distinctBy { it.memberId }
             if (entries.size >= 2) {
-                synchronized(stanceBook) { stanceBook += StanceTopic(newId(), convId, ask.id, nt.question, options, entries, createdAt = now, updatedAt = now) }
+                val id = newId()
+                synchronized(stanceBook) { stanceBook += StanceTopic(id, convId, ask.id, nt.question, options, entries, createdAt = now, updatedAt = now) }
                 touched = true
+                newTopicId = id
             }
         }
         if (touched) saveStances(setOf(convId))
+        return newTopicId
+    }
+
+    /** AI 核实：开新议题后，裁判判一次谁对（能查就用 web_search）。 */
+    private suspend fun aiVerifyTopic(topicId: String, members: List<Member>) {
+        val topic = synchronized(stanceBook) { stanceBook.firstOrNull { it.id == topicId } } ?: return
+        val (p, model) = JudgePick.pick(state) ?: return
+        val anonymous = state.settings.memory.judgeAnonymous
+        val verifyResult = StanceJudge.verifyPrompt(topic, members, anonymous)
+        // 带工具的请求：web_search
+        val tools = buildJsonArray {
+            add(buildJsonObject {
+                put("type", "function")
+                putJsonObject("function") {
+                    put("name", "web_search")
+                    put("description", "Search the web for current information")
+                    putJsonObject("parameters") {
+                        put("type", "object")
+                        putJsonObject("properties") {
+                            putJsonObject("query") {
+                                put("type", "string")
+                                put("description", "Search query")
+                            }
+                        }
+                        putJsonArray("required") { add("query") }
+                    }
+                }
+            })
+        }
+        val tag = UsageTag("stances", "", topic.convId)
+        var sources = emptyList<SearchSource>()
+        val working = mutableListOf<JsonObject>()
+        working += userMsg(verifyResult.prompt)
+
+        var r: ChatResult
+        withContext(tag + Dispatchers.IO) {
+            r = llm.chat(p, model, working, null, tools, null, {}, null) { _, _ -> }
+            // 如果有工具调用，执行工具并继续
+            if (r.toolCalls.isNotEmpty()) {
+                working += buildJsonObject {
+                    put("role", "assistant")
+                    put("content", r.content)
+                    putJsonArray("tool_calls") {
+                        r.toolCalls.forEach { tc ->
+                            add(buildJsonObject {
+                                put("id", tc.id); put("type", tc.type)
+                                putJsonObject("function") { put("name", tc.name); put("arguments", tc.arguments.ifBlank { "{}" }) }
+                            })
+                        }
+                    }
+                }
+                for (tc in r.toolCalls) {
+                    val result = if (tc.name == "web_search") {
+                        val args = runCatching { AppJson.parseToJsonElement(tc.arguments).jsonObject }.getOrNull()
+                        val query = args?.get("query")?.jsonPrimitive?.contentOrNull ?: "搜索参数错误"
+                        if (query != "搜索参数错误") {
+                            val sr = runCatching { search.search(query, state.settings.search) }.getOrNull()
+                            if (sr != null && sr.isNotEmpty()) {
+                                sources = sr
+                                sr.joinToString("\n\n") { "${it.title}\n${it.url}\n${it.snippet}" }
+                            } else "搜索失败"
+                        } else query
+                    } else "未知工具"
+                    working += buildJsonObject {
+                        put("role", "tool"); put("tool_call_id", tc.id)
+                        put("content", result)
+                    }
+                }
+                // 再次调用让模型处理工具结果
+                r = llm.chat(p, model, working, null, null, null, {}, null) { _, _ -> }
+            }
+        }
+        val verdict = StanceJudge.parseVerify(r.content) ?: return
+        // 更新议题
+        synchronized(stanceBook) {
+            val i = stanceBook.indexOfFirst { it.id == topicId }
+            if (i >= 0) {
+                stanceBook[i] = stanceBook[i].copy(
+                    aiVerdict = verdict.verdict,
+                    aiReason = verdict.reason,
+                    aiSources = sources,
+                    updatedAt = now()
+                )
+            }
+        }
+        saveStances(setOf(topic.convId))
+        bg.ok(BgJob.AI_VERIFY)
     }
 
     /** 消息删了（或重新生成）：它的表态也去掉；议题一条表态都不剩就删掉。 */

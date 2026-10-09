@@ -173,6 +173,16 @@ class EngineTest {
                                 |"stances":[{"member":"甲","stance":"A"},{"member":"乙","stance":"B"},{"member":"丙","stance":"A"}]}}
                                 |```""".trimMargin())
                             "立场档案" in firstText -> say("""{"newTopic":null}""")
+                            // 裁判 AI 核实：认出「成员甲乙丙丁」，判谁对（带 web_search 工具）
+                            "以下是一次讨论" in firstText && "成员" in firstText && hasFnSearch && !sawTool -> {
+                                // 先搜索
+                                chunk("""{"tool_calls":[{"index":0,"id":"call_ws","type":"function","function":{"name":"web_search","arguments":"{\"query\":\"1.5和1.12哪个大\"}"}}]}""")
+                                write("data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n")
+                            }
+                            "以下是一次讨论" in firstText && "成员" in firstText && sawTool -> {
+                                // 搜完后判断
+                                say("""根据搜索结果，成员甲和丙的观点正确。\n\n判断：A\n\n理由：1.5等于1.50，而1.12小于1.50，所以1.5更大。""")
+                            }
                             // 用户说「记住」：调 remember
                             hasTool("remember") && latest.contains("记住") && !sawTool -> {
                                 chunk("""{"tool_calls":[{"index":0,"id":"mem_1","type":"function","function":{"name":"remember","arguments":"{\"text\":\"喜欢简短的回答\",\"kind\":\"偏好\"}"}}]}""")
@@ -1187,6 +1197,69 @@ class EngineTest {
             relay.stop()
             broker.stopServer()
         }
+    }
+
+    /**
+     * 中立裁判：
+     * 1. 裁判用 deepseek-flash
+     * 2. 隐去名字（默认开）：裁判看到的是「成员甲乙丙」
+     * 3. AI 核实（默认开）：开新议题后裁判单独判一次谁对，能查就用 web_search
+     * 4. 花费记在「立场档案」名下
+     * 5. 测试：假服务器认出裁判请求、代号换回真名、核实结果落到议题
+     */
+    @Test
+    fun judgeVerifiesStances() = runBlocking {
+        val (e, ms) = engineWithMembers("甲", "乙", "丙")
+        // 加裁判服务商和模型
+        e.call(Command.SaveProvider(ProviderConfig("judge", "deepseek", "裁判", "${base()}/v1", "k", listOf(ModelInfo("deepseek-flash", chat = true, tools = true)))))
+        e.call(Command.SaveSettings(e.state.settings.copy(
+            memory = e.state.settings.memory.copy(
+                judgeProvider = "judge",
+                judgeModel = "deepseek-flash",
+                judgeAnonymous = true,
+                aiVerify = true
+            )
+        )))
+
+        val conv = e.call(Command.CreateConversation(ms.map { it.id })).data
+        e.call(Command.UpdateConversation(e.state.conversation(conv)!!.copy(webSearch = false)))
+        val ser = kotlinx.serialization.builtins.ListSerializer(com.guixing.jixunying.model.StanceTopic.serializer())
+        suspend fun topics() = AppJson.decodeFromString(ser, e.call(Command.StanceList(conv)).data)
+
+        // 第一轮：三人独立作答
+        e.call(Command.SendMessage(conv, "1.5 和 1.12 哪个大？"))
+        waitIdle(e, conv, 3)
+        withTimeout(5_000) { while (e.state.conversation(conv)!!.stanceTopics < 1) delay(50) }
+
+        // 等 AI 核实完成
+        withTimeout(10_000) {
+            while (topics().single().aiVerdict == null) delay(100)
+        }
+
+        val t1 = topics().single()
+        assertEquals("1.5 和 1.12 哪个大", t1.question)
+
+        // 检查裁判请求：应该看到「成员甲」而不是真名
+        val judgeReqs = requests.filter { "以下是一次讨论" in it.toString() }
+        assertTrue(judgeReqs.isNotEmpty(), "应该有裁判请求")
+        val judgeReq = judgeReqs.first().toString()
+        assertTrue("成员甲" in judgeReq, "裁判应该看到代号")
+        assertTrue("成员乙" in judgeReq, "裁判应该看到代号")
+        assertTrue("成员丙" in judgeReq, "裁判应该看到代号")
+        assertFalse("我是甲" in judgeReq, "裁判不应该看到真名")
+
+        // 检查 AI 核实结果
+        assertNotNull(t1.aiVerdict, "应该有 AI 核实结果")
+        assertEquals("A", t1.aiVerdict)
+        assertTrue(t1.aiReason.isNotEmpty(), "应该有理由")
+        assertTrue(t1.aiSources.isNotEmpty(), "应该有搜索来源")
+
+        // 检查花费记在「立场档案」名下
+        val usage = ledger().filter { it.kind == "stances" && it.convId == conv }
+        assertTrue(usage.isNotEmpty(), "应该有立场档案花费记录")
+
+        // 检查用的是 deepseek-flash
+        assertTrue(usage.any { it.model == "deepseek-flash" }, "应该用了 deepseek-flash")
     }
 
     @Suppress("unused")

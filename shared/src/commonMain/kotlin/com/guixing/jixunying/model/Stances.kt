@@ -20,6 +20,12 @@ data class StanceTopic(
     val entries: List<StanceEntry> = emptyList(),
     /** 用户标的对错：某个立场的 key = 它对；NONE = 都不对；OPEN = 没有对错（观点题）；空 = 还没标。 */
     val verdict: String = "",
+    /** AI 核实：裁判判的结论（某个立场对 / NONE / OPEN / UNCLEAR = 判断不了）；空 = 还没核实或核实出错。 */
+    val aiVerdict: String = "",
+    /** AI 核实的理由。 */
+    val aiReason: String = "",
+    /** AI 核实的出处（搜索来源）。 */
+    val aiSources: List<SearchSource> = emptyList(),
     val createdAt: Long = 0,
     val updatedAt: Long = 0,
 ) {
@@ -27,6 +33,9 @@ data class StanceTopic(
 
     /** 某位成员在某个时间点之前最后一次表态。 */
     fun latestOf(memberId: String, before: Long = Long.MAX_VALUE) = entries.lastOrNull { it.memberId == memberId && it.time < before }
+
+    /** 最终对错（用户标的优先；没标时按 AI 核实）。 */
+    fun effectiveVerdict(countAi: Boolean): String = verdict.ifBlank { if (countAi) aiVerdict else "" }
 
     companion object {
         const val NONE = "none"
@@ -105,10 +114,10 @@ object Stances {
     }
 
     /** 每位成员的立场卡（按传入的成员顺序）。 */
-    fun cards(topics: List<StanceTopic>, memberIds: List<String>): List<StanceCard> =
-        memberIds.map { id -> card(topics, id) }
+    fun cards(topics: List<StanceTopic>, memberIds: List<String>, countAi: Boolean = false): List<StanceCard> =
+        memberIds.map { id -> card(topics, id, countAi) }
 
-    fun card(topics: List<StanceTopic>, memberId: String): StanceCard {
+    fun card(topics: List<StanceTopic>, memberId: String, countAi: Boolean = false): StanceCard {
         var c = StanceCard(memberId)
         for (t in topics) {
             val timeline = t.entries.sortedBy { it.time }
@@ -137,11 +146,13 @@ object Stances {
                 )
             }
             val v = t.verdict
+            val av = if (countAi && v.isBlank()) t.aiVerdict else ""
+            val effectiveVerdict = v.ifBlank { av }
             val first = mine.firstOrNull { it.first }
-            if (first != null && v.isNotEmpty() && v != StanceTopic.OPEN) {
+            if (first != null && effectiveVerdict.isNotEmpty() && effectiveVerdict != StanceTopic.OPEN) {
                 val last = mine.last()
-                val firstOk = first.option == v
-                val lastOk = last.option == v
+                val firstOk = first.option == effectiveVerdict
+                val lastOk = last.option == effectiveVerdict
                 c = c.copy(
                     judged = c.judged + 1,
                     firstRight = c.firstRight + if (firstOk) 1 else 0,
