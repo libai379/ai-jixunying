@@ -1438,8 +1438,10 @@ class Engine(
         val hasImageModel = ImagePick.resolve(state).isNotEmpty()
         val wantSearch = conv.webSearch
         val toolsOk = model.tools && !llm.toolsDropped(provider, model.id)
-        // 平台有官方内置搜索就用内置的（Kimi、智谱、千问），否则用我们自己的搜索工具
+        // 平台有官方内置搜索就用内置的（智谱、千问），否则用我们自己的搜索工具。
+        // Kimi 的内置 $web_search 2026-10-20 下线：Kimi 成员也用我们的 web_search 工具，只是搜索走 Kimi 官方搜索接口（同一个 Key）
         val native = if (wantSearch && toolsOk) nativeSearchOf(provider, model.id) else NativeSearch.NONE
+        val kimiSearch = provider.takeIf { wantSearch && state.settings.search.mode == com.guixing.jixunying.model.SearchMode.AUTO && isKimi(it) }
         val fnSearch = wantSearch && native == NativeSearch.NONE
         val memOn = state.settings.memory.enabled
         val docsOn = docsUsable()
@@ -1460,7 +1462,7 @@ class Engine(
                 // 模型不会调工具：替它搜一次
                 val q = lastUserText(convId, cutoffId).take(120)
                 if (q.isNotBlank()) {
-                    val step = runSearch(q, sources)
+                    val step = runSearch(q, sources, kimiSearch)
                     updateMessage(convId, msg.id, persist = false) { it.copy(tools = it.tools + step.first) }
                     if (step.second.isNotEmpty()) working.add(1, buildJsonObject { put("role", "system"); put("content", Prompts.searchDigest(q, step.second)) })
                 }
@@ -1474,7 +1476,6 @@ class Engine(
                 }
             } else null
             val nativeLabel = when (native) {
-                NativeSearch.KIMI -> "Kimi 官方联网搜索"
                 NativeSearch.ZHIPU -> "智谱官方联网搜索"
                 NativeSearch.QWEN -> "千问官方联网搜索"
                 NativeSearch.NONE -> ""
@@ -1515,13 +1516,12 @@ class Engine(
                     }
                 }
                 for (tc in r.toolCalls) {
-                    // 一次回答最多用 8 次工具（Kimi 官方搜索不算），超过就让它根据已有结果直接回答
-                    val result = if (!tc.name.startsWith("$") && toolUses >= MAX_TOOL_USES)
+                    // 一次回答最多用 8 次工具，超过就让它根据已有结果直接回答
+                    val result = if (toolUses >= MAX_TOOL_USES)
                         "这次回答已经用了 $MAX_TOOL_USES 次工具，不能再搜了。请直接根据前面的结果回答；没查到的就如实说。"
-                    else { if (!tc.name.startsWith("$")) toolUses++; runTool(convId, msg.id, tc, sources) }
+                    else { toolUses++; runTool(convId, msg.id, tc, sources, kimiSearch) }
                     working += buildJsonObject {
                         put("role", "tool"); put("tool_call_id", tc.id)
-                        if (tc.name.startsWith("$")) put("name", tc.name)
                         put("content", result)
                     }
                 }
@@ -1550,14 +1550,18 @@ class Engine(
         return t
     }
 
-    private enum class NativeSearch { NONE, KIMI, ZHIPU, QWEN }
+    private enum class NativeSearch { NONE, ZHIPU, QWEN }
+
+    private fun isKimi(p: ProviderConfig): Boolean {
+        val u = p.baseUrl.lowercase()
+        return p.presetId.startsWith("moonshot") || "moonshot" in u || "api.kimi" in u
+    }
 
     private fun nativeSearchOf(p: ProviderConfig, model: String): NativeSearch {
         if (state.settings.search.mode != com.guixing.jixunying.model.SearchMode.AUTO) return NativeSearch.NONE
         if (llm.nativeSearchDropped(p, model)) return NativeSearch.NONE
         val u = p.baseUrl.lowercase()
         return when {
-            p.presetId.startsWith("moonshot") || "moonshot" in u || "api.kimi" in u -> NativeSearch.KIMI
             p.presetId == "zhipu" || p.presetId == "zai" || "bigmodel.cn" in u || "api.z.ai" in u -> NativeSearch.ZHIPU
             p.presetId.startsWith("dashscope") || p.presetId == "qianwen" || "dashscope" in u || "qianwenaiapi" in u || "maas.aliyuncs" in u -> NativeSearch.QWEN
             else -> NativeSearch.NONE
@@ -1566,10 +1570,6 @@ class Engine(
 
     private fun toolDefs(search: Boolean, fetch: Boolean, draw: Boolean, native: NativeSearch, memory: Boolean = false, docs: Boolean = false): JsonArray = buildJsonArray {
         when (native) {
-            NativeSearch.KIMI -> add(buildJsonObject {
-                put("type", "builtin_function")
-                putJsonObject("function") { put("name", "\$web_search") }
-            })
             NativeSearch.ZHIPU -> add(buildJsonObject {
                 put("type", "web_search")
                 putJsonObject("web_search") {
@@ -1626,30 +1626,38 @@ class Engine(
         }
     }
 
-    private suspend fun runSearch(query: String, sources: MutableList<SearchSource>): Pair<ToolStep, List<SearchSource>> = try {
-        val res = search.search(query, state.settings.search)
-        sources += res
-        ToolStep("search", query, res, ok = true) to res
-    } catch (e: CancellationException) {
-        throw e
-    } catch (e: Throwable) {
-        ToolStep("search", query, ok = false, note = friendlyError(e)) to emptyList()
+    /** kimi 不为空：用这家 Kimi 的官方搜索接口；它出错就退回设置里的搜索引擎，并在步骤上注明。 */
+    private suspend fun runSearch(query: String, sources: MutableList<SearchSource>, kimi: ProviderConfig? = null): Pair<ToolStep, List<SearchSource>> {
+        var note = ""
+        if (kimi != null) {
+            try {
+                val res = search.kimi(query, kimi.baseUrl, kimi.apiKey, state.settings.search)
+                sources += res
+                return ToolStep("search", query, res, ok = true) to res
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                note = "Kimi 官方搜索出错（${friendlyError(e, kimi)}），这次改用 ${WebSearch.engineName(state.settings.search.engine)}"
+            }
+        }
+        return try {
+            val res = search.search(query, state.settings.search)
+            sources += res
+            ToolStep("search", query, res, ok = true, note = note) to res
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            ToolStep("search", query, ok = false, note = listOf(note, friendlyError(e)).filter { it.isNotEmpty() }.joinToString("；")) to emptyList()
+        }
     }
 
-    private suspend fun runTool(convId: String, msgId: String, tc: ToolCall, sources: MutableList<SearchSource>): String {
+    private suspend fun runTool(convId: String, msgId: String, tc: ToolCall, sources: MutableList<SearchSource>, kimiSearch: ProviderConfig? = null): String {
         val args = runCatching { Json.parse(tc.arguments.ifBlank { "{}" }).jsonObject }.getOrNull() ?: JsonObject(emptyMap())
         return when (tc.name) {
-            // Kimi 官方搜索：搜索在 Kimi 服务器上做，客户端只要把参数原样交回去
-            "\$web_search" -> {
-                if (sources.isEmpty()) updateMessage(convId, msgId, persist = false) { m ->
-                    if (m.tools.any { it.input == "Kimi 官方联网搜索" }) m else m.copy(tools = m.tools + ToolStep("search", "Kimi 官方联网搜索"))
-                }
-                tc.arguments
-            }
             "web_search" -> {
                 val q = args.str("query").orEmpty().ifBlank { return "参数错误：缺少 query" }
                 val start = sources.size
-                val (step, res) = runSearch(q, sources)
+                val (step, res) = runSearch(q, sources, kimiSearch)
                 updateMessage(convId, msgId, persist = false) { it.copy(tools = it.tools + step) }
                 if (!step.ok) "搜索失败：${step.note}。请如实告诉用户没搜到，不要编造。"
                 else if (res.isEmpty()) "没有搜到结果。请如实告诉用户。"

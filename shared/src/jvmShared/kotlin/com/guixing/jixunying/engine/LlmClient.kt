@@ -57,7 +57,7 @@ class LlmClient(private val proxyOf: (ProviderConfig) -> String?) {
     private fun url(p: ProviderConfig, path: String) = p.baseUrl.trimEnd('/') + path
 
     /**
-     * @param tools 函数工具 + 平台内置工具（Kimi 的 builtin_function、智谱的 web_search）
+     * @param tools 函数工具 + 平台内置工具（智谱的 web_search）
      * @param extra 额外放进请求体的字段（千问的 enable_search 等）
      * @param onSources 平台内置搜索返回的出处（智谱 web_search、千问 search_info）
      * @param thinking 切换思考的字段（见 model/Thinking.kt）；模型不认就去掉重试，并记住

@@ -703,7 +703,7 @@ private fun SearchPage(ctl: AppController, state: AppState) {
     PageHeader("联网搜索", "对话里打开「联网」后，AI 遇到时效性问题会先搜再答，并标出处。不需要单独的 AI：回答问题的那个模型自己决定什么时候搜、搜什么。改了马上生效。")
     SectionCard {
         FieldLabel("联网方式")
-        RadioRow(s.mode == SearchMode.AUTO, "自动（推荐）", "Kimi、智谱、千问这几家平台自带官方搜索，用它们的；其他模型（DeepSeek、MiniMax、MiMo 等）用下面选的搜索引擎") {
+        RadioRow(s.mode == SearchMode.AUTO, "自动（推荐）", "智谱、千问用平台自带的官方搜索；Kimi 用 Kimi 官方搜索接口（同一个 Key，每次 1 分钱，出错自动换下面的引擎）；其他模型（DeepSeek、MiniMax、MiMo 等）用下面选的搜索引擎") {
             set { it.copy(mode = SearchMode.AUTO) }
         }
         RadioRow(s.mode == SearchMode.ENGINE_ONLY, "全部用下面的搜索引擎", "所有模型统一用同一个搜索引擎，出处显示最一致") {

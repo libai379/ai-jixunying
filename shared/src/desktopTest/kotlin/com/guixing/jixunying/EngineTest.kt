@@ -69,6 +69,7 @@ import kotlin.test.assertTrue
 class EngineTest {
     private val requests = Collections.synchronizedList(mutableListOf<JsonObject>())
     private val imageRequests = Collections.synchronizedList(mutableListOf<String>())
+    private val kimiSearches = Collections.synchronizedList(mutableListOf<JsonObject>())
     // 假微信
     private val wxInbox = java.util.concurrent.ConcurrentLinkedQueue<String>()
     private val wxSent = Collections.synchronizedList(mutableListOf<String>())
@@ -193,11 +194,8 @@ class EngineTest {
                             // 想读文档库以外的文件
                             hasTool("read_document") && latest.contains("偷看") && !sawTool -> callTool("read_document", mapOf("path" to latest.substringAfter("偷看").trim()))
                             toolTexts.any { "文档库里没有" in it } -> say("读不了。")
-                            // Kimi 官方搜索：先回一个 $web_search 调用，客户端原样交回参数后再回答
-                            model == "kimi-fake" && !sawTool -> {
-                                chunk("""{"tool_calls":[{"index":0,"id":"ws_1","type":"builtin_function","function":{"name":"${'$'}web_search","arguments":"{\"search_result\":{\"search_id\":\"abc\"}}"}}]}""")
-                                write("data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n")
-                            }
+                            // Kimi：用我们的 web_search 工具，搜索由客户端去调 Kimi 官方搜索接口（/v1/tools/search）
+                            model == "kimi-fake" && hasFnSearch && !sawTool -> callTool("web_search", mapOf("query" to "最新消息"))
                             model == "kimi-fake" -> say("Kimi 搜到了。")
                             // 智谱官方搜索：出处放在 web_search 字段
                             model == "zhipu-fake" -> {
@@ -244,6 +242,12 @@ class EngineTest {
                 }
                 get("/mm/account/query_balance") {
                     call.respondText("""{"available_amount":"12.30","cash_balance":"10.00","voucher_balance":"2.30","owed_amount":"0","base_resp":{"status_code":0,"status_msg":"success"}}""", ContentType.Application.Json)
+                }
+                // Kimi 官方搜索接口（格式照 https://platform.kimi.com/docs/api/tools-search）
+                post("/v1/tools/search") {
+                    kimiSearches += Json.parseToJsonElement(call.receiveText()).jsonObject
+                    if (call.request.headers["Authorization"] != "Bearer k") return@post call.respondText("", status = HttpStatusCode.Unauthorized)
+                    call.respondText("""{"search_results":[{"authority":"S","date":"2026-10-10","icon":"","mime":"text/html","site_name":"示例","snippet":"Kimi 搜到的摘要","text":"","title":"Kimi 来源","url":"https://kimi.example/a"}]}""", ContentType.Application.Json)
                 }
                 // —— 画图 ——
                 post("/v1/images/generations") {
@@ -686,15 +690,26 @@ class EngineTest {
             return e.store.messages.value[conv]!!.last()
         }
 
+        // Kimi 的内置 $web_search 10-20 下线：给它我们的 web_search，搜索走 Kimi 官方搜索接口（同一个 Key）
+        kimiSearches.clear()
         val kimi = ask("mk")
         assertEquals("Kimi 搜到了。", kimi.content, kimi.error)
         val kimiReqs = requests.filter { it["model"]!!.jsonPrimitive.content == "kimi-fake" }
-        assertTrue(kimiReqs.first()["tools"].toString().contains("builtin_function"))
-        assertFalse(kimiReqs.first()["tools"].toString().contains("\"web_search\""), "有官方搜索就不再给自己的 web_search")
-        val echoed = kimiReqs.last()["messages"]!!.jsonArray.map { it.jsonObject }.first { it["role"]?.jsonPrimitive?.content == "tool" }
-        assertEquals("\$web_search", echoed["name"]!!.jsonPrimitive.content)
-        assertEquals("{\"search_result\":{\"search_id\":\"abc\"}}", echoed["content"]!!.jsonPrimitive.content)
-        assertTrue(kimi.tools.any { it.input == "Kimi 官方联网搜索" })
+        assertFalse(kimiReqs.first()["tools"].toString().contains("builtin_function"), "不再用要下线的内置搜索")
+        assertTrue(kimiReqs.first()["tools"].toString().contains("\"web_search\""))
+        assertEquals("最新消息", kimiSearches.single()["text_query"]!!.jsonPrimitive.content)
+        assertEquals("https://kimi.example/a", kimi.tools.single { it.kind == "search" }.sources.single().url)
+        val toolMsg = kimiReqs.last()["messages"]!!.jsonArray.map { it.jsonObject }.first { it["role"]?.jsonPrimitive?.content == "tool" }
+        assertTrue("Kimi 来源" in toolMsg["content"]!!.jsonPrimitive.content)
+
+        // Kimi 搜索接口出错（这里 Key 不对）：退回设置里的搜索引擎，步骤上写明；博查没填 Key 也失败，两条原因都写上，不编结果
+        e.call(Command.SaveSettings(e.state.settings.copy(search = e.state.settings.search.copy(engine = com.guixing.jixunying.model.SearchEngine.BOCHA))))
+        e.call(Command.SaveProvider(e.state.providers.first { it.id == "pk" }.copy(apiKey = "wrong")))
+        val bad = ask("mk").tools.single { it.kind == "search" }
+        assertFalse(bad.ok)
+        assertTrue("Kimi 官方搜索出错" in bad.note && "博查" in bad.note, bad.note)
+        e.call(Command.SaveSettings(e.state.settings.copy(search = e.state.settings.search.copy(engine = com.guixing.jixunying.model.SearchEngine.BING_FREE))))
+        e.call(Command.SaveProvider(e.state.providers.first { it.id == "pk" }.copy(apiKey = "k")))
 
         val zhipu = ask("mz")
         val zReq = requests.last { it["model"]!!.jsonPrimitive.content == "zhipu-fake" }
@@ -707,12 +722,14 @@ class EngineTest {
         assertEquals("true", qReq["enable_search"]!!.jsonPrimitive.content)
         assertEquals(listOf("https://q.example/1", "https://q.example/2"), qwen.tools.single().sources.map { it.url }, "按 index 排序")
 
-        // 改成「全部用搜索引擎」后，Kimi 也走自己的 web_search
-        e.call(Command.SaveSettings(e.state.settings.copy(search = e.state.settings.search.copy(mode = com.guixing.jixunying.model.SearchMode.ENGINE_ONLY))))
-        requests.clear()
-        ask("mk")
+        // 改成「全部用搜索引擎」后，Kimi 的 web_search 也不走 Kimi 搜索接口了（这里设成没填 Key 的博查，不真去联网）
+        e.call(Command.SaveSettings(e.state.settings.copy(search = e.state.settings.search.copy(
+            mode = com.guixing.jixunying.model.SearchMode.ENGINE_ONLY, engine = com.guixing.jixunying.model.SearchEngine.BOCHA))))
+        requests.clear(); kimiSearches.clear()
+        val viaEngine = ask("mk")
         assertTrue(requests.first()["tools"].toString().contains("\"web_search\""))
-        assertFalse(requests.first()["tools"].toString().contains("builtin_function"))
+        assertTrue(kimiSearches.isEmpty())
+        assertFalse("Kimi" in viaEngine.tools.single { it.kind == "search" }.note)
     }
 
     @Test
@@ -743,6 +760,20 @@ class EngineTest {
         assertTrue(imageRequests.any { it.startsWith("minimax:") && "\"aspect_ratio\":\"1:1\"" in it })
         assertTrue(imageRequests.any { it.startsWith("kling:Bearer ey") }, "AK:SK 要签成 JWT")
         assertTrue(imageRequests.any { it.startsWith("modelscope:true:") })
+    }
+
+    /** 阶跃的画图接口 2026-10-10 下线：自己列出来的也不挑；以前指定过阶跃的，改按自动挑。 */
+    @Test
+    fun retiredImageModelsSkipped() {
+        val step = ProviderConfig("ps", "stepfun", "阶跃", "https://api.stepfun.com/v1", "k",
+            listOf(ModelInfo("step-3.5-flash"), ModelInfo("step-2x-large", imageGen = true, tools = false)))
+        val zhipu = ProviderConfig("pz", "zhipu", "智谱", "https://open.bigmodel.cn/api/paas/v4", "k", listOf(ModelInfo("glm-fake")))
+        val picked = com.guixing.jixunying.model.ImagePick.candidates(listOf(step, zhipu)).map { it.modelId }
+        assertTrue(picked.none { it.startsWith("step") }, picked.toString())
+        val st = com.guixing.jixunying.model.AppState(providers = listOf(step, zhipu),
+            settings = com.guixing.jixunying.model.Settings(imageGen = ImageGenSettings("ps", "step-2x-large", "1024x1024")))
+        assertTrue(com.guixing.jixunying.model.ImagePick.isAuto(st))
+        assertEquals(picked, com.guixing.jixunying.model.ImagePick.resolve(st).map { it.modelId })
     }
 
     /**

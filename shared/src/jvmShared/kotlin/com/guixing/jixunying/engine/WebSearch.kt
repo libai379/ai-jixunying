@@ -39,6 +39,19 @@ class WebSearch(private val proxy: () -> String?) {
         }
     }
 
+    /**
+     * Kimi 官方搜索接口（POST {base}/tools/search，用 Kimi 的 Key，Basic ¥0.01/次）。
+     * 替代 2026-10-20 下线的内置 $web_search，出处见 docs/参考资料.md「Kimi 联网搜索」。
+     */
+    suspend fun kimi(q: String, baseUrl: String, key: String, s: SearchSettings): List<SearchSource> {
+        val o = postJson(baseUrl.trimEnd('/') + "/tools/search", key, if (s.useProxy) proxy() else null, buildJsonObject {
+            put("text_query", q); put("limit", s.maxResults.coerceIn(3, 10)); put("timeout_seconds", 20)
+        })
+        return (o["search_results"] as? JsonArray).orEmpty().map { it.jsonObject }.map {
+            SearchSource(it.str("title").orEmpty(), it.str("url").orEmpty(), it.str("snippet").orEmpty().take(500))
+        }.filter { it.url.startsWith("http") }
+    }
+
     private suspend fun bing(q: String, n: Int, px: String?): List<SearchSource> {
         val html = Http.client(px).get("https://cn.bing.com/search") {
             parameter("q", q)

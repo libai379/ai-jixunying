@@ -23,6 +23,15 @@ object ImagePick {
 
     private val freeModels = setOf("cogview-3-flash")
 
+    /**
+     * 已经下线的画图模型：阶跃的文生图、图生图、图片编辑接口 2026-10-10 整个停了（step-2x-large、step-1x 等，出处见 docs/参考资料.md）。
+     * 自动挑时跳过；以前在 设置 → 画图 指定了的也不再用，按自动挑。
+     */
+    fun retired(model: String): Boolean {
+        val id = model.lowercase()
+        return id.startsWith("step-1x") || id.startsWith("step-2x") || id.startsWith("step-image")
+    }
+
     private val topModels = listOf("seedream", "gpt-image", "hy-image", "wan2", "kling")
 
     /** 画质档次，越小越靠前。 */
@@ -70,7 +79,7 @@ object ImagePick {
         providers.filter(::usable).forEachIndexed { pi, p ->
             val listed = p.models.filter { it.imageGen }.map { it.id }
             val preset = if (p.presetId == "custom") emptyList() else Presets.byId(p.presetId).models.filter { it.imageGen }.map { it.id }
-            (listed + preset.filter { it !in listed }).distinct().forEach { id ->
+            (listed + preset.filter { it !in listed }).distinct().filterNot(::retired).forEach { id ->
                 val free = id.lowercase() in freeModels
                 val inferred = id !in listed
                 val rank = tier(id) * 10_000 + (if (inferred) 1_000 else 0) + pi
@@ -85,7 +94,7 @@ object ImagePick {
         val ig = state.settings.imageGen
         if (ig.providerId.isNotBlank() && ig.modelId.isNotBlank()) {
             val p = state.provider(ig.providerId)
-            if (p != null && usable(p)) {
+            if (p != null && usable(p) && !retired(ig.modelId)) {
                 val free = ig.modelId.lowercase() in freeModels
                 return listOf(ImageChoice(p.id, p.name, ig.modelId, free, inferred = false, note = noteOf(p, ig.modelId, free)))
             }
@@ -97,6 +106,6 @@ object ImagePick {
     fun isAuto(state: AppState): Boolean {
         val ig = state.settings.imageGen
         val p = state.provider(ig.providerId)
-        return ig.providerId.isBlank() || ig.modelId.isBlank() || p == null || !usable(p)
+        return ig.providerId.isBlank() || ig.modelId.isBlank() || p == null || !usable(p) || retired(ig.modelId)
     }
 }

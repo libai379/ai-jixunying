@@ -104,8 +104,8 @@ object Presets {
             note = "画图用 iRAG（irag-1.0）"),
         ProviderPreset("stepfun", "阶跃星辰", GROUP_CN, "https://api.stepfun.com/v1",
             "https://platform.stepfun.com/interface-key",
-            listOf(m("step-3.5-flash"), m("step-1o-turbo-vision", vision = true), img("step-2x-large"), img("step-1x-medium")),
-            "阶", 0xFF0F172A),
+            listOf(m("step-3.5-flash"), m("step-1o-turbo-vision", vision = true)),
+            "阶", 0xFF0F172A, note = "阶跃的画图接口 2026-10-10 下线了，这里只能聊天"),
         ProviderPreset("longcat", "美团 LongCat", GROUP_CN, "https://api.longcat.chat/openai/v1",
             "https://longcat.chat/platform/api_keys",
             listOf(m("LongCat-Flash-Chat"), m("LongCat-Flash-Thinking")), "龙", 0xFFFFC300, note = "每天有免费额度"),
@@ -163,7 +163,7 @@ object Presets {
 
         // —— 聚合与本地 ——
         ProviderPreset("openrouter", "OpenRouter", GROUP_HUB, "https://openrouter.ai/api/v1",
-            "https://openrouter.ai/keys", listOf(m("openai/gpt-5", vision = true), m("anthropic/claude-sonnet-5-5", vision = true)),
+            "https://openrouter.ai/keys", listOf(m("openai/gpt-5", vision = true), m("anthropic/claude-sonnet-5.5", vision = true)),
             "OR", 0xFF6467F2, useProxy = true, note = "一个 Key 用遍海外模型"),
         ProviderPreset("ollama", "Ollama（本机）", GROUP_HUB, "http://127.0.0.1:11434/v1",
             "https://ollama.com/download", listOf(m("qwen3:8b")), "O", 0xFF222222, note = "本机模型，Key 随便填"),
