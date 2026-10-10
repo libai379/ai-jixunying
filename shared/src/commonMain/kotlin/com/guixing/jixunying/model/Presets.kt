@@ -204,4 +204,4 @@ object MemberTemplates {
 }
 
 /** 显示用的版本号（和 androidApp 的 versionName、desktopApp 的 packageVersion 一起改）。 */
-const val APP_VERSION = "1.3.0"
+const val APP_VERSION = "1.4.0"

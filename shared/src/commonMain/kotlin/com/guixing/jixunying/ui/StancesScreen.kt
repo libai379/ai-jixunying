@@ -30,6 +30,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -81,7 +82,7 @@ fun StancesScreen(ctl: AppController, wide: Boolean, openDrawer: () -> Unit) {
             Column(Modifier.widthIn(max = 860.dp)) {
                 PageHeader("立场档案", "群聊里大家独立作答时，记录员记下每位成员一开始怎么说；之后谁改了口、为什么改（被说服、跟风、迎合你、自己查证）也记下来。" +
                     "你在议题上标一下谁说对了，就能看出谁首答准、谁容易被带偏。")
-                BgProblemsCard(ctl, state.bgProblems.filter { it.job == com.guixing.jixunying.model.BgJob.STANCES })
+                BgProblemsCard(ctl, state.bgProblems.filter { it.job == com.guixing.jixunying.model.BgJob.STANCES || it.job == com.guixing.jixunying.model.BgJob.AI_VERIFY })
                 SectionCard {
                     SwitchRow("记立场档案", "群聊每轮答完由记录员" + (recorder?.let { "（$it）" } ?: "") + "看一遍，一次只花很少的 token；单聊不记", state.settings.memory.stances) { on ->
                         ctl.updateSettings { it.copy(memory = it.memory.copy(stances = on)) }
@@ -101,7 +102,7 @@ fun StancesScreen(ctl: AppController, wide: Boolean, openDrawer: () -> Unit) {
                 val countAi = state.settings.memory.aiVerify && state.settings.memory.countAiVerdict
                 val cards = Stances.cards(topics, ids, countAi)
                 val mine = topics.count { it.verdict.isNotEmpty() }
-                val verified = topics.count { it.verdict.isEmpty() && it.aiVerdict.isNotEmpty() && it.aiVerdict != StanceTopic.UNCLEAR }
+                val verified = topics.count { it.verdict.isEmpty() && it.aiCounts() }
                 val aiNote = if (verified == 0) "" else "，AI 核实 $verified 题" + if (countAi) "（一起算进下面的数字）" else "（没算进下面的数字）"
                 FieldLabel("成员", "你标了 $mine 题$aiNote。标了对错的题越多，数字越有意义")
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -181,6 +182,9 @@ fun StanceTopicCard(ctl: AppController, state: AppState, t: StanceTopic, conv: C
     val nowOf = members.associateWith { id -> t.latestOf(id)!! }
     var confirmDelete by remember { mutableStateOf(false) }
     var verifying by remember(t.id) { mutableStateOf(false) }
+    // 核实跑完（成没成都会碰一下议题的更新时间）就恢复按钮；万一一直没消息，三分钟后也恢复
+    LaunchedEffect(t.updatedAt) { verifying = false }
+    LaunchedEffect(verifying) { if (verifying) { kotlinx.coroutines.delay(180_000); verifying = false } }
     SectionCard(padding = androidx.compose.foundation.layout.PaddingValues(14.dp)) {
         Row(verticalAlignment = Alignment.Top) {
             Text(t.question, style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
@@ -247,7 +251,8 @@ fun StanceTopicCard(ctl: AppController, state: AppState, t: StanceTopic, conv: C
             if (state.settings.memory.aiVerify) {
                 TextButton(enabled = !verifying, onClick = {
                     verifying = true
-                    ctl.run(Command.VerifyStance(t.id), quiet = true) { verifying = false }
+                    // 指令马上就回（核实在后台跑）：没开成才恢复按钮；跑完议题会更新，下面的 LaunchedEffect 恢复
+                    ctl.run(Command.VerifyStance(t.id)) { r -> if (!r.ok) verifying = false }
                 }) { Text(if (verifying) "正在核实…" else "重新核实", style = MaterialTheme.typography.labelMedium) }
             }
             TextButton(onClick = { confirmDelete = true }) { Text("记错了，删掉", style = MaterialTheme.typography.labelMedium) }
@@ -305,7 +310,7 @@ private fun AiVerifyRow(ctl: AppController, state: AppState, t: StanceTopic, nam
         }
         Spacer(Modifier.height(6.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
-            if (t.aiVerdict.isNotBlank() && t.aiVerdict != StanceTopic.UNCLEAR && !mine) {
+            if (t.aiCounts() && !mine) {
                 TextButton(onClick = { ctl.run(Command.StanceMark(t.id, t.aiVerdict), quiet = true) }) {
                     Text("采纳", style = MaterialTheme.typography.labelMedium)
                 }

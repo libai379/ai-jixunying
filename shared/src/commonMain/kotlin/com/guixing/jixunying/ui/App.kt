@@ -106,7 +106,7 @@ class AppController(val hub: Hub, val backend: Backend, val scope: CoroutineScop
         scope.launch {
             settingsLock.lock()
             try {
-                val r = backend.call(Command.SaveSettings(transform(backend.store.state.value.settings)))
+                val r = backend.call(Command.SaveSettings(transform(backend.store.state.value.settings).copy(schema = com.guixing.jixunying.model.Settings.SCHEMA)))
                 if (!r.ok) snackbar.showSnackbar(r.message.ifBlank { "保存失败" }, duration = SnackbarDuration.Long)
             } finally {
                 settingsLock.unlock()

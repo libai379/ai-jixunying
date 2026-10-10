@@ -10,3 +10,6 @@ out/
 # 签名配置（密码），只在本机
 keystore.properties
 *.jks
+
+# Kotlin 2.x 编译守护进程的会话文件
+.kotlin/

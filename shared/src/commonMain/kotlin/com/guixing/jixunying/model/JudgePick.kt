@@ -21,6 +21,8 @@ object JudgePick {
         // 自动找：deepseek-flash 优先
         val chat = state.providers.filter(ImagePick::usable).flatMap { p -> p.models.filter { !it.imageGen }.map { p to it.id } }
         chat.firstOrNull { it.second.lowercase() == PREFERRED_JUDGE }?.let { return it }
+        // 别的平台上的同一个模型（比如 deepseek-ai/DeepSeek-V4.1-Flash）
+        chat.firstOrNull { it.second.lowercase().let { id -> "deepseek" in id && "flash" in id } }?.let { return it }
         // 找不到就用记录员
         return RecorderPick.pick(state)
     }

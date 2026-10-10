@@ -35,7 +35,10 @@ data class StanceTopic(
     fun latestOf(memberId: String, before: Long = Long.MAX_VALUE) = entries.lastOrNull { it.memberId == memberId && it.time < before }
 
     /** 最终对错（用户标的优先；没标时按 AI 核实）。 */
-    fun effectiveVerdict(countAi: Boolean): String = verdict.ifBlank { if (countAi) aiVerdict else "" }
+    fun effectiveVerdict(countAi: Boolean): String = verdict.ifBlank { if (countAi && aiCounts()) aiVerdict else "" }
+
+    /** AI 核实的结论能不能算数：判的是这道题的某个立场，或者「都不对 / 没有对错」；判断不了、判了个不存在的立场都不算。 */
+    fun aiCounts(): Boolean = aiVerdict == NONE || aiVerdict == OPEN || option(aiVerdict) != null
 
     companion object {
         const val NONE = "none"
@@ -145,9 +148,7 @@ object Stances {
                     selfCheck = c.selfCheck + if (!kept && e.why == SELF_CHECK) 1 else 0,
                 )
             }
-            val v = t.verdict
-            val av = if (countAi && v.isBlank()) t.aiVerdict else ""
-            val effectiveVerdict = v.ifBlank { av }
+            val effectiveVerdict = t.effectiveVerdict(countAi)
             val first = mine.firstOrNull { it.first }
             if (first != null && effectiveVerdict.isNotEmpty() && effectiveVerdict != StanceTopic.OPEN) {
                 val last = mine.last()

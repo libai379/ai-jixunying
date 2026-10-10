@@ -20,8 +20,10 @@
   没在 设置→画图 指定时自动挑（model/ImagePick.kt，2026-10-08 用户定「默认千问」：画质优先，千问图像第一、免费 cogview-3-flash 垫底；按预设推断同一个 Key 能调的画图模型；Engine.paintAuto 失败换下一个，Key 失效 / 欠费整家跳过）。
 - 点名（engine/Stances.kt 的 Addressing）：群里没 @ 时，开头直接喊名字的程序认，其他出现成员名字的问记录员模型，只让被叫到的回答；开头喊了对话外的成员会拉进来。
 - 立场档案（model/Stances.kt 数据和统计，engine/Stances.kt 的 StanceJudge 写给记录员的说明，Engine.judgeStances）：群聊每轮答完记录员后台判断——开议题、记首答、记改口和原因；存 stances.json，界面用 StanceList / StanceMark / StanceDelete 指令；侧栏「立场档案」页（ui/StancesScreen.kt）。成员的提示词里不提立场档案（不能让它们知道被记录）。
+- 裁判和 AI 核实（2026-10-09 / 10，1.4.0）：记立场和核实都用「裁判」模型（model/JudgePick.kt：设置里指定了就用；没指定找 deepseek-flash，即用户定的 DeepSeek-V4.1-Flash；都没有退回记录员）。隐名开关（judgeAnonymous，默认开）：StanceJudge.Anon 把成员名字换成「成员甲 / 乙 / 丙」、成员回答里报的模型名换成「模型甲」；代号按对话里的成员顺序给，每轮一样；用户的问题和议题只换名字（问题里提到的模型名回答里也不换）；裁判写回来的名字和说明文字都换回真名。AI 核实开关（aiVerify，默认开）：开新议题后 Engine.verifyTopic 另开协程让裁判判一次谁对（能用 web_search），结论只认这道题的立场 key / none / open / unclear，存 StanceTopic.aiVerdict / aiReason / aiSources；同一题不同时跑两次；出错、看不懂都进后台出错提示（BgJob.AI_VERIFY）；重新核实不先清旧结论。统计用 StanceTopic.effectiveVerdict：用户标的优先，没标时按 AI（countAiVerdict 开关），「判断不了」和不存在的立场不算。
+- 设置版本（Settings.schema / Settings.SCHEMA，1.4.0 起）：旧版手机不认识新加的设置项，发来的 SaveSettings 里是默认值；电脑看到 schema 比自己小就保留那几项（Engine 的 SaveSettings）。以后再加旧版不认识的设置项：SCHEMA 加一，并在 SaveSettings 里保留。
 - 思考（model/Thinking.kt，2026-10-08）：每位成员「默认 / 快速 / 深度」。各家切换参数不一样（DeepSeek thinking.type + reasoning_effort、MiniMax-M3 只认 adaptive / disabled、GLM-5.3 关不掉只能调强度、千问 enable_thinking……），出处在 docs/参考资料.md「切换思考的参数」；没查到的平台两样都灰掉、不传参数；模型报 400 不认就自动去掉重试（LlmClient 的 thinking）。
-- 后台出错提示（engine/Background.kt，2026-10-08）：记录员的四样后台活（压缩聊天、挑记忆、点名判断、立场档案）出错时记进 AppState.bgProblems，弹一次提示（同一样半小时内只弹一次），设置 → 记忆、立场档案页、侧栏「设置」上常驻显示，成功一次自动消失。
+- 后台出错提示（engine/Background.kt，2026-10-08）：记录员的后台活（压缩聊天、挑记忆、点名判断、立场档案，1.4.0 加了 AI 核实）出错时记进 AppState.bgProblems，弹一次提示（同一样半小时内只弹一次），设置 → 记忆、立场档案页、侧栏「设置」上常驻显示，成功一次自动消失。
 - 花费（2026-10-08）：每次调用模型、每张图记进账本 usage\年-月.jsonl（engine/Ledger.kt，UsageTag 标算谁的账）；价格表 model/Prices.kt（官方价，DeepSeek 分高峰 / 空闲，用户能改单价）；engine/CostReporter.kt 汇总；engine/Balances.kt 查余额；侧栏「花费」页 ui/CostsScreen.kt。
 - 说话规矩写在 engine/Prompts.kt：正经回答为主、幽默点到为止、不知道就说不知道、时效信息先搜再答并标出处。
 - 记忆（engine/Memory.kt，2026-10-08）：记录员（model/RecorderPick.kt，默认 mimo-v2.6-flash）把太长的聊天压成摘要，全群一份，存 convs\<id>.memo.json；长期记忆 AppState.memories 写进每位成员的设定，AI 有 remember 工具，攒够 4 句用户的话自动挑；search_history 工具和侧栏搜索能翻以前的聊天。
@@ -73,7 +75,7 @@
 - 渲染：Main.kt 默认 skiko.renderApi=OPENGL（DirectX 在用户电脑上会让字闪，见教训库 26）。用户正在用的窗口只截图，不要模拟鼠标键盘
 - 检查界面（不碰用户屏幕）：JXY_SHOTS=G:/DevCache/shots ./gradlew :shared:desktopTest --tests "*ShotsTest*" --rerun，电脑和手机尺寸、各页面、弹窗、深色模式都画成 PNG。要加场景就在 ShotsTest 里加一行，App 的 debugStart 支持 settings:标签名#弹窗、conv:对话编号#convsettings、conv:对话编号#stances、docs、stances、settingshome、newchat
 - 交付：复制到 F:\apk-out\，文件名 AI集训营.exe / AI集训营.apk，不带版本号和日期，汇报时报文件时间。exe 是只读的，复制前后都用 PowerShell 的 Set-ItemProperty IsReadOnly false 去掉目标的只读属性（教训 50）。复制前先把版本号加上去（四处：androidApp 的 versionCode / versionName、desktopApp 的 packageVersion、model/Presets.kt 的 APP_VERSION、WeixinBridge 的 BOT_AGENT）
-- 发到 GitHub（2026-10-08 起用户要从 GitHub 下载安装）：收尾提交推上去以后，用 gh（F:\Tools\gh\bin，环境变量设代理 127.0.0.1:10809）建 Release：标签 v版本号、--target 收尾提交的完整 SHA；**文件名必须带版本号和时间**（格式参考其他 GitHub 项目的 Release：AI集训营-1.3.0-20261010-windows.exe / AI集训营-1.3.0-20261010-android.apk），中文写在「文件#显示名」的显示名里；**Release 说明必须包含**：## What's New（新增功能清单）、## Improvements（改进项）、## Bug Fixes（修复的问题）、## Download（下载说明 + 每个文件的 SHA-256）、## 安卓签名指纹（方便用户验证）。上传前用 build-tools 的 apksigner verify --print-certs 确认安卓包是专用签名（CN=AI Jixunying），不然手机覆盖安装会失败
+- 发到 GitHub（2026-10-08 起用户要从 GitHub 下载安装）：收尾提交推上去以后，用 gh（F:\Tools\gh\bin，环境变量设代理 127.0.0.1:10809）建 Release：标签 v版本号、--target 收尾提交的完整 SHA；**文件名必须带版本号和日期，而且只用英文字母数字**（GitHub 会把文件名里的中文删掉，2026-10-10 传成了「AI.-1.3.0-…」，教训 55）：AI-Jixunying-1.4.0-20261010-windows.exe / AI-Jixunying-1.4.0-20261010-android.apk；中文写在显示名里（gh release upload 的「文件路径#显示名」）；每次发版都是新版本号、新标签，不许往已有的 Release 里换别的版本的安装包；安卓要求 Android 8.0 以上（minSdk 26）；**Release 说明必须包含**：## What's New（新增功能清单）、## Improvements（改进项）、## Bug Fixes（修复的问题）、## Download（下载说明 + 每个文件的 SHA-256）、## 安卓签名指纹（方便用户验证）。上传前用 build-tools 的 apksigner verify --print-certs 确认安卓包是专用签名（CN=AI Jixunying），不然手机覆盖安装会失败
 
 ## 用户偏好
 

@@ -22,7 +22,7 @@ compose.desktop {
         nativeDistributions {
             targetFormats(TargetFormat.Msi, TargetFormat.Exe)
             packageName = "ai-jixunying"
-            packageVersion = "1.3.0"
+            packageVersion = "1.4.0"
             description = "AI集训营"
             vendor = "guixing"
             modules("java.instrument", "java.management", "java.prefs", "java.naming", "java.net.http", "java.sql", "jdk.unsupported", "jdk.crypto.ec", "jdk.charsets", "jdk.localedata")

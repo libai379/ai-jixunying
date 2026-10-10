@@ -178,7 +178,7 @@ class EngineTest {
                                 chunk("""{"tool_calls":[{"index":0,"id":"call_ws","type":"function","function":{"name":"web_search","arguments":"{\"query\":\"1.5和1.12哪个大\"}"}}]}""")
                                 write("data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n")
                             }
-                            "请你判断" in firstText -> say("""根据搜索结果：{"verdict":"A","reason":"1.5 等于 1.50，比 1.12 大"}""")
+                            "请你判断" in firstText -> say("""根据搜索结果：{"verdict":"A","reason":"1.5 等于 1.50，比 1.12 大，成员乙看错了"}""")
                             // 用户说「记住」：调 remember
                             hasTool("remember") && latest.contains("记住") && !sawTool -> {
                                 chunk("""{"tool_calls":[{"index":0,"id":"mem_1","type":"function","function":{"name":"remember","arguments":"{\"text\":\"喜欢简短的回答\",\"kind\":\"偏好\"}"}}]}""")
@@ -1246,6 +1246,7 @@ class EngineTest {
         // AI 核实结果落到议题上
         assertEquals("A", t1.aiVerdict)
         assertTrue(t1.aiReason.isNotBlank(), "应该有理由")
+        assertTrue("成员乙" !in t1.aiReason && "乙看错了" in t1.aiReason, "理由里的代号要换回真名：${t1.aiReason}")
         // 注意：测试环境搜索引擎配置为 Tavily 无 Key，搜索会失败，所以 aiSources 可能为空
         // 但假服务器模拟了工具调用，所以裁判看到的流程是正确的
 
@@ -1269,8 +1270,13 @@ class EngineTest {
         assertEquals(0, withoutAi[0].judged, "不算 AI 核实：用户没标，这道题不计")
 
         // 重新核实：能从界面再跑一次
+        // 旧结论留着，新的判出来才换；跑完议题的更新时间会变（界面靠它恢复「重新核实」按钮）
+        fun judgeCalls() = requests.count { "请你判断" in it.toString() }
+        val before = judgeCalls()
+        val stamp = topics().single().updatedAt
         assertTrue(e.call(Command.VerifyStance(t1.id)).ok)
-        withTimeout(20_000) { while (topics().single().aiVerdict.isEmpty()) delay(100) }
+        assertEquals("A", topics().single().aiVerdict, "重新核实时不先清掉旧结论")
+        withTimeout(20_000) { while (topics().single().updatedAt == stamp || judgeCalls() < before + 2) delay(100) }
         assertEquals("A", topics().single().aiVerdict)
 
         // 花费记在「立场档案」名下，用的是裁判那个模型

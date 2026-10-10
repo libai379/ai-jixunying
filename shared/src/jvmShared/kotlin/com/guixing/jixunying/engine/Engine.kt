@@ -25,6 +25,7 @@ import com.guixing.jixunying.model.ProviderConfig
 import com.guixing.jixunying.model.ReplyMode
 import com.guixing.jixunying.model.Role
 import com.guixing.jixunying.model.SearchSource
+import com.guixing.jixunying.model.Settings
 import com.guixing.jixunying.model.StanceEntry
 import com.guixing.jixunying.model.StanceOption
 import com.guixing.jixunying.model.StanceTopic
@@ -138,6 +139,8 @@ class Engine(
         if (s.pairingSecret.isEmpty()) s = s.copy(pairingSecret = newSecret())
         // 手机上一般没有本地 HTTP 代理（用的是 VPN 类软件），默认直连
         if (isPhone && storage.loadState() == null) s = s.copy(settings = s.settings.copy(proxy = ""))
+        // 这一版认得的设置版本（新版界面拿到状态再改、再发回来，带的就是它）
+        if (s.settings.schema < Settings.SCHEMA) s = s.copy(settings = s.settings.copy(schema = Settings.SCHEMA))
         // 以前重复导入留下的同一个服务商 / 同一位成员，启动时合并掉
         val (deduped, memberMap, removed) = ConfigMerge.dedupe(s)
         if (removed > 0) s = deduped
@@ -408,12 +411,17 @@ class Engine(
                 val oldKeys = s.settings.search.apiKeys
                 val keys = c.settings.search.apiKeys.mapValues { (k, v) -> if (isMaskedKey(v)) oldKeys[k].orEmpty() else v }
                 // 花费设置走 SaveCosts 单独存，这里保留原样（旧版手机发来的设置里没有这块）
-                s.copy(settings = c.settings.copy(search = c.settings.search.copy(apiKeys = keys), costs = s.settings.costs))
+                // 1.4.0 以前的手机不认识裁判和 AI 核实这几项，发来的是默认值：保留电脑上的
+                val memory = if (c.settings.schema >= Settings.SCHEMA) c.settings.memory else c.settings.memory.copy(
+                    judgeProviderId = s.settings.memory.judgeProviderId, judgeModelId = s.settings.memory.judgeModelId,
+                    judgeAnonymous = s.settings.memory.judgeAnonymous, aiVerify = s.settings.memory.aiVerify, countAiVerdict = s.settings.memory.countAiVerdict)
+                s.copy(settings = c.settings.copy(search = c.settings.search.copy(apiKeys = keys), costs = s.settings.costs, memory = memory, schema = Settings.SCHEMA))
             }
             if (before.enabled != state.settings.relay.enabled || before.brokers != state.settings.relay.brokers) onRelaySettingsChanged?.invoke()
             // 关掉了的后台活不会再跑，它以前的出错提示也就不会「成功一次自己消失」：直接清掉
             state.settings.memory.let { m ->
                 if (!m.stances) bg.ok(BgJob.STANCES)
+                if (!m.stances || !m.aiVerify) bg.ok(BgJob.AI_VERIFY)
                 if (!m.enabled || !m.autoExtract) bg.ok(BgJob.MEMORY)
             }
             if (docsBefore != state.settings.docs) rescanDocs()
@@ -522,21 +530,9 @@ class Engine(
         is Command.VerifyStance -> {
             val topic = synchronized(stanceBook) { stanceBook.firstOrNull { it.id == c.topicId } } ?: return CommandResult(false, "这个议题已经不在了")
             if (!state.settings.memory.aiVerify) return CommandResult(false, "AI 核实没开：到 设置 → 记忆 → 立场档案 打开它")
-            val members = topic.entries.mapNotNull { state.member(it.memberId) }.distinctBy { it.id }
-            // 重新核实：先清掉旧结论，界面上就能看出在跑
-            synchronized(stanceBook) {
-                val i = stanceBook.indexOfFirst { it.id == c.topicId }
-                if (i >= 0) stanceBook[i] = stanceBook[i].copy(aiVerdict = "", aiReason = "", aiSources = emptyList(), updatedAt = now())
-            }
-            saveStances(setOf(topic.convId))
-            scope.launch {
-                try {
-                    aiVerifyTopic(c.topicId, members)
-                } catch (e: Throwable) {
-                    if (e is CancellationException) throw e
-                    bg.failed(BgJob.AI_VERIFY, friendlyError(e, JudgePick.pick(state)?.first), titleOf(topic.convId))
-                }
-            }
+            // 旧结论先留着，新的判出来再换（判不出来也不会把原来的弄丢）
+            if (topic.id in verifying) return CommandResult(false, "这道题正在核实，等一会儿")
+            scope.launch { verifyTopic(topic.id) }
             CommandResult(message = "正在让裁判核实…")
         }
         is Command.StanceDelete -> {
@@ -732,7 +728,9 @@ class Engine(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Throwable) {
-            bg.failed(job, friendlyError(e, Recorder.pick(state)?.first), titleOf(convId))
+            // 立场档案用的是裁判的模型，出错提示要按裁判那家说
+            val p = if (job == BgJob.STANCES) JudgePick.pick(state)?.first else Recorder.pick(state)?.first
+            bg.failed(job, friendlyError(e, p), titleOf(convId))
         }
     }
 
@@ -1011,27 +1009,24 @@ class Engine(
             val (p, model) = JudgePick.pick(state) ?: run { bg.failed(BgJob.STANCES, BackgroundWatch.NO_RECORDER, titleOf(convId)); return }
             fun nameOf(id: String) = state.member(id)?.name ?: "已移除的成员"
             val items = said.map { m -> StanceJudge.Said(m, nameOf(m.senderId), m.id in independentIds, calledBy[m.id], toolsNote(m)) }
-            val members = said.map { m -> state.member(m.senderId) }.filterNotNull().distinctBy { it.id }
+            val members = stanceMembers(convId, open)
             val anonymous = state.settings.memory.judgeAnonymous
             val promptResult = StanceJudge.prompt(open, items, stripThink(ask.content), state.profile.name, ::nameOf, canOpen, anonymous, members)
             val r = withContext(Dispatchers.IO) { llm.chat(p, model, listOf(userMsg(promptResult.prompt)), null, null) { _, _ -> } }
-            val v = StanceJudge.parse(r.content, promptResult.mapping) ?: run { bg.failed(BgJob.STANCES, BackgroundWatch.UNREADABLE, titleOf(convId)); return }
+            val v = StanceJudge.parse(r.content, promptResult.anon) ?: run { bg.failed(BgJob.STANCES, BackgroundWatch.UNREADABLE, titleOf(convId)); return }
             val newTopicId = applyStances(convId, ask, said, independentIds, open, v, canOpen)
             bg.ok(BgJob.STANCES)
-            // AI 核实：开新议题后，裁判判一次谁对
-            if (newTopicId != null && state.settings.memory.aiVerify) {
-                coroutineScope {
-                    launch(Dispatchers.IO) {
-                        try {
-                            aiVerifyTopic(newTopicId, members)
-                        } catch (e: Exception) {
-                            val friendly = friendlyError(e, p)
-                            bg.failed(BgJob.AI_VERIFY, friendly, titleOf(convId))
-                        }
-                    }
-                }
-            }
+            // AI 核实：开新议题后，裁判判一次谁对。另开一个协程，不占着这个对话的锁（下一轮的记录不用等它联网查完）
+            if (newTopicId != null && state.settings.memory.aiVerify) scope.launch { verifyTopic(newTopicId) }
         }
+    }
+
+    /**
+     * 给裁判看时排代号用的成员：对话里的成员按对话里的顺序（每一轮代号都一样），再加上议题里有表态、后来移出对话的。
+     */
+    private fun stanceMembers(convId: String, topics: List<StanceTopic>): List<Member> {
+        val ids = state.conversation(convId)?.memberIds.orEmpty() + topics.flatMap { t -> t.entries.map { it.memberId } }
+        return ids.distinct().mapNotNull { state.member(it) }
     }
 
     private fun toolsNote(m: Message): String {
@@ -1113,12 +1108,38 @@ class Engine(
         return newTopicId
     }
 
+    /** 正在核实的议题（同一道题不同时跑两次，免得重复花钱）。 */
+    private val verifying: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
+    /**
+     * AI 核实一道题：出错、看不懂、没有能用的裁判，都记进后台出错提示（不悄悄停掉）。
+     * 不管成没成，最后都碰一下议题的更新时间，界面上的「正在核实…」就能恢复。
+     */
+    private suspend fun verifyTopic(topicId: String) {
+        if (!verifying.add(topicId)) return
+        val convId = synchronized(stanceBook) { stanceBook.firstOrNull { it.id == topicId } }?.convId ?: run { verifying.remove(topicId); return }
+        try {
+            aiVerifyTopic(topicId)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            bg.failed(BgJob.AI_VERIFY, friendlyError(e, JudgePick.pick(state)?.first), titleOf(convId))
+        } finally {
+            verifying.remove(topicId)
+            synchronized(stanceBook) {
+                val i = stanceBook.indexOfFirst { it.id == topicId }
+                if (i >= 0) stanceBook[i] = stanceBook[i].copy(updatedAt = now())
+            }
+            saveStances(setOf(convId))
+        }
+    }
+
     /** AI 核实：开新议题后，裁判判一次谁对（能查就用 web_search）。 */
-    private suspend fun aiVerifyTopic(topicId: String, members: List<Member>) {
+    private suspend fun aiVerifyTopic(topicId: String) {
         val topic = synchronized(stanceBook) { stanceBook.firstOrNull { it.id == topicId } } ?: return
-        val (p, model) = JudgePick.pick(state) ?: return
+        val (p, model) = JudgePick.pick(state) ?: run { bg.failed(BgJob.AI_VERIFY, BackgroundWatch.NO_RECORDER, titleOf(topic.convId)); return }
         val anonymous = state.settings.memory.judgeAnonymous
-        val verifyResult = StanceJudge.verifyPrompt(topic, members, anonymous)
+        val verifyResult = StanceJudge.verifyPrompt(topic, stanceMembers(topic.convId, listOf(topic)), anonymous)
         // 带工具的请求：web_search
         val tools = buildJsonArray {
             add(buildJsonObject {
@@ -1152,6 +1173,8 @@ class Engine(
                 working += buildJsonObject {
                     put("role", "assistant")
                     put("content", r.content)
+                    // 跟成员的工具循环一样：思考模式下把思考内容带回去（DeepSeek 等要求）
+                    if (r.reasoning.isNotEmpty() && p.presetId !in setOf("openai", "anthropic", "gemini", "openrouter")) put("reasoning_content", r.reasoning)
                     putJsonArray("tool_calls") {
                         r.toolCalls.forEach { tc ->
                             add(buildJsonObject {
@@ -1182,7 +1205,8 @@ class Engine(
                 r = llm.chat(p, model, working, null, null, null, {}, null) { _, _ -> }
             }
         }
-        val verdict = StanceJudge.parseVerify(r.content) ?: return
+        val verdict = StanceJudge.parseVerify(r.content, topic.options.map { it.key }, verifyResult.anon)
+            ?: run { bg.failed(BgJob.AI_VERIFY, "裁判的回答看不懂：$model 可能不适合当裁判，可以在 设置 → 记忆 → 立场档案 换一个", titleOf(topic.convId)); return }
         // 更新议题
         synchronized(stanceBook) {
             val i = stanceBook.indexOfFirst { it.id == topicId }
