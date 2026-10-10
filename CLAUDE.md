@@ -73,7 +73,7 @@
 - 渲染：Main.kt 默认 skiko.renderApi=OPENGL（DirectX 在用户电脑上会让字闪，见教训库 26）。用户正在用的窗口只截图，不要模拟鼠标键盘
 - 检查界面（不碰用户屏幕）：JXY_SHOTS=G:/DevCache/shots ./gradlew :shared:desktopTest --tests "*ShotsTest*" --rerun，电脑和手机尺寸、各页面、弹窗、深色模式都画成 PNG。要加场景就在 ShotsTest 里加一行，App 的 debugStart 支持 settings:标签名#弹窗、conv:对话编号#convsettings、conv:对话编号#stances、docs、stances、settingshome、newchat
 - 交付：复制到 F:\apk-out\，文件名 AI集训营.exe / AI集训营.apk，不带版本号和日期，汇报时报文件时间。exe 是只读的，复制前后都用 PowerShell 的 Set-ItemProperty IsReadOnly false 去掉目标的只读属性（教训 50）。复制前先把版本号加上去（四处：androidApp 的 versionCode / versionName、desktopApp 的 packageVersion、model/Presets.kt 的 APP_VERSION、WeixinBridge 的 BOT_AGENT）
-- 发到 GitHub（2026-10-08 起用户要从 GitHub 下载安装）：收尾提交推上去以后，用 gh（F:\Tools\gh\bin，环境变量设代理 127.0.0.1:10809）建 Release：标签 v版本号、--target 收尾提交的完整 SHA；文件名用英文（AI-Jixunying-版本-windows.exe / AI-Jixunying-版本-android.apk），中文写在「文件#显示名」的显示名里；说明里写新功能、安装提示、SHA-256 和安卓签名证书指纹。上传前用 build-tools 的 apksigner verify --print-certs 确认安卓包是专用签名（CN=AI Jixunying），不然手机覆盖安装会失败
+- 发到 GitHub（2026-10-08 起用户要从 GitHub 下载安装）：收尾提交推上去以后，用 gh（F:\Tools\gh\bin，环境变量设代理 127.0.0.1:10809）建 Release：标签 v版本号、--target 收尾提交的完整 SHA；**文件名必须带版本号和时间**（格式参考其他 GitHub 项目的 Release：AI集训营-1.3.0-20261010-windows.exe / AI集训营-1.3.0-20261010-android.apk），中文写在「文件#显示名」的显示名里；**Release 说明必须包含**：## What's New（新增功能清单）、## Improvements（改进项）、## Bug Fixes（修复的问题）、## Download（下载说明 + 每个文件的 SHA-256）、## 安卓签名指纹（方便用户验证）。上传前用 build-tools 的 apksigner verify --print-certs 确认安卓包是专用签名（CN=AI Jixunying），不然手机覆盖安装会失败
 
 ## 用户偏好
 
