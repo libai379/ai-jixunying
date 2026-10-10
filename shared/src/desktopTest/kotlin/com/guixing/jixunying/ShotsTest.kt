@@ -4,6 +4,10 @@ import androidx.compose.ui.ImageComposeScene
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.toComposeImageBitmap
 import androidx.compose.ui.unit.Density
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.pointer.PointerButton
+import androidx.compose.ui.input.pointer.PointerButtons
+import androidx.compose.ui.input.pointer.PointerEventType
 import com.guixing.jixunying.client.Hub
 import com.guixing.jixunying.engine.Engine
 import com.guixing.jixunying.engine.Storage
@@ -76,6 +80,7 @@ class ShotsTest {
             Conversation("c2", "微信对话", listOf("ma"), createdAt = now - 7_200_000, updatedAt = now - 3_000_000, channel = "weixin:u1@im.wechat"),
             Conversation("c3", "画一只在月球上喝茶的橘猫", listOf("md"), createdAt = now - 90_000_000, updatedAt = now - 86_000_000),
             Conversation("c4", "新对话", listOf("mc"), createdAt = now - 900_000_000, updatedAt = now - 800_000_000),
+            Conversation("c6", "聊了很久的对话", listOf("ma"), createdAt = now - 950_000_000, updatedAt = now - 900_000_000),
         )
         val st = Storage(root)
         st.saveState(AppState(
@@ -168,6 +173,16 @@ class ShotsTest {
                         com.guixing.jixunying.model.StanceEntry("mc", "r5c", "u7", "A", first = true, time = t0 - 600_000),
                     ), createdAt = t0 - 590_000, updatedAt = t0 - 590_000),
             )), Charsets.UTF_8)
+        // 聊了很久的对话：打开时要停在最新一条的最后一行（以前停在最上面）
+        st.saveMessages("c6", (1..15).flatMap { i ->
+            val at = now - 950_000_000L + i * 60_000L
+            listOf(
+                Message("u6-$i", "c6", Role.USER, USER_ID, "第 $i 个问题：这一段讲了什么？", createdAt = at),
+                // 最后一条比一屏还长：要看到它的最后一行，不是开头
+                Message("r6-$i", "c6", Role.AI, "ma", (1..(if (i == 15) 40 else 6)).joinToString("\n\n") { k -> "第 $i 个回答的第 $k 段。" } +
+                    if (i == 15) "\n\n这是最新一条回答的最后一行。" else "", createdAt = at + 1000),
+            )
+        })
         st.saveMessages("c3", listOf(
             Message("u3", "c3", Role.USER, USER_ID, "画一只在月球上喝茶的橘猫", createdAt = now - 86_100_000),
             Message("r3", "c3", Role.AI, "md", "画好了。", attachments = listOf(cat), tools = listOf(ToolStep("image", "月球上喝茶的橘猫，水彩风格")), createdAt = now - 86_000_000,
@@ -191,6 +206,45 @@ class ShotsTest {
         scene.close()
     }
 
+    /** 离屏点几下、滚几下再截图（不碰真屏幕）：每一步是 (位置, 滚轮量)，滚轮量为 0 就是点一下。 */
+    @OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
+    private fun shootSteps(name: String, hub: Hub, platform: Platform, start: String, steps: List<Pair<Offset, Float>>) {
+        val scene = ImageComposeScene(1280, 820, Density(1f)) { App(hub, platform, start) }
+        var t = 0L
+        fun frames(n: Int) = repeat(n) { scene.render(t); t += 120_000_000L; Thread.sleep(60) }
+        frames(14)
+        for ((at, wheel) in steps) {
+            if (wheel != 0f) scene.sendPointerEvent(PointerEventType.Scroll, at, scrollDelta = Offset(0f, wheel))
+            else {
+                scene.sendPointerEvent(PointerEventType.Press, at, buttons = PointerButtons(isPrimaryPressed = true), button = PointerButton.Primary)
+                scene.sendPointerEvent(PointerEventType.Release, at, buttons = PointerButtons(), button = PointerButton.Primary)
+            }
+            frames(14)
+        }
+        File(out, "$name.png").writeBytes(scene.render(t).encodeToData(EncodedImageFormat.PNG)!!.bytes)
+        scene.close()
+    }
+
+    /** 打开对话停在哪：要停在最新一条的最后一行（10-10 用户报：每次打开都在最上面）。 */
+    @Test
+    fun scrollShots() {
+        val dir = out ?: return
+        dir.mkdirs()
+        val tmp = kotlin.io.path.createTempDirectory("jxy-scroll").toFile()
+        val hub = Hub(seed(File(tmp, "data"), File(tmp, "文档").apply { mkdirs() }))
+        val desktop = DesktopPlatform { null }
+        // 侧栏位置（1280×820）：绳子剪几段 210、租房合同 260、聊了很久的对话 490；聊天区中间 (800, 400)
+        val c5 = Offset(140f, 210f); val c1 = Offset(140f, 260f); val c6 = Offset(140f, 490f); val chat = Offset(800f, 400f)
+        val up = List(8) { chat to -30f }
+        shootSteps("scroll-c1-then-long", hub, desktop, "conv:c1", listOf(c6 to 0f))
+        shootSteps("scroll-up-then-c5", hub, desktop, "conv:c6", up + listOf(c5 to 0f))
+        shootSteps("scroll-up-then-c1-then-long", hub, desktop, "conv:c6", up + listOf(c1 to 0f, c6 to 0f))
+        shootSteps("scroll-long-up", hub, desktop, "conv:c6", up)
+        shoot("scroll-focus-old", 1280, 820, 1f, hub, desktop, "conv:c6@u6-3")
+        shoot("scroll-focus-old-phone", 824, 1784, 2f, hub, PhonePlatform(), "conv:c6@u6-3")
+        tmp.deleteRecursively()
+    }
+
     @Test
     fun shots() {
         val dir = out ?: return
@@ -207,11 +261,11 @@ class ShotsTest {
 
         val wide = listOf(
             "chat" to "conv:c1", "chat-image" to "conv:c3", "newchat" to "newchat", "docs" to "docs", "costs" to "costs",
-            "stances" to "stances", "chat-stances" to "conv:c5", "chat-stances-dialog" to "conv:c5#stances",
+            "stances" to "stances", "chat-stances" to "conv:c5", "chat-stances-dialog" to "conv:c5#stances", "chat-long" to "conv:c6",
         ) + com.guixing.jixunying.ui.SettingsTab.entries.map { "settings-" + it.name.lowercase() to "settings:${it.name}" } +
             listOf("provider-add" to "settings:PROVIDERS#add")
         for ((name, start) in wide) shoot("desktop-$name", 1280, 820, 1f, hub, desktop, start)
-        val narrow = listOf("chat" to "conv:c1", "docs" to "docs", "stances" to "stances", "chat-stances" to "conv:c5", "costs" to "costs",
+        val narrow = listOf("chat" to "conv:c1", "chat-long" to "conv:c6", "docs" to "docs", "stances" to "stances", "chat-stances" to "conv:c5", "costs" to "costs",
             "settings-home" to "settingshome", "settings-image" to "settings:IMAGE",
             "settings-memory" to "settings:MEMORY", "settings-weixin" to "settings:WEIXIN", "settings-providers" to "settings:PROVIDERS",
             "settings-search" to "settings:SEARCH", "settings-profile" to "settings:PROFILE")

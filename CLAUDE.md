@@ -46,6 +46,7 @@
 - 不靠在提示词里加限制词修毛病（用户 2026-10-08：「限制提示词我觉得最笨的方法，他们模型不能自己去理解吗？」）。先用真模型测是哪一环坏了；判断类的活（点名、立场）交给模型理解，程序只做对号入座。
 - 成员固定四家（阿德 DeepSeek、阿麦 MiniMax、阿智 智谱、阿米 小米 MiMo）；国内最多再加一家画图 / 做视频的（千问，只画图不当成员），国外以后再说。
 - 千问 Key 余额很少（2026-10-08 剩约 0.64 元，每张图 0.18 元），测试别用它画图，除非用户同意。
+- 只在本机跑（用户 2026-10-10）：开发、测试、打包都在这台电脑上做，不开云端会话、不用远程 agent 或云端隔离环境；推 GitHub、发 Release 不算。
 
 ## 工程结构
 
@@ -75,7 +76,7 @@
 - 渲染：Main.kt 默认 skiko.renderApi=OPENGL（DirectX 在用户电脑上会让字闪，见教训库 26）。用户正在用的窗口只截图，不要模拟鼠标键盘
 - 检查界面（不碰用户屏幕）：JXY_SHOTS=G:/DevCache/shots ./gradlew :shared:desktopTest --tests "*ShotsTest*" --rerun，电脑和手机尺寸、各页面、弹窗、深色模式都画成 PNG。要加场景就在 ShotsTest 里加一行，App 的 debugStart 支持 settings:标签名#弹窗、conv:对话编号#convsettings、conv:对话编号#stances、docs、stances、settingshome、newchat
 - 交付：复制到 F:\apk-out\，文件名 AI集训营.exe / AI集训营.apk，不带版本号和日期，汇报时报文件时间。exe 是只读的，复制前后都用 PowerShell 的 Set-ItemProperty IsReadOnly false 去掉目标的只读属性（教训 50）。复制前先把版本号加上去（四处：androidApp 的 versionCode / versionName、desktopApp 的 packageVersion、model/Presets.kt 的 APP_VERSION、WeixinBridge 的 BOT_AGENT）
-- 发到 GitHub（2026-10-08 起用户要从 GitHub 下载安装）：收尾提交推上去以后，用 gh（F:\Tools\gh\bin，环境变量设代理 127.0.0.1:10809）建 Release：标签 v版本号、--target 收尾提交的完整 SHA；**文件名必须带版本号和日期，而且只用英文字母数字**（GitHub 会把文件名里的中文删掉，2026-10-10 传成了「AI.-1.3.0-…」，教训 55）：AI-Jixunying-1.4.0-20261010-windows.exe / AI-Jixunying-1.4.0-20261010-android.apk；中文写在显示名里（gh release upload 的「文件路径#显示名」）；每次发版都是新版本号、新标签，不许往已有的 Release 里换别的版本的安装包；安卓要求 Android 8.0 以上（minSdk 26）；**Release 说明必须包含**：## What's New（新增功能清单）、## Improvements（改进项）、## Bug Fixes（修复的问题）、## Download（下载说明 + 每个文件的 SHA-256）、## 安卓签名指纹（方便用户验证）。上传前用 build-tools 的 apksigner verify --print-certs 确认安卓包是专用签名（CN=AI Jixunying），不然手机覆盖安装会失败
+- 发到 GitHub（2026-10-08 起用户要从 GitHub 下载安装）：收尾提交推上去以后，用 gh（F:\Tools\gh\bin，环境变量设代理 127.0.0.1:10809）建 Release：标签 v版本号、--target 收尾提交的完整 SHA；**文件名必须带版本号和日期，而且只用英文字母数字**（GitHub 会把文件名里的中文删掉，2026-10-10 传成了「AI.-1.3.0-…」，教训 55）：AI-Jixunying-1.4.0-20261010-windows.exe / AI-Jixunying-1.4.0-20261010-android.apk；中文写在显示名里（gh release upload 的「文件路径#显示名」）；每次发版都是新版本号、新标签，不许往已有的 Release 里换别的版本的安装包；**只留最新一版**（用户 2026-10-10）：新 Release 发好、线上核对无误后，用 gh release delete 删掉旧的 Release（标签留着，不加 --cleanup-tag）；说明开头一句写清版本号、日期、比上一版多了什么；安卓要求 Android 8.0 以上（minSdk 26）；**Release 说明必须包含**：## What's New（新增功能清单）、## Improvements（改进项）、## Bug Fixes（修复的问题）、## Download（下载说明 + 每个文件的 SHA-256）、## 安卓签名指纹（方便用户验证）。上传前用 build-tools 的 apksigner verify --print-certs 确认安卓包是专用签名（CN=AI Jixunying），不然手机覆盖安装会失败
 
 ## 用户偏好
 

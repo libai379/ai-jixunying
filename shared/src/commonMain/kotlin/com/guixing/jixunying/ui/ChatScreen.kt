@@ -21,7 +21,8 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -174,27 +175,31 @@ private fun ChatTopBar(state: AppState, conv: Conversation, wide: Boolean, openD
 @Composable
 private fun MessageList(ctl: AppController, state: AppState, conv: Conversation, messages: List<Message>,
                         topics: List<com.guixing.jixunying.model.StanceTopic>, onStance: (String) -> Unit) {
-    val listState = rememberLazyListState()
+    // 和微信一样从底下往上排：打开对话就停在最新一条的最后一行，图片后加载、AI 正在输出也不会把最新一行挤出去。
+    // 每个对话各记各的位置（以前所有对话共用一份：在一个对话里往上翻过，之后打开别的对话都停在上面）
+    val listState = remember(conv.id) { LazyListState() }
     val stanceOf = remember(topics) { topics.flatMap { t -> t.entries.map { e -> e.messageId to (t to e) } }.groupBy({ it.first }, { it.second }) }
     val last = messages.lastOrNull()
-    // 从侧栏搜索结果点进来：滚到那条消息
+    // 倒着排：0 是底部留白，1 是最新一条，最上面是开头那行提示
+    val newestFirst = remember(messages) { messages.asReversed() }
+    // 从侧栏搜索结果、立场档案点进来：滚到那条消息，让它的开头露在最上面
     LaunchedEffect(ctl.focusMessageId, messages.size) {
         val target = ctl.focusMessageId ?: return@LaunchedEffect
         val i = messages.indexOfFirst { it.id == target }
-        if (i >= 0) {
-            listState.scrollToItem(i + 1)
-            ctl.focusMessageId = null
-        }
-    }
-    // 新消息或流式输出时，如果本来就在底部附近就跟着滚到底
-    LaunchedEffect(messages.size, last?.content?.length, last?.attachments?.size) {
-        if (messages.isEmpty()) return@LaunchedEffect
+        if (i < 0) return@LaunchedEffect
+        val index = messages.size - i
+        listState.scrollToItem(index)   // 倒着排时这一条贴在最下面
         val info = listState.layoutInfo
-        val lastVisible = info.visibleItemsInfo.lastOrNull()?.index ?: 0
-        // 自己刚发的消息、或者本来就在底部附近，都滚到底
+        info.visibleItemsInfo.firstOrNull { it.index == index }?.let { item ->
+            listState.scrollBy((item.size - (info.viewportEndOffset - info.viewportStartOffset)).toFloat())
+        }
+        ctl.focusMessageId = null
+    }
+    // 新消息或流式输出：自己刚发的，或者本来就在底部附近，贴到底（停在底部时倒着排本来就不会动）
+    LaunchedEffect(messages.size, last?.content?.length, last?.attachments?.size) {
+        if (messages.isEmpty() || ctl.focusMessageId != null) return@LaunchedEffect
         val justSent = last?.role == Role.USER
-        if (ctl.focusMessageId != null) return@LaunchedEffect
-        if (justSent || lastVisible >= info.totalItemsCount - 3 || messages.size <= 2) listState.animateScrollToItem(messages.size)
+        if (justSent || listState.firstVisibleItemIndex in 1..2) listState.animateScrollToItem(0)
     }
     if (messages.isEmpty()) {
         ChatEmptyHint(state, conv) { t -> ctl.composerDraft = conv.id to t }
@@ -205,24 +210,30 @@ private fun MessageList(ctl: AppController, state: AppState, conv: Conversation,
     LazyColumn(
         state = listState,
         modifier = Modifier.fillMaxSize().pointerInput(Unit) { detectTapGestures { focusManager.clearFocus() } },
+        reverseLayout = true,
+        // 消息少、一屏放得下时照样从上往下排，不沉在底下
+        verticalArrangement = Arrangement.Top,
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        item {
-            Spacer(Modifier.height(16.dp))
-            if (conv.summarized > 0) {
-                Text("前面 ${conv.summarized} 条已由记录员压缩成摘要，AI 记得要点；原话还在这里，AI 需要时也能搜到",
-                    style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-                    modifier = Modifier.padding(horizontal = 24.dp).widthIn(max = 640.dp).clip(RoundedCornerShape(10.dp))
-                        .background(MaterialTheme.colorScheme.surfaceVariant).padding(horizontal = 12.dp, vertical = 6.dp))
-                Spacer(Modifier.height(8.dp))
-            }
-        }
-        items(messages, key = { it.id }) { m ->
+        item(key = "bottom") { Spacer(Modifier.height(24.dp)) }
+        items(newestFirst, key = { it.id }) { m ->
             Box(Modifier.widthIn(max = 860.dp).fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
                 if (m.role == Role.USER) UserMessage(ctl, state, m) else AiMessage(ctl, state, m, stanceOf[m.id].orEmpty(), onStance)
             }
         }
-        item { Spacer(Modifier.height(24.dp)) }
+        item(key = "top") {
+            // 倒着排时一项里的几块也会倒过来，所以包一层 Column
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Spacer(Modifier.height(16.dp))
+                if (conv.summarized > 0) {
+                    Text("前面 ${conv.summarized} 条已由记录员压缩成摘要，AI 记得要点；原话还在这里，AI 需要时也能搜到",
+                        style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                        modifier = Modifier.padding(horizontal = 24.dp).widthIn(max = 640.dp).clip(RoundedCornerShape(10.dp))
+                            .background(MaterialTheme.colorScheme.surfaceVariant).padding(horizontal = 12.dp, vertical = 6.dp))
+                    Spacer(Modifier.height(8.dp))
+                }
+            }
+        }
     }
 }
 

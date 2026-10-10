@@ -168,7 +168,11 @@ fun App(hub: Hub, platform: Platform, debugStart: String? = null) {
                             if (s == "stances") c.page = MainPage.STANCES
                             if (s == "costs") c.page = MainPage.COSTS
                             if (s == "settingshome") c.openSettings()
-                            if (s.startsWith("conv:")) c.currentConvId = s.removePrefix("conv:").substringBefore('#')
+                            if (s.startsWith("conv:")) {
+                                // conv:对话编号@消息编号 = 像从搜索结果点进来一样，跳到那条消息
+                                c.currentConvId = s.removePrefix("conv:").substringBefore('#').substringBefore('@')
+                                c.focusMessageId = s.substringBefore('#').substringAfter('@', "").ifEmpty { null }
+                            }
                             c.debugDialog = s.substringAfter('#', "")
                         }
                     }
