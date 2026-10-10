@@ -79,6 +79,8 @@ sealed interface Command {
     @Serializable data class StanceList(val convId: String = "") : Command
     /** 立场档案：标对错。verdict 是立场的 key，或 StanceTopic.NONE / OPEN，空 = 取消标记。 */
     @Serializable data class StanceMark(val topicId: String, val verdict: String) : Command
+    /** 立场档案：让裁判重新核实一次这个议题（上次失败了，或者想再试一次）。 */
+    @Serializable data class VerifyStance(val topicId: String) : Command
     /** 立场档案：删掉一个议题（记录员认错了的）。 */
     @Serializable data class StanceDelete(val topicId: String) : Command
 

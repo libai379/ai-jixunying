@@ -519,6 +519,26 @@ class Engine(
             saveStances(setOf(convId))
             CommandResult()
         }
+        is Command.VerifyStance -> {
+            val topic = synchronized(stanceBook) { stanceBook.firstOrNull { it.id == c.topicId } } ?: return CommandResult(false, "这个议题已经不在了")
+            if (!state.settings.memory.aiVerify) return CommandResult(false, "AI 核实没开：到 设置 → 记忆 → 立场档案 打开它")
+            val members = topic.entries.mapNotNull { state.member(it.memberId) }.distinctBy { it.id }
+            // 重新核实：先清掉旧结论，界面上就能看出在跑
+            synchronized(stanceBook) {
+                val i = stanceBook.indexOfFirst { it.id == c.topicId }
+                if (i >= 0) stanceBook[i] = stanceBook[i].copy(aiVerdict = "", aiReason = "", aiSources = emptyList(), updatedAt = now())
+            }
+            saveStances(setOf(topic.convId))
+            scope.launch {
+                try {
+                    aiVerifyTopic(c.topicId, members)
+                } catch (e: Throwable) {
+                    if (e is CancellationException) throw e
+                    bg.failed(BgJob.AI_VERIFY, friendlyError(e, JudgePick.pick(state)?.first), titleOf(topic.convId))
+                }
+            }
+            CommandResult(message = "正在让裁判核实…")
+        }
         is Command.StanceDelete -> {
             val convId = synchronized(stanceBook) {
                 stanceBook.firstOrNull { it.id == c.topicId }?.also { t -> stanceBook.removeAll { it.id == t.id } }?.convId

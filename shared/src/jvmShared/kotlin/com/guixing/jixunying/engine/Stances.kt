@@ -93,73 +93,70 @@ object StanceJudge {
 
     class Said(val message: Message, val name: String, val independent: Boolean, val calledBy: String?, val tools: String)
 
+    /** 代号：成员甲 / 成员乙 / ……（超过十个用数字）。 */
+    private val CODES = listOf("甲", "乙", "丙", "丁", "戊", "己", "庚", "辛", "壬", "癸")
+
+    fun codeOf(members: List<Member>, id: String): String {
+        val i = members.indexOfFirst { it.id == id }
+        return if (i < 0) "" else CODES.getOrNull(i) ?: "${i + 1}"
+    }
+
     /**
      * 隐去名字：把成员名字换成「成员甲 / 乙 / 丙 / 丁」、成员自己说出的模型名也换掉。
      * 返回：隐名后的文本、成员 id → 代号的映射。
      */
     fun anonymize(text: String, members: List<Member>): Pair<String, Map<String, String>> {
-        val sorted = members.sortedBy { it.name.length }.reversed() // 长的优先，防止「阿德」被「阿」抢掉
-        val codes = listOf("甲", "乙", "丙", "丁", "戊", "己", "庚", "辛", "壬", "癸")
-        val mapping: Map<String, String> = members.withIndex().associate { (index, member) ->
-            member.id to (codes.getOrNull(index) ?: "成员${index + 1}")
-        }
+        val idToCode = members.associate { it.id to codeOf(members, it.id) }
+        // 长的名字先换，防止「阿德」被「阿」抢先换掉
+        val sorted = members.sortedByDescending { it.name.length }
         var result = text
         for (m in sorted) {
-            if (m.name.isBlank()) continue
-            val code = mapping[m.id] ?: continue
-            // 替换成员名字（不区分大小写）
-            result = result.replace(Regex("(?i)${Regex.escape(m.name)}"), "成员$code")
-            // 替换模型名（deepseek、minimax、glm、mimo、qwen 等常见模型前缀）
-            if (m.modelId.isNotBlank()) {
-                val modelPrefix = m.modelId.lowercase().split("-", "_").firstOrNull() ?: continue
-                if (modelPrefix.length >= 3) {
-                    result = result.replace(Regex("(?i)${Regex.escape(modelPrefix)}"), "模型$code")
-                }
-            }
+            val code = idToCode[m.id] ?: continue
+            if (code.isBlank()) continue
+            if (m.name.isNotBlank()) result = result.replace(Regex("(?i)${Regex.escape(m.name)}"), "成员$code")
+            // 成员自己说出的模型名（deepseek-flash → 模型甲），免得裁判认出选手是谁
+            val modelPrefix = m.modelId.lowercase().split("-", "_").firstOrNull().orEmpty()
+            if (modelPrefix.length >= 4) result = result.replace(Regex("(?i)${Regex.escape(modelPrefix)}"), "模型$code")
         }
-        return Pair(result, mapping)
+        return Pair(result, idToCode)
     }
 
-    /**
-     * 反向映射：把代号换回成员 id。「成员甲」→ 甲对应的 id、「甲」→ 甲对应的 id。
-     */
-    fun deanonymize(code: String, mapping: Map<String, String>): String? {
-        val clean = code.trim().removePrefix("成员").removePrefix("@")
-        return mapping.entries.firstOrNull { it.value == clean }?.key
-    }
+    /** 反向映射：把裁判回的代号换回真人名字。「成员甲」→ 阿德（mapping 是 代号 → 名字）。 */
+    fun deanonymize(code: String, mapping: Map<String, String>): String? =
+        mapping[code.trim().removePrefix("成员").removePrefix("@").trim()]
 
     data class PromptParts(
         val open: List<StanceTopic>,
         val said: List<Said>,
         val ask: String,
         val userName: String,
+        /** 代号 → 真人名字（没隐名时是空的）。 */
         val mapping: Map<String, String>
     )
 
     fun prompt(open: List<StanceTopic>, said: List<Said>, ask: String, userName: String, nameOf: (String) -> String, canOpen: Boolean,
                anonymous: Boolean = false, members: List<Member> = emptyList()): PromptResult {
         val parts = if (anonymous && members.isNotEmpty()) {
-            val (anonAsk, map) = anonymize(ask, members)
+            val (anonAsk, idToCode) = anonymize(ask, members)
             val anonOpen = open.map { t ->
-                val (anonQ, _) = anonymize(t.question, members)
-                val anonOpts = t.options.map { opt ->
-                    val (anonText, _) = anonymize(opt.text, members)
-                    StanceOption(opt.key, anonText)
-                }
-                val anonEntries = t.entries.map { e ->
-                    val code = map[e.memberId] ?: e.memberId
-                    e.copy(memberId = code)
-                }
-                t.copy(question = anonQ, options = anonOpts, entries = anonEntries)
+                val anonOpts = t.options.map { opt -> StanceOption(opt.key, anonymize(opt.text, members).first) }
+                // 议题里记的表态也换成代号
+                val anonEntries = t.entries.map { e -> e.copy(memberId = idToCode[e.memberId] ?: e.memberId) }
+                t.copy(question = anonymize(t.question, members).first, options = anonOpts, entries = anonEntries)
             }
             val anonSaid = said.map { s ->
-                val code = map[s.message.senderId] ?: s.name
-                val (anonContent, _) = anonymize(s.message.content, members)
-                val anonMsg = s.message.copy(content = anonContent)
-                val anonTools = anonymize(s.tools, members).first
-                Said(anonMsg, "成员$code", s.independent, s.calledBy?.let { map[it] }?.let { "成员$it" }, anonTools)
+                val code = idToCode[s.message.senderId]
+                Said(
+                    s.message.copy(content = anonymize(s.message.content, members).first),
+                    if (code != null) "成员$code" else s.name,
+                    s.independent,
+                    s.calledBy?.let { c -> idToCode[c]?.let { "成员$it" } },
+                    anonymize(s.tools, members).first,
+                )
             }
-            PromptParts(anonOpen, anonSaid, anonAsk, "用户", map)
+            // 代号 → 真名，读裁判的回答时用
+            val codeToName = members.associate { codeOf(members, it.id) to it.name }
+            PromptParts(anonOpen, anonSaid, anonAsk, "用户", codeToName)
         } else {
             PromptParts(open, said, ask, userName, emptyMap())
         }
@@ -173,8 +170,8 @@ object StanceJudge {
                     appendLine("议题 ${i + 1}：${t.question}")
                     t.options.forEach { appendLine("  立场 ${it.key}：${it.text}") }
                     val now = t.entries.map { it.memberId }.distinct().mapNotNull { id ->
-                        val name = if (anonymous && parts.mapping.isNotEmpty()) "成员${parts.mapping[id] ?: id}" else nameOf(id)
-                        t.latestOf(id)?.let { name + "=" + it.option }
+                        val who = if (anonymous) "成员$id" else nameOf(id)
+                        t.latestOf(id)?.let { who + "=" + it.option }
                     }
                     if (now.isNotEmpty()) appendLine("  现在：" + now.joinToString("，"))
                 }
@@ -230,20 +227,35 @@ object StanceJudge {
     fun verifyPrompt(topic: StanceTopic, members: List<Member>, anonymous: Boolean): VerifyPromptResult {
         val finalQ: String
         val finalOpts: List<StanceOption>
+        val finalStances: Map<String, List<String>>  // key → 成员列表
         val mapping: Map<String, String>
 
         if (anonymous) {
-            val (anonQ, map) = anonymize(topic.question, members)
+            val (anonQ, idToCode) = anonymize(topic.question, members)
             val anonOpts = topic.options.map { opt ->
                 val (anonText, _) = anonymize(opt.text, members)
                 StanceOption(opt.key, anonText)
             }
+            // 每个立场的持有者：换成代号
+            val stances = mutableMapOf<String, MutableList<String>>()
+            topic.entries.groupBy { it.option }.forEach { (opt, entries) ->
+                stances[opt] = entries.map { e ->
+                    val code = codeOf(members, e.memberId)
+                    if (code.isBlank()) e.memberId else "成员$code"
+                }.distinct().toMutableList()
+            }
             finalQ = anonQ
             finalOpts = anonOpts
-            mapping = map
+            finalStances = stances
+            mapping = members.associate { codeOf(members, it.id) to it.name }
         } else {
+            val stances = mutableMapOf<String, MutableList<String>>()
+            topic.entries.groupBy { it.option }.forEach { (opt, entries) ->
+                stances[opt] = entries.map { e -> members.firstOrNull { it.id == e.memberId }?.name ?: e.memberId }.distinct().toMutableList()
+            }
             finalQ = topic.question
             finalOpts = topic.options
+            finalStances = stances
             mapping = emptyMap()
         }
 
@@ -253,7 +265,11 @@ object StanceJudge {
             appendLine("问题：$finalQ")
             appendLine()
             appendLine("各种立场：")
-            finalOpts.forEach { appendLine("  ${it.key}：${it.text}") }
+            finalOpts.forEach { opt ->
+                val who = finalStances[opt.key].orEmpty()
+                val whoStr = if (who.isNotEmpty()) "（${who.joinToString("、")}）" else ""
+                appendLine("  ${opt.key}：${opt.text} $whoStr")
+            }
             appendLine()
             appendLine("要做的事：")
             appendLine("1. 如果能确定哪个立场对（或都不对），尽量搜索验证（用 web_search 工具）；")
@@ -275,13 +291,13 @@ object StanceJudge {
 
     fun parseVerify(raw: String): VerifyResult? {
         val o = jsonObjectIn(raw) ?: return null
-        val verdict = (o["verdict"] as? JsonPrimitive)?.contentOrNull?.trim()?.lowercase() ?: return null
+        val verdict = (o["verdict"] as? JsonPrimitive)?.contentOrNull?.trim() ?: return null
         val reason = (o["reason"] as? JsonPrimitive)?.contentOrNull?.trim()?.take(160) ?: ""
-        val finalVerdict = when (verdict) {
+        val finalVerdict = when (verdict.lowercase()) {
             "none" -> StanceTopic.NONE
             "open" -> StanceTopic.OPEN
             "unclear", "?" -> StanceTopic.UNCLEAR
-            else -> verdict.take(3)
+            else -> verdict.uppercase().take(3)  // 立场 key 保持大写（A/B/C）
         }
         return VerifyResult(finalVerdict, reason)
     }

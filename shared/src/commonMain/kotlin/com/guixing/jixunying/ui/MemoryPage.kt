@@ -38,6 +38,7 @@ import androidx.compose.ui.unit.dp
 import com.guixing.jixunying.model.AppState
 import com.guixing.jixunying.model.Command
 import com.guixing.jixunying.model.ImagePick
+import com.guixing.jixunying.model.JudgePick
 import com.guixing.jixunying.model.MemoryItem
 import com.guixing.jixunying.model.MemorySettings
 import com.guixing.jixunying.model.RecorderPick
@@ -102,6 +103,8 @@ fun MemoryPage(ctl: AppController, state: AppState) {
             }
         }
     }
+    Spacer(Modifier.height(12.dp))
+    JudgeSection(ctl, state, ms, ::saveMs)
     Spacer(Modifier.height(12.dp))
     SectionCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -182,5 +185,50 @@ private fun KindPicker(kind: String, onPick: (String) -> Unit) {
                 Pill(k, if (k == kind) MaterialTheme.colorScheme.primary else Ext.c.subtle)
             }
         }
+    }
+}
+
+/**
+ * 立场档案的裁判：用哪个模型判、要不要隐去名字、要不要 AI 核实。
+ * 默认 deepseek-flash（阿德也是这个模型，所以默认隐去名字，只防「看名字偏袒」）。
+ */
+@Composable
+private fun JudgeSection(ctl: AppController, state: AppState, ms: MemorySettings, saveMs: ((MemorySettings) -> MemorySettings) -> Unit) {
+    val recorder = RecorderPick.pick(state)?.second
+    val judgeAuto = JudgePick.isAuto(state)
+    val judgeNow = JudgePick.pick(state)
+    SectionCard {
+        FieldLabel("立场档案的裁判", "判断谁改了口、谁被带偏的模型。默认用 deepseek-flash（DeepSeek-V4.1-Flash）")
+        SelectBox(
+            when {
+                judgeNow == null -> "还没有能用的模型（先在 模型服务 里配一个）"
+                judgeAuto -> "自动：${judgeNow.second}（${judgeNow.first.name}）"
+                else -> "${judgeNow.second}（${judgeNow.first.name}）"
+            },
+        ) { close ->
+            androidx.compose.material3.DropdownMenuItem({
+                Column {
+                    Text("自动（推荐）")
+                    Text("优先用 deepseek-flash，没有就退回记录员" + (recorder?.let { "（$it）" } ?: ""), style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
+                }
+            }, onClick = { saveMs { it.copy(judgeProviderId = "", judgeModelId = "") }; close() })
+            state.providers.filter(ImagePick::usable).forEach { p ->
+                p.models.filter { !it.imageGen }.forEach { m ->
+                    androidx.compose.material3.DropdownMenuItem({
+                        Column {
+                            Text(m.id)
+                            Text(p.name, style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
+                        }
+                    }, onClick = { saveMs { it.copy(judgeProviderId = p.id, judgeModelId = m.id) }; close() })
+                }
+            }
+        }
+        Spacer(Modifier.height(10.dp))
+        SwitchRow("裁判看不到成员名字", "把名字换成「成员甲乙丙丁」再交给裁判，防它看名字偏袒。回答风格本身藏不住，只能防这一层",
+            ms.stances && ms.judgeAnonymous) { v -> saveMs { it.copy(judgeAnonymous = v) } }
+        SwitchRow("开新议题后 AI 核实", "裁判自己判一次谁对（能查就联网查），结论和出处显示在议题上。你标的永远优先",
+            ms.stances && ms.aiVerify) { v -> saveMs { it.copy(aiVerify = v) } }
+        SwitchRow("统计时按 AI 核实算", "你没标对错的题，用 AI 核实的结论算「首答准确率」。关掉就只算你亲手标的题",
+            ms.stances && ms.aiVerify && ms.countAiVerdict) { v -> saveMs { it.copy(countAiVerdict = v) } }
     }
 }

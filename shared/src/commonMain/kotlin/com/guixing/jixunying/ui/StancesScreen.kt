@@ -1,5 +1,6 @@
 package com.guixing.jixunying.ui
 
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -18,6 +19,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Menu
@@ -96,8 +98,12 @@ fun StancesScreen(ctl: AppController, wide: Boolean, openDrawer: () -> Unit) {
                     return@Column
                 }
                 val ids = state.members.map { it.id }.filter { id -> topics.any { t -> t.entries.any { it.memberId == id } } }
-                val cards = Stances.cards(topics, ids)
-                FieldLabel("成员", "标了对错的题越多，数字越有意义")
+                val countAi = state.settings.memory.aiVerify && state.settings.memory.countAiVerdict
+                val cards = Stances.cards(topics, ids, countAi)
+                val mine = topics.count { it.verdict.isNotEmpty() }
+                val verified = topics.count { it.verdict.isEmpty() && it.aiVerdict.isNotEmpty() && it.aiVerdict != StanceTopic.UNCLEAR }
+                val aiNote = if (verified == 0) "" else "，AI 核实 $verified 题" + if (countAi) "（一起算进下面的数字）" else "（没算进下面的数字）"
+                FieldLabel("成员", "你标了 $mine 题$aiNote。标了对错的题越多，数字越有意义")
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     cards.forEach { StanceCardView(state, it, if (wide) Modifier.width(262.dp) else Modifier.fillMaxWidth()) }
                 }
@@ -174,6 +180,7 @@ fun StanceTopicCard(ctl: AppController, state: AppState, t: StanceTopic, conv: C
     val firstOf = members.associateWith { id -> t.entries.firstOrNull { it.memberId == id && it.first } ?: t.entries.first { it.memberId == id } }
     val nowOf = members.associateWith { id -> t.latestOf(id)!! }
     var confirmDelete by remember { mutableStateOf(false) }
+    var verifying by remember(t.id) { mutableStateOf(false) }
     SectionCard(padding = androidx.compose.foundation.layout.PaddingValues(14.dp)) {
         Row(verticalAlignment = Alignment.Top) {
             Text(t.question, style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
@@ -226,12 +233,23 @@ fun StanceTopicCard(ctl: AppController, state: AppState, t: StanceTopic, conv: C
             if (held.isNotEmpty()) Text("被追问后坚持：" + held.joinToString("、", transform = ::name), style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
         }
         Spacer(Modifier.height(8.dp))
+        // AI 核实：裁判自己判了一次谁对（能查就联网查了）；用户没标的时候显示，用户标过就收起
+        if (t.aiVerdict.isNotEmpty() || t.aiReason.isNotEmpty()) {
+            AiVerifyRow(ctl, state, t, ::name)
+            Spacer(Modifier.height(8.dp))
+        }
         FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp), itemVerticalAlignment = Alignment.CenterVertically) {
             Text("谁说对了？", style = MaterialTheme.typography.labelMedium, color = Ext.c.subtle)
             fun mark(v: String) = ctl.run(Command.StanceMark(t.id, if (t.verdict == v) "" else v), quiet = true)
             t.options.forEach { o -> ToggleChip("${o.key} 对", Icons.Rounded.Check, t.verdict == o.key) { mark(o.key) } }
             ToggleChip("都不对", Icons.Rounded.Close, t.verdict == StanceTopic.NONE) { mark(StanceTopic.NONE) }
             ToggleChip("没有对错", Icons.Rounded.RemoveCircleOutline, t.verdict == StanceTopic.OPEN) { mark(StanceTopic.OPEN) }
+            if (state.settings.memory.aiVerify) {
+                TextButton(enabled = !verifying, onClick = {
+                    verifying = true
+                    ctl.run(Command.VerifyStance(t.id), quiet = true) { verifying = false }
+                }) { Text(if (verifying) "正在核实…" else "重新核实", style = MaterialTheme.typography.labelMedium) }
+            }
             TextButton(onClick = { confirmDelete = true }) { Text("记错了，删掉", style = MaterialTheme.typography.labelMedium) }
         }
     }
@@ -248,6 +266,54 @@ private fun whyColor(why: String) = when (why) {
     Stances.FOLLOW, Stances.PLEASE_USER -> Ext.c.warning
     Stances.PERSUADED, Stances.SELF_CHECK -> MaterialTheme.colorScheme.primary
     else -> Ext.c.subtle
+}
+
+/** AI 核实的结论：判的是哪个立场、理由、出处，以及「采纳」。 */
+@Composable
+private fun AiVerifyRow(ctl: AppController, state: AppState, t: StanceTopic, name: (String) -> String) {
+    val platform = LocalPlatform.current
+    val taken = t.verdict.isNotEmpty()
+    val mine = t.verdict == t.aiVerdict && taken
+    val text = when (t.aiVerdict) {
+        StanceTopic.NONE -> "都不对"
+        StanceTopic.OPEN -> "没有对错"
+        StanceTopic.UNCLEAR -> "判断不了"
+        "" -> ""
+        else -> "${t.aiVerdict} 对：" + (t.option(t.aiVerdict)?.text ?: "")
+    }
+    val color = when (t.aiVerdict) {
+        StanceTopic.UNCLEAR, "" -> Ext.c.subtle
+        else -> MaterialTheme.colorScheme.primary
+    }
+    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp))
+        .border(1.dp, Ext.c.border, RoundedCornerShape(10.dp)).padding(10.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Rounded.AutoAwesome, null, Modifier.size(15.dp), tint = color)
+            Spacer(Modifier.width(5.dp))
+            Text("AI 核实", style = MaterialTheme.typography.labelMedium, color = color)
+            if (text.isNotBlank()) { Spacer(Modifier.width(8.dp)); Text(text, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold) }
+            if (mine) { Spacer(Modifier.width(6.dp)); Text("（已采纳）", style = MaterialTheme.typography.labelSmall, color = Ext.c.success) }
+        }
+        if (t.aiReason.isNotBlank()) Text(t.aiReason, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 4.dp))
+        if (t.aiSources.isNotEmpty()) {
+            Spacer(Modifier.height(3.dp))
+            t.aiSources.take(4).forEach { s ->
+                Text("· " + s.title.ifBlank { s.url }, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.clip(RoundedCornerShape(4.dp)).clickable { platform.openUrl(s.url) }.padding(vertical = 1.dp))
+            }
+        }
+        Spacer(Modifier.height(6.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (t.aiVerdict.isNotBlank() && t.aiVerdict != StanceTopic.UNCLEAR && !mine) {
+                TextButton(onClick = { ctl.run(Command.StanceMark(t.id, t.aiVerdict), quiet = true) }) {
+                    Text("采纳", style = MaterialTheme.typography.labelMedium)
+                }
+            }
+            if (taken && !mine) Text("（你已经标了，你标的优先）", style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
+        }
+        Text("裁判只看答案对不对，防不了「回答风格被认出来」。", style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
+    }
 }
 
 /** 聊天里 AI 回答下面的小标签：这条回答在某个议题上的立场。 */
