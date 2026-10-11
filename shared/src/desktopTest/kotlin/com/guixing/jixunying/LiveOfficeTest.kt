@@ -17,7 +17,8 @@ import kotlin.test.Test
  * 再拿 OOXML 校验器和 LibreOffice 检查。
  * 只在设了 JXY_LIVE_OFFICE=数据文件夹 时跑：只复制那份数据的 state.json 到临时文件夹（不动原数据），
  * 关掉记忆、立场档案、AI 核实、联网（省钱、少变数）。不打印 Key。会花一点钱（四家都很便宜，一轮几分钱）。
- * JXY_LIVE_OFFICE_ONLY=阿德 只跑这一位。
+ * JXY_LIVE_OFFICE_ONLY=阿德 只跑这一位；JXY_LIVE_OFFICE_ASKS=3 只问第 3 句（逗号分开可以选几句）。
+ * 每一步的结果也写进输出文件夹的 结果.txt（Gradle 的测试报告可能被别的测试覆盖掉）。
  */
 class LiveOfficeTest {
     private val asks = listOf(
@@ -31,6 +32,9 @@ class LiveOfficeTest {
         val src = System.getenv("JXY_LIVE_OFFICE") ?: return@runBlocking
         val out = File(System.getenv("JXY_LIVE_OFFICE_OUT") ?: File(File(src).parentFile, "live-office-out").path).apply { mkdirs() }
         val only = System.getenv("JXY_LIVE_OFFICE_ONLY").orEmpty()
+        val pick = System.getenv("JXY_LIVE_OFFICE_ASKS")?.split(',')?.mapNotNull { it.trim().toIntOrNull() }?.toSet().orEmpty()
+        val log = File(out, "结果.txt")
+        fun say(line: String) { println(line); log.appendText(line + "\n", Charsets.UTF_8) }
         val tmp = kotlin.io.path.createTempDirectory("jxy-live-office").toFile()
         try {
             File(src, "state.json").copyTo(File(tmp, "state.json"))
@@ -41,11 +45,12 @@ class LiveOfficeTest {
                 office = s.office.copy(enabled = true, saveFolder = out.path),
             )))
             val members = e.state.members.filter { only.isEmpty() || it.name == only }
-            println("成员：" + members.joinToString("、") { "${it.name}（${it.modelId}）" })
+            say("成员：" + members.joinToString("、") { "${it.name}（${it.modelId}）" })
             for (m in members) {
                 val conv = e.call(Command.CreateConversation(listOf(m.id), "做文件-${m.name}")).data
                 e.call(Command.UpdateConversation(e.state.conversation(conv)!!.copy(webSearch = false)))
-                for (ask in asks) {
+                for ((k, ask) in asks.withIndex()) {
+                    if (pick.isNotEmpty() && (k + 1) !in pick) continue
                     val before = e.store.messages.value[conv].orEmpty().count { it.role == Role.AI }
                     val t0 = System.currentTimeMillis()
                     e.call(Command.SendMessage(conv, ask))
@@ -58,17 +63,18 @@ class LiveOfficeTest {
                         @Suppress("UNREACHABLE_CODE") null
                     }
                     val secs = (System.currentTimeMillis() - t0) / 1000
-                    if (done == null) { println("【${m.name}】超时：${ask.take(20)}"); continue }
+                    if (done == null) { say("【${m.name}】超时：${ask.take(20)}"); continue }
                     val files = done.attachments.filter { it.generated }
-                    println("【${m.name}】${ask.take(18)}… → ${done.status}，$secs 秒，" +
+                    say("【${m.name}】${ask.take(18)}… → ${done.status}，$secs 秒，" +
                         (if (files.isEmpty()) "没做文件" else files.joinToString("；") { "${it.name}（${it.note}，${it.size / 1024} KB）" }) +
                         (done.usage?.let { "，输入 ${it.prompt} / 输出 ${it.completion}" } ?: "") +
                         (if (done.error.isNotBlank()) "，出错：${done.error.take(200)}" else ""))
-                    done.tools.filter { it.kind == "file" && !it.ok }.forEach { println("    文件没做成：${it.note.take(200)}") }
-                    println("    回答：" + done.content.replace('\n', ' ').take(160))
+                    done.tools.filter { !it.ok }.forEach { say("    ${it.kind} 没成：${it.input.take(40)} ${it.note.take(300)}") }
+                    say("    工具：" + done.tools.joinToString("、") { "${it.kind}:${it.input.take(20)}" })
+                    say("    回答：" + done.content.replace('\n', ' ').take(300))
                 }
             }
-            println("文件在：${out.path}")
+            say("文件在：${out.path}")
         } finally {
             tmp.deleteRecursively()
         }

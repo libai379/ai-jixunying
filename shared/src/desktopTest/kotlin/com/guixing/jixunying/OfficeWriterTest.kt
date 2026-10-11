@@ -198,6 +198,12 @@ class OfficeWriterTest {
             listOf("2026 年第三季度工作汇报", "登录页改版", "128,500", "复盘会", "谢谢").forEach { assertTrue(it in back, "读回来要有「$it」") }
             out?.let { File(it, "汇报-$theme.pptx").writeBytes(made.bytes) }
         }
+        // 目录：不列「谢谢」，标题自带的「第一部分：」去掉
+        val first = parts(com.guixing.jixunying.engine.PptWriter.ppt(deck, OfficeSettings()).bytes)["ppt/slides/slide2.xml"]!!
+        assertTrue("谢谢" !in first && "第一部分" !in first && "成果" in first, "目录页")
+        // 只有一个「章节」：画成金句页，不编号
+        val one = parts(com.guixing.jixunying.engine.PptWriter.ppt("# 标题\n\n## 一个应用，一群 AI\n备注：开场白\n\n## 内容\n- 第一点\n- 第二点", OfficeSettings()).bytes)
+        assertTrue("一个应用" in one["ppt/slides/slide2.xml"]!! && "<a:t>01</a:t>" !in one["ppt/slides/slide2.xml"]!!)
         // 4:3、不拆页、没讲稿
         val narrow = com.guixing.jixunying.engine.PptWriter.ppt(deck, OfficeSettings(pptWide = false, pptSplit = false, pptNotes = false, pptAgenda = false))
         val np = parts(narrow.bytes)

@@ -336,6 +336,16 @@ object PptWriter {
         return slideXml(sh, if (th.dark) th.bg else null)
     }
 
+    /** 金句页：一句话大字居中。 */
+    private fun statement(s: Slide, c: Canvas, th: Theme): String {
+        val sh = Shapes()
+        sh.rect(0, 0, c.w, c.h, if (th.dark) th.bg else th.light, "背景")
+        sh.rect((c.w - inch(1.2)) / 2, (c.h * 0.36).toLong() - inch(0.35), inch(1.2), inch(0.06), th.accent, "线")
+        val fs = if (em(s.title) > 24) 32.0 else 40.0
+        sh.textBox(inch(1.0), (c.h * 0.36).toLong(), c.w - inch(2.0), inch(1.8), para(runs(s.title, fs, if (th.dark) th.primary else th.primary, true), "ctr", lnPct = 120), "t", "金句")
+        return slideXml(sh, null)
+    }
+
     private fun Shapes.chrome(title: String, c: Canvas, th: Theme, deck: String, page: Int, pageNumbers: Boolean) {
         rect(inch(0.42), inch(0.47), inch(0.08), inch(0.6), th.accent, "标题条")
         val tfs = if (em(title) > 26) 24.0 else 28.0
@@ -437,8 +447,11 @@ object PptWriter {
         // 内容页按字数排好（可能拆成几页）
         val laid = raw.flatMap { if (it.kind == Kind.CONTENT) fit(it, wPt, hPt, s.pptSplit) else listOf(it to 0.0) }
         val deck = cover?.title.orEmpty()
-        val contentTitles = raw.filter { it.kind == Kind.CONTENT && it.title.isNotBlank() }.map { it.title }.distinct()
-        val sections = raw.filter { it.kind == Kind.SECTION }.map { it.title }
+        // 目录里不列「谢谢」这种结尾页；标题自带的「一、」「第一部分：」去掉（前面已经有 01、02）
+        val ordinal = Regex("""^(第[一二三四五六七八九十\d]+(部分|章|节)[：:、\s]*|[一二三四五六七八九十]+[、.．]\s*|\d{1,2}[、.．]\s*)""")
+        val contentTitles = raw.filter { it.kind == Kind.CONTENT && it.title.isNotBlank() && !endRe.matches(it.title) }
+            .map { it.title.replace(ordinal, "").ifBlank { it.title } }.distinct()
+        val sections = raw.filter { it.kind == Kind.SECTION }.map { it.title.replace(ordinal, "").ifBlank { it.title } }
         val agendaTitles = if (sections.size >= 2) sections else contentTitles
         // 目录页：有两个以上章节就列章节；没章节时内容页 4 页以上列内容页（太多就不列了）
         val withAgenda = s.pptAgenda && cover != null && (sections.size >= 2 || contentTitles.size in 4..16)
@@ -449,7 +462,8 @@ object PptWriter {
         for ((sl, fs) in laid) {
             val page = slides.size + 1
             slides += when (sl.kind) {
-                Kind.SECTION -> section(sl, canvas, th)
+                // 只有一个「章节」时不编号，画成金句页（AI 常把一句口号单独放一页）
+                Kind.SECTION -> if (sections.size >= 2) section(sl, canvas, th) else statement(sl, canvas, th)
                 Kind.END -> cover(sl, canvas, th, end = true)
                 else -> content(sl, fs, canvas, th, deck, page, s.pptPageNumbers)
             } to (if (s.pptNotes) sl.notes else "")
