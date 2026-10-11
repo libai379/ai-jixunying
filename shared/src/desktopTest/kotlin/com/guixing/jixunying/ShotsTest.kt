@@ -301,6 +301,36 @@ class ShotsTest {
         }
         shoot("desktop-member-edit-glm", 1280, 1500, 1f, hub, desktop, "settings:MEMBERS#edit")
 
+        // 手机的 设置 → 微信（配对过电脑）：假的电脑线路，一连上就把电脑的状态发过来（电脑绑了微信、正在接）
+        class FakeHostLink(val host: AppState) : com.guixing.jixunying.client.FrameLink {
+            override val online = kotlinx.coroutines.flow.MutableStateFlow(true)
+            override val incoming = kotlinx.coroutines.flow.MutableSharedFlow<com.guixing.jixunying.model.WireFrame>(extraBufferCapacity = 8)
+            override suspend fun send(frame: com.guixing.jixunying.model.WireFrame) {
+                if (frame is com.guixing.jixunying.model.WireFrame.Hello) incoming.emit(com.guixing.jixunying.model.WireFrame.Evt(com.guixing.jixunying.model.Event.State(host)))
+            }
+            override fun close() {}
+        }
+        val hostState = AppState(weixinCapable = true, weixin = com.guixing.jixunying.model.WeixinInfo(bound = true, status = "已连接：在微信里给助理发消息就行",
+            answering = true, botId = "bot1@im.bot"))
+        fun phoneHub(root: File): Pair<Hub, Engine> {
+            val pe = Engine(Storage(root), isPhone = true)
+            val h = Hub(pe, linkFactory = { FakeHostLink(hostState) }, deviceName = "SM-S938U")
+            h.attach(com.guixing.jixunying.model.PairedHost("h1", "我的电脑", "d1", "k", emptyList()))
+            val bridge = com.guixing.jixunying.engine.WeixinBridge(pe, File(root, "weixin"))
+            pe.weixin = bridge
+            com.guixing.jixunying.engine.WeixinHandover(h, pe, bridge).start()
+            bridge.start()
+            return h to pe
+        }
+        // 还没同步：显示「现在同步」
+        shoot("phone-weixin-paired", 824, 1784, 2f, phoneHub(File(tmp, "phone-a")).first, phone, "settings:WEIXIN")
+        // 用的是电脑的绑定、电脑在接：手机待命（凭证文件直接写好，不去连真微信）
+        File(tmp, "phone-b/weixin").mkdirs()
+        File(tmp, "phone-b/weixin/account.json").writeText("""{"botToken":"t","botId":"bot1@im.bot","userId":"me@im.wechat","shared":true}""")
+        val (hubB, _) = phoneHub(File(tmp, "phone-b"))
+        Thread.sleep(3_000)
+        shoot("phone-weixin-shared", 824, 1784, 2f, hubB, phone, "settings:WEIXIN")
+
         // 空白状态：第一次打开
         val empty = Engine(Storage(File(tmp, "empty")))
         shoot("desktop-welcome", 1280, 820, 1f, Hub(empty), desktop, null)

@@ -28,7 +28,11 @@
 - 说话规矩写在 engine/Prompts.kt：正经回答为主、幽默点到为止、不知道就说不知道、时效信息先搜再答并标出处。
 - 记忆（engine/Memory.kt，2026-10-08）：记录员（model/RecorderPick.kt，默认 mimo-v2.6-flash）把太长的聊天压成摘要，全群一份，存 convs\<id>.memo.json；长期记忆 AppState.memories 写进每位成员的设定，AI 有 remember 工具，攒够 4 句用户的话自动挑；search_history 工具和侧栏搜索能翻以前的聊天。
 - 本地文档（engine/DocLibrary.kt）：两端各自给文档建索引（存 docindex\），AI 用 search_documents / read_document，只能读收录了的文件；侧栏「我的文档」页。手机要「所有文件访问」权限；手机上微信「用其他应用打开」和系统分享都能把文件交给 AI（MainActivity 的 VIEW / SEND 意图）。
-- 微信助理（engine/WeixinBridge.kt）：腾讯官方 ClawBot 的 iLink 协议，照官方插件 @tencent-weixin/openclaw-weixin 源码写（细节在 docs/参考资料.md）。只接在电脑上，凭证存 %APPDATA%\ai-jixunying\weixin\；每个微信联系人一个「微信对话」（Conversation.channel = weixin:<编号>），走 Engine.channelTurn。
+- 微信助理（engine/WeixinBridge.kt）：腾讯官方 ClawBot 的 iLink 协议，照官方插件 @tencent-weixin/openclaw-weixin 源码写（细节在 docs/参考资料.md）。凭证存 <数据目录>\weixin\；每个微信联系人一个「微信对话」（Conversation.channel = weixin:<编号>），走 Engine.channelTurn。
+  - 1.5.0 起手机也能接（JxyApp 里建 WeixinBridge + engine/WeixinHandover）。一个微信只能绑一台设备（社区实测：再绑会把前一个顶掉），所以配对过电脑的手机不扫码，经加密线路用电脑的同一个绑定（Command.WeixinShare → WeixinImport，自动同步，电脑换绑 / 解绑手机跟着变）。
+  - 电脑优先：电脑在线、开着微信助理、收得到消息（WeixinInfo.answering）时手机待命（WeixinBridge.standby），刚打开还不知道电脑状态时也先等着；电脑关机、断网或关掉开关，手机接着答。两边各一个开关（Settings.weixin.enabled 各存各的），手机省电时关掉。
+  - 不重复回答：按微信消息的 create_time_ms 划界——手机只答最后一次听到电脑（RemoteBackend.lastHeardAt）以后发来的（WeixinCursor.answerAfter）；手机答过的经 Command.WeixinReport 告诉电脑；电脑把绑定给过手机的话，刚打开时积压的消息先等 30 秒（BACKLOG_HOLD_MS）等手机报告。只有正在接的那台发 notifystop。
+  - 已知限制：中转全断但电脑和手机都能上网时，手机看不到电脑，两边可能都答；手机上的 AI集训营 被系统杀掉后不接（「手机后台省电」那件再说）。
 
 ## 红线
 

@@ -199,6 +199,12 @@ data class WeixinInfo(
     val needVerifyCode: Boolean = false,
     val boundAt: Long = 0,
     val lastMessageAt: Long = 0,
+    /** 这台设备正在收微信消息（绑定了、开关开着、没在待命、连得上）。手机看电脑的这一项决定自己接不接。 */
+    val answering: Boolean = false,
+    /** 绑定的助理编号（ilink_bot_id，不是凭证）：手机拿它和电脑的比，看是不是同一个绑定。 */
+    val botId: String = "",
+    /** 这台手机用的是从电脑同步来的绑定。 */
+    val shared: Boolean = false,
 )
 
 @Serializable

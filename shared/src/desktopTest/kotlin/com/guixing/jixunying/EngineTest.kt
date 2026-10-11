@@ -1137,6 +1137,85 @@ class EngineTest {
         assertEquals("中文内容", gbk)
     }
 
+    /**
+     * 微信助理手机也能接（1.5.0）：一个微信只能绑一台设备，手机经加密线路用电脑的同一个绑定；
+     * 电脑在接时手机待命，电脑关掉微信助理后手机接着答；手机不答电脑在线时发来的旧消息，电脑不答手机答过的。
+     * 假微信服务器一条消息只给一个来取的人；谁答的看回复内容（电脑「小智」、手机「小米」）。
+     */
+    @Test
+    fun weixinPhoneTakesOver() = runBlocking {
+        val mqttPort = freePort()
+        val broker = io.moquette.broker.Server()
+        broker.startServer(io.moquette.broker.config.MemoryConfig(Properties().apply {
+            setProperty("port", mqttPort.toString()); setProperty("host", "127.0.0.1"); setProperty("websocket_port", "disabled")
+            setProperty("allow_anonymous", "true"); setProperty("persistence_enabled", "false"); setProperty("data_path", File(dir, "mqtt2").absolutePath)
+        }))
+        val (pc, _) = engineWithMembers("小智", root = File(dir, "pc2").also { it.mkdirs() })
+        pc.call(Command.SaveSettings(pc.state.settings.copy(relay = RelaySettings(true, listOf("tcp://127.0.0.1:$mqttPort"), "测试电脑"))))
+        val relay = RelayHost(pc)
+        relay.restart()
+        val pcWx = com.guixing.jixunying.engine.WeixinBridge(pc, File(dir, "pc2/weixin"), loginBase = base(), cdnBase = "${base()}/c2c", backlogHoldMs = 1_500)
+        pc.weixin = pcWx
+        pcWx.start()
+        val (phone, _) = engineWithMembers("小米", root = File(dir, "phone2").also { it.mkdirs() })
+        val phoneWx = com.guixing.jixunying.engine.WeixinBridge(phone, File(dir, "phone2/weixin"), loginBase = base(), cdnBase = "${base()}/c2c")
+        phone.weixin = phoneWx
+        fun replies() = wxSent.filter { it.startsWith("{") }.map {
+            Json.parseToJsonElement(it).jsonObject["msg"]!!.jsonObject["item_list"]!!.jsonArray[0].jsonObject["text_item"]?.jsonObject?.get("text")?.jsonPrimitive?.content.orEmpty()
+        }
+        fun msg(id: Long, text: String, at: Long) =
+            """{"message_id":$id,"from_user_id":"me@im.wechat","to_user_id":"bot1@im.bot","message_type":1,"create_time_ms":$at,"context_token":"c$id","item_list":[{"type":1,"text_item":{"text":"$text"}}]}"""
+        try {
+            withTimeout(15_000) { while (!pc.state.relayStatus.startsWith("已连上")) delay(100) }
+            assertTrue(pc.call(Command.WeixinLogin).ok)
+            withTimeout(10_000) { while (!pc.state.weixin.answering) delay(50) }
+            assertEquals("bot1@im.bot", pc.state.weixin.botId)
+
+            val hub = Hub(phone, linkFactory = { RelayLink(it) }, pairer = { c, n -> pairWithHost(c, n) }, deviceName = "测试手机")
+            assertTrue(hub.pair(PairingCode(pc.state.hostId, pc.state.pairingSecret, "测试电脑", pc.state.settings.relay.brokers)).isSuccess)
+            com.guixing.jixunying.engine.WeixinHandover(hub, phone, phoneWx).start()
+            phoneWx.start()
+
+            // 手机自动用电脑的绑定（不扫码），电脑在接所以待命
+            withTimeout(30_000) { while (!phoneWx.isShared) delay(100) }
+            assertEquals("bot1@im.bot", phoneWx.botId)
+            withTimeout(10_000) { while (phone.state.weixin.status != com.guixing.jixunying.engine.WeixinHandover.STANDBY) delay(50) }
+            assertFalse(phone.state.weixin.answering)
+            wxSent.clear()
+            wxInbox += msg(11, "电脑在吗", System.currentTimeMillis())
+            withTimeout(20_000) { while (replies().none { "小智" in it }) delay(50) }
+            assertTrue(phone.state.conversations.none { it.channel.startsWith("weixin:") }, "电脑在接，手机不答")
+
+            // 电脑关掉微信助理：手机接着答；电脑在接时发来的旧消息手机不答
+            val pcWs = pc.state.settings.weixin
+            pc.call(Command.SaveSettings(pc.state.settings.copy(weixin = pcWs.copy(enabled = false))))
+            withTimeout(20_000) { while (!phone.state.weixin.answering) delay(50) }
+            wxSent.clear()
+            val tC = System.currentTimeMillis() + 1_000
+            wxInbox += msg(12, "这条早就答过了", 1_000)
+            wxInbox += msg(13, "现在谁在", tC)
+            withTimeout(20_000) { while (replies().none { "小米" in it }) delay(50) }
+            delay(500)
+            assertEquals(1, replies().size, "旧消息不答：${replies()}")
+            assertEquals(tC, phoneWx.answeredUntil)
+
+            // 电脑重新打开微信助理：手机待命；手机答过的（报告给了电脑）电脑不再答，新的电脑答
+            pc.call(Command.SaveSettings(pc.state.settings.copy(weixin = pcWs.copy(enabled = true))))
+            withTimeout(20_000) { while (phone.state.weixin.status != com.guixing.jixunying.engine.WeixinHandover.STANDBY) delay(50) }
+            delay(2_500)
+            wxSent.clear()
+            wxInbox += msg(14, "手机答过的这条", tC)
+            wxInbox += msg(15, "积压的新消息", tC + 1)
+            wxInbox += msg(16, "电脑回来了吗", System.currentTimeMillis() + 5_000)
+            withTimeout(20_000) { while (replies().count { "小智" in it } < 2) delay(50) }
+            delay(500)
+            assertEquals(2, replies().size, "手机答过的不再答：${replies()}")
+            assertTrue(replies().none { "小米" in it })
+        } finally {
+            phoneWx.stop(); pcWx.stop(); relay.stop(); broker.stopServer()
+        }
+    }
+
     /** 手机隔着中转（这里用本地 MQTT 服务器模拟）配对、遥控电脑、传大文件、导入配置、被取消配对。 */
     @Test
     fun phoneLinksThroughRelay() = runBlocking {

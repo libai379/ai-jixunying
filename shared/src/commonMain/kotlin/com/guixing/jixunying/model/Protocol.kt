@@ -74,6 +74,15 @@ sealed interface Command {
     @Serializable data class WeixinVerify(val code: String) : Command
     /** 微信助理：解除绑定。 */
     @Serializable data object WeixinLogout : Command
+    /**
+     * 微信助理：手机经加密线路向电脑要绑定（一个微信只能绑一台设备，手机再扫码会把电脑的顶掉，所以两边用同一个绑定）。
+     * 结果 data 是绑定（含凭证）的 JSON，只给已配对的手机；电脑关机时手机拿它接着回答。
+     */
+    @Serializable data object WeixinShare : Command
+    /** 微信助理：手机把 WeixinShare 拿到的绑定存到本机。 */
+    @Serializable data class WeixinImport(val shareJson: String) : Command
+    /** 微信助理：手机告诉电脑，微信消息它答到了这个时间（消息的 create_time_ms），电脑别再答一遍。 */
+    @Serializable data class WeixinReport(val answeredUntil: Long) : Command
 
     /** 立场档案：取议题（convId 留空 = 全部对话的）。结果 data 是 List<StanceTopic> 的 JSON。 */
     @Serializable data class StanceList(val convId: String = "") : Command

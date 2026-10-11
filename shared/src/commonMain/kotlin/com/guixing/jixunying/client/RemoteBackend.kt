@@ -61,10 +61,15 @@ class RemoteBackend(
     /** 电脑把我取消配对了。 */
     val revoked = MutableStateFlow(false)
 
+    /** 最后一次收到电脑消息的时间（毫秒时间戳）。手机接微信时拿它划界：这以后发来的电脑可能没答。 */
+    @kotlin.concurrent.Volatile var lastHeardAt: Long = 0L
+        private set
+
     fun start() {
         jobs += scope.launch {
             link.incoming.collect { f ->
                 lastHostFrame = clock.markNow()
+                lastHeardAt = com.guixing.jixunying.ui.nowMillis()
                 when (f) {
                     is WireFrame.Evt -> store.apply(f.event)
                     is WireFrame.Res -> lock.withLock { pending.remove(f.reqId) }?.complete(f.result)

@@ -510,9 +510,13 @@ class Engine(
         is Command.TidyMemories -> tidyMemories()
         is Command.SearchHistory -> CommandResult(data = AppJson.encodeToString(
             kotlinx.serialization.builtins.ListSerializer(com.guixing.jixunying.model.HistoryHit.serializer()), searchHistory(c.query, c.limit)))
-        is Command.WeixinLogin -> weixin?.login() ?: CommandResult(false, "微信助理只能接在电脑上：到电脑上的 设置 → 微信 扫码绑定")
+        is Command.WeixinLogin -> weixin?.login() ?: CommandResult(false, "这台设备没有接微信助理")
         is Command.WeixinVerify -> weixin?.verify(c.code) ?: CommandResult(false, "这台设备没有接微信助理")
         is Command.WeixinLogout -> weixin?.logout() ?: CommandResult(false, "这台设备没有接微信助理")
+        // 手机经加密线路来要绑定（RelayHost 只放已配对的手机进来）
+        is Command.WeixinShare -> weixin?.shareAccount()?.let { CommandResult(data = it) } ?: CommandResult(false, "电脑上还没绑定微信")
+        is Command.WeixinImport -> weixin?.importShared(c.shareJson) ?: CommandResult(false, "这台设备没有接微信助理")
+        is Command.WeixinReport -> { weixin?.raiseFence(c.answeredUntil); CommandResult() }
         is Command.StanceList -> {
             val list = synchronized(stanceBook) { stanceBook.filter { c.convId.isBlank() || it.convId == c.convId } }
             CommandResult(data = AppJson.encodeToString(kotlinx.serialization.builtins.ListSerializer(StanceTopic.serializer()), list))
@@ -1241,7 +1245,7 @@ class Engine(
 
     // ———————————————— 外部渠道（微信助理） ————————————————
 
-    /** 微信助理接在这台电脑上时由 Main.kt 设置。 */
+    /** 微信助理：电脑上由 Main.kt 设置，手机上由 JxyApp 设置（1.5.0 起手机也能接）。 */
     @Volatile var weixin: WeixinBridge? = null
         set(value) {
             field = value

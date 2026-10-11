@@ -59,6 +59,11 @@ class JxyApp : Application() {
         prefs.getString("paired_host", null)
             ?.let { runCatching { AppJson.decodeFromString(PairedHost.serializer(), it) }.getOrNull() }
             ?.let { hub.attach(it) }
+        // 微信助理（1.5.0 起手机也能接）：配对过电脑就用电脑的同一个绑定，电脑在接时手机待命，见 WeixinHandover
+        val weixin = com.guixing.jixunying.engine.WeixinBridge(engine, File(filesDir, "data/weixin"))
+        engine.weixin = weixin
+        com.guixing.jixunying.engine.WeixinHandover(hub, engine, weixin).start()
+        weixin.start()
     }
 
     fun deviceName(): String = listOf(Build.MANUFACTURER, Build.MODEL).joinToString(" ").trim().ifEmpty { "手机" }

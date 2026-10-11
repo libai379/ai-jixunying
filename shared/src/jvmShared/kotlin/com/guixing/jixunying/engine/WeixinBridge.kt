@@ -31,6 +31,7 @@ import kotlinx.serialization.json.add
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
@@ -50,6 +51,8 @@ private data class WeixinAccount(
     val userId: String = "",
     val baseUrl: String = "",
     val boundAt: Long = 0,
+    /** 手机上：这份绑定是从配对的电脑同步来的。解除时只删本机这份，不通知微信。 */
+    val shared: Boolean = false,
 )
 
 @Serializable
@@ -57,13 +60,25 @@ private data class WeixinCursor(
     val buf: String = "",
     /** 每个微信用户最近一条消息的 context_token（回复时必须带回去）。 */
     val contextTokens: Map<String, String> = emptyMap(),
+    /** 只回答这个时间（微信消息的 create_time_ms）以后发来的：之前的另一台设备已经答过。 */
+    val answerAfter: Long = 0,
+    /** 这台设备答过的最新一条消息的时间（手机告诉电脑用）。 */
+    val answeredUntil: Long = 0,
+    /** 电脑上：绑定同步给手机的时间。同步过的话，电脑刚打开时积压的消息先等一会儿再答（手机可能已经答过）。 */
+    val sharedAt: Long = 0,
 )
+
+/** 电脑交给手机的绑定：凭证 + 从什么时候起归手机算（之前的电脑答过了）。 */
+@Serializable
+private data class WeixinShareBundle(val account: WeixinAccount, val answerAfter: Long)
 
 /**
  * 微信助理：腾讯官方 ClawBot 的 iLink 协议（和 WorkBuddy 的「微信助理」同一套）。
  * 协议细节照腾讯官方插件 @tencent-weixin/openclaw-weixin 2.4.9 的源码核对，见 docs/参考资料.md。
  *
- * 只接在电脑上（电脑常开，手机在外面也能通过微信用）。凭证存在 <数据目录>\weixin\，不进 AppState。
+ * 电脑和手机都能接（1.5.0 起）。一个微信只能绑一台设备，所以手机不重新扫码，而是经加密线路用电脑的同一个绑定
+ * （WeixinShare / importShared）；电脑优先，电脑在接时手机待命（standby，见 WeixinHandover），按消息时间划界不重复回答。
+ * 凭证存在 <数据目录>\weixin\，不进 AppState。
  * 微信里的每个人一个对话（channel = "weixin:<微信用户编号>"），界面上也能看到、也能接着聊。
  */
 class WeixinBridge(
@@ -71,6 +86,8 @@ class WeixinBridge(
     private val dir: File,
     private val loginBase: String = DEFAULT_BASE,
     private val cdnBase: String = CDN_BASE,
+    /** 电脑刚打开、绑定给过手机时，积压的消息先等多久（测试里改短）。 */
+    private val backlogHoldMs: Long = BACKLOG_HOLD_MS,
 ) {
     companion object {
         const val DEFAULT_BASE = "https://ilinkai.weixin.qq.com"
@@ -83,6 +100,8 @@ class WeixinBridge(
         const val STALE_TOKEN = -14
         /** 一条微信消息最长发多少字，再长就拆开。 */
         const val CHUNK = 1800
+        /** 电脑刚打开、绑定给过手机时，积压的消息先等这么久（手机连上来会说它答到了哪儿）。 */
+        const val BACKLOG_HOLD_MS = 30_000L
 
         /** 微信不显示 Markdown：把标题、加粗、列表、链接、表格分隔线换成普通文字。 */
         fun plainText(md: String): String {
@@ -149,9 +168,68 @@ class WeixinBridge(
     private val queues = ConcurrentHashMap<String, kotlinx.coroutines.channels.Channel<JsonObject>>()
     private val typingTickets = ConcurrentHashMap<String, String>()
     private val seen = java.util.Collections.synchronizedSet(LinkedHashSet<String>())
-    @Volatile private var info = WeixinInfo(bound = account != null, status = if (account != null) "正在连接…" else "未绑定", boundAt = account?.boundAt ?: 0)
+    @Volatile private var info = WeixinInfo(bound = account != null, status = if (account != null) "正在连接…" else "未绑定", boundAt = account?.boundAt ?: 0,
+        botId = account?.botId.orEmpty(), shared = account?.shared == true)
+    private val cursorLock = Any()
+    @Volatile private var monitorStartedAt = 0L
+
+    /** 别的设备在接微信时返回给人看的原因（手机上：配对的电脑在线、开着微信助理），这台就不收消息。 */
+    @Volatile var standby: () -> String? = { null }
+    /** 答完一条微信消息（参数是那条消息的 create_time_ms）。手机用它告诉电脑答到了哪儿。 */
+    @Volatile var onAnswered: (Long) -> Unit = {}
+
+    val isBound: Boolean get() = account != null
+    val isShared: Boolean get() = account?.shared == true
+    val botId: String get() = account?.botId.orEmpty()
+    val answeredUntil: Long get() = cursor.answeredUntil
 
     init { dir.mkdirs() }
+
+    private fun editCursor(f: (WeixinCursor) -> WeixinCursor) = synchronized(cursorLock) {
+        cursor = f(cursor)
+        store(cursorFile, WeixinCursor.serializer(), cursor)
+    }
+
+    /** 另一台设备答到了 t：t 以前（含）发来的这台不再答。 */
+    fun raiseFence(t: Long) {
+        if (t > cursor.answerAfter) editCursor { it.copy(answerAfter = maxOf(it.answerAfter, t)) }
+    }
+
+    /** 电脑上：把绑定交给配对的手机。手机从现在起才开始算，之前的消息电脑已经答过。 */
+    fun shareAccount(): String? {
+        val acc = account ?: return null
+        val now = System.currentTimeMillis()
+        editCursor { it.copy(sharedAt = now) }
+        return AppJson.encodeToString(WeixinShareBundle.serializer(), WeixinShareBundle(acc.copy(shared = true), now))
+    }
+
+    /** 手机上：存下电脑交过来的绑定，开始收消息（电脑在接时会待命）。 */
+    fun importShared(json: String): CommandResult {
+        val b = runCatching { AppJson.decodeFromString(WeixinShareBundle.serializer(), json) }.getOrNull()
+            ?: return CommandResult(false, "电脑发来的微信绑定看不懂（两边版本不一样？）")
+        val acc = b.account.copy(shared = true)
+        val keepFence = if (account?.botId == acc.botId) cursor.answerAfter else 0
+        monitorJob?.cancel()
+        loginJob?.cancel()
+        account = acc
+        synchronized(cursorLock) { cursor = WeixinCursor(answerAfter = maxOf(b.answerAfter, keepFence)) }
+        store(accountFile, WeixinAccount.serializer(), acc)
+        store(cursorFile, WeixinCursor.serializer(), cursor)
+        update(WeixinInfo(bound = true, status = "已同步电脑上的绑定，正在连接…", boundAt = acc.boundAt, botId = acc.botId, shared = true))
+        startMonitor()
+        return CommandResult(message = "已同步电脑上的微信绑定")
+    }
+
+    /** 手机上：电脑解除了绑定，同步来的这份也删掉（不通知微信，绑定是电脑的）。 */
+    fun forgetShared() {
+        if (account?.shared != true) return
+        monitorJob?.cancel()
+        account = null
+        synchronized(cursorLock) { cursor = WeixinCursor() }
+        accountFile.delete()
+        cursorFile.delete()
+        update(WeixinInfo(status = "电脑上解除了微信绑定"))
+    }
 
     private fun <T> load(f: File, ser: kotlinx.serialization.KSerializer<T>): T? =
         runCatching { AppJson.decodeFromString(ser, f.readText(Charsets.UTF_8)) }.getOrNull()
@@ -174,9 +252,11 @@ class WeixinBridge(
 
     fun stop() {
         val acc = account
+        val wasAnswering = info.answering
         monitorJob?.cancel()
         loginJob?.cancel()
-        if (acc != null) runCatching { kotlinx.coroutines.runBlocking { post(baseOf(acc), "ilink/bot/msg/notifystop", buildJsonObject { put("base_info", baseInfo()) }, acc.botToken, 3_000) } }
+        // 只有正在接的那台说「我下线了」（待命的手机说了，微信会以为电脑也下线了）
+        if (acc != null && wasAnswering) runCatching { kotlinx.coroutines.runBlocking { post(baseOf(acc), "ilink/bot/msg/notifystop", buildJsonObject { put("base_info", baseInfo()) }, acc.botToken, 3_000) } }
     }
 
     // ———————————————— HTTP ————————————————
@@ -228,6 +308,7 @@ class WeixinBridge(
     private fun enc(s: String) = URLEncoder.encode(s, "UTF-8")
 
     private fun JsonObject.int(k: String) = (this[k] as? JsonPrimitive)?.intOrNull
+    private fun JsonObject.long(k: String) = (this[k] as? JsonPrimitive)?.longOrNull
     private fun JsonObject.obj(k: String) = this[k] as? JsonObject
     private fun JsonObject.arr(k: String) = this[k] as? JsonArray
 
@@ -256,13 +337,15 @@ class WeixinBridge(
         val acc = account
         monitorJob?.cancel()
         loginJob?.cancel()
-        if (acc != null) runCatching { post(baseOf(acc), "ilink/bot/msg/notifystop", buildJsonObject { put("base_info", baseInfo()) }, acc.botToken, 5_000) }
+        // 从电脑同步来的绑定：只删手机上这份，电脑照常
+        if (acc != null && !acc.shared) runCatching { post(baseOf(acc), "ilink/bot/msg/notifystop", buildJsonObject { put("base_info", baseInfo()) }, acc.botToken, 5_000) }
         account = null
-        cursor = WeixinCursor()
+        synchronized(cursorLock) { cursor = WeixinCursor() }
         accountFile.delete()
         cursorFile.delete()
         update(WeixinInfo(status = "未绑定"))
-        return CommandResult(message = "已解除绑定。微信里那个助理的对话可以删掉。")
+        return CommandResult(message = if (acc?.shared == true) "这台手机不再用电脑上的微信绑定，电脑上照常。"
+            else "已解除绑定。微信里那个助理的对话可以删掉。")
     }
 
     private suspend fun pollLogin(initial: String) {
@@ -311,10 +394,10 @@ class WeixinBridge(
                     }
                     val acc = WeixinAccount(token, botId, st.str("ilink_user_id").orEmpty(), st.str("baseurl").orEmpty(), System.currentTimeMillis())
                     account = acc
-                    cursor = WeixinCursor()
+                    synchronized(cursorLock) { cursor = WeixinCursor() }
                     store(accountFile, WeixinAccount.serializer(), acc)
                     store(cursorFile, WeixinCursor.serializer(), cursor)
-                    update(WeixinInfo(bound = true, status = "已绑定，正在连接…", boundAt = acc.boundAt))
+                    update(WeixinInfo(bound = true, status = "已绑定，正在连接…", boundAt = acc.boundAt, botId = acc.botId))
                     startMonitor()
                     return
                 }
@@ -329,14 +412,27 @@ class WeixinBridge(
     private fun startMonitor() {
         monitorJob?.cancel()
         monitorJob = scope.launch {
-            account?.let { acc -> runCatching { post(baseOf(acc), "ilink/bot/msg/notifystart", buildJsonObject { put("base_info", baseInfo()) }, acc.botToken, 10_000) } }
             var failures = 0
             var pollMs = 35_000L
+            // 开始收（或者从暂停 / 待命恢复）时告诉微信「我在线」；待命时不说下线，接着的那台还在线
+            var live = false
             while (isActive) {
                 val acc = account ?: return@launch
                 if (!engine.state.settings.weixin.enabled) {
-                    if (info.status != "已暂停") update(info.copy(status = "已暂停"))
+                    if (info.status != "已暂停" || info.answering) update(info.copy(status = "已暂停", answering = false))
+                    live = false
                     delay(3_000); continue
+                }
+                val other = standby()
+                if (other != null) {
+                    if (info.status != other || info.answering) update(info.copy(status = other, answering = false))
+                    live = false
+                    delay(2_000); continue
+                }
+                if (!live) {
+                    live = true
+                    monitorStartedAt = System.currentTimeMillis()
+                    runCatching { post(baseOf(acc), "ilink/bot/msg/notifystart", buildJsonObject { put("base_info", baseInfo()) }, acc.botToken, 10_000) }
                 }
                 try {
                     val resp = try {
@@ -349,29 +445,28 @@ class WeixinBridge(
                     val ret = resp.int("ret") ?: 0
                     val err = resp.int("errcode") ?: 0
                     if (ret == STALE_TOKEN || err == STALE_TOKEN) {
-                        update(info.copy(status = "微信那边的会话过期了，请重新扫码绑定（一小时后会再自动试一次）"))
-                        delay(60 * 60_000L)
+                        update(info.copy(status = if (acc.shared) "微信那边的会话过期了：电脑上重新扫码绑定后，这台手机会自动同步"
+                            else "微信那边的会话过期了，请重新扫码绑定（一小时后会再自动试一次）", answering = false))
+                        delay(if (acc.shared) 60_000L else 60 * 60_000L)
                         continue
                     }
                     if (ret != 0 || err != 0) {
                         failures++
-                        update(info.copy(status = "微信返回错误（$ret / $err）：${resp.str("errmsg").orEmpty().take(60)}"))
+                        // 偶尔一次出错不算断（不然配对的手机会马上抢着接）
+                        update(info.copy(status = "微信返回错误（$ret / $err）：${resp.str("errmsg").orEmpty().take(60)}", answering = info.answering && failures < 3))
                         delay(if (failures >= 3) 30_000 else 2_000)
                         continue
                     }
                     failures = 0
                     resp.int("longpolling_timeout_ms")?.takeIf { it > 0 }?.let { pollMs = it.toLong() }
-                    resp.str("get_updates_buf")?.takeIf { it.isNotEmpty() }?.let {
-                        cursor = cursor.copy(buf = it)
-                        store(cursorFile, WeixinCursor.serializer(), cursor)
-                    }
-                    if (!info.status.startsWith("已连接")) update(info.copy(bound = true, status = "已连接：在微信里给助理发消息就行"))
+                    resp.str("get_updates_buf")?.takeIf { it.isNotEmpty() }?.let { buf -> editCursor { it.copy(buf = buf) } }
+                    if (!info.status.startsWith("已连接") || !info.answering) update(info.copy(bound = true, status = "已连接：在微信里给助理发消息就行", answering = true))
                     resp.arr("msgs")?.forEach { m -> (m as? JsonObject)?.let(::handle) }
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Throwable) {
                     failures++
-                    update(info.copy(status = "连不上微信（${engine.friendlyError(e).take(60)}），稍后自动重试"))
+                    update(info.copy(status = "连不上微信（${engine.friendlyError(e).take(60)}），稍后自动重试", answering = info.answering && failures < 3))
                     delay(if (failures >= 3) 30_000 else 2_000)
                 }
             }
@@ -393,27 +488,46 @@ class WeixinBridge(
             if (!seen.add(id)) return
             if (seen.size > 500) synchronized(seen) { seen.iterator().let { it.next(); it.remove() } }
         }
-        m.str("context_token")?.let { tok ->
-            cursor = cursor.copy(contextTokens = cursor.contextTokens + (from to tok))
-            store(cursorFile, WeixinCursor.serializer(), cursor)
-        }
+        m.str("context_token")?.let { tok -> editCursor { it.copy(contextTokens = it.contextTokens + (from to tok)) } }
+        val at = m.long("create_time_ms") ?: 0L
+        // 另一台设备接着的时候发来的，它已经答过了
+        if (at in 1..cursor.answerAfter) return
         update(info.copy(lastMessageAt = System.currentTimeMillis()))
-        // 只有收消息的循环会调到这里（一个协程），getOrPut 不会并发建出两个处理者
-        queues.getOrPut(from) {
-            kotlinx.coroutines.channels.Channel<JsonObject>(kotlinx.coroutines.channels.Channel.UNLIMITED).also { ch ->
-                scope.launch {
-                    for (msg in ch) {
-                        try {
-                            process(from, msg)
-                        } catch (e: CancellationException) {
-                            // 整个助理在关：退出；只是这一条被取消：接着处理下一条（处理者没了，后面的消息就永远没人管）
-                            if (!isActive) throw e
-                        } catch (_: Throwable) {
+        // 电脑刚打开、绑定同步给过手机：积压的消息先等一会儿，手机连上来会说它答到了哪儿，答过的就不再答
+        val wait = monitorStartedAt + backlogHoldMs - System.currentTimeMillis()
+        if (cursor.sharedAt > 0 && at in 1 until monitorStartedAt && wait > 0) {
+            scope.launch { delay(wait); if (at > cursor.answerAfter) enqueue(from, m) }
+            return
+        }
+        enqueue(from, m)
+    }
+
+    private fun enqueue(from: String, m: JsonObject) {
+        // 收消息的循环和上面「等一会儿」的协程都会调到这里：加锁，免得并发建出两个处理者
+        synchronized(queues) {
+            queues.getOrPut(from) {
+                kotlinx.coroutines.channels.Channel<JsonObject>(kotlinx.coroutines.channels.Channel.UNLIMITED).also { ch ->
+                    scope.launch {
+                        for (msg in ch) {
+                            try {
+                                process(from, msg)
+                            } catch (e: CancellationException) {
+                                // 整个助理在关：退出；只是这一条被取消：接着处理下一条（处理者没了，后面的消息就永远没人管）
+                                if (!isActive) throw e
+                            } catch (_: Throwable) {
+                            }
+                            markAnswered(msg)
                         }
                     }
                 }
             }
         }.trySend(m)
+    }
+
+    private fun markAnswered(m: JsonObject) {
+        val at = m.long("create_time_ms") ?: return
+        if (at > cursor.answeredUntil) editCursor { it.copy(answeredUntil = maxOf(it.answeredUntil, at)) }
+        runCatching { onAnswered(at) }
     }
 
     private suspend fun process(from: String, m: JsonObject) {

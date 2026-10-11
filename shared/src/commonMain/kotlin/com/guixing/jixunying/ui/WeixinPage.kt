@@ -19,6 +19,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -32,10 +33,12 @@ import androidx.compose.ui.unit.dp
 import com.guixing.jixunying.model.AppState
 import com.guixing.jixunying.model.Command
 import com.guixing.jixunying.model.WeixinSettings
+import kotlinx.coroutines.launch
 
 /**
- * 设置 → 微信。电脑上：扫码绑定微信助理、选谁来回答；手机上（没遥控电脑时）：说明微信助理接在电脑上，
- * 以及怎么把微信里的文件交给 AI。
+ * 设置 → 微信。扫码绑定微信助理、选谁来回答、开关。
+ * 手机上看本机时（1.5.0 起手机也能接）：配对过电脑就用电脑的同一个绑定（一个微信只能绑一台设备），电脑在接时手机待命；
+ * 没配对电脑的手机自己绑。
  */
 @Composable
 fun WeixinPage(ctl: AppController, state: AppState) {
@@ -47,14 +50,20 @@ fun WeixinPage(ctl: AppController, state: AppState) {
     var code by remember { mutableStateOf("") }
     var confirmUnbind by remember { mutableStateOf(false) }
     fun save(f: (WeixinSettings) -> WeixinSettings) = ctl.updateSettings { it.copy(weixin = f(it.weixin)) }
+    // 手机上看的是本机（不是遥控电脑），并且配对过电脑
+    val phoneLocal = !platform.isDesktop && ctl.backend === ctl.hub.local
+    val remote by ctl.hub.remote.collectAsState()
+    val paired = remote.takeIf { phoneLocal }
+    val host = paired?.let { it.store.state.collectAsState().value }
+    val hostOnline = paired?.let { it.conn.collectAsState().value is com.guixing.jixunying.client.ConnState.Connected } == true
 
-    PageHeader("微信", "和 WorkBuddy 的「微信助理」一样：电脑上扫码绑定以后，在手机微信里给助理发消息（文字、图片、文件、语音都行），电脑上的 AI 成员回答，回复发回微信。用的是腾讯官方的 ClawBot 接口。")
+    PageHeader("微信", "和 WorkBuddy 的「微信助理」一样：扫码绑定以后，在手机微信里给助理发消息（文字、图片、文件、语音都行），AI 成员回答，回复发回微信。" +
+        "电脑和手机都能接：电脑开着就电脑答，电脑关了由手机接着答。用的是腾讯官方的 ClawBot 接口。")
 
     if (!state.weixinCapable) {
         SectionCard {
-            Text("微信助理接在电脑上", style = MaterialTheme.typography.titleSmall)
-            Text("电脑常开、一直在线，手机在外面用微信就能找它。到电脑上的 AI集训营：设置 → 微信，扫码绑定。" +
-                "如果这台手机已经配对电脑，可以在侧栏顶上切到电脑，在这里直接管理。",
+            Text("这台设备没有接微信助理", style = MaterialTheme.typography.titleSmall)
+            Text("电脑上的 AI集训营：设置 → 微信，扫码绑定。如果这台手机已经配对电脑，可以在侧栏顶上切到电脑，在这里直接管理。",
                 style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle, modifier = Modifier.padding(top = 4.dp))
         }
         Spacer(Modifier.height(12.dp))
@@ -62,7 +71,34 @@ fun WeixinPage(ctl: AppController, state: AppState) {
         return
     }
 
-    SectionCard {
+    if (paired != null && (wx.shared || !wx.bound)) {
+        // 配对过电脑的手机：用电脑的绑定，不在手机上另外扫码（会把电脑的顶掉）
+        SectionCard {
+            Text(if (wx.bound) "用的是电脑上的微信绑定" else "还没接微信", style = MaterialTheme.typography.titleSmall)
+            if (wx.bound && wx.status.isNotBlank()) Text(wx.status, style = MaterialTheme.typography.bodySmall,
+                color = if (wx.status.startsWith("已连接")) Ext.c.success else Ext.c.subtle)
+            if (wx.bound && wx.lastMessageAt > 0) Text("这台手机收到的最近一条：${formatTime(wx.lastMessageAt)}", style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
+            Text(
+                when {
+                    wx.bound -> "回答用的是这台手机上的 AI 成员。手机上的 AI集训营 要开着（在后台也行）才能接；电脑在接时手机只待命，不收消息。"
+                    host?.weixin?.bound == true -> "电脑上已经绑定了微信。开着下面「这台手机接微信」的开关，手机会自动用同一个绑定，不用再扫码。"
+                    else -> "先在电脑上 设置 → 微信 扫码绑定，这台手机会自动用同一个绑定。一个微信只能绑一台设备，在手机上另外扫码会把电脑的顶掉。"
+                },
+                style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle, modifier = Modifier.padding(top = 6.dp))
+            if (!wx.bound && host?.weixin?.bound == true) {
+                Spacer(Modifier.height(8.dp))
+                Button(enabled = hostOnline && !busy, onClick = {
+                    busy = true
+                    ctl.scope.launch {
+                        val r = paired.call(Command.WeixinShare)
+                        if (r.ok) ctl.run(Command.WeixinImport(r.data)) { busy = false } else { busy = false; ctl.toast(r.message) }
+                    }
+                }) { Text(if (busy) "正在同步…" else "现在同步") }
+                if (!hostOnline) Text("电脑现在不在线，等电脑开着再同步。", style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle,
+                    modifier = Modifier.padding(top = 4.dp))
+            }
+        }
+    } else SectionCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text(if (wx.bound) "已绑定微信" else "还没绑定微信", style = MaterialTheme.typography.titleSmall)
@@ -111,13 +147,19 @@ fun WeixinPage(ctl: AppController, state: AppState) {
                 busy = true
                 ctl.run(Command.WeixinLogin, quiet = true) { r -> busy = false; if (!r.ok) ctl.toast(r.message) }
             }) { Text(if (busy) "正在生成二维码…" else "绑定微信") }
-            Text("需要这台电脑能上网（连的是腾讯的服务器，国内直连，不走代理）。",
+            Text("需要这台设备能上网（连的是腾讯的服务器，国内直连，不走代理）。一个微信只能绑一台设备：手机配对过电脑的话，在电脑上绑，手机会自动用同一个绑定。",
                 style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, modifier = Modifier.padding(top = 6.dp))
+        }
+        // 手机自己扫码绑了、电脑也绑了：后绑的会把先绑的顶掉
+        if (wx.bound && !wx.shared && host?.weixin?.bound == true) {
+            Text("这台手机和电脑各绑了一次微信。一个微信只能绑一台设备，后绑的会把先绑的顶掉。建议在手机上「解除绑定」，手机会自动改用电脑的绑定。",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(top = 8.dp))
         }
     }
     Spacer(Modifier.height(12.dp))
     SectionCard {
-        SwitchRow("开启微信助理", "关掉后微信里发的消息不回（绑定还在）", ws.enabled) { v -> save { it.copy(enabled = v) } }
+        if (platform.isDesktop || !phoneLocal) SwitchRow("开启微信助理", "关掉后这台电脑不回微信消息（绑定还在）；配对的手机开着微信助理的话，由手机接着答", ws.enabled) { v -> save { it.copy(enabled = v) } }
+        else SwitchRow("这台手机接微信", "电脑关机或关掉微信助理时由手机接着答。关掉省电：手机不收微信消息，电脑开着照常回答", ws.enabled) { v -> save { it.copy(enabled = v) } }
         SwitchRow("联网搜索", "微信里问时效性的问题会先搜再答，回复末尾附上来源", ws.webSearch) { v -> save { it.copy(webSearch = v) } }
         Spacer(Modifier.height(6.dp))
         FieldLabel("谁来回答微信消息", "选一位就是单聊；选多位就是群聊，每位的回答各发一条")
@@ -138,8 +180,8 @@ fun WeixinPage(ctl: AppController, state: AppState) {
             "· 直接发文字、图片、文件（PDF、Word、Excel、PPT 等），AI 会读；语音用微信转好的文字。\n" +
                 "· 说「画一张……」，画好的图会发回微信。\n" +
                 "· 发「/新对话」开始一个新话题，发「/帮助」看说明。\n" +
-                "· 每个微信联系人在电脑上有一个「微信对话」，在电脑上也能看、能接着聊。\n" +
-                "· 电脑要开着 AI集训营，微信里才有回复。",
+                "· 每个微信联系人在接的那台设备上有一个「微信对话」，在那里也能看、能接着聊。\n" +
+                "· 电脑开着 AI集训营 就由电脑答；电脑关了，开着微信助理的手机接着答（手机上的 AI集训营 要开着，在后台也行）。两边都关着，微信里就没有回复。",
             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
