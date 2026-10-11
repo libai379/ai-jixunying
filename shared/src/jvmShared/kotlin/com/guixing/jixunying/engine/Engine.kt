@@ -68,6 +68,7 @@ import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
 import com.guixing.jixunying.model.AppJson
 import com.guixing.jixunying.model.ConfigBundle
+import java.io.File
 import java.util.Base64
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -412,10 +413,13 @@ class Engine(
                 val keys = c.settings.search.apiKeys.mapValues { (k, v) -> if (isMaskedKey(v)) oldKeys[k].orEmpty() else v }
                 // 花费设置走 SaveCosts 单独存，这里保留原样（旧版手机发来的设置里没有这块）
                 // 1.4.0 以前的手机不认识裁判和 AI 核实这几项，发来的是默认值：保留电脑上的
-                val memory = if (c.settings.schema >= Settings.SCHEMA) c.settings.memory else c.settings.memory.copy(
+                val memory = if (c.settings.schema >= 1) c.settings.memory else c.settings.memory.copy(
                     judgeProviderId = s.settings.memory.judgeProviderId, judgeModelId = s.settings.memory.judgeModelId,
                     judgeAnonymous = s.settings.memory.judgeAnonymous, aiVerify = s.settings.memory.aiVerify, countAiVerdict = s.settings.memory.countAiVerdict)
-                s.copy(settings = c.settings.copy(search = c.settings.search.copy(apiKeys = keys), costs = s.settings.costs, memory = memory, schema = Settings.SCHEMA))
+                // 1.5.0 以前的不认识 Word / Excel 设置
+                val office = if (c.settings.schema >= 2) c.settings.office else s.settings.office
+                s.copy(settings = c.settings.copy(search = c.settings.search.copy(apiKeys = keys), costs = s.settings.costs, memory = memory, office = office,
+                    schema = Settings.SCHEMA))
             }
             if (before.enabled != state.settings.relay.enabled || before.brokers != state.settings.relay.brokers) onRelaySettingsChanged?.invoke()
             // 关掉了的后台活不会再跑，它以前的出错提示也就不会「成功一次自己消失」：直接清掉
@@ -517,6 +521,7 @@ class Engine(
         is Command.WeixinShare -> weixin?.shareAccount()?.let { CommandResult(data = it) } ?: CommandResult(false, "电脑上还没绑定微信")
         is Command.WeixinImport -> weixin?.importShared(c.shareJson) ?: CommandResult(false, "这台设备没有接微信助理")
         is Command.WeixinReport -> { weixin?.raiseFence(c.answeredUntil); CommandResult() }
+        is Command.ExportMessage -> exportMessage(c)
         is Command.StanceList -> {
             val list = synchronized(stanceBook) { stanceBook.filter { c.convId.isBlank() || it.convId == c.convId } }
             CommandResult(data = AppJson.encodeToString(kotlinx.serialization.builtins.ListSerializer(StanceTopic.serializer()), list))
@@ -1449,7 +1454,8 @@ class Engine(
         val fnSearch = wantSearch && native == NativeSearch.NONE
         val memOn = state.settings.memory.enabled
         val docsOn = docsUsable()
-        val useTools = toolsOk && (wantSearch || hasImageModel || memOn || docsOn)
+        val officeOn = state.settings.office.enabled
+        val useTools = toolsOk && (wantSearch || hasImageModel || memOn || docsOn || officeOn)
 
         try {
             val working = mutableListOf<JsonObject>()
@@ -1457,7 +1463,8 @@ class Engine(
                 canSeeImages = model.vision, independentRound = independent, calledBy = calledBy,
                 nativeSearch = native != NativeSearch.NONE, hasImageModel = hasImageModel,
                 memories = if (memOn) Recorder.forPrompt(state.memories) else emptyList(), canRemember = memOn && useTools,
-                docCount = if (docsOn && useTools) docs.count else 0, deviceLabel = if (isPhone) "这台手机" else "这台电脑")
+                docCount = if (docsOn && useTools) docs.count else 0, deviceLabel = if (isPhone) "这台手机" else "这台电脑",
+                canMakeFiles = officeOn && useTools)
             working += buildJsonObject { put("role", "system"); put("content", sys) }
             working += buildHistory(convId, member, cutoffId, excludeId = msg.id, vision = model.vision)
 
@@ -1472,7 +1479,7 @@ class Engine(
                 }
             }
 
-            val tools = if (useTools) toolDefs(fnSearch, fetch = wantSearch, draw = hasImageModel, native = native, memory = memOn, docs = docsOn) else null
+            val tools = if (useTools) toolDefs(fnSearch, fetch = wantSearch, draw = hasImageModel, native = native, memory = memOn, docs = docsOn, office = officeOn) else null
             val extra = if (native == NativeSearch.QWEN) buildJsonObject {
                 put("enable_search", true)
                 putJsonObject("search_options") {
@@ -1572,7 +1579,8 @@ class Engine(
         }
     }
 
-    private fun toolDefs(search: Boolean, fetch: Boolean, draw: Boolean, native: NativeSearch, memory: Boolean = false, docs: Boolean = false): JsonArray = buildJsonArray {
+    private fun toolDefs(search: Boolean, fetch: Boolean, draw: Boolean, native: NativeSearch, memory: Boolean = false, docs: Boolean = false,
+                         office: Boolean = false): JsonArray = buildJsonArray {
         when (native) {
             NativeSearch.ZHIPU -> add(buildJsonObject {
                 put("type", "web_search")
@@ -1628,6 +1636,119 @@ class Engine(
                     put("start", prop("可选，从第几个字开始读，默认 0"))
                 }, listOf("path"))
         }
+        if (office) {
+            fn("create_word", "做一个 Word 文件（.docx）交给用户，做好会显示在你的回答下面，点开就用 Word / WPS 打开。" +
+                "正文用 Markdown 写：# 标题、## 小标题、- 列表、1. 编号、| 表格 |、**加粗**、> 引用；单独一行写 [分页] 就换页。" +
+                "字体、字号、行距、页码、目录这些排版程序按用户的设置做，你只管把内容写完整、写好。",
+                buildJsonObject {
+                    put("filename", prop("文件名，不用写 .docx，比如「第三季度项目验收报告」"))
+                    put("content", prop("正文（Markdown）"))
+                    put("title", prop("可选，文档标题（第一页最上面居中）；不写就用正文开头的一级标题"))
+                    put("style", prop("可选，排版样式：通用 / 正式 / 公文。用户没说就不填，按用户的设置"))
+                    put("header", prop("可选，页眉文字，用户要求时才填"))
+                    put("landscape", prop("可选，true = 横向（表格列很多时用）"))
+                    put("toc", prop("可选，true / false：要不要目录；不填按设置（标题多时自动加）"))
+                }, listOf("filename", "content"))
+            fn("create_excel", "做一个 Excel 表格文件（.xlsx）交给用户，做好会显示在你的回答下面，点开就用 Excel / WPS 打开。" +
+                "内容用 Markdown 表格写：每个「## 名字」下面的表格是一个工作表（名字就是工作表名）；表格上面一行字是表名，表格下面的字是备注。" +
+                "数字直接写：12000、12,000、12.5%、¥1200、2026-10-10 会自动变成数字、百分比、金额、日期，能直接算；" +
+                "要公式就写 =SUM(B2:B5) 这样，行号按表格算（表头是第 1 行，第一行数据是第 2 行）。表头样式、冻结、筛选、列宽程序自动做。",
+                buildJsonObject {
+                    put("filename", prop("文件名，不用写 .xlsx，比如「2026年销售汇总」"))
+                    put("content", prop("表格内容（Markdown，可以有多个 ## 工作表）"))
+                    put("total_row", prop("可选，true = 每张表最后加「合计」行（数字列自动求和）"))
+                }, listOf("filename", "content"))
+        }
+    }
+
+    // ———————————————— 做 Word / Excel（1.5.0） ————————————————
+
+    class OfficeFile(val att: Attachment, val bytes: ByteArray)
+
+    private fun JsonObject.flag(key: String): Boolean? = when (str(key)?.trim()?.lowercase()) {
+        "true", "1", "yes", "是", "要" -> true
+        "false", "0", "no", "否", "不要" -> false
+        else -> null
+    }
+
+    /** 文件名：去掉不能用的字符，补扩展名；设置里要日期就加上。 */
+    private fun officeName(raw: String, ext: String, withDate: Boolean): String {
+        var base = OfficeWriter.plain(raw).replace(Regex("""[\\/:*?"<>|\r\n\t]"""), " ").trim().trimEnd('.')
+        if (base.lowercase().endsWith(".$ext")) base = base.dropLast(ext.length + 1).trim()
+        base = base.take(60).ifEmpty { if (ext == "xlsx") "表格" else "文档" }
+        if (withDate) base += "-" + java.time.LocalDate.now().format(java.time.format.DateTimeFormatter.BASIC_ISO_DATE)
+        return "$base.$ext"
+    }
+
+    /** 另存一份带真名字的副本（点开就用 Word / WPS 打开）。电脑默认「文档\AI集训营」；手机存应用目录。重名加 (2)。 */
+    private fun saveOfficeCopy(name: String, bytes: ByteArray): String = runCatching {
+        val s = state.settings.office
+        val dir = if (!isPhone && s.autoSave) (s.saveFolder.takeIf { it.isNotBlank() }?.let { File(it) } ?: defaultSaveFolder() ?: File(storage.root, "made"))
+            else File(storage.root, "made")
+        dir.mkdirs()
+        var f = File(dir, name)
+        var n = 2
+        while (f.exists()) { f = File(dir, name.substringBeforeLast('.') + "($n)." + name.substringAfterLast('.')); n++ }
+        f.writeBytes(bytes)
+        f.absolutePath
+    }.getOrDefault("")
+
+    /** 按 AI 给的参数（create_word / create_excel）做文件，存成附件。 */
+    fun makeOfficeFile(excel: Boolean, args: JsonObject): OfficeFile {
+        val (name, made) = buildOffice(excel, args)
+        val mime = if (excel) "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" else "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        val att = Attachment(newId(), name, mime, made.bytes.size.toLong(), AttachmentKind.DOCUMENT, textChars = made.text.length,
+            note = made.summary, generated = true, savedPath = saveOfficeCopy(name, made.bytes))
+        storage.putFile(att, made.bytes, made.text)
+        return OfficeFile(att, made.bytes)
+    }
+
+    /** 做文件，返回（文件名, 文件）。 */
+    private fun buildOffice(excel: Boolean, args: JsonObject): Pair<String, OfficeWriter.Made> {
+        val s = state.settings.office
+        val content = args.str("content").orEmpty()
+        val made = if (excel) OfficeWriter.excel(content, s, totalRow = args.flag("total_row") == true)
+        else OfficeWriter.word(content, s, OfficeWriter.WordOptions(
+            title = args.str("title").orEmpty(),
+            style = when (args.str("style")?.trim()?.lowercase()) {
+                "正式", "formal" -> "formal"
+                "公文", "红头", "红头文件", "official" -> "official"
+                "通用", "general" -> "general"
+                else -> ""
+            },
+            header = args.str("header").orEmpty(),
+            landscape = args.flag("landscape") == true,
+            toc = args.flag("toc"),
+        ))
+        val ext = if (excel) "xlsx" else "docx"
+        val firstHeading = Regex("""(?m)^#{1,6}\s+(.+)$""").find(content)?.groupValues?.get(1).orEmpty()
+        val name = officeName(args.str("filename").orEmpty().ifBlank { args.str("title").orEmpty().ifBlank { firstHeading } }, ext, s.dateInName)
+        return name to made
+    }
+
+    /** 「存成 Word」「表格存成 Excel」（像豆包的导出）：拿一条回答的正文做文件，用过的搜索来源附在 Word 最后。 */
+    private fun exportMessage(c: Command.ExportMessage): CommandResult {
+        val m = snapshot(c.convId).firstOrNull { it.id == c.messageId } ?: return CommandResult(false, "找不到这条消息")
+        val body = stripThink(m.content)
+        if (body.isBlank()) return CommandResult(false, "这条回答没有正文")
+        val excel = c.format == "xlsx"
+        val who = state.member(m.senderId)?.name.orEmpty()
+        val convTitle = state.conversation(c.convId)?.title.orEmpty()
+        val sources = m.tools.filter { it.kind == "search" }.flatMap { it.sources }.distinctBy { it.url }
+        val content = if (excel || sources.isEmpty()) body
+            else body + "\n\n## 参考来源\n\n" + sources.mapIndexed { i, x -> "${i + 1}. [${x.title.ifBlank { x.url }}](${x.url})" }.joinToString("\n")
+        val args = buildJsonObject {
+            put("filename", listOf(convTitle, who).filter { it.isNotBlank() }.joinToString("-"))
+            put("content", content)
+            if (excel) put("total_row", "false")
+        }
+        return try {
+            val (name, made) = buildOffice(excel, args)
+            CommandResult(message = name, data = AppJson.encodeToString(com.guixing.jixunying.model.ExportedFile.serializer(),
+                com.guixing.jixunying.model.ExportedFile(name, Base64.getEncoder().encodeToString(made.bytes))))
+        } catch (e: Throwable) {
+            CommandResult(false, if (excel) "这条回答里没有能存成 Excel 的表格" else "没做成：${e.message}")
+        }
     }
 
     /** kimi 不为空：用这家 Kimi 的官方搜索接口；它出错就退回设置里的搜索引擎，并在步骤上注明。 */
@@ -1680,6 +1801,22 @@ class Engine(
                 }
                 updateMessage(convId, msgId, persist = false) { it.copy(tools = it.tools + step) }
                 text
+            }
+            "create_word", "create_excel" -> {
+                val excel = tc.name == "create_excel"
+                if (args.str("content").isNullOrBlank()) return "参数错误：缺少 content（文件内容）"
+                try {
+                    val f = makeOfficeFile(excel, args)
+                    updateMessage(convId, msgId) { it.copy(attachments = it.attachments + f.att, tools = it.tools + ToolStep("file", f.att.name, note = "")) }
+                    "已做好《${f.att.name}》（${f.att.note}），已经显示在你的回答下面，用户点开就能用。" +
+                        (if (f.att.savedPath.isNotEmpty() && !isPhone) "电脑上另存在 ${f.att.savedPath}。" else "") +
+                        "回答里简单说一下文件里有什么就行，不用把全文再贴一遍。"
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Throwable) {
+                    updateMessage(convId, msgId) { it.copy(tools = it.tools + ToolStep("file", args.str("filename").orEmpty(), ok = false, note = e.message ?: "出错了")) }
+                    "文件没做成：${e.message}。改一下内容再试，或者告诉用户。"
+                }
             }
             "generate_image" -> {
                 val prompt = args.str("prompt").orEmpty().ifBlank { return "参数错误：缺少 prompt" }

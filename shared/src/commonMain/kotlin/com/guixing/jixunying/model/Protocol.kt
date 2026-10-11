@@ -84,6 +84,9 @@ sealed interface Command {
     /** 微信助理：手机告诉电脑，微信消息它答到了这个时间（消息的 create_time_ms），电脑别再答一遍。 */
     @Serializable data class WeixinReport(val answeredUntil: Long) : Command
 
+    /** 把一条回答存成 Word（format = "docx"）或把里面的表格存成 Excel（"xlsx"）。结果 data 是 ExportedFile 的 JSON。 */
+    @Serializable data class ExportMessage(val convId: String, val messageId: String, val format: String) : Command
+
     /** 立场档案：取议题（convId 留空 = 全部对话的）。结果 data 是 List<StanceTopic> 的 JSON。 */
     @Serializable data class StanceList(val convId: String = "") : Command
     /** 立场档案：标对错。verdict 是立场的 key，或 StanceTopic.NONE / OPEN，空 = 取消标记。 */

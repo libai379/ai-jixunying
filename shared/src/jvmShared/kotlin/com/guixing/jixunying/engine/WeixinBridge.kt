@@ -614,7 +614,12 @@ class WeixinBridge(
         if (text.isNotBlank()) chunks(text).forEach { sendText(to, ctx, it) }
         for (a in r.attachments.filter { it.kind == AttachmentKind.GENERATED_IMAGE }) {
             val bytes = engine.fileBytes(a.id) ?: continue
-            runCatching { sendImage(to, ctx, bytes) }.onFailure { sendText(to, ctx, "（画好了一张图，但发到微信失败了：${it.message?.take(80)}。可以在电脑上看。）") }
+            runCatching { sendImage(to, ctx, bytes) }.onFailure { sendText(to, ctx, "（画好了一张图，但发到微信失败了：${it.message?.take(80)}。可以在 AI集训营 里看。）") }
+        }
+        // AI 做的 Word / Excel 也发回微信
+        for (a in r.attachments.filter { it.generated && it.kind == AttachmentKind.DOCUMENT }) {
+            val bytes = engine.fileBytes(a.id) ?: continue
+            runCatching { sendFile(to, ctx, a.name, bytes) }.onFailure { sendText(to, ctx, "（做好了《${a.name}》，但发到微信失败了：${it.message?.take(80)}。可以在 AI集训营 里打开。）") }
         }
     }
 
@@ -670,16 +675,51 @@ class WeixinBridge(
         return aesEcb(bytes, key, encrypt = false)
     }
 
+    private class Uploaded(val downloadParam: String, val aesHex: String, val rawSize: Int, val cipherSize: Int)
+
     /** 把图片加密传到微信 CDN，再发一条图片消息。 */
     private suspend fun sendImage(to: String, ctx: String?, plain: ByteArray) {
-        val acc = account ?: return
+        val u = uploadMedia(to, plain, 1) ?: return
+        sendItem(to, ctx, buildJsonObject {
+            put("type", 2)
+            putJsonObject("image_item") {
+                putJsonObject("media") {
+                    put("encrypt_query_param", u.downloadParam)
+                    put("aes_key", Base64.getEncoder().encodeToString(u.aesHex.toByteArray()))
+                    put("encrypt_type", 1)
+                }
+                put("mid_size", u.cipherSize)
+            }
+        })
+    }
+
+    /** 把文件（AI 做的 Word / Excel）加密传到微信 CDN，再发一条文件消息（照官方插件 sendFileMessageWeixin：上传 media_type 3，消息 type 4）。 */
+    private suspend fun sendFile(to: String, ctx: String?, name: String, plain: ByteArray) {
+        val u = uploadMedia(to, plain, 3) ?: return
+        sendItem(to, ctx, buildJsonObject {
+            put("type", 4)
+            putJsonObject("file_item") {
+                putJsonObject("media") {
+                    put("encrypt_query_param", u.downloadParam)
+                    put("aes_key", Base64.getEncoder().encodeToString(u.aesHex.toByteArray()))
+                    put("encrypt_type", 1)
+                }
+                put("file_name", name)
+                put("len", u.rawSize.toString())
+            }
+        })
+    }
+
+    /** 加密（AES-128-ECB）传到微信 CDN。mediaType：1 图片，3 文件。 */
+    private suspend fun uploadMedia(to: String, plain: ByteArray, mediaType: Int): Uploaded? {
+        val acc = account ?: return null
         val filekey = bytesToHex(ByteArray(16).also(rnd::nextBytes))
         val aes = ByteArray(16).also(rnd::nextBytes)
         val cipher = aesEcb(plain, aes, encrypt = true)
         val md5 = bytesToHex(MessageDigest.getInstance("MD5").digest(plain))
         val up = post(baseOf(acc), "ilink/bot/getuploadurl", buildJsonObject {
             put("filekey", filekey)
-            put("media_type", 1)
+            put("media_type", mediaType)
             put("to_user_id", to)
             put("rawsize", plain.size)
             put("rawfilemd5", md5)
@@ -712,16 +752,6 @@ class WeixinBridge(
             }
         }
         val dp = downloadParam ?: throw last ?: IllegalStateException("上传失败")
-        sendItem(to, ctx, buildJsonObject {
-            put("type", 2)
-            putJsonObject("image_item") {
-                putJsonObject("media") {
-                    put("encrypt_query_param", dp)
-                    put("aes_key", Base64.getEncoder().encodeToString(bytesToHex(aes).toByteArray()))
-                    put("encrypt_type", 1)
-                }
-                put("mid_size", cipher.size)
-            }
-        })
+        return Uploaded(dp, bytesToHex(aes), plain.size, cipher.size)
     }
 }

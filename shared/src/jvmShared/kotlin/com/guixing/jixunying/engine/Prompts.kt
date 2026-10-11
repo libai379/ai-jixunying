@@ -41,6 +41,8 @@ object Prompts {
         /** 本机文档库里有几个文档（0 = 不能查文档）。 */
         docCount: Int = 0,
         deviceLabel: String = "这台电脑",
+        /** 能用 create_word / create_excel 做文件。 */
+        canMakeFiles: Boolean = false,
     ): String {
         val profile = state.profile
         val others = conv.memberIds.filter { it != me.id }.mapNotNull { state.member(it) }
@@ -116,6 +118,10 @@ object Prompts {
             if (canDraw) appendLine("- 你可以画图：用户要图片、要改图时调用 generate_image，提示词要具体（主体、风格、构图、光线、色彩）；用户说「改成……」就在上一张的基础上调整描述重新画。画完简单说明即可，不用把图再描述一遍。可以一边聊一边画。")
             else if (hasImageModel) appendLine("- 你这个模型不会调用工具，没法自己画图。用户要图时，请他点输入框上的「直接画图」，再描述画面。")
             else appendLine("- 你现在不能画图：用户还没接入能画图的服务商。用户要图时告诉他：到 设置 → 模型服务 添加任意一家能画图的平台并填 Key（智谱开放平台的 cogview-3-flash 免费，MiniMax 的 image-01、豆包 Seedream 也行），加好之后直接说「画一张……」就行，不用别的设置。")
+            if (canMakeFiles) {
+                appendLine("- 你能做 Word 和 Excel 文件：用户要文档、报告、方案、通知、简历、合同这类要交出去的东西，或者要表格、清单、台账、统计表时，用 create_word / create_excel 做成文件交给他；只是想在聊天里看个答案就直接回答。" +
+                    "文件内容要完整、能直接用；做好后在回答里简单说说文件里有什么。用户说「改一下」就按要求改好再做一份。")
+            }
             if (docCount > 0) {
                 appendLine("- 你能查${profile.name}${deviceLabel}上的文档（收录了 $docCount 个）：问到他自己的文件、资料、合同、报告、表格、笔记里的内容时，先用 search_documents 找，再用 read_document 读原文，回答时说明出自哪个文件。不要说你看不到用户的文件。")
             }

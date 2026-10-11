@@ -24,6 +24,8 @@ interface Platform {
     fun setPref(key: String, value: String?) {}
     /** 用系统默认程序打开本机文件。 */
     fun openFile(path: String): Boolean = false
+    /** 把收到的文件（比如手机遥控电脑时电脑做的 Word）存成临时文件，再用默认程序打开。 */
+    suspend fun openBytes(name: String, bytes: ByteArray): Boolean = false
     /** 选一个文件夹，返回路径；取消返回 null。 */
     suspend fun pickFolder(): String? = null
     /** 安卓：跳到系统设置，让用户给「所有文件访问」权限（读别的 App 存的文档要用）。 */

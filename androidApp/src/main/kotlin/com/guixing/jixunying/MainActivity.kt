@@ -157,6 +157,16 @@ class MainActivity : ComponentActivity() {
             true
         }.getOrDefault(false)
 
+        override suspend fun openBytes(name: String, bytes: ByteArray): Boolean = withContext(Dispatchers.IO) {
+            runCatching {
+                // 存在应用自己的目录里（FileProvider 的 files-path 覆盖得到），再交给 WPS / Office 打开
+                val dir = File(filesDir, "open").apply { mkdirs() }
+                val f = File(dir, name.replace(Regex("""[\\/:*?"<>|]"""), "_"))
+                f.writeBytes(bytes)
+                f.absolutePath
+            }.getOrNull()
+        }?.let { withContext(Dispatchers.Main) { openFile(it) } } == true
+
         override fun requestFileAccess() {
             if (Build.VERSION.SDK_INT < 30) return
             runCatching {

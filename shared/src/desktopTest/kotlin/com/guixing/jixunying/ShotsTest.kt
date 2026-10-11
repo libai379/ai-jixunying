@@ -123,6 +123,11 @@ class ShotsTest {
         st.putFile(doc, ByteArray(10), "房屋租赁合同 月租金 4800 元")
         val cat = Attachment("a2", "图片_1.png", "image/png", png.size.toLong(), AttachmentKind.GENERATED_IMAGE, note = "月球上喝茶的橘猫")
         st.putFile(cat, png, null)
+        // AI 做的 Word：回答下面显示成能点开的文件
+        val madeDoc = com.guixing.jixunying.engine.OfficeWriter.word("# 租房合同补充条款\n\n## 一、维修责任\n房屋主体由出租方负责。\n\n## 二、押金退还\n退租后 7 日内退还。", com.guixing.jixunying.model.OfficeSettings())
+        val made = Attachment("a3", "租房合同补充条款.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", madeDoc.bytes.size.toLong(),
+            AttachmentKind.DOCUMENT, textChars = madeDoc.text.length, note = madeDoc.summary, generated = true)
+        st.putFile(made, madeDoc.bytes, madeDoc.text)
         st.saveMessages("c1", listOf(
             Message("u1", "c1", Role.USER, USER_ID, "帮我看看这份合同有什么坑", attachments = listOf(doc), createdAt = now - 120_000),
             Message("r1", "c1", Role.AI, "ma",
@@ -133,7 +138,8 @@ class ShotsTest {
                     ToolStep("search", "租房押金 规定", listOf(SearchSource("住房租赁条例解读", "https://www.gov.cn/zhengce/a", "押金不得超过……"), SearchSource("押金退还纠纷", "https://news.example.com/b"))),
                 ),
                 createdAt = now - 110_000, modelLabel = "deepseek-flash（DeepSeek 4.1 Flash）· 深度", usage = Usage(1345, 420, 128, 4800)),
-            Message("r2", "c1", Role.AI, "mb", "补充一点：**签之前拍照留存房屋现状**，退押金时少扯皮。@阿德 说的维修责任也要写进去。",
+            Message("r2", "c1", Role.AI, "mb", "补充一点：**签之前拍照留存房屋现状**，退押金时少扯皮。@阿德 说的维修责任也要写进去。\n\n补充条款我做成了 Word，可以直接拿去和房东谈。",
+                attachments = listOf(made), tools = listOf(ToolStep("file", "租房合同补充条款.docx")),
                 createdAt = now - 100_000, modelLabel = "MiniMax-M3（MiniMax 中国版）", usage = Usage(980, 60, 0, 2100)),
         ))
         // 立场档案：四位独立作答，阿智首答错；被用户质疑后阿麦顺着改错（迎合用户），阿智被阿德说服改对
@@ -268,7 +274,7 @@ class ShotsTest {
         val narrow = listOf("chat" to "conv:c1", "chat-long" to "conv:c6", "docs" to "docs", "stances" to "stances", "chat-stances" to "conv:c5", "costs" to "costs",
             "settings-home" to "settingshome", "settings-image" to "settings:IMAGE",
             "settings-memory" to "settings:MEMORY", "settings-weixin" to "settings:WEIXIN", "settings-providers" to "settings:PROVIDERS",
-            "settings-search" to "settings:SEARCH", "settings-profile" to "settings:PROFILE")
+            "settings-search" to "settings:SEARCH", "settings-profile" to "settings:PROFILE", "settings-office" to "settings:OFFICE")
         for ((name, start) in narrow) shoot("phone-$name", 824, 1784, 2f, hub, phone, start)
 
         // 弹窗

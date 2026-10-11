@@ -186,6 +186,12 @@ class EngineTest {
                                 write("data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n")
                             }
                             remembered -> say("记住了。")
+                            // 要文件：先调 create_word / create_excel，拿到「已做好」再说话
+                            hasTool("create_word") && latest.contains("做成 Word") && !sawTool -> callTool("create_word",
+                                mapOf("filename" to "周报", "content" to "# 本周周报\n\n## 完成\n- 登录页改版\n- 数据看板\n\n## 下周\n1. 灰度测试"))
+                            hasTool("create_excel") && latest.contains("做成表格") && !sawTool -> callTool("create_excel",
+                                mapOf("filename" to "销售", "content" to "## 销售\n| 月份 | 销售额 |\n|---|---|\n| 1月 | 12,000 |\n| 2月 | 13,500 |", "total_row" to "true"))
+                            toolTexts.any { "已做好《" in it } -> say("做好了，文件在下面。")
                             // 问自己的文档：先搜，再按搜到的路径读，读完再答
                             hasTool("search_documents") && latest.contains("合同") && !sawTool -> callTool("search_documents", mapOf("query" to "付款日期"))
                             toolTexts.any { "字，下面是" in it } -> say("合同里写的付款日期是 " + Regex("付款日期：(\\S+)").find(toolTexts.last())!!.groupValues[1])
@@ -762,6 +768,63 @@ class EngineTest {
         assertTrue(imageRequests.any { it.startsWith("modelscope:true:") })
     }
 
+    /**
+     * 做 Word / Excel（1.5.0）：成员调 create_word / create_excel，文件挂在回答下面、另存一份副本、内容读得回来；
+     * 「存成 Word」导出；关掉开关后不再给工具；旧版手机发来的设置不冲掉 Word / Excel 设置。
+     */
+    @Test
+    fun aiMakesWordAndExcel() = runBlocking {
+        val (e, ms) = engineWithMembers("小智")
+        // 副本存到测试目录（不然会存进这台电脑真正的「文档\AI集训营」）
+        val made = File(dir, "made-out")
+        e.call(Command.SaveSettings(e.state.settings.copy(office = e.state.settings.office.copy(saveFolder = made.path))))
+        val conv = e.call(Command.CreateConversation(listOf(ms[0].id))).data
+        e.call(Command.UpdateConversation(e.state.conversation(conv)!!.copy(webSearch = false)))
+        e.call(Command.SendMessage(conv, "把本周工作做成 Word"))
+        waitIdle(e, conv, 1)
+        val m = e.store.messages.value[conv]!!.last()
+        assertEquals("做好了，文件在下面。", m.content, m.error)
+        assertTrue(requests.any { "create_word" in it["tools"].toString() && "create_excel" in it["tools"].toString() })
+        val doc = m.attachments.single()
+        assertTrue(doc.generated)
+        assertEquals("周报.docx", doc.name)
+        assertEquals(made.canonicalFile, File(doc.savedPath).parentFile.canonicalFile)
+        assertTrue(File(doc.savedPath).isFile)
+        assertTrue("登录页改版" in com.guixing.jixunying.engine.DocExtract.extract(doc.name, e.fileBytes(doc.id)!!).first!!)
+        assertTrue(m.tools.any { it.kind == "file" && it.ok && it.input == "周报.docx" })
+        // 再做一份同名的：副本加 (2)，不覆盖
+        e.call(Command.SendMessage(conv, "再做成 Word"))
+        waitIdle(e, conv, 2)
+        assertTrue(File(made, "周报(2).docx").isFile)
+
+        e.call(Command.SendMessage(conv, "再做成表格"))
+        waitIdle(e, conv, 3)
+        val xls = e.store.messages.value[conv]!!.last().attachments.single()
+        assertEquals("销售.xlsx", xls.name)
+        val sheetText = com.guixing.jixunying.engine.DocExtract.extract(xls.name, e.fileBytes(xls.id)!!).first!!
+        assertTrue("合计" in sheetText && "12000" in sheetText, sheetText)
+
+        // 存成 Word：拿回答正文做文件；没有表格的回答存不成 Excel
+        val exp = e.call(Command.ExportMessage(conv, m.id, "docx"))
+        assertTrue(exp.ok, exp.message)
+        val f = AppJson.decodeFromString(com.guixing.jixunying.model.ExportedFile.serializer(), exp.data)
+        assertTrue(f.name.endsWith(".docx"))
+        assertTrue("文件在下面" in com.guixing.jixunying.engine.DocExtract.extract(f.name, Base64.getDecoder().decode(f.base64)).first!!)
+        assertFalse(e.call(Command.ExportMessage(conv, m.id, "xlsx")).ok)
+
+        // 旧版手机（不认识 office）改设置：保留电脑上的
+        val mine = e.state.settings.office
+        e.call(Command.SaveSettings(e.state.settings.copy(office = com.guixing.jixunying.model.OfficeSettings(), schema = 1)))
+        assertEquals(mine, e.state.settings.office)
+
+        // 关掉开关：不再给成员这两个工具
+        e.call(Command.SaveSettings(e.state.settings.copy(office = e.state.settings.office.copy(enabled = false))))
+        requests.clear()
+        e.call(Command.SendMessage(conv, "随便聊聊"))
+        waitIdle(e, conv, 4)
+        assertTrue(requests.none { "create_word" in it["tools"].toString() })
+    }
+
     /** 阶跃的画图接口 2026-10-10 下线：自己列出来的也不挑；以前指定过阶跃的，改按自动挑。 */
     @Test
     fun retiredImageModelsSkipped() {
@@ -958,6 +1021,17 @@ class EngineTest {
         assertTrue(texts.any { it["item_list"]!!.jsonArray[0].jsonObject["type"]!!.jsonPrimitive.content == "2" }, "画的图发回微信")
         assertTrue(wxSent.any { it.startsWith("cdn:up1:") }, "图片先加密传到 CDN")
         assertTrue(wxTyping.any { "\"status\":1" in it } && wxTyping.any { "\"status\":2" in it }, "正在输入 → 取消")
+
+        // 微信里要文件：AI 做的 Word 加密传到 CDN（media_type 3），再发一条文件消息（type 4，带文件名和明文长度）
+        e.call(Command.SaveSettings(e.state.settings.copy(office = e.state.settings.office.copy(saveFolder = File(dir, "made-wx").path))))
+        wxSent.clear()
+        wxInbox += msg(7, """{"type":1,"text_item":{"text":"把周报做成 Word"}}""")
+        withTimeout(20_000) { while (wxSent.none { "file_item" in it }) delay(50) }
+        assertTrue(wxSent.any { it.startsWith("upload:") && "\"media_type\":3" in it }, "文件按 media_type 3 上传")
+        val fileMsg = wxSent.first { "file_item" in it }.let { Json.parseToJsonElement(it).jsonObject["msg"]!!.jsonObject["item_list"]!!.jsonArray[0].jsonObject }
+        assertEquals("4", fileMsg["type"]!!.jsonPrimitive.content)
+        assertEquals("周报.docx", fileMsg["file_item"]!!.jsonObject["file_name"]!!.jsonPrimitive.content)
+        assertEquals("dl1", fileMsg["file_item"]!!.jsonObject["media"]!!.jsonObject["encrypt_query_param"]!!.jsonPrimitive.content)
 
         e.call(Command.WeixinLogout)
         assertFalse(e.state.weixin.bound)

@@ -60,3 +60,5 @@ actual fun extractPdfText(bytes: ByteArray): Pair<String?, String> {
         else text to "${doc.numberOfPages} 页"
     }
 }
+
+actual fun defaultSaveFolder(): java.io.File? = java.io.File(documentsDirs().firstOrNull() ?: java.io.File(home, "Documents"), "AI集训营")

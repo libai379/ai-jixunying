@@ -51,6 +51,7 @@ import androidx.compose.material.icons.rounded.Menu
 import androidx.compose.material.icons.rounded.Psychology
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Stop
+import androidx.compose.material.icons.rounded.TableChart
 import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -319,7 +320,8 @@ private fun AiMessage(ctl: AppController, state: AppState, m: Message,
             if (m.status == MsgStatus.ERROR) ErrorBox(m.error, ctl)
             if (m.status == MsgStatus.STOPPED) Text("（已停止）", style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle, modifier = Modifier.padding(top = 4.dp))
             if (sources.isNotEmpty() && m.status != MsgStatus.STREAMING) SourcesRow(sources)
-            if (m.status != MsgStatus.STREAMING) MessageActions(ctl, m, alignEnd = false, canRegenerate = true)
+            if (m.status != MsgStatus.STREAMING) MessageActions(ctl, m, alignEnd = false, canRegenerate = true,
+                export = state.settings.office.exportButtons && !painter && body.isNotBlank() && m.status == MsgStatus.DONE, body = body)
         }
     }
 }
@@ -344,7 +346,9 @@ private fun ToolStepsView(tools: List<ToolStep>, streaming: Boolean) {
     val docs = tools.count { it.kind == "doc" }
     val history = tools.count { it.kind == "history" }
     val memos = tools.count { it.kind == "memory" }
+    val files = tools.count { it.kind == "file" }
     val summary = buildList {
+        if (files > 0) add("做了 $files 个文件")
         if (searches > 0) add("联网搜了 $searches 次")
         if (pages > 0) add("读了 $pages 个网页")
         if (docs > 0) add("查了 $docs 次文档")
@@ -383,6 +387,7 @@ private fun ToolStepView(t: ToolStep) {
         "memory" -> Icons.Rounded.Psychology to (if (t.ok) "记住了：${t.input.take(40)}" else "没记：${t.input.take(40)}")
         "history" -> Icons.Rounded.History to (if (t.ok) "翻了以前的聊天「${t.input.take(24)}」" else "以前的聊天里没找到「${t.input.take(24)}」")
         "doc" -> Icons.Rounded.FolderOpen to (if (t.ok) t.input.take(60) else "${t.input.take(50)}（没找到）")
+        "file" -> Icons.Rounded.Description to (if (t.ok) "做了文件《${t.input.take(50)}》" else "文件没做成：${t.input.take(40)}")
         else -> Icons.Rounded.Brush to (if (t.ok) "画图：${t.input.take(40)}" else "画图失败")
     }
     Column(Modifier.padding(bottom = 6.dp)) {
@@ -481,14 +486,24 @@ private fun ErrorBox(error: String, ctl: AppController) {
 }
 
 @Composable
-private fun MessageActions(ctl: AppController, m: Message, alignEnd: Boolean, canRegenerate: Boolean) {
+private fun MessageActions(ctl: AppController, m: Message, alignEnd: Boolean, canRegenerate: Boolean, export: Boolean = false, body: String = "") {
     val clipboard = LocalClipboardManager.current
+    val platform = LocalPlatform.current
+    // 像豆包的导出：这条回答存成 Word；里面有表格的话，表格存成 Excel
+    fun export(fmt: String) = ctl.run(Command.ExportMessage(m.convId, m.id, fmt), quiet = true) { r ->
+        if (!r.ok) { ctl.toast(r.message); return@run }
+        val f = runCatching { com.guixing.jixunying.model.AppJson.decodeFromString(com.guixing.jixunying.model.ExportedFile.serializer(), r.data) }.getOrNull() ?: return@run
+        ctl.scope.launch { if (platform.saveFile(f.name, kotlin.io.encoding.Base64.decode(f.base64))) ctl.toast("已保存《${f.name}》") }
+    }
+    val hasTable = export && remember(body) { Regex("""(?m)^\s*\|?\s*:?-{3,}:?\s*\|""").containsMatchIn(body) }
     Row(
         Modifier.padding(top = 4.dp),
         horizontalArrangement = if (alignEnd) Arrangement.End else Arrangement.Start,
         verticalAlignment = Alignment.CenterVertically,
     ) {
         if (m.content.isNotBlank()) SmallAction(Icons.Rounded.ContentCopy, "复制") { clipboard.setText(AnnotatedString(splitThink(m.content).first)); ctl.toast("已复制") }
+        if (export) SmallAction(Icons.Rounded.Description, "存成 Word") { export("docx") }
+        if (hasTable) SmallAction(Icons.Rounded.TableChart, "表格存成 Excel") { export("xlsx") }
         // 自己说的话：放回输入框改一改再发（和豆包、ChatGPT 一样）
         if (m.role == Role.USER && m.content.isNotBlank()) SmallAction(Icons.Rounded.Edit, "改了重发") { ctl.composerDraft = m.convId to m.content }
         if (canRegenerate) SmallAction(Icons.Rounded.Refresh, "重新回答") { ctl.run(Command.Regenerate(m.convId, m.id)) }
@@ -552,9 +567,54 @@ private fun AttachmentStrip(ctl: AppController, atts: List<Attachment>, alignEnd
                 }
             }
         }
-        docs.forEach { a -> DocChip(a) }
+        docs.forEach { a -> if (a.generated) MadeFileChip(ctl, a) else DocChip(a) }
     }
     preview?.let { ImagePreview(ctl, it) { preview = null } }
+}
+
+/** AI 做的 Word / Excel：点一下用 Word / WPS 打开，右边「另存为」。 */
+@Composable
+private fun MadeFileChip(ctl: AppController, a: Attachment) {
+    val platform = LocalPlatform.current
+    val scope = rememberCoroutineScope()
+    var busy by remember { mutableStateOf(false) }
+    fun open() {
+        if (busy) return
+        busy = true
+        scope.launch {
+            // 文件做在这台设备上：直接打开存好的副本；遥控电脑时先把文件取过来
+            val here = ctl.backend === ctl.hub.local && a.savedPath.isNotEmpty() && platform.openFile(a.savedPath)
+            val ok = here || (ctl.backend.fileBytes(a.id)?.let { platform.openBytes(a.name, it) } == true)
+            if (!ok) {
+                val bytes = ctl.backend.fileBytes(a.id)
+                if (bytes == null) ctl.toast("文件取不到") else if (platform.saveFile(a.name, bytes)) ctl.toast("已保存《${a.name}》")
+            }
+            busy = false
+        }
+    }
+    Row(
+        Modifier.clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.surface).border(1.dp, Ext.c.border, RoundedCornerShape(12.dp))
+            .clickable { open() }.padding(start = 10.dp, end = 4.dp, top = 8.dp, bottom = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        val ext = a.name.substringAfterLast('.', "").uppercase().take(4)
+        Box(Modifier.size(36.dp).clip(RoundedCornerShape(8.dp)).background(docColor(ext)), contentAlignment = Alignment.Center) {
+            if (busy) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp, color = Color.White)
+            else Text(if (ext == "XLSX") "表" else if (ext == "DOCX") "文" else ext, color = Color.White, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+        }
+        Spacer(Modifier.width(10.dp))
+        Column(Modifier.widthIn(max = 280.dp)) {
+            Text(a.name, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(listOf(formatSize(a.size), a.note).filter { it.isNotBlank() }.joinToString(" · ") + " · 点一下打开",
+                style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+        IconButton(onClick = {
+            scope.launch {
+                val bytes = ctl.backend.fileBytes(a.id)
+                if (bytes == null) ctl.toast("文件取不到") else if (platform.saveFile(a.name, bytes)) ctl.toast("已保存《${a.name}》")
+            }
+        }, Modifier.size(34.dp)) { Icon(Icons.Rounded.Download, "另存为", Modifier.size(18.dp), tint = Ext.c.subtle) }
+    }
 }
 
 @Composable

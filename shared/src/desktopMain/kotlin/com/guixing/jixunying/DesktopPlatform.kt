@@ -58,6 +58,15 @@ class DesktopPlatform(private val window: () -> Frame?) : Platform {
 
     override fun openFile(path: String): Boolean = runCatching { Desktop.getDesktop().open(File(path)); true }.getOrDefault(false)
 
+    override suspend fun openBytes(name: String, bytes: ByteArray): Boolean = withContext(Dispatchers.IO) {
+        runCatching {
+            val dir = File(System.getProperty("java.io.tmpdir"), "AI集训营").apply { mkdirs() }
+            val f = File(dir, name.replace(Regex("""[\\/:*?"<>|]"""), "_"))
+            f.writeBytes(bytes)
+            openFile(f.absolutePath)
+        }.getOrDefault(false)
+    }
+
     override suspend fun pickFolder(): String? = withContext(Dispatchers.Swing) {
         // 文件夹选择框用 Windows 自己的样式，别用 Java 默认那套
         runCatching { javax.swing.UIManager.setLookAndFeel(javax.swing.UIManager.getSystemLookAndFeelClassName()) }

@@ -14,3 +14,6 @@ expect fun weixinDocRoots(): List<java.io.File>
 
 /** 手机上还没给「所有文件访问」权限（读不了别的 App 存的文档）。 */
 expect fun docAccessMissing(): Boolean
+
+/** AI 做的 Word / Excel 默认另存到哪：电脑是「文档\AI集训营」，手机返回 null（存在应用自己的目录里）。 */
+expect fun defaultSaveFolder(): java.io.File?

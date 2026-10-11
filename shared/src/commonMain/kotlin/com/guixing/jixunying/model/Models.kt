@@ -220,6 +220,8 @@ data class Settings(
     val docs: DocSettings = DocSettings(),
     val weixin: WeixinSettings = WeixinSettings(),
     val costs: CostSettings = CostSettings(),
+    /** AI 做 Word / Excel 文件（1.5.0）。 */
+    val office: OfficeSettings = OfficeSettings(),
     /**
      * 发设置的这一端认得哪一版设置。旧版手机不认识这个字段，发来的就是 0；
      * 电脑看到 0 就保留旧版不认识的那几项（不然手机一改设置就把电脑上的冲回默认值）。
@@ -227,10 +229,51 @@ data class Settings(
     val schema: Int = 0,
 ) {
     companion object {
-        /** 1.4.0 加了裁判和 AI 核实的设置。以后再加旧版不认识的设置项，就加一，并在 SaveSettings 里保留。 */
-        const val SCHEMA = 1
+        /**
+         * 1 = 1.4.0 加了裁判和 AI 核实；2 = 1.5.0 加了 office（Word / Excel）。
+         * 以后再加旧版不认识的设置项，就加一，并在 SaveSettings 里保留。
+         */
+        const val SCHEMA = 2
     }
 }
+
+/**
+ * 设置 → Word / Excel：AI 做文件时怎么排版（用户 10-08：「做精细，人性化智能化，后台多做开关我可以主动调试」）。
+ * AI 这次另外指定的（比如「用公文格式」「横向」）优先。
+ */
+@Serializable
+data class OfficeSettings(
+    /** 成员能做 Word / Excel 文件（多两个工具）。 */
+    val enabled: Boolean = true,
+    /** Word 样式：general 通用（微软雅黑）/ formal 正式（宋体正文、黑体标题、首行缩进）/ official 公文（仿宋三号、固定行距 28 磅）。 */
+    val wordStyle: String = "general",
+    /** 正文首行缩进两个字（选样式时跟着样式变，也能单独改）。 */
+    val firstLineIndent: Boolean = false,
+    /** 页脚加页码。 */
+    val pageNumbers: Boolean = true,
+    /** 页眉写文档标题。 */
+    val headerTitle: Boolean = false,
+    /** 标题多（4 个以上）时开头自动加目录。 */
+    val autoToc: Boolean = true,
+    /** Excel 表头加粗、加底色。 */
+    val excelHeaderStyle: Boolean = true,
+    /** Excel 冻结表头（往下翻表头不动）。 */
+    val excelFreeze: Boolean = true,
+    /** Excel 表头加筛选按钮。 */
+    val excelFilter: Boolean = true,
+    /** Excel 隔行浅色底纹。 */
+    val excelZebra: Boolean = false,
+    /** 大于一千的数字加千分位逗号。 */
+    val excelThousands: Boolean = true,
+    /** 文件名后面加日期（周报-20261010.docx）。 */
+    val dateInName: Boolean = false,
+    /** 电脑上：做好后另存一份到文件夹。 */
+    val autoSave: Boolean = true,
+    /** 另存到哪个文件夹（空 = 文档\AI集训营）。 */
+    val saveFolder: String = "",
+    /** 每条回答下面显示「存成 Word」，有表格的再显示「表格存成 Excel」。 */
+    val exportButtons: Boolean = true,
+)
 
 @Serializable
 enum class ReplyMode {
@@ -283,7 +326,15 @@ data class Attachment(
     /** 文档抽出来的文字有多少字（0 表示没抽出来）。 */
     val textChars: Int = 0,
     val note: String = "",
+    /** AI 做的文件（Word / Excel）：在回答下面显示成能打开的文件，微信里也发回去。 */
+    val generated: Boolean = false,
+    /** 做文件的那台设备上另存的副本（带真名字，点开就用 Word / WPS 打开）；别的设备用不了这个路径。 */
+    val savedPath: String = "",
 )
+
+/** 导出的文件（「存成 Word」）：文件名 + base64 内容，界面拿去另存。 */
+@Serializable
+data class ExportedFile(val name: String, val base64: String)
 
 @Serializable
 data class SearchSource(val title: String, val url: String, val snippet: String = "")
