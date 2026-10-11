@@ -244,7 +244,8 @@ object OfficeWriter {
     fun word(markdown: String, s: OfficeSettings, o: WordOptions = WordOptions()): Made {
         val styleId = o.style.ifBlank { s.wordStyle }
         val lk = look(styleId)
-        val indent = o.firstLineIndent ?: s.firstLineIndent
+        // AI 这次指定了别的样式（比如设置是通用、用户说「用公文格式」）：缩进跟那套样式走
+        val indent = o.firstLineIndent ?: if (o.style.isNotBlank() && o.style != s.wordStyle) lk.indentDefault else s.firstLineIndent
         var blocks = parse(markdown)
         // 标题：AI 给了就用；没给、而且只有开头一个一级标题，就把它当文档标题
         var title = plain(o.title).trim()
@@ -260,7 +261,8 @@ object OfficeWriter {
         val shift = (minLevel - 1).coerceAtLeast(0)
         fun lvl(h: Md.Heading) = (h.level - shift).coerceIn(1, 4)
         val headings = blocks.filterIsInstance<Md.Heading>()
-        val toc = o.toc ?: (s.autoToc && headings.size >= 4)
+        // 自动目录：长文档（3000 字以上）、标题 4 个以上才加，短的加了反而多一页
+        val toc = o.toc ?: (s.autoToc && headings.size >= 4 && markdown.length >= 3000)
 
         val links = mutableListOf<String>()
         val nums = mutableListOf<Int>()   // 每个有序列表一个编号实例（起始号）
@@ -426,7 +428,12 @@ object OfficeWriter {
             val vals = t.rows.map { it.getOrElse(c) { "" }.trim() }.filter { it.isNotEmpty() && it != "-" && it != "—" }
             vals.isNotEmpty() && vals.all { cellValue(plain(it)) is CellVal.Num }
         }
-        fun jc(c: Int) = when (t.aligns.getOrElse(c) { ' ' }) { 'c' -> "center"; 'r' -> "right"; 'l' -> "left"; else -> if (numeric[c]) "right" else "left" }
+        // 日期列居中
+        val dates = (0 until cols).map { c ->
+            val vals = t.rows.map { it.getOrElse(c) { "" }.trim() }.filter { it.isNotEmpty() }
+            vals.isNotEmpty() && vals.all { (cellValue(plain(it)) as? CellVal.Num)?.fmt == "yyyy-mm-dd" }
+        }
+        fun jc(c: Int) = when (t.aligns.getOrElse(c) { ' ' }) { 'c' -> "center"; 'r' -> "right"; 'l' -> "left"; else -> if (dates[c]) "center" else if (numeric[c]) "right" else "left" }
         val sz = """<w:sz w:val="${lk.tableSize}"/><w:szCs w:val="${lk.tableSize}"/>"""
         val cellPpr = """<w:spacing w:before="0" w:after="0" w:line="276" w:lineRule="auto"/><w:ind w:firstLineChars="0" w:firstLine="0"/>"""
         val sb = StringBuilder()

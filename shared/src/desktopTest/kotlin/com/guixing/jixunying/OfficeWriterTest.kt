@@ -84,14 +84,14 @@ class OfficeWriterTest {
     @Test
     fun wordInThreeStyles() {
         for (style in listOf("general", "formal", "official")) {
-            val made = OfficeWriter.word(report, OfficeSettings(wordStyle = style, headerTitle = true), OfficeWriter.WordOptions())
+            val made = OfficeWriter.word(report, OfficeSettings(wordStyle = style, headerTitle = true), OfficeWriter.WordOptions(toc = true))
             val p = parts(made.bytes)
             p.forEach { (n, x) -> if (n.endsWith(".xml") || n.endsWith(".rels")) wellFormed(n, x) }
             val doc = p["word/document.xml"]!!
             // 第一个一级标题当文档标题；## 提成一级标题；有目录、分页、表头重复、超链接
             assertTrue("""<w:pStyle w:val="Title"/>""" in doc)
             assertTrue("""<w:pStyle w:val="Heading1"/>""" in doc && """<w:pStyle w:val="Heading2"/>""" in doc)
-            assertTrue("TOC \\o" in doc, "4 个标题以上自动加目录")
+            assertTrue("TOC \\o" in doc, "要目录就有目录")
             assertTrue("""<w:br w:type="page"/>""" in doc)
             assertTrue("<w:tblHeader/>" in doc)
             assertTrue("<w:hyperlink" in doc && "https://example.com/p" in p["word/_rels/document.xml.rels"]!!)
@@ -104,6 +104,11 @@ class OfficeWriterTest {
             if (style == "official") assertTrue("仿宋" in p["word/styles.xml"]!! && """w:lineRule="exact"""" in p["word/styles.xml"]!!)
             out?.let { File(it, "报告-$style.docx").writeBytes(made.bytes) }
         }
+        // 短文档（不到 3000 字）不自动加目录；设置是通用、AI 指定公文：正文跟公文首行缩进
+        val short = OfficeWriter.word(report, OfficeSettings(), OfficeWriter.WordOptions(style = "official"))
+        val sp = parts(short.bytes)
+        assertTrue("TOC \\o" !in sp["word/document.xml"]!!)
+        assertTrue("w:firstLineChars=\"200\"" in sp["word/styles.xml"]!!.substringAfter("w:styleId=\"Normal\"").substringBefore("</w:style>"))
         // 横向、指定页眉、不要目录
         val wide = OfficeWriter.word("## 一\n正文\n## 二\n## 三\n## 四", OfficeSettings(), OfficeWriter.WordOptions(title = "横向测试", header = "内部资料", landscape = true, toc = false))
         val d = parts(wide.bytes)["word/document.xml"]!!
