@@ -39,6 +39,7 @@ object UsageKinds {
         "memory" -> "挑长期记忆"
         "addressing" -> "点名判断"
         "stances" -> "立场档案"
+        "council" -> "会审（互评、汇总）"
         IMAGE -> "画图"
         TEST -> "测试连通"
         else -> "其他"

@@ -74,6 +74,8 @@ import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
 const val PAINTER_ID = "tool:image"
+/** 会审模式里写汇总的「主席」（用裁判模型，不是成员）。 */
+const val CHAIR_ID = "tool:chair"
 
 /** 一次回答最多调几次工具（搜索、读网页、画图）。 */
 const val MAX_TOOL_USES = 8
@@ -748,6 +750,7 @@ class Engine(
     private fun speakerName(m: Message) = when {
         m.role == Role.USER -> state.profile.name
         m.senderId == PAINTER_ID -> "画图助手"
+        m.senderId == CHAIR_ID -> "会审主席"
         else -> state.member(m.senderId)?.name ?: "已移除的成员"
     }
 
@@ -921,7 +924,9 @@ class Engine(
             conv.replyMode == ReplyMode.MENTION_ONLY -> listOf(members.first())
             else -> members
         }
-        val independent = targets.size > 1 && conv.replyMode != ReplyMode.RELAY
+        // 会审模式：对大家提的问题（不是只叫了某几位）走「独立回答 → 匿名互评 → 主席汇总」，不接力
+        val council = conv.council && targets.size > 1 && mentioned.isEmpty() && named.isEmpty()
+        val independent = targets.size > 1 && (conv.replyMode != ReplyMode.RELAY || council)
         var produced: List<Message> = if (independent) {
             coroutineScope {
                 targets.map { m -> async { reply(convId, m, cutoffId = trigger.id, independent = true, calledBy = null) } }.awaitAll()
@@ -932,6 +937,8 @@ class Engine(
         val firstAnswers = produced
         val all = produced.toMutableList()
         val calledBy = mutableMapOf<String, String>()
+        val councilMsgs = if (council) runCouncil(convId, trigger, firstAnswers) else emptyList()
+        if (council) produced = emptyList()
 
         // AI 之间互相 @：被 @ 的接着说，最多接力 maxMentionChain 轮
         var depth = 0
@@ -953,7 +960,78 @@ class Engine(
             val round = all.toList()
             scope.launch { guard(BgJob.STANCES, convId) { judgeStances(convId, trigger, round, independentIds, calledBy.toMap()) } }
         }
-        return all
+        // 微信里：互评太长不发，发各自的回答和主席汇总
+        return all + councilMsgs.filter { it.stage != "review" }
+    }
+
+    // ———————————————— 会审模式（1.5.0） ————————————————
+
+    /**
+     * 第一轮各自答完以后：匿名互评（每位答了的成员各评一次，同时跑）→ 主席汇总（裁判模型）。
+     * 互评和汇总里的「回答甲」等最后换回真名再给人看；名次由程序算平均名次。
+     */
+    private suspend fun runCouncil(convId: String, ask: Message, answers: List<Message>): List<Message> {
+        val done = answers.filter { it.status == MsgStatus.DONE && stripThink(it.content).isNotBlank() }
+        if (done.size < 2) return emptyList()
+        val conv = state.conversation(convId) ?: return emptyList()
+        // 打乱顺序（按这句话的编号定，同一句话每次一样），代号甲乙丙
+        val order = done.shuffled(kotlin.random.Random(ask.id.hashCode()))
+        val texts = order.mapIndexed { i, m -> Council.letters[i] to stripThink(m.content) }
+        val names = order.mapIndexed { i, m -> Council.letters[i] to speakerName(m) }.toMap()
+        val reviewers = done.mapNotNull { state.member(it.senderId) }.distinctBy { it.id }
+        val prompt = Council.reviewPrompt(ask.content, texts)
+        val reviews = coroutineScope {
+            reviewers.map { mb ->
+                async {
+                    val p = state.provider(mb.providerId)
+                    val thinking = p?.let { if (llm.thinkingDropped(it, mb.modelId)) null else Thinking.params(Thinking.rule(it, mb.modelId), mb.thinking) }
+                    val sys = Prompts.system(state, conv, mb, canSearch = false, canDraw = false, canSeeImages = false,
+                        independentRound = false, calledBy = null, hasImageModel = false)
+                    singleShot(convId, mb.id, p, mb.modelId, Prompts.modelLabel(state, mb) + "· 互评", "review", sys, prompt,
+                        mb.temperature, thinking, UsageTag("council", mb.id, convId))
+                }
+            }.awaitAll()
+        }.filterNotNull()
+        val rankings = reviews.mapNotNull { Council.parseRanking(stripThink(it.content), order.size) }
+        val avg = Council.averageRanks(rankings, order.size)
+        val judge = com.guixing.jixunying.model.JudgePick.pick(state)
+        val chairText = Council.chairPrompt(ask.content, texts, reviews.map { stripThink(it.content) }, avg)
+        val chair = singleShot(convId, CHAIR_ID, judge?.first, judge?.second.orEmpty(),
+            judge?.let { "${it.second}（${it.first.name}）· 主席" }.orEmpty(), "chair",
+            "你是一位中立、严谨的主席，用中文回答，可以用 Markdown。", chairText, null, null, UsageTag("council", "", convId),
+            missing = "没有能当主席的模型：到 设置 → 记忆 → 立场档案 选一个裁判（默认 DeepSeek-V4.1-Flash）")
+        // 名次表程序写（不靠模型抄），跟在汇总后面；代号换回真名
+        val rankTable = if (avg.isEmpty()) "" else "\n\n---\n**互评名次**（${rankings.size} 份互评的平均名次，越小越好）：" +
+            avg.entries.sortedBy { it.value }.joinToString("；") { "${names[Council.letters[it.key]]} ${"%.1f".format(it.value)}" }
+        val out = mutableListOf<Message>()
+        for (r in reviews) updateMessage(convId, r.id) { it.copy(content = Council.reveal(it.content, names)) }?.let(out::add)
+        if (chair != null) updateMessage(convId, chair.id) { it.copy(content = Council.reveal(it.content, names) + rankTable) }?.let(out::add)
+        return out
+    }
+
+    /** 流式问一次模型，写进一条新消息（会审的互评、主席汇总用）。出错写在这条消息上，返回 null。 */
+    private suspend fun singleShot(convId: String, senderId: String, provider: ProviderConfig?, modelId: String, label: String, stage: String,
+                                   system: String, user: String, temperature: Double?, thinking: JsonObject?, tag: UsageTag,
+                                   missing: String = "还没配置模型"): Message? {
+        val msg = Message(newId(), convId, Role.AI, senderId, status = MsgStatus.STREAMING, createdAt = now(), modelLabel = label, stage = stage)
+        addMessage(msg)
+        if (provider == null || modelId.isBlank()) {
+            updateMessage(convId, msg.id) { it.copy(status = MsgStatus.ERROR, error = missing) }
+            return null
+        }
+        return try {
+            val r = withContext(tag) {
+                llm.chat(provider, modelId, listOf(buildJsonObject { put("role", "system"); put("content", system) }, userMsg(user)),
+                    temperature, null, thinking = thinking) { c, rs -> appendDelta(convId, msg.id, c, rs) }
+            }
+            updateMessage(convId, msg.id) { it.copy(status = MsgStatus.DONE, usage = r.usage) }
+        } catch (e: CancellationException) {
+            withContext(NonCancellable) { updateMessage(convId, msg.id) { it.copy(status = MsgStatus.STOPPED) } }
+            throw e
+        } catch (e: Throwable) {
+            updateMessage(convId, msg.id) { it.copy(status = MsgStatus.ERROR, error = friendlyError(e, provider)) }
+            null
+        }
     }
 
     /** 点名：没有 @ 时，看是不是直接喊了某几位成员的名字。开头直接喊的程序认；别的说法问记录员的模型，判断不了就当对大家说。 */
@@ -1008,7 +1086,7 @@ class Engine(
         lock.withLock {
             val current = snapshot(convId).associateBy { it.id }
             val said = round.mapNotNull { current[it.id] }.filter {
-                it.role == Role.AI && it.status == MsgStatus.DONE && it.senderId != PAINTER_ID && stripThink(it.content).isNotBlank()
+                it.role == Role.AI && it.status == MsgStatus.DONE && it.senderId != PAINTER_ID && it.senderId != CHAIR_ID && it.stage.isEmpty() && stripThink(it.content).isNotBlank()
             }
             if (said.isEmpty()) return
             val open = topicsOf(convId).sortedBy { it.createdAt }.takeLast(3)
@@ -1318,6 +1396,8 @@ class Engine(
         if (idx < 0) return CommandResult(false, "消息不存在")
         val old = all[idx]
         if (old.role != Role.AI) return CommandResult(false, "只能重新生成 AI 的回答")
+        // 会审的互评和汇总靠整轮的回答，单独重答对不上：要重来就把问题再发一次
+        if (old.stage.isNotEmpty() || old.senderId == CHAIR_ID) return CommandResult(false, "会审的互评和主席汇总不能单独重答，把问题再发一次就会重新会审")
         val list = messages(convId)
         synchronized(list) { list.removeAll { it.id == messageId } }
         emit(Event.MessageRemoved(convId, messageId))
@@ -1948,8 +2028,9 @@ class Engine(
             val speaker = when {
                 m.role == Role.USER -> profile.name
                 m.senderId == PAINTER_ID -> "画图助手"
+                m.senderId == CHAIR_ID -> "会审主席"
                 else -> state.member(m.senderId)?.name ?: "已移除的成员"
-            }
+            } + if (m.stage == "review") "·互评" else ""
             val sb = StringBuilder()
             if (!mine) sb.append("【").append(speaker).append("】")
             sb.append(stripThink(m.content))

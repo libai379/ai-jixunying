@@ -81,6 +81,8 @@ class ShotsTest {
             Conversation("c3", "画一只在月球上喝茶的橘猫", listOf("md"), createdAt = now - 90_000_000, updatedAt = now - 86_000_000),
             Conversation("c4", "新对话", listOf("mc"), createdAt = now - 900_000_000, updatedAt = now - 800_000_000),
             Conversation("c6", "聊了很久的对话", listOf("ma"), createdAt = now - 950_000_000, updatedAt = now - 900_000_000),
+            Conversation("c7", "会审：先学 Python 还是 Java", listOf("ma", "mb"), ReplyMode.INDEPENDENT, createdAt = now - 960_000_000, updatedAt = now - 950_000_000,
+                council = true),
         )
         val st = Storage(root)
         st.saveState(AppState(
@@ -179,6 +181,18 @@ class ShotsTest {
                         com.guixing.jixunying.model.StanceEntry("mc", "r5c", "u7", "A", first = true, time = t0 - 600_000),
                     ), createdAt = t0 - 590_000, updatedAt = t0 - 590_000),
             )), Charsets.UTF_8)
+        // 会审：两位各答 → 两份互评（默认折叠）→ 主席汇总
+        val tc = now - 955_000_000L
+        st.saveMessages("c7", listOf(
+            Message("u7", "c7", Role.USER, USER_ID, "零基础想转行做数据分析，先学 Python 还是 Java？", createdAt = tc),
+            Message("r7a", "c7", Role.AI, "ma", "**先学 Python。** 数据分析的主流工具（pandas、Jupyter）都是 Python 的，入门快。", createdAt = tc + 1000, modelLabel = "deepseek-flash（DeepSeek 4.1 Flash）"),
+            Message("r7b", "c7", Role.AI, "mb", "**看目标岗位。** 去大厂做数据开发要会 Java / Scala；只做分析报表，Python 加 SQL 就够。", createdAt = tc + 1100, modelLabel = "MiniMax-M3（MiniMax 中国版）"),
+            Message("v7a", "c7", Role.AI, "ma", "阿麦（回答乙）提到 SQL，这点很重要，我（回答甲）漏了。\n\n名次：乙 > 甲", createdAt = tc + 2000, modelLabel = "deepseek-flash · 互评", stage = "review"),
+            Message("v7b", "c7", Role.AI, "mb", "阿德（回答甲）的结论对，但没说 SQL。\n\n名次：甲 > 乙", createdAt = tc + 2100, modelLabel = "MiniMax-M3 · 互评", stage = "review"),
+            Message("h7", "c7", Role.AI, "tool:chair", "**结论：先学 Python 和 SQL。** 只做数据分析不需要 Java。\n\n- **首轮分歧**：两种说法——阿德（回答甲）说先学 Python；阿麦（回答乙）说看岗位。\n" +
+                "- **依据**：分析岗的日常工具是 pandas、SQL、Excel；Java 主要在数据开发岗。\n- **少数派意见**：阿麦提醒「看岗位」有道理——想进大厂数据开发，后面要补 Java。\n- **还不确定**：你的目标岗位。\n\n---\n**互评名次**（2 份互评的平均名次，越小越好）：阿德 1.5；阿麦 1.5",
+                createdAt = tc + 3000, modelLabel = "deepseek-flash（DeepSeek 4.1 Flash）· 主席", stage = "chair"),
+        ))
         // 聊了很久的对话：打开时要停在最新一条的最后一行（以前停在最上面）
         st.saveMessages("c6", (1..15).flatMap { i ->
             val at = now - 950_000_000L + i * 60_000L
@@ -267,11 +281,11 @@ class ShotsTest {
 
         val wide = listOf(
             "chat" to "conv:c1", "chat-image" to "conv:c3", "newchat" to "newchat", "docs" to "docs", "costs" to "costs",
-            "stances" to "stances", "chat-stances" to "conv:c5", "chat-stances-dialog" to "conv:c5#stances", "chat-long" to "conv:c6",
+            "stances" to "stances", "chat-stances" to "conv:c5", "chat-stances-dialog" to "conv:c5#stances", "chat-long" to "conv:c6", "chat-council" to "conv:c7",
         ) + com.guixing.jixunying.ui.SettingsTab.entries.map { "settings-" + it.name.lowercase() to "settings:${it.name}" } +
             listOf("provider-add" to "settings:PROVIDERS#add")
         for ((name, start) in wide) shoot("desktop-$name", 1280, 820, 1f, hub, desktop, start)
-        val narrow = listOf("chat" to "conv:c1", "chat-long" to "conv:c6", "docs" to "docs", "stances" to "stances", "chat-stances" to "conv:c5", "costs" to "costs",
+        val narrow = listOf("chat" to "conv:c1", "chat-long" to "conv:c6", "chat-council" to "conv:c7", "docs" to "docs", "stances" to "stances", "chat-stances" to "conv:c5", "costs" to "costs",
             "settings-home" to "settingshome", "settings-image" to "settings:IMAGE",
             "settings-memory" to "settings:MEMORY", "settings-weixin" to "settings:WEIXIN", "settings-providers" to "settings:PROVIDERS",
             "settings-search" to "settings:SEARCH", "settings-profile" to "settings:PROFILE", "settings-office" to "settings:OFFICE")
@@ -279,6 +293,7 @@ class ShotsTest {
 
         // 弹窗
         shoot("desktop-convsettings", 1280, 820, 1f, hub, desktop, "conv:c1#convsettings")
+        shoot("desktop-convsettings-tall", 1280, 1300, 1f, hub, desktop, "conv:c7#convsettings")
         shoot("desktop-member-edit", 1280, 820, 1f, hub, desktop, "settings:MEMBERS#edit")
         shoot("phone-convsettings", 824, 1784, 2f, hub, phone, "conv:c1#convsettings")
         shoot("phone-settings-members", 824, 1784, 2f, hub, phone, "settings:MEMBERS")

@@ -315,6 +315,11 @@ data class Conversation(
     val stanceTopics: Int = 0,
     /** 立场档案最近一次变化的时间，界面看到它变了就重新取。 */
     val stanceAt: Long = 0,
+    /**
+     * 会审模式（1.5.0，构想.md 第二节）：对大家提的问题，各自独立回答 → 匿名互评 → 主席汇总（写出分歧和少数派）。
+     * 不做成 ReplyMode 的新值：旧版手机解不开新的枚举值，整个状态都会读坏；新加的字段旧版直接忽略。
+     */
+    val council: Boolean = false,
 ) {
     val isGroup: Boolean get() = memberIds.size > 1
 }
@@ -381,6 +386,8 @@ data class Message(
     /** 发言时用的模型，留档（成员以后换模型也能看出当时是谁答的）。 */
     val modelLabel: String = "",
     val usage: Usage? = null,
+    /** 会审模式里这是哪一步："" 普通回答，"review" 匿名互评，"chair" 主席汇总。 */
+    val stage: String = "",
 )
 
 /** 和这台电脑配对过的手机。key 是两边共享的加密密钥（Base64），只存在电脑和那台手机上。 */

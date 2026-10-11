@@ -158,6 +158,9 @@ class EngineTest {
                             write("data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n")
                         }
                         when {
+                            // —— 会审：互评（看到的是代号）、主席汇总 ——
+                            "请做互评" in lastText -> say("回答甲：说得对。回答乙：也对，但没说理由。\n名次：甲 > 乙")
+                            "中立、严谨的主席" in firstText -> say("结论：1.5 大。首轮分歧：回答甲和回答乙一致。少数派：没有。")
                             // —— 记录员 ——
                             "你是聊天记录员" in firstText -> say("## 话题\n测试话题\n## 已经定下的结论\n摘要里的结论")
                             "找出值得长期记住的" in firstText -> say("""好的：[{"text":"在北京做产品经理","kind":"关于我","replaces":null}]""")
@@ -833,6 +836,45 @@ class EngineTest {
         e.call(Command.SendMessage(conv, "随便聊聊"))
         waitIdle(e, conv, 5)
         assertTrue(requests.none { "create_word" in it["tools"].toString() || "create_ppt" in it["tools"].toString() })
+    }
+
+    /**
+     * 会审模式（1.5.0）：对大家提的问题，各自回答 → 匿名互评（看到的是「回答甲 / 乙」）→ 主席（裁判模型）汇总，
+     * 代号最后换回真名，名次由程序算；立场档案只记第一轮；会审消息不能单独重答；只叫一位时照常回答。
+     */
+    @Test
+    fun councilMode() = runBlocking {
+        val (e, ms) = engineWithMembers("小智", "小米")
+        val s0 = e.state.settings
+        e.call(Command.SaveSettings(s0.copy(memory = s0.memory.copy(judgeProviderId = "p1", judgeModelId = "fake-chat"))))
+        val conv = e.call(Command.CreateConversation(ms.map { it.id })).data
+        e.call(Command.UpdateConversation(e.state.conversation(conv)!!.copy(council = true, webSearch = false)))
+        requests.clear()
+        e.call(Command.SendMessage(conv, "1.5 和 1.12 哪个大？"))
+        withTimeout(30_000) {
+            while (e.store.messages.value[conv].orEmpty().filter { it.role == Role.AI }.let { ai -> ai.size < 5 || ai.any { it.status == MsgStatus.STREAMING } }) delay(50)
+        }
+        val ai = e.store.messages.value[conv]!!.filter { it.role == Role.AI }
+        val reviews = ai.filter { it.stage == "review" }
+        val chair = ai.single { it.stage == "chair" }
+        assertEquals(2, ai.count { it.stage.isEmpty() }, "两位各自先答")
+        assertEquals(2, reviews.size, "两位各评一次")
+        assertEquals(com.guixing.jixunying.engine.CHAIR_ID, chair.senderId)
+        assertTrue(requests.any { r -> r["messages"].toString().let { "请做互评" in it && "【回答甲】" in it && "【回答乙】" in it } }, "互评看到的是代号")
+        assertTrue(reviews.all { "小智（回答" in it.content || "小米（回答" in it.content }, "给人看时换回真名：${reviews.map { it.content }}")
+        assertTrue("互评名次" in chair.content && "1.0" in chair.content && "2.0" in chair.content, chair.content)
+        assertTrue(chair.content.contains("小智") && chair.content.contains("小米"))
+        // 主席汇总、互评不能单独重答
+        assertFalse(e.call(Command.Regenerate(conv, chair.id)).ok)
+        assertFalse(e.call(Command.Regenerate(conv, reviews.first().id)).ok)
+        // 立场档案只拿第一轮的回答给裁判看
+        withTimeout(10_000) { while (requests.none { "立场档案" in it["messages"].toString() }) delay(50) }
+        assertTrue(requests.filter { "立场档案" in it["messages"].toString() }.none { "请做互评" in it["messages"].toString() || "会审主席" in it["messages"].toString() })
+        // 只叫一位：照常回答，不会审
+        e.call(Command.SendMessage(conv, "@小智 你再说说"))
+        waitIdle(e, conv, 6)
+        delay(500)
+        assertEquals(6, e.store.messages.value[conv]!!.count { it.role == Role.AI })
     }
 
     /** 阶跃的画图接口 2026-10-10 下线：自己列出来的也不挑；以前指定过阶跃的，改按自动挑。 */

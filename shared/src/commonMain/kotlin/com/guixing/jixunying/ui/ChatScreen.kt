@@ -111,6 +111,7 @@ import com.guixing.jixunying.model.ToolStep
 import kotlinx.coroutines.launch
 
 private const val PAINTER = "tool:image"
+private const val CHAIR = "tool:chair"
 
 @Composable
 fun ChatScreen(ctl: AppController, convId: String, wide: Boolean, openDrawer: () -> Unit) {
@@ -164,7 +165,7 @@ private fun ChatTopBar(state: AppState, conv: Conversation, wide: Boolean, openD
         Column(Modifier.weight(1f).padding(start = 6.dp)) {
             Text(conv.title, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text(
-                if (members.size > 1) "群聊 · ${members.size} 位成员 · " + when (conv.replyMode) {
+                if (members.size > 1) "群聊 · ${members.size} 位成员 · " + if (conv.council) "会审" else when (conv.replyMode) {
                     ReplyMode.INDEPENDENT -> "独立作答"
                     ReplyMode.RELAY -> "接力讨论"
                     ReplyMode.MENTION_ONLY -> "只回答被 @ 的"
@@ -307,17 +308,25 @@ private fun AiMessage(ctl: AppController, state: AppState, m: Message,
                       onStance: (String) -> Unit = {}) {
     val member = state.member(m.senderId)
     val painter = m.senderId == PAINTER
+    val chair = m.senderId == CHAIR
+    val review = m.stage == "review"
+    // 会审的互评默认折叠（四份互评很长），点一下展开
+    var folded by remember(m.id) { mutableStateOf(review) }
     val (body, thinkInline) = remember(m.content) { splitThink(m.content) }
     val reasoning = (m.reasoning + if (thinkInline.isNotEmpty()) "\n$thinkInline" else "").trim()
     val sources = remember(m.tools) { m.tools.filter { it.kind == "search" }.flatMap { it.sources } }
 
     Row(Modifier.fillMaxWidth()) {
-        if (painter) MemberAvatar(null, 34.dp, emoji = "🎨", color = 0xFFEC4899) else MemberAvatar(member, 34.dp)
+        if (painter) MemberAvatar(null, 34.dp, emoji = "🎨", color = 0xFFEC4899)
+        else if (chair) MemberAvatar(null, 34.dp, emoji = "⚖️", color = 0xFF0F766E)
+        else MemberAvatar(member, 34.dp)
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(if (painter) "画图助手" else member?.name ?: "已移除的成员", style = MaterialTheme.typography.titleSmall)
+                Text(if (painter) "画图助手" else if (chair) "会审主席" else member?.name ?: "已移除的成员", style = MaterialTheme.typography.titleSmall)
                 Spacer(Modifier.width(8.dp))
+                if (review) { Pill(if (folded) "互评 · 点开看" else "互评", MaterialTheme.colorScheme.secondary) { folded = !folded }; Spacer(Modifier.width(6.dp)) }
+                if (chair) { Pill("会审汇总", Ext.c.success); Spacer(Modifier.width(6.dp)) }
                 if (m.modelLabel.isNotBlank()) Pill(m.modelLabel, Ext.c.subtle)
             }
             // 立场档案：这条回答在哪个议题上是什么立场、是不是改口（点开看这道题大家怎么说）
@@ -328,7 +337,9 @@ private fun AiMessage(ctl: AppController, state: AppState, m: Message,
             Spacer(Modifier.height(6.dp))
             ToolStepsView(m.tools, streaming = m.status == MsgStatus.STREAMING)
             if (reasoning.isNotEmpty()) ReasoningView(reasoning, streaming = m.status == MsgStatus.STREAMING && body.isEmpty())
-            if (body.isNotBlank()) SelectionContainer { MarkdownText(body, sources = sources) }
+            if (body.isNotBlank() && folded) Text(body.lineSequence().firstOrNull { it.isNotBlank() }?.take(80).orEmpty() + " …",
+                style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle, modifier = Modifier.clickable { folded = false })
+            else if (body.isNotBlank()) SelectionContainer { MarkdownText(body, sources = sources) }
             if (m.status == MsgStatus.STREAMING && body.isEmpty() && reasoning.isEmpty()) TypingDots()
             if (m.attachments.isNotEmpty()) {
                 Spacer(Modifier.height(8.dp))
@@ -337,7 +348,7 @@ private fun AiMessage(ctl: AppController, state: AppState, m: Message,
             if (m.status == MsgStatus.ERROR) ErrorBox(m.error, ctl)
             if (m.status == MsgStatus.STOPPED) Text("（已停止）", style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle, modifier = Modifier.padding(top = 4.dp))
             if (sources.isNotEmpty() && m.status != MsgStatus.STREAMING) SourcesRow(sources)
-            if (m.status != MsgStatus.STREAMING) MessageActions(ctl, m, alignEnd = false, canRegenerate = true,
+            if (m.status != MsgStatus.STREAMING && !folded) MessageActions(ctl, m, alignEnd = false, canRegenerate = !review && !chair,
                 export = state.settings.office.exportButtons && !painter && body.isNotBlank() && m.status == MsgStatus.DONE, body = body)
         }
     }
@@ -948,6 +959,7 @@ private fun ConversationSettingsDialog(ctl: AppController, state: AppState, conv
     var picked by remember { mutableStateOf(conv.memberIds.toSet()) }
     var mode by remember { mutableStateOf(conv.replyMode) }
     var search by remember { mutableStateOf(conv.webSearch) }
+    var council by remember { mutableStateOf(conv.council) }
     var title by remember { mutableStateOf(conv.title) }
     AppDialog("对话设置", onClose, width = 560.dp, actions = {
         TextButton(onClose) { Text("取消") }
@@ -956,7 +968,7 @@ private fun ConversationSettingsDialog(ctl: AppController, state: AppState, conv
             ctl.run(Command.UpdateConversation(conv.copy(
                 title = title.trim().ifEmpty { conv.title },
                 memberIds = state.members.map { it.id }.filter { it in picked } + conv.memberIds.filter { it in picked && state.member(it) == null },
-                replyMode = mode, webSearch = search,
+                replyMode = mode, webSearch = search, council = council && picked.size > 1,
             )))
         }) { Text("保存") }
     }) {
@@ -982,6 +994,9 @@ private fun ConversationSettingsDialog(ctl: AppController, state: AppState, conv
                         }
                     }
                 }
+                Spacer(Modifier.height(8.dp))
+                SwitchRow("会审模式", "对大家提的问题：先各自独立回答，再匿名互评、排名次，最后由中立的主席（立场档案用的裁判模型）写最终答案，" +
+                    "写清首轮分歧和少数派意见。每个问题要多调「成员数 + 1」次模型，适合重要、有争议的问题；只叫某几位时照常回答。", council) { council = it }
             }
             Spacer(Modifier.height(8.dp))
             SwitchRow("联网搜索", "需要时先搜索再回答，回答里标出处", search) { search = it }
