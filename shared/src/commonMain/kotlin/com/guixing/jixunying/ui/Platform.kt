@@ -27,7 +27,15 @@ interface Platform {
     /** 把收到的文件（比如手机遥控电脑时电脑做的 Word）存成临时文件，再用默认程序打开。 */
     suspend fun openBytes(name: String, bytes: ByteArray): Boolean = false
     /** 选一个文件夹，返回路径；取消返回 null。 */
-    suspend fun pickFolder(): String? = null
+    suspend fun pickFolder(title: String = "选择文件夹"): String? = null
+    /**
+     * 剪贴板里是文件（资源管理器里复制的）或者截图：输入框里 Ctrl+V 时当附件，不当文字粘贴。
+     * 剪贴板里有文字时不算（从 Word、网页复制的字往往还带一张图，这时用户要的是字）。
+     */
+    fun clipboardHasFiles(): Boolean = false
+    suspend fun clipboardFiles(): List<PickedFile> = emptyList()
+    /** 让一块区域能把文件拖进来（电脑）。onHover：拖着文件经过 / 离开；onFiles：松开后读好的文件。手机上原样返回。 */
+    fun fileDropTarget(modifier: androidx.compose.ui.Modifier, onHover: (Boolean) -> Unit, onFiles: (List<PickedFile>) -> Unit): androidx.compose.ui.Modifier = modifier
     /** 安卓：跳到系统设置，让用户给「所有文件访问」权限（读别的 App 存的文档要用）。 */
     fun requestFileAccess() {}
     /** 别的 App 用「打开方式 / 分享」发来的文件（比如在微信里点文件 → 用其他应用打开）。 */

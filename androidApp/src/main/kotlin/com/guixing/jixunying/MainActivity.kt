@@ -177,7 +177,7 @@ class MainActivity : ComponentActivity() {
         }
 
         /** 系统文件夹选择器返回的是 content:// 地址，换成文件路径（主存储是 /storage/emulated/0）。 */
-        override suspend fun pickFolder(): String? {
+        override suspend fun pickFolder(title: String): String? {
             val d = CompletableDeferred<Uri?>()
             folderResult = d
             pickTree.launch(null)

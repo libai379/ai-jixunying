@@ -102,7 +102,7 @@ fun OfficePage(ctl: AppController, state: AppState) {
                         FieldLabel("存到")
                         Text(o.saveFolder.ifBlank { "文档\\AI集训营（默认）" }, style = MaterialTheme.typography.bodySmall)
                     }
-                    OutlinedButton(onClick = { scope.launch { platform.pickFolder()?.let { p -> set { it.copy(saveFolder = p) } } } }) { Text("换文件夹") }
+                    OutlinedButton(onClick = { scope.launch { platform.pickFolder("做好的文件存到哪个文件夹")?.let { p -> set { it.copy(saveFolder = p) } } } }) { Text("换文件夹") }
                     if (o.saveFolder.isNotBlank()) {
                         Spacer(Modifier.width(6.dp))
                         TextButton(onClick = { set { it.copy(saveFolder = "") } }) { Text("恢复默认") }

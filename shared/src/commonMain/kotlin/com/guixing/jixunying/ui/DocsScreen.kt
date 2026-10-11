@@ -130,7 +130,7 @@ fun DocsScreen(ctl: AppController, wide: Boolean, openDrawer: () -> Unit) {
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                         if (!ctl.remoteMode) OutlinedButton(onClick = {
                             scope.launch {
-                                val f = platform.pickFolder() ?: return@launch
+                                val f = platform.pickFolder("选择要收录的文件夹") ?: return@launch
                                 // 第一次自己加文件夹时，把原来默认的那些也带上，免得一加反而少了
                                 val base = ds.folders.ifEmpty { info.roots.filter { it !in info.weixinRoots } }
                                 save { it.copy(folders = (base + f).distinct()) }

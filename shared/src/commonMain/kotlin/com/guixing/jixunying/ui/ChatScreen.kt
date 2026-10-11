@@ -80,6 +80,8 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.isCtrlPressed
+import androidx.compose.ui.input.key.isMetaPressed
 import androidx.compose.ui.input.key.isShiftPressed
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
@@ -125,12 +127,27 @@ fun ChatScreen(ctl: AppController, convId: String, wide: Boolean, openDrawer: ()
         if (!ctl.backend.store.hasMessages(convId)) ctl.run(Command.LoadMessages(convId), quiet = true)
     }
 
-    Column(Modifier.fillMaxSize()) {
-        ChatTopBar(state, conv, wide, openDrawer, onStances = if (conv.stanceTopics > 0) ({ stanceDialog = "" }) else null) { showConvSettings = true }
-        Box(Modifier.weight(1f).fillMaxWidth()) {
-            MessageList(ctl, state, conv, messages, topics) { stanceDialog = it }
+    // 电脑上把文件拖进聊天区：放进输入框（和点回形针选的一样，先上传，等你写问题）
+    val platform = LocalPlatform.current
+    var dragging by remember { mutableStateOf(false) }
+    Box(platform.fileDropTarget(Modifier.fillMaxSize(), onHover = { dragging = it }) { files ->
+        if (files.isEmpty()) ctl.toast("没读到文件（文件夹和 50MB 以上的文件放不进来）")
+        else ctl.composerInbox = convId to Incoming(files = files)
+    }) {
+        Column(Modifier.fillMaxSize()) {
+            ChatTopBar(state, conv, wide, openDrawer, onStances = if (conv.stanceTopics > 0) ({ stanceDialog = "" }) else null) { showConvSettings = true }
+            Box(Modifier.weight(1f).fillMaxWidth()) {
+                MessageList(ctl, state, conv, messages, topics) { stanceDialog = it }
+            }
+            Composer(ctl, state, conv, running = messages.any { it.status == MsgStatus.STREAMING })
         }
-        Composer(ctl, state, conv, running = messages.any { it.status == MsgStatus.STREAMING })
+        if (dragging) Box(
+            Modifier.fillMaxSize().padding(12.dp).clip(RoundedCornerShape(16.dp)).background(MaterialTheme.colorScheme.primary.copy(alpha = 0.08f))
+                .border(2.dp, MaterialTheme.colorScheme.primary, RoundedCornerShape(16.dp)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text("松开鼠标，把文件放进输入框", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.primary)
+        }
     }
     if (showConvSettings) ConversationSettingsDialog(ctl, state, conv) { showConvSettings = false }
     stanceDialog?.let { focus -> ConversationStancesDialog(ctl, state, conv, topics, focus.ifEmpty { null }) { stanceDialog = null } }
@@ -850,13 +867,20 @@ private fun Composer(ctl: AppController, state: AppState, conv: Conversation, ru
                                 if (platform.isDesktop && e.type == KeyEventType.KeyDown && (e.key == Key.Enter || e.key == Key.NumPadEnter) && !e.isShiftPressed) {
                                     if (suggestions.isNotEmpty()) insertMention(suggestions.first().first) else send()
                                     true
+                                } else if (platform.isDesktop && e.type == KeyEventType.KeyDown && e.key == Key.V && (e.isCtrlPressed || e.isMetaPressed) && platform.clipboardHasFiles()) {
+                                    // 剪贴板里是截图或复制的文件：当附件放进来；是文字就照常粘贴
+                                    scope.launch {
+                                        val files = platform.clipboardFiles()
+                                        if (files.isEmpty()) ctl.toast("剪贴板里的东西读不出来") else ctl.composerInbox = conv.id to Incoming(files = files)
+                                    }
+                                    true
                                 } else false
                             },
                         )
                     }
                     Spacer(Modifier.height(8.dp))
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        ComposerIcon(Icons.Rounded.AttachFile, "附件（图片、PDF、Word、Excel、PPT、代码…）") { pick(false) }
+                        ComposerIcon(Icons.Rounded.AttachFile, if (platform.isDesktop) "附件（图片、PDF、Word、Excel、PPT、代码…；也可以把文件拖进来，或者 Ctrl+V 粘贴截图）" else "附件（图片、PDF、Word、Excel、PPT、代码…）") { pick(false) }
                         ComposerIcon(Icons.Rounded.Image, "图片") { pick(true) }
                         if (state.members.size > 1) ComposerIcon(Icons.Rounded.AlternateEmail, "@ 成员（也能 @ 不在这个对话里的成员，会把他拉进来）") {
                             text = TextFieldValue(text.text + (if (text.text.isEmpty() || text.text.endsWith(" ")) "@" else " @"), TextRange(Int.MAX_VALUE))
