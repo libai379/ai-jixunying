@@ -273,6 +273,18 @@ data class OfficeSettings(
     val saveFolder: String = "",
     /** 每条回答下面显示「存成 Word」，有表格的再显示「表格存成 Excel」。 */
     val exportButtons: Boolean = true,
+    /** PPT 配色：blue 商务蓝 / green 清新绿 / orange 活力橙 / dark 科技深色 / mono 简约黑白。 */
+    val pptTheme: String = "blue",
+    /** PPT 宽屏 16:9（关掉是 4:3）。 */
+    val pptWide: Boolean = true,
+    /** 每页右下角页码。 */
+    val pptPageNumbers: Boolean = true,
+    /** 内容页 4 页以上时，封面后面自动加一页目录。 */
+    val pptAgenda: Boolean = true,
+    /** 讲稿（AI 写的「备注：」）放进演讲者备注。 */
+    val pptNotes: Boolean = true,
+    /** 一页字太多时自动拆成两页（第二页标题加「（续）」）；关掉就缩小字号硬塞。 */
+    val pptSplit: Boolean = true,
 )
 
 @Serializable

@@ -191,6 +191,8 @@ class EngineTest {
                                 mapOf("filename" to "周报", "content" to "# 本周周报\n\n## 完成\n- 登录页改版\n- 数据看板\n\n## 下周\n1. 灰度测试"))
                             hasTool("create_excel") && latest.contains("做成表格") && !sawTool -> callTool("create_excel",
                                 mapOf("filename" to "销售", "content" to "## 销售\n| 月份 | 销售额 |\n|---|---|\n| 1月 | 12,000 |\n| 2月 | 13,500 |", "total_row" to "true"))
+                            hasTool("create_ppt") && latest.contains("做成 PPT") && !sawTool -> callTool("create_ppt",
+                                mapOf("filename" to "汇报", "content" to "# 季度汇报\n产品部\n\n## 亮点\n- 登录页改版\n- 数据看板\n\n备注：先讲转化率\n\n## 谢谢", "theme" to "科技深色"))
                             toolTexts.any { "已做好《" in it } -> say("做好了，文件在下面。")
                             // 问自己的文档：先搜，再按搜到的路径读，读完再答
                             hasTool("search_documents") && latest.contains("合同") && !sawTool -> callTool("search_documents", mapOf("query" to "付款日期"))
@@ -804,6 +806,14 @@ class EngineTest {
         val sheetText = com.guixing.jixunying.engine.DocExtract.extract(xls.name, e.fileBytes(xls.id)!!).first!!
         assertTrue("合计" in sheetText && "12000" in sheetText, sheetText)
 
+        e.call(Command.SendMessage(conv, "再做成 PPT"))
+        waitIdle(e, conv, 4)
+        val ppt = e.store.messages.value[conv]!!.last().attachments.single()
+        assertEquals("汇报.pptx", ppt.name)
+        assertTrue("科技深色" in ppt.note && "有讲稿" in ppt.note, ppt.note)
+        assertTrue("登录页改版" in com.guixing.jixunying.engine.DocExtract.extract(ppt.name, e.fileBytes(ppt.id)!!).first!!)
+        assertTrue(requests.any { "create_ppt" in it["tools"].toString() })
+
         // 存成 Word：拿回答正文做文件；没有表格的回答存不成 Excel
         val exp = e.call(Command.ExportMessage(conv, m.id, "docx"))
         assertTrue(exp.ok, exp.message)
@@ -817,12 +827,12 @@ class EngineTest {
         e.call(Command.SaveSettings(e.state.settings.copy(office = com.guixing.jixunying.model.OfficeSettings(), schema = 1)))
         assertEquals(mine, e.state.settings.office)
 
-        // 关掉开关：不再给成员这两个工具
+        // 关掉开关：不再给成员做文件的工具
         e.call(Command.SaveSettings(e.state.settings.copy(office = e.state.settings.office.copy(enabled = false))))
         requests.clear()
         e.call(Command.SendMessage(conv, "随便聊聊"))
-        waitIdle(e, conv, 4)
-        assertTrue(requests.none { "create_word" in it["tools"].toString() })
+        waitIdle(e, conv, 5)
+        assertTrue(requests.none { "create_word" in it["tools"].toString() || "create_ppt" in it["tools"].toString() })
     }
 
     /** 阶跃的画图接口 2026-10-10 下线：自己列出来的也不挑；以前指定过阶跃的，改按自动挑。 */

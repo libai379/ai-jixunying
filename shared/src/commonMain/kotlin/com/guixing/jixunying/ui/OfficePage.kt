@@ -31,11 +31,11 @@ fun OfficePage(ctl: AppController, state: AppState) {
     fun set(f: (OfficeSettings) -> OfficeSettings) = ctl.updateSettings { it.copy(office = f(it.office)) }
     val desktopHere = platform.isDesktop && ctl.backend === ctl.hub.local
 
-    PageHeader("Word / Excel", "成员能把回答做成 Word 文档、Excel 表格：说「做成 Word」「整理成表格发我」就行，做好的文件显示在回答下面，点一下用 Word / WPS 打开；" +
-        "微信里要的也直接发回微信。这里是默认的排版，聊天里另外说的（比如「用公文格式」「横向」「加个合计」）优先。改了马上生效。")
+    PageHeader("Word / Excel / PPT", "成员能把回答做成 Word 文档、Excel 表格、PPT 演示文稿：说「做成 Word」「整理成表格发我」「做个汇报 PPT」就行，做好的文件显示在回答下面，点一下用 Word / WPS 打开；" +
+        "微信里要的也直接发回微信。这里是默认的排版，聊天里另外说的（比如「用公文格式」「横向」「加个合计」「用深色」）优先。改了马上生效。")
 
     SectionCard {
-        SwitchRow("AI 能做 Word / Excel", "关掉后成员不再做文件，已经做好的还在", o.enabled) { v -> set { it.copy(enabled = v) } }
+        SwitchRow("AI 能做 Word / Excel / PPT", "关掉后成员不再做文件，已经做好的还在", o.enabled) { v -> set { it.copy(enabled = v) } }
         SwitchRow("回答下面显示「存成 Word」", "有表格的回答再显示「表格存成 Excel」（像豆包的导出），用过的搜索来源附在 Word 最后", o.exportButtons) { v -> set { it.copy(exportButtons = v) } }
     }
     Spacer(Modifier.height(12.dp))
@@ -68,6 +68,26 @@ fun OfficePage(ctl: AppController, state: AppState) {
         SwitchRow("表头加筛选按钮", null, o.excelFilter) { v -> set { it.copy(excelFilter = v) } }
         SwitchRow("隔行浅色底纹", "行多的时候看着不串行", o.excelZebra) { v -> set { it.copy(excelZebra = v) } }
         SwitchRow("大于一千的数字加千分位", "12000 显示成 12,000，只是显示，值不变", o.excelThousands) { v -> set { it.copy(excelThousands = v) } }
+    }
+    Spacer(Modifier.height(12.dp))
+    SectionCard {
+        Text("PPT", style = MaterialTheme.typography.titleSmall)
+        Text("封面、目录、章节页、内容页、表格页、结尾页的版式程序自动排；字多字少自动选字号。",
+            style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle, modifier = Modifier.padding(top = 2.dp, bottom = 6.dp))
+        FieldLabel("配色")
+        listOf(
+            Triple("blue", "商务蓝", "深蓝封面、蓝色点缀；汇报、方案最稳妥"),
+            Triple("green", "清新绿", "墨绿封面；培训、环保、医疗"),
+            Triple("orange", "活力橙", "橙色封面；营销、活动、路演"),
+            Triple("dark", "科技深色", "深色背景、亮蓝点缀；技术分享、发布会"),
+            Triple("mono", "简约黑白", "黑灰白；学术、正式场合"),
+        ).forEach { (id, name, desc) -> RadioRow(o.pptTheme == id, name, desc) { set { it.copy(pptTheme = id) } } }
+        Spacer(Modifier.height(6.dp))
+        SwitchRow("宽屏 16:9", "关掉是 4:3（老投影仪）", o.pptWide) { v -> set { it.copy(pptWide = v) } }
+        SwitchRow("每页加页码", null, o.pptPageNumbers) { v -> set { it.copy(pptPageNumbers = v) } }
+        SwitchRow("自动加目录页", "有两个以上章节、或者内容页 4 页以上时，封面后面加一页目录", o.pptAgenda) { v -> set { it.copy(pptAgenda = v) } }
+        SwitchRow("讲稿放进演讲者备注", "AI 写的「备注：」放在每页的备注里，放映时只有你看得到", o.pptNotes) { v -> set { it.copy(pptNotes = v) } }
+        SwitchRow("字太多时自动拆页", "一页放不下就平均拆成几页（标题加「（续）」）；关掉就缩小字号硬塞", o.pptSplit) { v -> set { it.copy(pptSplit = v) } }
     }
     Spacer(Modifier.height(12.dp))
     SectionCard {

@@ -1658,6 +1658,17 @@ class Engine(
                     put("content", prop("表格内容（Markdown，可以有多个 ## 工作表）"))
                     put("total_row", prop("可选，true = 每张表最后加「合计」行（数字列自动求和）"))
                 }, listOf("filename", "content"))
+            fn("create_ppt", "做一个 PPT 演示文稿（.pptx）交给用户，做好会显示在你的回答下面，点开就用 PowerPoint / WPS 打开。" +
+                "内容用 Markdown 写：开头「# 标题」是封面（下面一行字是副标题，比如部门和姓名），每个「## 」是一页；页里写要点（- 列表，最多两级）、编号、| 表格 |、> 引用；" +
+                "「### 」是页里的小标题；只写「## 第一部分：xxx」不写内容就是章节页；最后一页可以只写「## 谢谢」。" +
+                "每页写一行「备注：……」放讲稿（演讲时看的话），不会显示在幻灯片上。每页要点精炼（一页 3～6 条，每条一句话），配色、版式、字号、拆页程序自动做。",
+                buildJsonObject {
+                    put("filename", prop("文件名，不用写 .pptx，比如「第三季度工作汇报」"))
+                    put("content", prop("内容（Markdown）"))
+                    put("title", prop("可选，封面标题；不写就用开头的一级标题"))
+                    put("subtitle", prop("可选，封面副标题"))
+                    put("theme", prop("可选，配色：商务蓝 / 清新绿 / 活力橙 / 科技深色 / 简约黑白。用户没说就不填，按用户的设置"))
+                }, listOf("filename", "content"))
         }
     }
 
@@ -1693,10 +1704,14 @@ class Engine(
         f.absolutePath
     }.getOrDefault("")
 
-    /** 按 AI 给的参数（create_word / create_excel）做文件，存成附件。 */
-    fun makeOfficeFile(excel: Boolean, args: JsonObject): OfficeFile {
-        val (name, made) = buildOffice(excel, args)
-        val mime = if (excel) "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" else "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    /** 按 AI 给的参数（create_word / create_excel / create_ppt，ext = docx / xlsx / pptx）做文件，存成附件。 */
+    fun makeOfficeFile(ext: String, args: JsonObject): OfficeFile {
+        val (name, made) = buildOffice(ext, args)
+        val mime = when (ext) {
+            "xlsx" -> "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            "pptx" -> "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+            else -> "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        }
         val att = Attachment(newId(), name, mime, made.bytes.size.toLong(), AttachmentKind.DOCUMENT, textChars = made.text.length,
             note = made.summary, generated = true, savedPath = saveOfficeCopy(name, made.bytes))
         storage.putFile(att, made.bytes, made.text)
@@ -1704,23 +1719,29 @@ class Engine(
     }
 
     /** 做文件，返回（文件名, 文件）。 */
-    private fun buildOffice(excel: Boolean, args: JsonObject): Pair<String, OfficeWriter.Made> {
+    private fun buildOffice(ext: String, args: JsonObject): Pair<String, OfficeWriter.Made> {
         val s = state.settings.office
         val content = args.str("content").orEmpty()
-        val made = if (excel) OfficeWriter.excel(content, s, totalRow = args.flag("total_row") == true)
-        else OfficeWriter.word(content, s, OfficeWriter.WordOptions(
-            title = args.str("title").orEmpty(),
-            style = when (args.str("style")?.trim()?.lowercase()) {
-                "正式", "formal" -> "formal"
-                "公文", "红头", "红头文件", "official" -> "official"
-                "通用", "general" -> "general"
-                else -> ""
-            },
-            header = args.str("header").orEmpty(),
-            landscape = args.flag("landscape") == true,
-            toc = args.flag("toc"),
-        ))
-        val ext = if (excel) "xlsx" else "docx"
+        val made = when (ext) {
+            "xlsx" -> OfficeWriter.excel(content, s, totalRow = args.flag("total_row") == true)
+            "pptx" -> PptWriter.ppt(content, s, PptWriter.PptOptions(
+                title = args.str("title").orEmpty(),
+                subtitle = args.str("subtitle").orEmpty(),
+                theme = PptWriter.themeId(args.str("theme").orEmpty()),
+            ))
+            else -> OfficeWriter.word(content, s, OfficeWriter.WordOptions(
+                title = args.str("title").orEmpty(),
+                style = when (args.str("style")?.trim()?.lowercase()) {
+                    "正式", "formal" -> "formal"
+                    "公文", "红头", "红头文件", "official" -> "official"
+                    "通用", "general" -> "general"
+                    else -> ""
+                },
+                header = args.str("header").orEmpty(),
+                landscape = args.flag("landscape") == true,
+                toc = args.flag("toc"),
+            ))
+        }
         val firstHeading = Regex("""(?m)^#{1,6}\s+(.+)$""").find(content)?.groupValues?.get(1).orEmpty()
         val name = officeName(args.str("filename").orEmpty().ifBlank { args.str("title").orEmpty().ifBlank { firstHeading } }, ext, s.dateInName)
         return name to made
@@ -1743,7 +1764,7 @@ class Engine(
             if (excel) put("total_row", "false")
         }
         return try {
-            val (name, made) = buildOffice(excel, args)
+            val (name, made) = buildOffice(if (excel) "xlsx" else "docx", args)
             CommandResult(message = name, data = AppJson.encodeToString(com.guixing.jixunying.model.ExportedFile.serializer(),
                 com.guixing.jixunying.model.ExportedFile(name, Base64.getEncoder().encodeToString(made.bytes))))
         } catch (e: Throwable) {
@@ -1802,11 +1823,11 @@ class Engine(
                 updateMessage(convId, msgId, persist = false) { it.copy(tools = it.tools + step) }
                 text
             }
-            "create_word", "create_excel" -> {
-                val excel = tc.name == "create_excel"
+            "create_word", "create_excel", "create_ppt" -> {
+                val ext = when (tc.name) { "create_excel" -> "xlsx"; "create_ppt" -> "pptx"; else -> "docx" }
                 if (args.str("content").isNullOrBlank()) return "参数错误：缺少 content（文件内容）"
                 try {
-                    val f = makeOfficeFile(excel, args)
+                    val f = makeOfficeFile(ext, args)
                     updateMessage(convId, msgId) { it.copy(attachments = it.attachments + f.att, tools = it.tools + ToolStep("file", f.att.name, note = "")) }
                     "已做好《${f.att.name}》（${f.att.note}），已经显示在你的回答下面，用户点开就能用。" +
                         (if (f.att.savedPath.isNotEmpty() && !isPhone) "电脑上另存在 ${f.att.savedPath}。" else "") +

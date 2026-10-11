@@ -116,6 +116,97 @@ class OfficeWriterTest {
         out?.let { File(it, "横向.docx").writeBytes(wide.bytes) }
     }
 
+    private val deck = """
+        # 2026 年第三季度工作汇报
+        产品研发部 · 张三
+
+        ## 第一部分：成果
+
+        ## 本季度亮点
+        - 完成 **登录页改版**，转化率提升 12.5%
+          - 扫码登录上线
+          - 短信验证码改造
+        - 上线数据看板，日活 3,200
+        - ~~旧版报表~~ 已下线
+
+        备注：开场先讲转化率，强调扫码登录是用户呼声最高的功能。
+        时间控制在两分钟。
+
+        ## 进度与费用
+        | 阶段 | 计划完成 | 实际完成 | 费用（元） |
+        |---|---|---|---:|
+        | 需求 | 2026-07-15 | 2026-07-14 | 35,000 |
+        | 开发 | 2026-08-31 | 2026-09-05 | 128,500 |
+        | 测试 | 2026-09-20 | 2026-09-25 | 22,000 |
+
+        ## 第二部分：问题
+
+        ## 遇到的问题
+        1. 接口文档更新不及时，前后端对不上的情况一个月出现了好几次，返工浪费了大约两周时间
+        2. 测试环境不稳定，经常因为数据库连接池耗尽导致自动化测试大面积失败
+        3. 需求变更 3 次，其中两次发生在开发后期，导致排期整体延后一周
+        4. 第三方短信服务商在 8 月中旬出现过一次长达四小时的故障，影响了验证码登录
+        5. 新同事上手慢，缺少系统的入职文档和代码规范说明
+        6. 跨部门沟通链路长，一个小改动需要经过三层审批
+        7. 线上监控告警太多，真正重要的告警经常被淹没
+        8. 代码评审不及时，合并请求平均要等两天才有人看
+        9. 发布流程全靠手工，每次上线都要两个人盯一晚上，出错了也很难回滚
+        10. 数据看板的口径和财务报表对不上，每个月对账都要花一天时间
+        11. 移动端适配问题多，安卓低版本机型上偶尔白屏，排查周期长
+        12. 埋点设计不统一，同一个指标在不同页面的统计方式不一样
+        13. 外包团队交付质量参差不齐，验收标准没写清楚
+        14. 技术债越来越多，老模块没人敢动，改一处牵一发而动全身
+
+        > 这些问题下季度逐一跟进。
+
+        ## 全部任务清单
+        | 序号 | 任务 | 负责人 | 状态 |
+        |---|---|---|---|
+        | 1 | 登录页改版 | 张三 | 完成 |
+        | 2 | 扫码登录 | 李四 | 完成 |
+        | 3 | 短信验证码 | 王五 | 完成 |
+        | 4 | 数据看板 | 赵六 | 完成 |
+        | 5 | 报表下线 | 张三 | 完成 |
+        | 6 | 接口文档 | 李四 | 进行中 |
+        | 7 | 测试环境 | 王五 | 进行中 |
+        | 8 | 监控告警 | 赵六 | 进行中 |
+        | 9 | 代码评审 | 张三 | 未开始 |
+        | 10 | 入职文档 | 李四 | 未开始 |
+        | 11 | 审批流程 | 王五 | 未开始 |
+        | 12 | 性能优化 | 赵六 | 未开始 |
+        | 13 | 安全加固 | 张三 | 未开始 |
+        | 14 | 灰度发布 | 李四 | 未开始 |
+        | 15 | 复盘会 | 王五 | 未开始 |
+
+        ## 谢谢
+    """.trimIndent()
+
+    @Test
+    fun pptDecks() {
+        for (theme in listOf("blue", "green", "orange", "dark", "mono")) {
+            val made = com.guixing.jixunying.engine.PptWriter.ppt(deck, OfficeSettings(pptTheme = theme))
+            val p = parts(made.bytes)
+            p.forEach { (n, x) -> if (n.endsWith(".xml") || n.endsWith(".rels")) wellFormed(n, x) }
+            val slides = p.keys.filter { Regex("""ppt/slides/slide\d+\.xml""").matches(it) }
+            // 封面、目录、章节、亮点、进度、章节、问题（拆成两页）、清单（15 行拆成两页）、谢谢
+            assertEquals(11, slides.size, "页数：${made.summary}")
+            assertTrue("目录" in p["ppt/slides/slide2.xml"]!!, "内容页 4 页以上加目录")
+            assertTrue("（续）" in p.filterKeys { it in slides }.values.joinToString(""), "放不下的页拆开")
+            assertTrue(p.keys.any { it.startsWith("ppt/notesSlides/") } && "开场先讲转化率" in p.filterKeys { it.startsWith("ppt/notesSlides/") }.values.joinToString(""))
+            assertTrue("""<p:sldSz cx="12192000" cy="6858000"/>""" in p["ppt/presentation.xml"]!!)
+            val back = DocExtract.extract("汇报.pptx", made.bytes).first!!
+            listOf("2026 年第三季度工作汇报", "登录页改版", "128,500", "复盘会", "谢谢").forEach { assertTrue(it in back, "读回来要有「$it」") }
+            out?.let { File(it, "汇报-$theme.pptx").writeBytes(made.bytes) }
+        }
+        // 4:3、不拆页、没讲稿
+        val narrow = com.guixing.jixunying.engine.PptWriter.ppt(deck, OfficeSettings(pptWide = false, pptSplit = false, pptNotes = false, pptAgenda = false))
+        val np = parts(narrow.bytes)
+        assertTrue("""type="screen4x3"""" in np["ppt/presentation.xml"]!!)
+        assertTrue(np.keys.none { it.startsWith("ppt/notesSlides/") || it.startsWith("ppt/notesMasters/") })
+        assertTrue("（续）" !in np.values.joinToString(""))
+        out?.let { File(it, "汇报-4比3.pptx").writeBytes(narrow.bytes) }
+    }
+
     @Test
     fun cellValues() {
         assertEquals(CellVal.Num(12000.0, "#,##0"), OfficeWriter.cellValue("12,000"))

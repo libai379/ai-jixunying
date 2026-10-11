@@ -600,7 +600,7 @@ private fun MadeFileChip(ctl: AppController, a: Attachment) {
         val ext = a.name.substringAfterLast('.', "").uppercase().take(4)
         Box(Modifier.size(36.dp).clip(RoundedCornerShape(8.dp)).background(docColor(ext)), contentAlignment = Alignment.Center) {
             if (busy) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp, color = Color.White)
-            else Text(if (ext == "XLSX") "表" else if (ext == "DOCX") "文" else ext, color = Color.White, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+            else Text(when (ext) { "XLSX" -> "表"; "DOCX" -> "文"; "PPTX" -> "演"; else -> ext }, color = Color.White, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
         }
         Spacer(Modifier.width(10.dp))
         Column(Modifier.widthIn(max = 280.dp)) {

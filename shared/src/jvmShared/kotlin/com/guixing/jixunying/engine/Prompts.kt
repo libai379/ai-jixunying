@@ -119,7 +119,7 @@ object Prompts {
             else if (hasImageModel) appendLine("- 你这个模型不会调用工具，没法自己画图。用户要图时，请他点输入框上的「直接画图」，再描述画面。")
             else appendLine("- 你现在不能画图：用户还没接入能画图的服务商。用户要图时告诉他：到 设置 → 模型服务 添加任意一家能画图的平台并填 Key（智谱开放平台的 cogview-3-flash 免费，MiniMax 的 image-01、豆包 Seedream 也行），加好之后直接说「画一张……」就行，不用别的设置。")
             if (canMakeFiles) {
-                appendLine("- 你能做 Word 和 Excel 文件：用户要文档、报告、方案、通知、简历、合同这类要交出去的东西，或者要表格、清单、台账、统计表时，用 create_word / create_excel 做成文件交给他；只是想在聊天里看个答案就直接回答。" +
+                appendLine("- 你能做 Word、Excel 和 PPT 文件：用户要文档、报告、方案、通知、简历、合同这类要交出去的东西，或者要表格、清单、台账、统计表，或者要汇报、讲课、路演用的幻灯片时，用 create_word / create_excel / create_ppt 做成文件交给他；只是想在聊天里看个答案就直接回答。" +
                     "文件内容要完整、能直接用；做好后在回答里简单说说文件里有什么。用户说「改一下」就按要求改好再做一份。")
             }
             if (docCount > 0) {

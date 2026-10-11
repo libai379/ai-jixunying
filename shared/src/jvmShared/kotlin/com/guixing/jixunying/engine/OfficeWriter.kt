@@ -159,7 +159,7 @@ object OfficeWriter {
 
     // ———————————————— 共用 ————————————————
 
-    private fun esc(s: String): String {
+    internal fun esc(s: String): String {
         val sb = StringBuilder(s.length + 16)
         for (ch in s) {
             when {
@@ -175,7 +175,7 @@ object OfficeWriter {
         return sb.toString()
     }
 
-    private fun zip(parts: List<Pair<String, String>>): ByteArray {
+    internal fun zip(parts: List<Pair<String, String>>): ByteArray {
         val bos = ByteArrayOutputStream()
         ZipOutputStream(bos).use { z ->
             for ((name, xml) in parts) {
@@ -187,20 +187,20 @@ object OfficeWriter {
         return bos.toByteArray()
     }
 
-    private const val XML = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>"""
-    private const val RELS_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
-    private const val R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+    internal const val XML = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>"""
+    internal const val RELS_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
+    internal const val R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 
-    private fun coreXml(title: String): String {
+    internal fun coreXml(title: String): String {
         val now = ZonedDateTime.now(ZoneOffset.UTC).truncatedTo(ChronoUnit.SECONDS).format(DateTimeFormatter.ISO_INSTANT)
         return XML + """<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:dcmitype="http://purl.org/dc/dcmitype/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">""" +
             "<dc:title>${esc(title)}</dc:title><dc:creator>AI集训营</dc:creator><cp:lastModifiedBy>AI集训营</cp:lastModifiedBy>" +
             """<dcterms:created xsi:type="dcterms:W3CDTF">$now</dcterms:created><dcterms:modified xsi:type="dcterms:W3CDTF">$now</dcterms:modified></cp:coreProperties>"""
     }
 
-    private fun appXml() = XML + """<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties"><Application>AI集训营</Application></Properties>"""
+    internal fun appXml() = XML + """<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties"><Application>AI集训营</Application></Properties>"""
 
-    private fun rootRels(main: String) = XML + """<Relationships xmlns="$RELS_NS">""" +
+    internal fun rootRels(main: String) = XML + """<Relationships xmlns="$RELS_NS">""" +
         """<Relationship Id="rId1" Type="$R_NS/officeDocument" Target="$main"/>""" +
         """<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>""" +
         """<Relationship Id="rId3" Type="$R_NS/extended-properties" Target="docProps/app.xml"/></Relationships>"""
@@ -644,7 +644,7 @@ object OfficeWriter {
     }
 
     /** 显示宽度：中文算两个。 */
-    private fun width(s: String) = s.sumOf { if (it.code > 0x2E80) 2.0 else 1.0 }
+    internal fun width(s: String) = s.sumOf { if (it.code > 0x2E80) 2.0 else 1.0 }
 
     fun excel(markdown: String, s: OfficeSettings, totalRow: Boolean = false): Made {
         val sheets = sheets(markdown)

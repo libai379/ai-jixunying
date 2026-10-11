@@ -294,6 +294,7 @@ class ShotsTest {
         shoot("desktop-dark-member-edit", 1280, 820, 1f, hub, desktop, "settings:MEMBERS#edit")
         shoot("desktop-dark-costs", 1280, 820, 1f, hub, desktop, "costs")
         shoot("desktop-costs-tall", 1280, 2000, 1f, hub, desktop, "costs")
+        shoot("desktop-office-tall", 1280, 2600, 1f, hub, desktop, "settings:OFFICE")
 
         // 编辑成员弹窗整个画出来（窗口拉高），看「思考」下面那行说明：阿德（深度），再把阿智（GLM-5.3 关不掉思考，快速 = 少想）挪到第一个
         kotlinx.coroutines.runBlocking { e.call(com.guixing.jixunying.model.Command.SaveSettings(e.state.settings.copy(darkMode = 1))) }
