@@ -7,6 +7,10 @@
     <!-- 「我的文档」：读手机里别的 App 存的文档（PDF、Word 等）。只读不改。侧载安装，不上应用商店 -->
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" tools:ignore="ScopedStorage" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
+    <!-- 手机接微信时的前台服务（通知栏常驻，系统不会把应用关掉）。remoteMessaging：在设备之间转文字消息 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_REMOTE_MESSAGING" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
         android:name=".JxyApp"
@@ -52,6 +56,10 @@
                 <data android:mimeType="*/*" />
             </intent-filter>
         </activity>
+        <service
+            android:name=".KeepAliveService"
+            android:exported="false"
+            android:foregroundServiceType="remoteMessaging" />
         <!-- 「我的文档」里点「打开」：把文件交给别的 App 打开 -->
         <provider
             android:name="androidx.core.content.FileProvider"

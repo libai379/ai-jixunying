@@ -32,6 +32,9 @@ interface FrameLink {
     suspend fun send(frame: WireFrame)
     /** 线路自己觉得连着、却很久收不到对方消息时，拆掉重连。 */
     fun reconnect() {}
+    /** 手机切到后台省电：断开中转；resume 时再连上。 */
+    fun pause() {}
+    fun resume() {}
     fun close()
 }
 
@@ -61,6 +64,25 @@ class RemoteBackend(
     /** 电脑把我取消配对了。 */
     val revoked = MutableStateFlow(false)
 
+    /** 手机切到后台、又没在接微信：断开中转、不发心跳，省电。回前台 resume。 */
+    @kotlin.concurrent.Volatile var paused = false
+        private set
+
+    fun pause() {
+        if (paused) return
+        paused = true
+        link.pause()
+        _conn.value = ConnState.Connecting
+    }
+
+    fun resume() {
+        if (!paused) return
+        paused = false
+        onlineSince = null
+        lastHostFrame = null
+        link.resume()
+    }
+
     /** 最后一次收到电脑消息的时间（毫秒时间戳）。手机接微信时拿它划界：这以后发来的电脑可能没答。 */
     @kotlin.concurrent.Volatile var lastHeardAt: Long = 0L
         private set
@@ -84,6 +106,7 @@ class RemoteBackend(
             var lastHello: TimeSource.Monotonic.ValueTimeMark? = null
             var wasOnline = false
             while (isActive) {
+                if (paused) { wasOnline = false; delay(2_000); continue }
                 val online = link.online.value
                 if (online && !wasOnline) {
                     onlineSince = clock.markNow()
@@ -111,6 +134,7 @@ class RemoteBackend(
     }
 
     private fun refreshState() {
+        if (paused) return
         val before = _conn.value
         val online = link.online.value
         val since = onlineSince

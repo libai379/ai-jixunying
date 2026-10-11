@@ -159,7 +159,16 @@ fun WeixinPage(ctl: AppController, state: AppState) {
     Spacer(Modifier.height(12.dp))
     SectionCard {
         if (platform.isDesktop || !phoneLocal) SwitchRow("开启微信助理", "关掉后这台电脑不回微信消息（绑定还在）；配对的手机开着微信助理的话，由手机接着答", ws.enabled) { v -> save { it.copy(enabled = v) } }
-        else SwitchRow("这台手机接微信", "电脑关机或关掉微信助理时由手机接着答。关掉省电：手机不收微信消息，电脑开着照常回答", ws.enabled) { v -> save { it.copy(enabled = v) } }
+        else {
+            SwitchRow("这台手机接微信", "电脑关机或关掉微信助理时由手机接着答。关掉省电：手机不收微信消息，电脑开着照常回答", ws.enabled) { v -> save { it.copy(enabled = v) } }
+            if (ws.enabled && wx.bound) {
+                // 手机接微信时通知栏常驻一条（前台服务）；有的手机还会在后台省电时关掉应用，要把电池设成「不限制」
+                Text("开着时通知栏会常驻一条「AI集训营 在后台接微信」，系统才不会把应用关掉；点通知上的「关掉」等于关这个开关。" +
+                    "三星等手机还要在 设置 → 应用 → AI集训营 → 电池 里选「不限制」，不然锁屏久了还是会被关掉。",
+                    style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, modifier = Modifier.padding(bottom = 4.dp))
+                if (platform.canOpenAppSettings) TextButton(onClick = { platform.openAppSettings() }) { Text("打开这个应用的系统设置") }
+            }
+        }
         SwitchRow("联网搜索", "微信里问时效性的问题会先搜再答，回复末尾附上来源", ws.webSearch) { v -> save { it.copy(webSearch = v) } }
         Spacer(Modifier.height(6.dp))
         FieldLabel("谁来回答微信消息", "选一位就是单聊；选多位就是群聊，每位的回答各发一条")

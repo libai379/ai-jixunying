@@ -1361,6 +1361,14 @@ class EngineTest {
             assertNotNull(bigAtt)
             assertContentEquals(big, remote.fileBytes(bigAtt.id))
 
+            // 手机切到后台省电：断开中转；回前台换一套新连接接上，照常能用
+            remote.pause()
+            delay(1_500)
+            assertTrue(remote.conn.value !is ConnState.Connected)
+            remote.resume()
+            withTimeout(20_000) { while (remote.conn.value !is ConnState.Connected) delay(100) }
+            assertTrue(remote.call(Command.LoadMessages(conv)).ok, "接上后还能遥控电脑")
+
             // 打码的 Key 传回来不能覆盖真 Key
             remote.call(Command.SaveProvider(remote.store.state.value.providers.first { it.id == "p1" }.copy(name = "改名")))
             assertEquals("sk-test", pc.state.provider("p1")!!.apiKey)

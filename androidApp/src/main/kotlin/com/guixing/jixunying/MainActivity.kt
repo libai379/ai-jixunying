@@ -29,6 +29,7 @@ import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 
@@ -39,12 +40,74 @@ import java.io.File
 class JxyApp : Application() {
     lateinit var hub: Hub
         private set
+    lateinit var engine: Engine
+        private set
+    lateinit var weixin: com.guixing.jixunying.engine.WeixinBridge
+        private set
+
+    private val appScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + Dispatchers.Main)
+    /** 现在有几个界面在前台（0 = 应用在后台）。 */
+    private var visible = 0
+    private var bgJob: kotlinx.coroutines.Job? = null
+
+    /** 手机在接微信：绑定了、「这台手机接微信」开着。这时要开前台服务，不然系统会把应用关掉。 */
+    fun phoneAnswersWeixin() = weixin.isBound && engine.state.settings.weixin.enabled
+
+    fun weixinStatus(): String = engine.state.weixin.status
+
+    /** 通知上点「关掉」：把「这台手机接微信」关掉（和设置里关一样）。 */
+    fun turnOffPhoneWeixin() {
+        appScope.launch { engine.call(com.guixing.jixunying.model.Command.SaveSettings(engine.state.settings.let { it.copy(weixin = it.weixin.copy(enabled = false)) })) }
+    }
+
+    /**
+     * 手机后台省电（1.5.0）：
+     * - 回到前台：中转接上，手机接微信的话开前台服务；
+     * - 切到后台 30 秒（回个微信、切个应用不算）：手机没在接微信就断开中转、停心跳；在接微信就保持连着（前台服务已经开着）。
+     */
+    private fun watchLifecycle() {
+        registerActivityLifecycleCallbacks(object : ActivityLifecycleCallbacks {
+            override fun onActivityStarted(activity: android.app.Activity) {
+                if (visible++ == 0) {
+                    bgJob?.cancel()
+                    hub.remote.value?.resume()
+                    if (phoneAnswersWeixin()) KeepAliveService.start(this@JxyApp)
+                }
+            }
+            override fun onActivityStopped(activity: android.app.Activity) {
+                if (--visible == 0) {
+                    bgJob?.cancel()
+                    bgJob = appScope.launch {
+                        kotlinx.coroutines.delay(30_000)
+                        if (!phoneAnswersWeixin()) hub.remote.value?.pause()
+                    }
+                }
+            }
+            override fun onActivityCreated(activity: android.app.Activity, savedInstanceState: Bundle?) {}
+            override fun onActivityResumed(activity: android.app.Activity) {}
+            override fun onActivityPaused(activity: android.app.Activity) {}
+            override fun onActivitySaveInstanceState(activity: android.app.Activity, outState: Bundle) {}
+            override fun onActivityDestroyed(activity: android.app.Activity) {}
+        })
+        // 开关、绑定变了：在前台时开 / 关前台服务；通知上的字跟着状态变
+        appScope.launch {
+            engine.store.state.collect { st ->
+                val want = weixin.isBound && st.settings.weixin.enabled
+                when {
+                    !want -> KeepAliveService.stop(this@JxyApp)
+                    visible > 0 && !KeepAliveService.running -> KeepAliveService.start(this@JxyApp)
+                    else -> KeepAliveService.update(this@JxyApp, st.weixin.status)
+                }
+            }
+        }
+    }
 
     override fun onCreate() {
         super.onCreate()
         AndroidEnv.context = this
         val prefs = getSharedPreferences("jxy", Context.MODE_PRIVATE)
         val engine = Engine(Storage(File(filesDir, "data")), isPhone = true)
+        this.engine = engine
         hub = Hub(
             local = engine,
             linkFactory = { RelayLink(it) },
@@ -61,9 +124,11 @@ class JxyApp : Application() {
             ?.let { hub.attach(it) }
         // 微信助理（1.5.0 起手机也能接）：配对过电脑就用电脑的同一个绑定，电脑在接时手机待命，见 WeixinHandover
         val weixin = com.guixing.jixunying.engine.WeixinBridge(engine, File(filesDir, "data/weixin"))
+        this.weixin = weixin
         engine.weixin = weixin
         com.guixing.jixunying.engine.WeixinHandover(hub, engine, weixin).start()
         weixin.start()
+        watchLifecycle()
     }
 
     fun deviceName(): String = listOf(Build.MANUFACTURER, Build.MODEL).joinToString(" ").trim().ifEmpty { "手机" }
@@ -79,6 +144,9 @@ class MainActivity : ComponentActivity() {
     private val saveDoc = registerForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { saveResult?.complete(it) }
     private val scan = registerForActivityResult(ScanContract()) { scanResult?.complete(it.contents) }
     private val pickTree = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { folderResult?.complete(it) }
+    // 手机接微信时通知栏要常驻一条（前台服务）；Android 13 起显示通知要用户同意。没同意服务照样跑，只是通知栏看不到
+    private val askNotify = registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
+    private var askedNotify = false
 
     /** 别的 App 发来的文件（微信里点文件 → 用其他应用打开，或者分享）。 */
     private val incoming = kotlinx.coroutines.flow.MutableStateFlow<List<PickedFile>>(emptyList())
@@ -98,6 +166,12 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        val app = application as JxyApp
+        if (Build.VERSION.SDK_INT >= 33 && !askedNotify && app.phoneAnswersWeixin() &&
+            checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            askedNotify = true
+            askNotify.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+        }
         // 从系统设置给了「所有文件访问」权限回来：马上扫一遍文档
         (application as JxyApp).hub.local.let { local ->
             if (local is com.guixing.jixunying.engine.Engine && local.state.docs.needPermission && !com.guixing.jixunying.engine.docAccessMissing()) local.rescanDocs()
@@ -166,6 +240,11 @@ class MainActivity : ComponentActivity() {
                 f.absolutePath
             }.getOrNull()
         }?.let { withContext(Dispatchers.Main) { openFile(it) } } == true
+
+        override val canOpenAppSettings = true
+        override fun openAppSettings() {
+            runCatching { startActivity(Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName"))) }
+        }
 
         override fun requestFileAccess() {
             if (Build.VERSION.SDK_INT < 30) return

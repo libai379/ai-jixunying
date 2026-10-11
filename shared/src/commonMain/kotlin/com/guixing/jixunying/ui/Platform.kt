@@ -36,6 +36,9 @@ interface Platform {
     suspend fun clipboardFiles(): List<PickedFile> = emptyList()
     /** 让一块区域能把文件拖进来（电脑）。onHover：拖着文件经过 / 离开；onFiles：松开后读好的文件。手机上原样返回。 */
     fun fileDropTarget(modifier: androidx.compose.ui.Modifier, onHover: (Boolean) -> Unit, onFiles: (List<PickedFile>) -> Unit): androidx.compose.ui.Modifier = modifier
+    /** 安卓：打开这个应用的系统设置页（电池设成「不限制」，手机才能一直在后台接微信）。 */
+    val canOpenAppSettings: Boolean get() = false
+    fun openAppSettings() {}
     /** 安卓：跳到系统设置，让用户给「所有文件访问」权限（读别的 App 存的文档要用）。 */
     fun requestFileAccess() {}
     /** 别的 App 用「打开方式 / 分享」发来的文件（比如在微信里点文件 → 用其他应用打开）。 */

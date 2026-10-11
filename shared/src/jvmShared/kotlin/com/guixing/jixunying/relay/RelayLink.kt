@@ -9,11 +9,13 @@ import com.guixing.jixunying.model.PairingCode
 import com.guixing.jixunying.model.WireFrame
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -33,23 +35,49 @@ class RelayLink(private val host: PairedHost) : FrameLink {
     private val _incoming = MutableSharedFlow<WireFrame>(extraBufferCapacity = 1024)
     override val incoming: SharedFlow<WireFrame> = _incoming
 
-    private val mqtt = MqttMulti(host.brokers, listOf(Topics.down(host.hostId, host.deviceId)), probeTopic = Topics.probe(host.hostId, host.deviceId)) { _, payload ->
+    private fun newMqtt() = MqttMulti(host.brokers, listOf(Topics.down(host.hostId, host.deviceId)), probeTopic = Topics.probe(host.hostId, host.deviceId)) { _, payload ->
         val whole = assembler.accept(payload) ?: return@MqttMulti
         Envelope.openFrames(key, whole)?.forEach { _incoming.tryEmit(it) }
     }
 
-    override val online: StateFlow<Boolean> = mqtt.readyCount.map { it > 0 }.stateIn(scope, SharingStarted.Eagerly, false)
+    // 暂停（手机切到后台省电）会把中转全断开，继续时换一套新连接；online 跟着当前这套走
+    @Volatile private var mqtt: MqttMulti? = newMqtt()
+    private val _online = MutableStateFlow(false)
+    override val online: StateFlow<Boolean> = _online
+    private var watch: Job? = null
 
-    init { mqtt.start() }
-
-    override suspend fun send(frame: WireFrame) = withContext(Dispatchers.IO) {
-        mqtt.publish(Topics.up(host.hostId, host.deviceId), Envelope.sealFrames(key, listOf(frame)))
+    private fun watchOnline(m: MqttMulti) {
+        watch?.cancel()
+        watch = scope.launch { m.readyCount.collect { _online.value = it > 0 } }
     }
 
-    override fun reconnect() = mqtt.forceReconnect()
+    init { mqtt?.let { watchOnline(it); it.start() } }
+
+    override suspend fun send(frame: WireFrame) = withContext(Dispatchers.IO) {
+        mqtt?.publish(Topics.up(host.hostId, host.deviceId), Envelope.sealFrames(key, listOf(frame))) ?: Unit
+    }
+
+    override fun reconnect() { mqtt?.forceReconnect() }
+
+    @Synchronized override fun pause() {
+        val m = mqtt ?: return
+        mqtt = null
+        watch?.cancel()
+        _online.value = false
+        scope.launch { m.stop() }
+    }
+
+    @Synchronized override fun resume() {
+        if (mqtt != null) return
+        val m = newMqtt()
+        mqtt = m
+        watchOnline(m)
+        m.start()
+    }
 
     override fun close() {
-        mqtt.stop()
+        mqtt?.stop()
+        mqtt = null
         scope.cancel()
     }
 }

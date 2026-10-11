@@ -34,7 +34,8 @@
   - 1.5.0 起手机也能接（JxyApp 里建 WeixinBridge + engine/WeixinHandover）。一个微信只能绑一台设备（社区实测：再绑会把前一个顶掉），所以配对过电脑的手机不扫码，经加密线路用电脑的同一个绑定（Command.WeixinShare → WeixinImport，自动同步，电脑换绑 / 解绑手机跟着变）。
   - 电脑优先：电脑在线、开着微信助理、收得到消息（WeixinInfo.answering）时手机待命（WeixinBridge.standby），刚打开还不知道电脑状态时也先等着；电脑关机、断网或关掉开关，手机接着答。两边各一个开关（Settings.weixin.enabled 各存各的），手机省电时关掉。
   - 不重复回答：按微信消息的 create_time_ms 划界——手机只答最后一次听到电脑（RemoteBackend.lastHeardAt）以后发来的（WeixinCursor.answerAfter）；手机答过的经 Command.WeixinReport 告诉电脑；电脑把绑定给过手机的话，刚打开时积压的消息先等 30 秒（BACKLOG_HOLD_MS）等手机报告。只有正在接的那台发 notifystop。
-  - 已知限制：中转全断但电脑和手机都能上网时，手机看不到电脑，两边可能都答；手机上的 AI集训营 被系统杀掉后不接（「手机后台省电」那件再说）。
+  - 手机后台（JxyApp.watchLifecycle）：手机接微信时开前台服务 KeepAliveService（remoteMessaging，通知上「关掉」= 关开关），只在应用打开着时启动；没在接微信时切到后台 30 秒断开中转（RemoteBackend.pause / RelayLink.pause），回前台 resume。
+  - 已知限制：中转全断但电脑和手机都能上网时，手机看不到电脑，两边可能都答；三星等手机电池没设「不限制」时，锁屏久了还可能被关掉。
 
 ## 红线
 
