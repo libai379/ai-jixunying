@@ -173,7 +173,8 @@ private fun inline(text: String, sources: List<SearchSource>, base: SpanStyle = 
 
 @Composable
 fun MarkdownText(text: String, modifier: Modifier = Modifier, sources: List<SearchSource> = emptyList(), color: Color = MaterialTheme.colorScheme.onSurface) {
-    val blocks = remember(text) { parseBlocks(text) }
+    // LaTeX 公式先转成普通符号（这里显示不了 LaTeX）
+    val blocks = remember(text) { parseBlocks(com.guixing.jixunying.model.MathText.plain(text)) }
     val body = MaterialTheme.typography.bodyLarge.copy(color = color)
     Column(modifier, verticalArrangement = Arrangement.spacedBy(8.dp)) {
         for (b in blocks) {

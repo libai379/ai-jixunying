@@ -440,7 +440,7 @@ object PptWriter {
     fun ppt(markdown: String, s: OfficeSettings, o: PptOptions = PptOptions()): OfficeWriter.Made {
         val th = theme(o.theme.ifBlank { s.pptTheme })
         val canvas = if (s.pptWide) Canvas(12192000, 6858000) else Canvas(9144000, 6858000)
-        val (cover, raw) = build(markdown, o)
+        val (cover, raw) = build(com.guixing.jixunying.model.MathText.plain(markdown), o)
         require(cover != null || raw.isNotEmpty()) { "没找到内容：PPT 的内容用 Markdown 写，# 标题是封面，每个 ## 是一页" }
         val wPt = (canvas.w - inch(1.5)).toDouble() / EMU_PT
         val hPt = (canvas.h - inch(1.5) - inch(0.75)).toDouble() / EMU_PT

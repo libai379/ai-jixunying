@@ -998,7 +998,7 @@ class Engine(
         val chairText = Council.chairPrompt(ask.content, texts, reviews.map { stripThink(it.content) }, avg)
         val chair = singleShot(convId, CHAIR_ID, judge?.first, judge?.second.orEmpty(),
             judge?.let { "${it.second}（${it.first.name}）· 主席" }.orEmpty(), "chair",
-            "你是一位中立、严谨的主席，用中文回答，可以用 Markdown。", chairText, null, null, UsageTag("council", "", convId),
+            "你是一位中立、严谨的主席，用中文回答，可以用 Markdown；这里显示不了 LaTeX 公式，数学式子直接用文字和符号写。", chairText, null, null, UsageTag("council", "", convId),
             missing = "没有能当主席的模型：到 设置 → 记忆 → 立场档案 选一个裁判（默认 DeepSeek-V4.1-Flash）")
         // 名次表程序写（不靠模型抄），跟在汇总后面；代号换回真名
         val rankTable = if (avg.isEmpty()) "" else "\n\n---\n**互评名次**（${rankings.size} 份互评的平均名次，越小越好）：" +

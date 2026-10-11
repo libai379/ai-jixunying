@@ -105,7 +105,7 @@ class WeixinBridge(
 
         /** 微信不显示 Markdown：把标题、加粗、列表、链接、表格分隔线换成普通文字。 */
         fun plainText(md: String): String {
-            var t = md.replace("\r\n", "\n")
+            var t = com.guixing.jixunying.model.MathText.plain(md).replace("\r\n", "\n")
             t = t.replace(Regex("```[A-Za-z0-9_+-]*\\n?"), "")
             t = t.replace(Regex("(?m)^#{1,6}\\s+"), "")
             t = t.replace(Regex("\\*\\*(.+?)\\*\\*"), "$1").replace(Regex("__(.+?)__"), "$1")

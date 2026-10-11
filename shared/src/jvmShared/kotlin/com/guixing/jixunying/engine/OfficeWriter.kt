@@ -246,7 +246,7 @@ object OfficeWriter {
         val lk = look(styleId)
         // AI 这次指定了别的样式（比如设置是通用、用户说「用公文格式」）：缩进跟那套样式走
         val indent = o.firstLineIndent ?: if (o.style.isNotBlank() && o.style != s.wordStyle) lk.indentDefault else s.firstLineIndent
-        var blocks = parse(markdown)
+        var blocks = parse(com.guixing.jixunying.model.MathText.plain(markdown))
         // 标题：AI 给了就用；没给、而且只有开头一个一级标题，就把它当文档标题
         var title = plain(o.title).trim()
         val h1s = blocks.filterIsInstance<Md.Heading>().filter { it.level == 1 }

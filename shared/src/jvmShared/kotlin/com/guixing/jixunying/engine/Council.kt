@@ -61,10 +61,18 @@ object Council {
         append("提到某个回答时用「回答甲」这样的代号。名次只是参考，结论按道理定，不按人多。")
     }
 
-    /** 回答写完、给人看之前：「回答甲」换回真名（一次换完，免得名字里刚好有代号的字被再换一遍）。 */
+    /**
+     * 回答写完、给人看之前：「回答甲」「【甲】」换回真名（一次换完，免得名字里刚好有代号的字被再换一遍）。
+     * 「乙、丙都答 4」这种光写一个字的不换（单字太容易误伤）。
+     */
     fun reveal(text: String, names: Map<String, String>): String {
         if (names.isEmpty()) return text
-        val re = Regex("回答(" + names.keys.joinToString("|") { Regex.escape(it) } + ")")
-        return re.replace(text) { m -> names[m.groupValues[1]]?.let { "$it（回答${m.groupValues[1]}）" } ?: m.value }
+        val keys = names.keys.joinToString("|") { Regex.escape(it) }
+        val re = Regex("回答($keys)|【($keys)】")
+        return re.replace(text) { m ->
+            val k = m.groupValues[1].ifEmpty { m.groupValues[2] }
+            val n = names[k] ?: return@replace m.value
+            if (m.groupValues[1].isNotEmpty()) "$n（回答$k）" else "【$n（回答$k）】"
+        }
     }
 }
