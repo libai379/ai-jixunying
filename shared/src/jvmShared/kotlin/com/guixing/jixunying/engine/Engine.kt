@@ -2053,6 +2053,10 @@ class Engine(
         val wav = runCatching { Base64.getDecoder().decode(c.audioBase64) }.getOrNull()
         if (wav == null) return CommandResult(false, "这段录音不是有效的 base64")
         if (wav.isEmpty()) return CommandResult(false, "这段录音是空的")
+        // 几乎没声音就不发：听写模型对着静音会编出一句话来（10-12 模拟器上小米把静音听成了一句英文），还白花钱
+        SpeechText.parseWav(wav)?.let { w ->
+            if (SpeechText.isSilent(w)) return CommandResult(false, Speech.SILENT_RECORDING)
+        }
         val t = speechTarget(c.providerId, c.modelId, tts = false)
             ?: return CommandResult(false, if (c.providerId.isNotBlank()) "没有这家服务商，或者它不支持听写" else Speech.NO_ASR + "（去 设置 → 语音 里加一家的 Key）")
         return try {

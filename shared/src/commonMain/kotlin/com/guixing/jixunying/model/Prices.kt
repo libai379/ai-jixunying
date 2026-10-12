@@ -231,8 +231,11 @@ object Prices {
         return parts.joinToString("；") + " $unit/百万" + (if (p.offPeakHalf) "（高峰价，空闲时段半价）" else "") + (if (p.note.isNotBlank()) "（${p.note}）" else "")
     }
 
-    private fun fmt(d: Double): String {
-        val s = ((d * 10000).let { kotlin.math.round(it) } / 10000).toString()
-        return if (s.endsWith(".0")) s.dropLast(2) else s
+    /** 最多 4 位小数。不用 Double.toString：0.0002 会变成「2.0E-4」（智谱听写的单价，10-12 截图里看到的）。 */
+    internal fun fmt(d: Double): String {
+        val scaled = kotlin.math.round(d * 10000).toLong()
+        val a = kotlin.math.abs(scaled)
+        val frac = (a % 10000).toString().padStart(4, '0').trimEnd('0')
+        return (if (scaled < 0) "-" else "") + (a / 10000) + (if (frac.isNotEmpty()) ".$frac" else "")
     }
 }

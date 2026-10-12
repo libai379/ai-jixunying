@@ -61,6 +61,33 @@ class ShotsTest {
         override val brandIcon: ImageBitmap? = DesktopPlatform.loadBrandIcon()
     }
 
+    /**
+     * 截图用的台面：能放音、能录音，但不碰真设备（截图时不真的出声、不真的开麦克风）。
+     * 手机能不能放音、录音由真机决定，这里的 PhonePlatform 还是「不能」——
+     * 要看手机上语音那一页的样子，就套一层这个。
+     */
+    private class FakeAvPlatform(private val base: Platform) : Platform by base {
+        override val canPlayAudio = true
+        override val canRecord = true
+        override suspend fun playWav(bytes: ByteArray) {}
+        override suspend fun startRecording(): String? = null
+    }
+
+    /**
+     * 截图用：读出来永远停在「合成中…」——SpeakPlan 立刻回一个两段的计划，Speak 一直不返回。
+     * 用来看「停止」和「合成中…」长什么样（真跑要联网、还要花钱）。
+     */
+    private class HangingSpeech(private val inner: Engine) : com.guixing.jixunying.client.Backend by inner {
+        override suspend fun call(command: com.guixing.jixunying.model.Command): com.guixing.jixunying.model.CommandResult = when (command) {
+            is com.guixing.jixunying.model.Command.SpeakPlan -> com.guixing.jixunying.model.CommandResult(data =
+                com.guixing.jixunying.model.AppJson.encodeToString(com.guixing.jixunying.model.SpeechPlan.serializer(),
+                    com.guixing.jixunying.model.SpeechPlan("pm", "mimo-v2.5-tts", "mimo-v2.5-tts（小米 MiMo）",
+                        listOf("先说结论：这不是一份能签的合同，只是两条备忘。", "押金退还期限从哪天起算没写清，逾期也没写怎么办。"))))
+            is com.guixing.jixunying.model.Command.Speak -> kotlinx.coroutines.awaitCancellation()
+            else -> inner.call(command)
+        }
+    }
+
     private fun seed(root: File, docsDir: File): Engine {
         val providers = listOf(
             ProviderConfig("pd", "deepseek", "DeepSeek 4.1 Flash", "https://api.deepseek.com", "sk-1234567890abcdef", listOf(ModelInfo("deepseek-flash"))),
@@ -128,6 +155,19 @@ class ShotsTest {
                 r(2, "image", "pq", "qwen", "qwen-image-3.0", 0, 0, 0, images = 2),
                 r(1, "chat", "px", "custom", "my-local-model", 3_000, 0, 800, "ma"),
                 r(0, "addressing", "pi", "mimo", "mimo-v2.6-flash", 0, 0, 0),
+                // 语音：读出来的字数、听写的秒数要按模型累加显示（1.7.0）
+                com.guixing.jixunying.model.UsageRecord(now - 5_000_000L, com.guixing.jixunying.model.UsageKinds.TTS, "pi", "小米 MiMo", "mimo", "mimo-v2.5-tts",
+                    units = 1_240.0, unit = com.guixing.jixunying.model.SpeechUnits.CHAR),
+                com.guixing.jixunying.model.UsageRecord(now - 4_400_000L, com.guixing.jixunying.model.UsageKinds.TTS, "pi", "小米 MiMo", "mimo", "mimo-v2.5-tts",
+                    units = 860.0, unit = com.guixing.jixunying.model.SpeechUnits.CHAR),
+                com.guixing.jixunying.model.UsageRecord(now - 3_000_000L, com.guixing.jixunying.model.UsageKinds.ASR, "pi", "小米 MiMo", "mimo", "mimo-v2.5-asr",
+                    units = 95.0, unit = com.guixing.jixunying.model.SpeechUnits.SECOND),
+                // MiniMax 按字符算钱（一个汉字 2 个字符），这行要写清「汉字算 2 个」
+                com.guixing.jixunying.model.UsageRecord(now - 2_500_000L, com.guixing.jixunying.model.UsageKinds.TTS, "pm", "MiniMax 中国版", "minimax", "speech-2.8-turbo",
+                    units = 640.0, unit = com.guixing.jixunying.model.SpeechUnits.CHAR),
+                // 超过一分钟：显示成「共 M 分 S 秒」
+                com.guixing.jixunying.model.UsageRecord(now - 2_000_000L, com.guixing.jixunying.model.UsageKinds.ASR, "pm", "MiniMax 中国版", "minimax", "asr-1.0",
+                    units = 305.0, unit = com.guixing.jixunying.model.SpeechUnits.SECOND),
             ))
             backfilled = true
         }
@@ -369,6 +409,19 @@ class ShotsTest {
             "settings-code" to "settings:CODE")
         for ((name, start) in narrow) shoot("phone-$name", 824, 1784, 2f, hub, phone, start)
 
+        // 语音（1.7.0）：读出来的按钮、正在读、「合成中…」、输入框正在录音、手机上那一页
+        val av = FakeAvPlatform(desktop)
+        shoot("desktop-speaking", 1280, 820, 1f, Hub(HangingSpeech(e)), av, "conv:c1#speak")
+        shoot("desktop-recording", 1280, 820, 1f, hub, av, "conv:c1#record")
+        shoot("desktop-speaking-tall", 1280, 1300, 1f, Hub(HangingSpeech(e)), av, "conv:c1#speak")
+        // 手机上：听写那一页（能放音、能录音的手机）和正在录音的输入框
+        shoot("phone-settings-speech", 824, 1784, 2f, hub, FakeAvPlatform(phone), "settings:SPEECH")
+        shoot("phone-recording", 824, 1784, 2f, hub, FakeAvPlatform(phone), "conv:c1#record")
+        shoot("phone-speaking", 824, 1784, 2f, Hub(HangingSpeech(e)), FakeAvPlatform(phone), "conv:c1#speak")
+        // 语音那一页很长：整个画出来才看得到「试听」和「听写」两节
+        shoot("desktop-settings-speech-tall", 1280, 1700, 1f, hub, av, "settings:SPEECH")
+        shoot("phone-settings-speech-tall", 824, 2600, 2f, hub, FakeAvPlatform(phone), "settings:SPEECH")
+
         // Code 栏：侧栏那一栏（没开会话）、会话本身（含等批准那一步）、差异查看器、新建对话框
         shoot("desktop-code-tab", 1280, 820, 1f, hub, desktop, "code")
         shoot("desktop-code", 1280, 820, 1f, hub, desktop, "code:c8")
@@ -404,6 +457,9 @@ class ShotsTest {
         shoot("desktop-dark-code", 1280, 820, 1f, hub, desktop, "code:c8")
         shoot("desktop-dark-code-diff", 1280, 820, 1f, hub, desktop, "code:c8#diff")
         shoot("desktop-dark-code-new", 1280, 820, 1f, hub, desktop, "newcode")
+        // 深色：设置 → 语音（这一页有单选框、滑块、开关、按钮，都要看得清）
+        shoot("desktop-dark-settings-speech", 1280, 820, 1f, hub, av, "settings:SPEECH")
+        shoot("desktop-dark-speaking", 1280, 820, 1f, Hub(HangingSpeech(e)), av, "conv:c1#speak")
         shoot("phone-dark-code", 824, 1784, 2f, hub, phone, "code:c8")
         // 设置 → Code 栏（深色）：顶上的 1 GB 提醒、备份大小、错误提示在深色下都要看得清
         shoot("desktop-dark-settings-code", 1280, 820, 1f, hub, desktop, "settings:CODE")

@@ -5,6 +5,12 @@ import androidx.compose.ui.graphics.ImageBitmap
 
 class PickedFile(val name: String, val mime: String, val bytes: ByteArray)
 
+/**
+ * 用户没给麦克风权限时 startRecording 返回的这句话。
+ * 界面认这一句（不要改字），好在提示条上多给一个「去设置」按钮（安卓的 MainActivity 也用它）。
+ */
+const val NO_RECORD_PERMISSION = "没有录音权限：去 系统设置 → 应用 → AI集训营 → 权限 里打开麦克风"
+
 /** 各平台各自实现的能力：选文件、解码图片、存文件、开网页、二维码、本地小配置。 */
 interface Platform {
     val isDesktop: Boolean
@@ -48,6 +54,24 @@ interface Platform {
     /** 别的 App 用「打开方式 / 分享」发来的文件（比如在微信里点文件 → 用其他应用打开）。 */
     val incomingFiles: kotlinx.coroutines.flow.StateFlow<List<PickedFile>> get() = NoIncoming
     fun clearIncoming() {}
+    /** 这台设备能不能放声音（回答下面「读出来」按钮、设置里的「试听」）。默认不能。 */
+    val canPlayAudio: Boolean get() = false
+    /**
+     * 放一段 wav（16 位 PCM），放完才返回。
+     * 协程被取消时（点了「停止」）要马上停下、把放音设备放掉，不要再出声。
+     */
+    suspend fun playWav(bytes: ByteArray) {}
+    /** 这台设备能不能录音（输入框旁边的话筒按钮）。默认不能。 */
+    val canRecord: Boolean get() = false
+    /**
+     * 开始录音。成功返回 null；不行就返回一句人话（没有麦克风、没有权限……），界面直接把这句话弹出来。
+     * 要权限的平台在这里问用户（第一次点话筒时）。
+     */
+    suspend fun startRecording(): String? = "这台设备不能录音"
+    /** 停下并取出刚才录的：wav（16000 Hz、单声道、16 位）。没录到东西返回 null。 */
+    suspend fun stopRecording(): ByteArray? = null
+    /** 不要这段录音了（离开对话、切到别的页面时用）。 */
+    fun cancelRecording() {}
 }
 
 private val NoIncoming = kotlinx.coroutines.flow.MutableStateFlow<List<PickedFile>>(emptyList())

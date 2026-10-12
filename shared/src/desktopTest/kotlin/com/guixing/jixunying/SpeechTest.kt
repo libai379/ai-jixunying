@@ -2,6 +2,7 @@ package com.guixing.jixunying
 
 import com.guixing.jixunying.engine.Engine
 import com.guixing.jixunying.engine.Ledger
+import com.guixing.jixunying.engine.Speech
 import com.guixing.jixunying.engine.SpeechText
 import com.guixing.jixunying.engine.Storage
 import com.guixing.jixunying.model.AppJson
@@ -126,9 +127,17 @@ class SpeechTest {
     private fun freePort() = ServerSocket(0).use { it.localPort }
     private fun base() = "http://127.0.0.1:$port"
 
-    /** 自己拼一个 wav（16000 Hz、单声道、16 位），用来当「服务商返回的音频」和「用户的录音」。 */
-    private fun wavSeconds(seconds: Double, rate: Int = 16000): ByteArray {
+    /**
+     * 自己拼一个 wav（16000 Hz、单声道、16 位），用来当「服务商返回的音频」和「用户的录音」。
+     * 里面是 440 Hz 的正弦波（不是全 0）：全 0 的录音引擎会当成「没录到声音」不发。silent = true 才是静音。
+     */
+    private fun wavSeconds(seconds: Double, rate: Int = 16000, silent: Boolean = false): ByteArray {
         val data = ByteArray((rate * seconds).toInt() * 2)
+        if (!silent) for (i in 0 until data.size / 2) {
+            val v = (8000 * kotlin.math.sin(2 * Math.PI * 440 * i / rate)).toInt()
+            data[i * 2] = (v and 0xFF).toByte()
+            data[i * 2 + 1] = ((v shr 8) and 0xFF).toByte()
+        }
         val b = ByteArrayOutputStream()
         fun ascii(s: String) = b.write(s.toByteArray(Charsets.US_ASCII))
         fun le(v: Int, n: Int) {
@@ -480,19 +489,37 @@ class SpeechTest {
     @Test
     fun longTextIsSplitIntoFewRequests() = runBlocking {
         val e = engine("zhipu")
-        val text = (1..80).joinToString("") { "这是第 $it 句话。" } // 一共六百多字
-        val a = audioOf(speak(e, text))
-        assertEquals(1, a.segments.size, "六百多字没超过智谱的 1024，一次就行")
-        assertEquals(a.segments.size, zhipuTtsRequests.size, "一段一次请求")
-        assertEquals(text.take(10), zhipuTtsRequests.first()["input"]!!.jsonPrimitive.content.take(10))
-        // 超过上限的会切
+        // 很短的一句话：一次请求
+        val a = audioOf(speak(e, "你好，这是一句话。"))
+        assertEquals(1, a.segments.size)
+        assertEquals(1, zhipuTtsRequests.size, "一段一次请求")
+        // 长的：第一段一两句（先开口），后面每段不超过 PART 字（也不超过智谱的 1024），句子不劈开、一个字都不少
         val n = zhipuTtsRequests.size
-        val b = audioOf(speak(e, (1..300).joinToString("") { "这是第 $it 句话。" })) // 两千多字
-        assertTrue(b.segments.size >= 3, "两千多字要切成 3 段以上：${b.segments.size}")
-        val sent = zhipuTtsRequests.drop(n)
-        assertEquals(b.segments.size, sent.size)
-        assertTrue(sent.all { it["input"]!!.jsonPrimitive.content.length <= 1024 },
-            sent.maxOf { it["input"]!!.jsonPrimitive.content.length }.toString())
+        val text = (1..300).joinToString("") { "这是第 $it 句话。" } // 两千多字
+        val b = audioOf(speak(e, text))
+        val sent = zhipuTtsRequests.drop(n).map { it["input"]!!.jsonPrimitive.content }
+        assertEquals(b.segments.size, sent.size, "一段一次请求")
+        assertTrue(sent.first().length <= SpeechText.FIRST, "第一段要短：${sent.first().length} 字")
+        assertTrue(sent.all { it.length <= SpeechText.PART }, sent.maxOf { it.length }.toString())
+        assertTrue(sent.all { it.endsWith("。") }, "每段都在句号后面换段：" + sent.firstOrNull { !it.endsWith("。") })
+        assertEquals(text, sent.joinToString(""), "一个字都不能少")
+    }
+
+    /** 小米官方没写上限：也按 PART 切，不再一段 1000 字（模拟器上第一段要等十几秒才开口，10-12）。 */
+    @Test
+    fun firstChunkIsShortSoReadingStartsSoon() = runBlocking {
+        val e = engine("mimo")
+        val text = "先说结论：这份合同能签。" + (1..100).joinToString("") { "第 $it 条理由写在这里，说得比较长一点。" }
+        val r = e.call(Command.SpeakPlan(text))
+        assertTrue(r.ok, r.message)
+        val plan = AppJson.decodeFromString(SpeechPlan.serializer(), r.data)
+        assertEquals("先说结论：这份合同能签。", plan.chunks.first().take(12))
+        assertTrue(plan.chunks.first().length <= SpeechText.FIRST, plan.chunks.first())
+        assertTrue(plan.chunks.drop(1).all { it.length <= SpeechText.PART }, plan.chunks.map { it.length }.toString())
+        // 第一句本身就很长：不硬切它（超过 PART 才切）
+        val longFirst = "这" + "是很长的一句话".repeat(15) + "。后面一句。"
+        val p2 = AppJson.decodeFromString(SpeechPlan.serializer(), e.call(Command.SpeakPlan(longFirst)).data)
+        assertTrue(p2.chunks.first().endsWith("。"), p2.chunks.first())
     }
 
     @Test
@@ -551,6 +578,35 @@ class SpeechTest {
         e.call(Command.SaveProvider(mimo.copy(enabled = false)))
         audioOf(speak(e, "你好。"))
         assertEquals("tongtong", zhipuTtsRequests.last()["voice"]!!.jsonPrimitive.content)
+    }
+
+    /** 几乎没声音的录音不发给服务商（听写模型对着静音会编出一句话，10-12 模拟器上实测），也不记账。 */
+    @Test
+    fun silentRecordingIsNotSent() = runBlocking {
+        val e = engine("mimo", "minimax", "zhipu")
+        val r = transcribe(e, wavSeconds(2.0, silent = true))
+        assertFalse(r.ok)
+        assertEquals(Speech.SILENT_RECORDING, r.message)
+        assertEquals(0, chatRequests.size + miniMaxAsrBodies.size + zhipuAsrBodies.size, "一个请求都不发")
+        assertEquals(0, Ledger(File(dir, "usage")).since(0).size, "不记账")
+        // 底噪（峰值 200）也算没声音；正常说话（这里是峰值 8000 的正弦波）照常发
+        val noise = SpeechText.parseWav(wavSeconds(1.0, silent = true))!!.let { w ->
+            val d = w.data.copyOf(); d[100] = (200 and 0xFF).toByte(); d[101] = 0
+            SpeechText.Wav(w.sampleRate, w.channels, w.bits, d)
+        }
+        assertTrue(SpeechText.isSilent(noise))
+        assertFalse(SpeechText.isSilent(SpeechText.parseWav(wavSeconds(1.0))!!))
+        assertTrue(transcribe(e, wavSeconds(1.0)).ok)
+    }
+
+    /** 单价不能显示成科学计数法（以前智谱听写显示「2.0E-4 元/秒」，10-12 截图里看到的）。 */
+    @Test
+    fun priceTextIsPlainDecimal() {
+        val asr = Prices.describe(Prices.of("zhipu", "glm-asr-2512", baseUrl = "https://open.bigmodel.cn/api/paas/v4")!!)
+        assertTrue(asr.startsWith("0.0002 元/秒"), asr)
+        assertFalse("E-" in asr, asr)
+        assertTrue(Prices.describe(Prices.of("minimax", "speech-2.8-hd", baseUrl = "https://api.minimaxi.com/v1")!!).startsWith("3.5 元/万字符"))
+        assertTrue(Prices.describe(Prices.of("mimo", "mimo-v2.5-asr", baseUrl = "https://api.xiaomimimo.com/v1")!!).startsWith("0.5 元/小时"))
     }
 
     // ———————————————— 自动挑（SpeechPick） ————————————————

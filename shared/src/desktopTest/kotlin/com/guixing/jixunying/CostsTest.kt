@@ -10,6 +10,8 @@ import com.guixing.jixunying.model.PriceTier
 import com.guixing.jixunying.model.Prices
 import com.guixing.jixunying.model.ProviderConfig
 import com.guixing.jixunying.model.Settings
+import com.guixing.jixunying.model.SpeechUnits
+import com.guixing.jixunying.model.UsageKinds
 import com.guixing.jixunying.model.UsageRecord
 import java.time.ZonedDateTime
 import kotlin.math.abs
@@ -108,6 +110,43 @@ class CostsTest {
             near(10.18 + 2.0, CostReporter(ledger, { state }, { now }).report("all").total.cny)
             assertEquals(bj(2026, 10, 8, 0), CostReporter(ledger, { state }, { now }).periodStart("today"))
             assertEquals(bj(2026, 10, 5, 0), CostReporter(ledger, { state }, { now }).periodStart("week"), "本周从星期一算")
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun speechUnits() {
+        val dir = kotlin.io.path.createTempDirectory("jxy-cost-speech").toFile()
+        try {
+            val ledger = Ledger(dir)
+            val state = AppState(
+                providers = listOf(ProviderConfig("pm", "mimo", "小米 MiMo", "https://api.xiaomimimo.com/v1")),
+                settings = Settings(costs = CostSettings(usdRate = 7.0)),
+            )
+            val now = bj(2026, 10, 12, 20)
+            ledger.addAll(listOf(
+                // 同一模型的两次读出来，字数要加在一起
+                UsageRecord(bj(2026, 10, 12, 19), UsageKinds.TTS, "pm", "小米 MiMo", "mimo", "mimo-v2.5-tts", units = 120.0, unit = SpeechUnits.CHAR),
+                UsageRecord(bj(2026, 10, 12, 19), UsageKinds.TTS, "pm", "小米 MiMo", "mimo", "mimo-v2.5-tts", units = 80.0, unit = SpeechUnits.CHAR),
+                UsageRecord(bj(2026, 10, 12, 19), UsageKinds.ASR, "pm", "小米 MiMo", "mimo", "mimo-v2.5-asr", units = 95.0, unit = SpeechUnits.SECOND),
+                // 不是语音的行：units 留空
+                UsageRecord(bj(2026, 10, 12, 19), UsageKinds.CHAT, "pm", "小米 MiMo", "mimo", "mimo-v2.5", 1_000_000, 0, 0),
+            ))
+            val r = CostReporter(ledger, { state }, { now }).report("today")
+            val tts = r.byModel.first { it.label == "mimo-v2.5-tts" }
+            near(200.0, tts.units)
+            assertEquals(SpeechUnits.CHAR, tts.unit)
+            assertEquals(2, tts.calls)
+            val asr = r.byModel.first { it.label == "mimo-v2.5-asr" }
+            near(95.0, asr.units)
+            assertEquals(SpeechUnits.SECOND, asr.unit)
+            val chat = r.byModel.first { it.label == "mimo-v2.5" }
+            near(0.0, chat.units)
+            assertEquals("", chat.unit)
+            // 「合计」「按用途」也跟着累加（同一行里单位一样才加）
+            near(200.0, r.byKind.first { it.key == UsageKinds.TTS }.units)
+            assertEquals(SpeechUnits.CHAR, r.byKind.first { it.key == UsageKinds.TTS }.unit)
         } finally {
             dir.deleteRecursively()
         }

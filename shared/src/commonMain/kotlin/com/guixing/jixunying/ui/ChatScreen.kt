@@ -48,21 +48,26 @@ import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.Image
 import androidx.compose.material.icons.rounded.Language
 import androidx.compose.material.icons.rounded.Menu
+import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.Psychology
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material.icons.rounded.TableChart
 import androidx.compose.material.icons.rounded.Tune
+import androidx.compose.material.icons.rounded.VolumeUp
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.RadioButton
+import androidx.compose.material3.SnackbarDuration
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -119,6 +124,12 @@ fun ChatScreen(ctl: AppController, convId: String, wide: Boolean, openDrawer: ()
     val allMessages by ctl.backend.store.messages.collectAsState()
     val conv = state.conversation(convId) ?: return
     val messages = allMessages[convId].orEmpty()
+    // 回答完自动读（设置 → 语音 的开关，存的是本机的设置）：这个对话里刚答完的回答念出来，
+    // 打开对话时已有的旧回答不念（SpeechPlayer.onMessages 里分辨）
+    val localSettings by ctl.hub.local.store.state.collectAsState()
+    LaunchedEffect(convId, messages, localSettings.settings.speech.autoRead) {
+        ctl.speech.onMessages(convId, messages, localSettings.settings.speech.autoRead)
+    }
     var showConvSettings by remember { mutableStateOf(ctl.debugDialog == "convsettings") }
     // 立场档案：这个对话记过议题才去取；点了某条回答下的立场标签就打开它
     val topics = if (conv.stanceTopics > 0) rememberStanceTopics(ctl, convId, conv.stanceAt) else emptyList()
@@ -530,6 +541,15 @@ private fun MessageActions(ctl: AppController, m: Message, alignEnd: Boolean, ca
         verticalAlignment = Alignment.CenterVertically,
     ) {
         if (m.content.isNotBlank()) SmallAction(Icons.Rounded.ContentCopy, "复制") { clipboard.setText(AnnotatedString(splitThink(m.content).first)); ctl.toast("已复制") }
+        // 读出来：只给答完了的 AI 回答（念的是正文，不含思考过程；Markdown 记号引擎会去掉）
+        if (platform.canPlayAudio && m.role != Role.USER && body.isNotBlank() && m.status == MsgStatus.DONE) {
+            val speaking = ctl.speech.isReading(m.id)
+            if (speaking && ctl.speech.preparing) {
+                Text("合成中…", style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
+                Spacer(Modifier.width(4.dp))
+            }
+            SmallAction(if (speaking) Icons.Rounded.Stop else Icons.Rounded.VolumeUp, if (speaking) "停止" else "读出来") { ctl.speech.toggle(m.id, body) }
+        }
         if (export) SmallAction(Icons.Rounded.Description, "存成 Word") { export("docx") }
         if (hasTable) SmallAction(Icons.Rounded.TableChart, "表格存成 Excel") { export("xlsx") }
         // 自己说的话：放回输入框改一改再发（和豆包、ChatGPT 一样）
@@ -791,6 +811,78 @@ private fun Composer(ctl: AppController, state: AppState, conv: Conversation, ru
         }
     }
 
+    // ———— 听写：点话筒录音，停下就发给听写模型，认出来的字填进输入框（不直接发，用户看一眼再发） ————
+
+    var recording by remember(conv.id) { mutableStateOf(false) }
+    var recSec by remember(conv.id) { mutableStateOf(0) }
+    var recognizing by remember(conv.id) { mutableStateOf(false) }
+
+    /** 认出来的字插到光标处（输入框里原来有字就接在旁边，不覆盖）。 */
+    fun insertSpoken(t: String) {
+        if (t.isBlank()) { ctl.toast("没听出内容，再说一次"); return }
+        val cur = text
+        val at = cur.selection.start.coerceIn(0, cur.text.length)
+        val before = cur.text.substring(0, at)
+        val add = if (before.isEmpty() || before.last().isWhitespace()) t else " $t"
+        text = TextFieldValue(before + add + cur.text.substring(at), TextRange(at + add.length))
+    }
+
+    /** 开始录音；没有麦克风 / 没给权限就把原因弹出来（权限被拒时提示条上多一个「去设置」）。 */
+    fun startRec() {
+        if (recording || recognizing) return
+        scope.launch {
+            val err = platform.startRecording()
+            if (err == null) {
+                recSec = 0
+                recording = true
+                return@launch
+            }
+            if (err == NO_RECORD_PERMISSION && platform.canOpenAppSettings) {
+                val res = ctl.snackbar.showSnackbar(err, actionLabel = "去设置", withDismissAction = true, duration = SnackbarDuration.Long)
+                if (res == SnackbarResult.ActionPerformed) platform.openAppSettings()
+            } else ctl.toast(err)
+        }
+    }
+
+    fun stopRec() {
+        if (!recording) return
+        recording = false
+        scope.launch {
+            val wav = platform.stopRecording()
+            if (wav == null) { ctl.toast("没有录到声音，再试一次"); return@launch }
+            recognizing = true
+            // 听写也用本机的服务商：手机遥控电脑时，录音不往中转上传（见 SpeechUi.kt 顶上那段）
+            val r = ctl.hub.local.call(Command.Transcribe(kotlin.io.encoding.Base64.encode(wav)))
+            recognizing = false
+            if (!r.ok) { ctl.toast(r.message.ifBlank { "没听清，再试一次" }); return@launch }
+            insertSpoken(r.data.trim())
+        }
+    }
+
+    // 一次最多录 5 分钟（MiniMax 一段最长 500 秒，留点余量），到点自动停下并听写
+    LaunchedEffect(recording) {
+        if (!recording) return@LaunchedEffect
+        while (true) {
+            kotlinx.coroutines.delay(1000)
+            recSec++
+            if (recSec >= 300) {
+                ctl.toast("一次最多录 5 分钟，先认这一段")
+                stopRec()
+                return@LaunchedEffect
+            }
+        }
+    }
+    // 离开这个对话 / 切到别的页面：这段录音不要了
+    DisposableEffect(conv.id) {
+        onDispose { if (recording) { recording = false; platform.cancelRecording() } }
+    }
+    // 开发截图用：conv:编号#record = 打开对话就是「正在录音」的样子
+    LaunchedEffect(conv.id, ctl.debugDialog) {
+        if (ctl.debugDialog != "record") return@LaunchedEffect
+        ctl.debugDialog = ""
+        startRec()
+    }
+
     // AI 还在回答或画图时也能接着发：新消息另起一轮，不用等
     fun send() {
         if (uploading > 0) return
@@ -893,6 +985,27 @@ private fun Composer(ctl: AppController, state: AppState, conv: Conversation, ru
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         ComposerIcon(Icons.Rounded.AttachFile, if (platform.isDesktop) "附件（图片、PDF、Word、Excel、PPT、代码…；也可以把文件拖进来，或者 Ctrl+V 粘贴截图）" else "附件（图片、PDF、Word、Excel、PPT、代码…）") { pick(false) }
                         ComposerIcon(Icons.Rounded.Image, "图片") { pick(true) }
+                        // 听写：点一下开始录，再点一下停下，认出来的字填进输入框（不直接发）
+                        if (platform.canRecord) when {
+                            recognizing -> Row(Modifier.padding(horizontal = 5.dp), verticalAlignment = Alignment.CenterVertically) {
+                                CircularProgressIndicator(Modifier.size(13.dp), strokeWidth = 2.dp)
+                                Spacer(Modifier.width(5.dp))
+                                Text("识别中…", style = MaterialTheme.typography.labelMedium, color = Ext.c.subtle)
+                            }
+                            recording -> Row(
+                                Modifier.clip(RoundedCornerShape(50))
+                                    .background(MaterialTheme.colorScheme.error.copy(alpha = 0.12f))
+                                    .border(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.45f), RoundedCornerShape(50))
+                                    .clickable { stopRec() }.padding(horizontal = 9.dp, vertical = 5.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Icon(Icons.Rounded.Mic, "停下并变成文字", Modifier.size(15.dp), tint = MaterialTheme.colorScheme.error)
+                                Spacer(Modifier.width(4.dp))
+                                Text("${recSec / 60}:${(recSec % 60).toString().padStart(2, '0')}",
+                                    style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.error)
+                            }
+                            else -> ComposerIcon(Icons.Rounded.Mic, "说一段话，变成文字填进输入框（最多 5 分钟，再点一下停下）") { startRec() }
+                        }
                         if (state.members.size > 1) ComposerIcon(Icons.Rounded.AlternateEmail, "@ 成员（也能 @ 不在这个对话里的成员，会把他拉进来）") {
                             text = TextFieldValue(text.text + (if (text.text.isEmpty() || text.text.endsWith(" ")) "@" else " @"), TextRange(Int.MAX_VALUE))
                         }

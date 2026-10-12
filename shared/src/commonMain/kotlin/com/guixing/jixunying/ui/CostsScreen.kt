@@ -56,6 +56,7 @@ import com.guixing.jixunying.model.CostLine
 import com.guixing.jixunying.model.CostReport
 import com.guixing.jixunying.model.ModelPrice
 import com.guixing.jixunying.model.PriceTier
+import com.guixing.jixunying.model.SpeechUnits
 import kotlinx.serialization.builtins.ListSerializer
 
 private val PERIODS = listOf("today" to "今天", "week" to "本周", "month" to "本月", "all" to "全部")
@@ -181,6 +182,24 @@ private fun dayLabel(key: String): String {
     return if (parts.size == 3) "${parts[1].toInt()}月${parts[2].toInt()}日" else key
 }
 
+/**
+ * 语音的行后面跟一句累计：读出来是「共 N 字」（MiniMax 一个汉字算 2 个字符，照它的算法标出来），
+ * 听写是「共 M 分 S 秒」。别的行没有（unit 是空的）。
+ */
+private fun unitsText(l: CostLine): String? {
+    if (l.units <= 0.0) return null
+    return when (l.unit) {
+        // MiniMax 的单价说明里已经写了「1 个汉字算 2 个字符」，这里不再重复
+        SpeechUnits.CHAR -> if (l.label.trim().lowercase().startsWith("speech-")) "共 ${l.units.toInt()} 字符"
+        else "共 ${l.units.toInt()} 字"
+        SpeechUnits.SECOND -> {
+            val total = l.units.toInt()
+            if (total < 60) "共 $total 秒" else "共 ${total / 60} 分 ${total % 60} 秒"
+        }
+        else -> null
+    }
+}
+
 @Composable
 private fun TotalCard(r: CostReport) {
     val t = r.total
@@ -286,7 +305,8 @@ private fun ModelBreakdown(r: CostReport, onEdit: (CostLine) -> Unit) {
                 Text(lineMoney(l, r.usdRate), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text((if (l.overridden) "你改过的单价：" else "") + l.priceText, style = MaterialTheme.typography.labelSmall,
+                Text((if (l.overridden) "你改过的单价：" else "") + l.priceText + (unitsText(l)?.let { " · $it" } ?: ""),
+                    style = MaterialTheme.typography.labelSmall,
                     color = if (l.unpriced > 0) Ext.c.warning else Ext.c.subtle, modifier = Modifier.weight(1f).padding(top = 2.dp))
                 Text("改单价", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary,
                     modifier = Modifier.clip(RoundedCornerShape(6.dp)).clickable { onEdit(l) }.padding(horizontal = 8.dp, vertical = 6.dp))

@@ -42,6 +42,7 @@ import androidx.compose.material.icons.rounded.Groups
 import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.Language
 import androidx.compose.material.icons.rounded.Menu
+import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.Palette
 import androidx.compose.material.icons.rounded.PhoneAndroid
 import androidx.compose.material.icons.rounded.Psychology
@@ -94,6 +95,7 @@ import com.guixing.jixunying.model.Presets
 import com.guixing.jixunying.model.ProviderConfig
 import com.guixing.jixunying.model.SearchEngine
 import com.guixing.jixunying.model.SearchMode
+import com.guixing.jixunying.model.SpeechPick
 import kotlinx.coroutines.flow.first
 
 private fun tabIcon(t: SettingsTab): ImageVector = when (t) {
@@ -103,6 +105,7 @@ private fun tabIcon(t: SettingsTab): ImageVector = when (t) {
     SettingsTab.MEMORY -> Icons.Rounded.Psychology
     SettingsTab.SEARCH -> Icons.Rounded.Language
     SettingsTab.IMAGE -> Icons.Rounded.Brush
+    SettingsTab.SPEECH -> Icons.Rounded.Mic
     SettingsTab.OFFICE -> Icons.Rounded.Description
     SettingsTab.CODE -> Icons.Rounded.Terminal
     SettingsTab.WEIXIN -> Icons.Rounded.Forum
@@ -189,6 +192,10 @@ private fun tabSummary(t: SettingsTab, s: AppState, ctl: AppController): String 
     SettingsTab.MEMORY -> if (!s.settings.memory.enabled) "已关闭" else "${s.memories.size} 条"
     SettingsTab.SEARCH -> if (s.settings.search.mode == SearchMode.AUTO) "自动" else engineLabel(s.settings.search.engine)
     SettingsTab.IMAGE -> ImagePick.resolve(s).firstOrNull()?.let { (if (ImagePick.isAuto(s)) "自动：" else "") + it.modelId } ?: "没有可用的"
+    // 语音这一页读写的是这台设备自己的设置（手机上遥控电脑时也是本机的），所以这里看本机
+    SettingsTab.SPEECH -> ctl.hub.local.store.state.value.let { local ->
+        SpeechPick.forTts(local).let { c -> if (c == null) "没有可用的" else (if (SpeechPick.isAuto(local, tts = true)) "自动：" else "") + c.modelId }
+    }
     SettingsTab.OFFICE -> if (!s.settings.office.enabled) "已关闭" else when (s.settings.office.wordStyle) { "formal" -> "正式"; "official" -> "公文"; else -> "通用" }
     SettingsTab.CODE -> shellLabel(s.settings.code.shell) + if (s.settings.code.allowPhone) " · 手机能用" else " · 手机不能用"
     SettingsTab.WEIXIN -> if (!s.weixinCapable) "在电脑上设置" else if (s.weixin.bound) "已绑定" else "未绑定"
@@ -208,6 +215,7 @@ private fun SettingsPage(ctl: AppController, state: AppState, tab: SettingsTab) 
                 SettingsTab.MEMORY -> MemoryPage(ctl, state)
                 SettingsTab.SEARCH -> SearchPage(ctl, state)
                 SettingsTab.IMAGE -> ImagePage(ctl, state)
+                SettingsTab.SPEECH -> SpeechPage(ctl)
                 SettingsTab.OFFICE -> OfficePage(ctl, state)
                 SettingsTab.CODE -> CodePage(ctl, state)
                 SettingsTab.WEIXIN -> WeixinPage(ctl, state)

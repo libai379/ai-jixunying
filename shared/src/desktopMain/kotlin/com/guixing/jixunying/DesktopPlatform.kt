@@ -7,6 +7,8 @@ import com.guixing.jixunying.ui.Platform
 import androidx.compose.foundation.draganddrop.dragAndDropTarget
 import androidx.compose.ui.draganddrop.awtTransferable
 import kotlinx.coroutines.Dispatchers
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 import kotlinx.coroutines.swing.Swing
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -142,6 +144,117 @@ class DesktopPlatform(private val window: () -> Frame?) : Platform {
     override fun getPref(key: String): String? = prefs.get(key, null)
     override fun setPref(key: String, value: String?) {
         if (value == null) prefs.remove(key) else prefs.put(key, value)
+    }
+
+    // ---- 读出来（放音）和听写（录音）：用 Java 自带的 javax.sound。
+    //      统一是 wav、16 位 PCM；录的时候 16000 Hz 单声道（设计说明第 5 节）。
+
+    override val canPlayAudio = true
+
+    /**
+     * 放音在单独的线程里跑，协程被取消（点了「停止」）时从这边把 line 停掉、关掉：
+     * javax.sound 的文档写明 line 被停止 / 关闭时 write 不再阻塞、drain 也会返回，
+     * 所以缓冲里剩下的那一截不会再接着响（以前在协程里直接 drain，点停止还要等它放完，主会话审查 10-12 改）。
+     */
+    override suspend fun playWav(bytes: ByteArray) {
+        val (stream, line) = withContext(Dispatchers.IO) {
+            val s = javax.sound.sampled.AudioSystem.getAudioInputStream(java.io.ByteArrayInputStream(bytes))
+            val l = try {
+                javax.sound.sampled.AudioSystem.getSourceDataLine(s.format).also { it.open(s.format) }
+            } catch (e: Throwable) {
+                runCatching { s.close() }
+                throw e
+            }
+            s to l
+        }
+        val stopped = java.util.concurrent.atomic.AtomicBoolean(false)
+        fun shut() {
+            runCatching { line.stop() }
+            runCatching { line.flush() }
+            runCatching { line.close() }
+            runCatching { stream.close() }
+        }
+        kotlinx.coroutines.suspendCancellableCoroutine<Unit> { cont ->
+            cont.invokeOnCancellation { stopped.set(true); shut() }
+            Thread({
+                val result = runCatching {
+                    line.start()
+                    val buf = ByteArray(8192)
+                    while (!stopped.get()) {
+                        // 有的 wav 读到尾巴会直接抛，当成读完了
+                        val n = runCatching { stream.read(buf, 0, buf.size) }.getOrDefault(-1)
+                        if (n <= 0) break
+                        line.write(buf, 0, n)
+                    }
+                    if (!stopped.get()) line.drain() // 等最后一块放完才返回
+                }
+                shut()
+                // 已经取消的不用再回（取消时协程那边已经结束了）
+                if (cont.isActive) result.fold({ cont.resume(Unit) }, { cont.resumeWithException(it) })
+            }, "jxy-play").apply { isDaemon = true; start() }
+        }
+    }
+
+    override val canRecord = true
+
+    /** 正在录的这段：后台线程一边读一边攒在内存里，停下来时再拼 wav 头。 */
+    private class Recording(val line: javax.sound.sampled.TargetDataLine, val out: java.io.ByteArrayOutputStream) {
+        @Volatile var stopped = false
+        var thread: Thread? = null
+    }
+
+    private var recording: Recording? = null
+
+    override suspend fun startRecording(): String? {
+        if (recording != null) return null // 已经在录了
+        val format = javax.sound.sampled.AudioFormat(16000f, 16, 1, true, false)
+        val info = javax.sound.sampled.DataLine.Info(javax.sound.sampled.TargetDataLine::class.java, format)
+        if (!javax.sound.sampled.AudioSystem.isLineSupported(info)) return "这台电脑上没找到麦克风（没有能录音的设备）"
+        val line = try {
+            javax.sound.sampled.AudioSystem.getLine(info) as javax.sound.sampled.TargetDataLine
+        } catch (e: Throwable) {
+            return "打不开麦克风：${e.message ?: e::class.simpleName}"
+        }
+        val out = java.io.ByteArrayOutputStream()
+        val rec = Recording(line, out)
+        try {
+            line.open(format)
+            line.start()
+        } catch (e: Throwable) {
+            runCatching { line.close() }
+            return "打不开麦克风（可能被别的程序占着）：${e.message ?: e::class.simpleName}"
+        }
+        rec.thread = Thread({
+            val buf = ByteArray(4096)
+            while (!rec.stopped) {
+                val n = runCatching { line.read(buf, 0, buf.size) }.getOrDefault(-1)
+                if (n > 0) out.write(buf, 0, n) else if (n < 0) break // 关了以后 read 会返回 -1，收工
+            }
+        }, "jxy-record").also {
+            it.isDaemon = true
+            it.start()
+        }
+        recording = rec
+        return null
+    }
+
+    override suspend fun stopRecording(): ByteArray? = withContext(Dispatchers.IO) {
+        val rec = recording ?: return@withContext null
+        recording = null
+        rec.stopped = true
+        runCatching { rec.line.stop() }
+        runCatching { rec.line.close() } // 关掉，后台线程的 read 才会返回
+        rec.thread?.join(2000)
+        val data = rec.out.toByteArray() // 线程已经收工，这会儿读是安全的
+        if (data.isEmpty()) null else com.guixing.jixunying.engine.SpeechText.wavOf(16000, 1, 16, data)
+    }
+
+    override fun cancelRecording() {
+        val rec = recording ?: return
+        recording = null
+        rec.stopped = true
+        runCatching { rec.line.stop() }
+        runCatching { rec.line.close() }
     }
 }
 

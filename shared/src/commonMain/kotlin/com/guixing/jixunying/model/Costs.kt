@@ -112,6 +112,10 @@ data class CostLine(
     val price: ModelPrice? = null,
     /** 价格表里有官方价（没有的话「恢复官方价」要写成「清除自填单价」）。 */
     val hasOfficial: Boolean = false,
+    /** 语音累计：读出来多少字、听写多少秒（同一行里记录的单位一样时相加；不是语音的行是 0 / 空）。 */
+    val units: Double = 0.0,
+    /** SpeechUnits.CHAR 或 SECOND；不是语音的行是空串。 */
+    val unit: String = "",
 ) {
     fun total(usdRate: Double) = cny + usd * usdRate
 }

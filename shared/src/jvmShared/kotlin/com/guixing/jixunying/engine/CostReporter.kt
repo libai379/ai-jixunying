@@ -39,7 +39,9 @@ class CostReporter(private val ledger: Ledger, private val stateOf: () -> AppSta
             var cny = 0.0; var usd = 0.0; var calls = 0; var images = 0
             var prompt = 0L; var cached = 0L; var completion = 0L; var unpriced = 0; var noUsage = 0
             var priceText = ""; var priceKey = ""; var overridden = false; var price: com.guixing.jixunying.model.ModelPrice? = null; var hasOfficial = false
-            fun line() = CostLine(key, label, sub, cny, usd, calls, images, prompt, cached, completion, unpriced, noUsage, priceText, priceKey, overridden, price, hasOfficial)
+            // 语音累计：读出来多少字、听写多少秒（花费页「共 N 字」「共 M 分 S 秒」）
+            var units = 0.0; var unit = ""
+            fun line() = CostLine(key, label, sub, cny, usd, calls, images, prompt, cached, completion, unpriced, noUsage, priceText, priceKey, overridden, price, hasOfficial, units, unit)
         }
         val total = Acc("total", "合计")
         val members = LinkedHashMap<String, Acc>()
@@ -55,6 +57,11 @@ class CostReporter(private val ledger: Ledger, private val stateOf: () -> AppSta
             fun add(a: Acc) {
                 a.calls++; a.images += r.images
                 a.prompt += r.prompt; a.cached += r.cached; a.completion += r.completion
+                // 语音的字数 / 秒数：同一行里单位一样才相加（同一行混了两种单位就只留先来的那种）
+                if (r.unit.isNotBlank()) {
+                    if (a.unit.isBlank()) a.unit = r.unit
+                    if (a.unit == r.unit) a.units += r.units
+                }
                 when {
                     missing -> a.noUsage++
                     money == null -> a.unpriced++

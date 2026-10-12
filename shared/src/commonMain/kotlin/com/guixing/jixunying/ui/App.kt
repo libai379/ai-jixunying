@@ -21,6 +21,7 @@ import androidx.compose.material3.VerticalDivider
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -36,14 +37,18 @@ import com.guixing.jixunying.client.Backend
 import com.guixing.jixunying.client.Hub
 import com.guixing.jixunying.model.Command
 import com.guixing.jixunying.model.CommandResult
+import com.guixing.jixunying.model.MsgStatus
+import com.guixing.jixunying.model.Role
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 /** 全局提示条。弹窗打开时，弹窗里也放一个，免得提示被弹窗挡住。 */
 val LocalSnackbar = androidx.compose.runtime.staticCompositionLocalOf { SnackbarHostState() }
 
 enum class SettingsTab(val title: String) {
-    PROVIDERS("模型服务"), MEMBERS("AI 成员"), PROFILE("我的资料"), MEMORY("记忆"), SEARCH("联网搜索"), IMAGE("画图"), OFFICE("Word / Excel / PPT"),
+    PROVIDERS("模型服务"), MEMBERS("AI 成员"), PROFILE("我的资料"), MEMORY("记忆"), SEARCH("联网搜索"), IMAGE("画图"), SPEECH("语音"),
+    OFFICE("Word / Excel / PPT"),
     CODE("Code 栏"),
     WEIXIN("微信"), DEVICES("联机"), APPEARANCE("外观"), ABOUT("关于"),
 }
@@ -63,7 +68,17 @@ class Incoming(val files: List<PickedFile> = emptyList(), val attachments: List<
 }
 
 /** 界面级状态：当前操作哪台设备、打开哪个对话、是否在设置页。 */
-class AppController(val hub: Hub, val backend: Backend, val scope: CoroutineScope, val snackbar: SnackbarHostState) {
+class AppController(
+    val hub: Hub,
+    val backend: Backend,
+    val scope: CoroutineScope,
+    val snackbar: SnackbarHostState,
+    /** 这台设备的能力（放音、录音……），读出来和听写要用。 */
+    val platform: Platform,
+) {
+    /** 读出来（「读出来」按钮、回答完自动读）。 */
+    val speech = SpeechPlayer(this)
+
     var currentConvId by mutableStateOf<String?>(null)
     var page by mutableStateOf<MainPage?>(null)
     /** 等用户选「发到哪个对话」的文件。 */
@@ -121,6 +136,24 @@ class AppController(val hub: Hub, val backend: Backend, val scope: CoroutineScop
         }
     }
 
+    /**
+     * 改「这台设备自己的」设置（现在只有 设置 → 语音：读出来和听写用这台设备自己的服务商和 Key，
+     * 手机遥控电脑时也是用手机自己的，不走中转，见 docs/向量和语音设计说明.md 第 5 节）。
+     * 电脑上本机就是引擎本身，和 updateSettings 一个效果。
+     */
+    fun updateLocalSettings(transform: (com.guixing.jixunying.model.Settings) -> com.guixing.jixunying.model.Settings) {
+        scope.launch {
+            settingsLock.lock()
+            try {
+                val local = hub.local
+                val r = local.call(Command.SaveSettings(transform(local.store.state.value.settings).copy(schema = com.guixing.jixunying.model.Settings.SCHEMA)))
+                if (!r.ok) snackbar.showSnackbar(r.message.ifBlank { "保存失败" }, duration = SnackbarDuration.Long)
+            } finally {
+                settingsLock.unlock()
+            }
+        }
+    }
+
     fun updateProfile(transform: (com.guixing.jixunying.model.UserProfile) -> com.guixing.jixunying.model.UserProfile) {
         scope.launch {
             settingsLock.lock()
@@ -171,7 +204,7 @@ fun App(hub: Hub, platform: Platform, debugStart: String? = null) {
             // 切换本机 / 电脑时整个界面换一套状态
             key(backend) {
                 val ctl = remember(backend) {
-                    AppController(hub, backend, scope, snackbar).also { c ->
+                    AppController(hub, backend, scope, snackbar, platform).also { c ->
                         // 开发截图用：-Djxy.start=settings:MEMBERS 之类
                         debugStart?.let { s ->
                             if (s.startsWith("settings")) c.settingsTab = SettingsTab.entries.firstOrNull { it.name == s.substringAfter(':', "").substringBefore('#') } ?: SettingsTab.PROVIDERS
@@ -197,6 +230,18 @@ fun App(hub: Hub, platform: Platform, debugStart: String? = null) {
                 }
                 LaunchedEffect(backend) {
                     backend.store.notices.collect { snackbar.showSnackbar(it.text, duration = if (it.error) SnackbarDuration.Long else SnackbarDuration.Short) }
+                }
+                // 切「本机 / 电脑」时引擎换了：正在读的那条停下来，别再往下放
+                DisposableEffect(backend) { onDispose { ctl.speech.stop() } }
+                // 开发截图用：conv:编号#speak = 打开会话后立刻读最后一条回答（看「停止」「合成中…」的样子）
+                LaunchedEffect(backend, ctl.debugDialog) {
+                    if (ctl.debugDialog != "speak") return@LaunchedEffect
+                    ctl.debugDialog = ""
+                    val id = ctl.currentConvId ?: return@LaunchedEffect
+                    val msgs = backend.store.messages
+                        .first { (it[id]?.any { m -> m.role == Role.AI && m.content.isNotBlank() }) == true }[id].orEmpty()
+                    val m = msgs.lastOrNull { it.role == Role.AI && it.content.isNotBlank() && it.status == MsgStatus.DONE } ?: return@LaunchedEffect
+                    ctl.speech.read(m.id, splitThink(m.content).first)
                 }
                 // 别的 App 发来的文件（安卓：微信里「用其他应用打开」）：问发到哪个对话
                 val incomingFiles by platform.incomingFiles.collectAsState()

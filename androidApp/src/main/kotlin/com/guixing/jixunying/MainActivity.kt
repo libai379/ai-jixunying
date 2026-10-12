@@ -4,6 +4,10 @@ import android.app.Application
 import android.content.Context
 import android.content.Intent
 import android.graphics.BitmapFactory
+import android.media.AudioFormat
+import android.media.AudioRecord
+import android.media.MediaPlayer
+import android.media.MediaRecorder
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -32,6 +36,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
 /**
  * 手机端：本机自带完整引擎（不连电脑也能用，模型直接从手机调用，数据存在手机里）；
@@ -147,6 +153,18 @@ class MainActivity : ComponentActivity() {
     // 手机接微信时通知栏要常驻一条（前台服务）；Android 13 起显示通知要用户同意。没同意服务照样跑，只是通知栏看不到
     private val askNotify = registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
     private var askedNotify = false
+    // 录音权限：第一次点输入框旁边的话筒时问
+    private var recordResult: CompletableDeferred<Boolean>? = null
+    private val askRecord = registerForActivityResult(ActivityResultContracts.RequestPermission()) { recordResult?.complete(it) }
+
+    /** 问录音权限，同意返回 true。已经给过就直接 true。 */
+    private suspend fun askRecordPermission(): Boolean {
+        if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED) return true
+        val d = CompletableDeferred<Boolean>()
+        recordResult = d
+        withContext(Dispatchers.Main) { askRecord.launch(android.Manifest.permission.RECORD_AUDIO) }
+        return d.await()
+    }
 
     /** 别的 App 发来的文件（微信里点文件 → 用其他应用打开，或者分享）。 */
     private val incoming = kotlinx.coroutines.flow.MutableStateFlow<List<PickedFile>>(emptyList())
@@ -315,6 +333,106 @@ class MainActivity : ComponentActivity() {
         override fun getPref(key: String): String? = prefs.getString(key, null)
         override fun setPref(key: String, value: String?) {
             prefs.edit().apply { if (value == null) remove(key) else putString(key, value) }.apply()
+        }
+
+        // ---- 读出来（放音）和听写（录音）。手机上放用 MediaPlayer（先写成临时文件），录 用 AudioRecord，
+        //      格式照设计说明第 5 节：wav、16000 Hz、单声道、16 位。
+
+        override val canPlayAudio = true
+
+        override suspend fun playWav(bytes: ByteArray) {
+            val file = withContext(Dispatchers.IO) {
+                File(cacheDir, "speak-${System.currentTimeMillis()}.wav").also { it.writeBytes(bytes) }
+            }
+            var mp: MediaPlayer? = null
+            try {
+                withContext(Dispatchers.Main) {
+                    val p = MediaPlayer()
+                    mp = p
+                    p.setDataSource(file.absolutePath)
+                    p.prepare()
+                    kotlinx.coroutines.suspendCancellableCoroutine<Unit> { cont ->
+                        var done = false
+                        p.setOnCompletionListener { if (!done) { done = true; cont.resume(Unit) } }
+                        p.setOnErrorListener { _, what, extra ->
+                            if (!done) { done = true; cont.resumeWithException(IllegalStateException("这段音频放不出来（错误 $what/$extra）")) }
+                            true
+                        }
+                        cont.invokeOnCancellation { runCatching { p.stop() } } // 点了「停止」
+                        p.start()
+                    }
+                }
+            } finally {
+                // 取消的时候也要 release，所以套 NonCancellable
+                withContext(kotlinx.coroutines.NonCancellable + Dispatchers.Main) { runCatching { mp?.release() } }
+                withContext(Dispatchers.IO) { file.delete() }
+            }
+        }
+
+        override val canRecord = true
+        private var rec: AudioRecord? = null
+        private var recOut: java.io.ByteArrayOutputStream? = null
+        private var recThread: Thread? = null
+        @Volatile private var recStopped = false
+
+        override suspend fun startRecording(): String? {
+            if (rec != null) return null // 已经在录了
+            if (!askRecordPermission()) return com.guixing.jixunying.ui.NO_RECORD_PERMISSION
+            val minBuf = AudioRecord.getMinBufferSize(16000, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
+            if (minBuf <= 0) return "这台手机不支持 16 kHz 录音"
+            val ar = runCatching {
+                AudioRecord(MediaRecorder.AudioSource.MIC, 16000, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, maxOf(minBuf, 4096) * 2)
+            }.getOrElse { return "打不开麦克风：${it.message ?: it::class.simpleName}" }
+            if (ar.state != AudioRecord.STATE_INITIALIZED) {
+                runCatching { ar.release() }
+                return "麦克风打不开（可能被别的应用占着）"
+            }
+            val out = java.io.ByteArrayOutputStream()
+            runCatching { ar.startRecording() }.onFailure {
+                runCatching { ar.release() }
+                return "打不开麦克风：${it.message ?: it::class.simpleName}"
+            }
+            rec = ar
+            recOut = out
+            recStopped = false
+            recThread = Thread({
+                val buf = ByteArray(4096)
+                while (!recStopped) {
+                    val n = runCatching { ar.read(buf, 0, buf.size) }.getOrDefault(-1)
+                    if (n > 0) out.write(buf, 0, n) else if (n < 0) break // release 之后 read 会报错，收工
+                }
+            }, "jxy-record").also {
+                it.isDaemon = true
+                it.start()
+            }
+            return null
+        }
+
+        override suspend fun stopRecording(): ByteArray? = withContext(Dispatchers.IO) {
+            val ar = rec ?: return@withContext null
+            rec = null
+            recStopped = true
+            // 先 stop 让读线程的 read 返回、等它收工，再 release：读线程还卡在 read 里时 release，
+            // 有的机器会原生崩溃（主会话审查 10-12 改的顺序）
+            runCatching { ar.stop() }
+            recThread?.join(2000)
+            runCatching { ar.release() }
+            val data = recOut?.toByteArray() ?: ByteArray(0) // 线程已经收工，这会儿读是安全的
+            recOut = null
+            recThread = null
+            if (data.isEmpty()) null else com.guixing.jixunying.engine.SpeechText.wavOf(16000, 1, 16, data)
+        }
+
+        override fun cancelRecording() {
+            val ar = rec ?: return
+            val t = recThread
+            rec = null
+            recStopped = true
+            runCatching { ar.stop() }
+            recOut = null
+            recThread = null
+            // 和 stopRecording 一样：等读线程收工再 release（这里不能挂起，放到后台线程里等）
+            Thread({ t?.join(2000); runCatching { ar.release() } }, "jxy-record-release").apply { isDaemon = true; start() }
         }
     }
 }

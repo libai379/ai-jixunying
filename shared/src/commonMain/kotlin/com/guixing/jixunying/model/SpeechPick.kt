@@ -40,7 +40,8 @@ object SpeechPick {
         return SpeechChoice(p.id, p.name, model, noteOf(p, model))
     }
 
-    private fun noteOf(p: ProviderConfig, model: String): String {
+    /** 给人看的一句：谁家的 · 要不要钱（设置 → 语音 里列服务商时也用它，所以是公开的）。 */
+    fun noteOf(p: ProviderConfig, model: String): String {
         val maker = when (Thinking.platformOf(p)) {
             "mimo" -> "小米官方"
             "minimax" -> "MiniMax 官方"

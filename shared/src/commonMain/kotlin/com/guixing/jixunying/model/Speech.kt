@@ -54,6 +54,26 @@ object SpeechModels {
         "zhipu" to "glm-asr-2512",
     )
 
+    /** 平台 → 这家能选的读出来模型（设置页照着列；第一个是默认）。 */
+    private val ttsLists = mapOf(
+        "mimo" to listOf("mimo-v2.5-tts"),
+        "minimax" to listOf("speech-2.8-turbo", "speech-2.8-hd"),
+        "zhipu" to listOf("glm-tts"),
+        "qwen" to listOf("qwen3-tts-flash"),
+    )
+
+    /** 这家的语音模型有哪些（设置 → 语音 里列出来给用户挑）。 */
+    fun ttsListOf(p: ProviderConfig): List<String> = ttsLists[Thinking.platformOf(p)].orEmpty()
+
+    fun asrModelOf(p: ProviderConfig): String? = asrDefaultOf(p)
+
+    /**
+     * 这家的读出来接口认不认「语速」：MiniMax（voice_setting.speed）和智谱（speed）认；
+     * 小米走 chat/completions、千问的接口里都没有这个字段，所以不传、设置页里把滑块灰掉
+     * （出处 docs/参考资料.md「向量和语音」；engine/Speech.kt 也是只给这两家传 speed）。
+     */
+    fun supportsSpeed(platform: String) = platform == "minimax" || platform == "zhipu"
+
     /** 这位服务商有没有接读出来 / 听写。 */
     fun supportsTts(p: ProviderConfig) = Thinking.platformOf(p) in ttsDefaults
 

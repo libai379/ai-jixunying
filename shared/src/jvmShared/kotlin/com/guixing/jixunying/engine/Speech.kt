@@ -70,11 +70,16 @@ class Speech(private val proxyOf: (ProviderConfig) -> String?) {
     }
 
     /**
-     * 读之前切段（不联网）：清理 Markdown、跳过代码块，按这家的上限切开。
+     * 读之前切段（不联网）：清理 Markdown、跳过代码块，再切开——第一段只放一两句（SpeechText.FIRST 字以内），
+     * 好让声音早点出来；后面每段不超过 SpeechText.PART 字（也不超过这家的上限）。
+     * 以前按各家上限切（小米 1000 字一段），模拟器上第一段要等十几秒才开口，一段音频十几 MB、手机内存吃紧（10-12 实测）。
      * prepared = true 是已经切好的一段（SpeakPlan 给的），不再清理，只防一手超长。
      */
-    fun plan(provider: ProviderConfig, text: String, prepared: Boolean = false): List<String> =
-        SpeechText.split(if (prepared) text.trim() else SpeechText.clean(text), SpeechText.limitOf(Thinking.platformOf(provider)))
+    fun plan(provider: ProviderConfig, text: String, prepared: Boolean = false): List<String> {
+        val limit = SpeechText.limitOf(Thinking.platformOf(provider))
+        return if (prepared) SpeechText.split(text.trim(), limit)
+        else SpeechText.split(SpeechText.clean(text), minOf(limit, SpeechText.PART), firstSoft = SpeechText.FIRST)
+    }
 
     /** 听写（wav，16 位 PCM）。智谱超过 25 秒的切成几段分开识别，再按顺序拼起来。 */
     suspend fun transcribe(provider: ProviderConfig, model: String, wav: ByteArray): String {
@@ -358,6 +363,7 @@ class Speech(private val proxyOf: (ProviderConfig) -> String?) {
 
         const val NO_TTS = "这家还没有接读出来（现在支持：小米 mimo、MiniMax、智谱、千问）"
         const val NO_ASR = "这家还没有接听写（现在支持：小米 mimo、MiniMax、智谱）"
+        const val SILENT_RECORDING = "没录到声音：麦克风可能没开、被静音、被系统的隐私设置挡住了，或者离得太远。这次没有发给服务商（不花钱）。"
     }
 }
 
@@ -366,6 +372,12 @@ class Speech(private val proxyOf: (ProviderConfig) -> String?) {
  * 不靠提示词让模型别写 Markdown（CLAUDE.md 红线），读之前由程序清理。
  */
 object SpeechText {
+
+    /** 第一段尽量不超过这么多字（一两句）：先开口，后面的边放边合成。 */
+    const val FIRST = 60
+
+    /** 后面每段最多这么多字（约一分钟的声音）：一段太长要等很久才开口，音频也大（手机内存吃紧）。 */
+    const val PART = 300
 
     /** 一段最多多少字（各家官方上限，出处 docs/参考资料.md「读出来」）。 */
     fun limitOf(platform: String): Int = when (platform) {
@@ -424,8 +436,11 @@ object SpeechText {
         return out
     }
 
-    /** 切成每段不超过 limit 字的几段（单句就超长的硬切）。 */
-    fun split(text: String, limit: Int): List<String> {
+    /**
+     * 切成每段不超过 limit 字的几段。在句子之间换段（这一段放不下下一整句就另起一段），单句就超长的才硬切。
+     * firstSoft > 0：第一段攒到这么多字就收（一两句），好让声音早点出来；第一句本身更长也不硬切它。
+     */
+    fun split(text: String, limit: Int, firstSoft: Int = 0): List<String> {
         val max = limit.coerceAtLeast(50)
         val out = mutableListOf<String>()
         val cur = StringBuilder()
@@ -434,6 +449,10 @@ object SpeechText {
             cur.clear()
         }
         for (sentence in sentences(text)) {
+            val first = out.isEmpty()
+            // 放不下这一整句就先换段，别把一句话劈成两半（以前会把上一段剩下的空位用半句填满，10-12 改）
+            if (cur.isNotBlank() && cur.length + sentence.length > max) flush()
+            else if (first && firstSoft > 0 && cur.isNotBlank() && cur.length + sentence.length > firstSoft) flush()
             var rest = sentence
             while (rest.isNotEmpty()) {
                 val room = max - cur.length
@@ -498,6 +517,25 @@ object SpeechText {
         }
         return null
     }
+
+    /**
+     * 录音几乎没声音（只看 16 位 PCM）：整段最大振幅不到 SILENT_PEAK（满幅 32767 的约 1.2%，约 -38 dBFS）。
+     * 正常说话的峰值远高于这个；安静房间的底噪一般在几十到两三百。
+     */
+    fun isSilent(w: Wav): Boolean {
+        if (w.bits != 16 || w.data.size < 2) return false
+        var peak = 0
+        var i = 0
+        while (i + 1 < w.data.size) {
+            val s = ((w.data[i].toInt() and 0xFF) or (w.data[i + 1].toInt() shl 8)).toShort().toInt()
+            val a = if (s < 0) -s else s
+            if (a > peak) { peak = a; if (peak >= SILENT_PEAK) return false }
+            i += 2
+        }
+        return true
+    }
+
+    const val SILENT_PEAK = 400
 
     /** 这段话有多少秒（不是能认出来的 wav 返回 null）。 */
     fun secondsOf(bytes: ByteArray): Double? = parseWav(bytes)?.seconds
