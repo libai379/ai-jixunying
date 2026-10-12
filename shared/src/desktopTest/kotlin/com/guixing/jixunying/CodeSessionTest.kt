@@ -209,7 +209,7 @@ class CodeSessionTest {
         // 这一版的界面（schema = 3）能改回来
         assertTrue(e.call(Command.SaveSettings(s.copy(schema = 3, code = CodeSettings(shell = "powershell")))).ok)
         assertEquals("powershell", e.state.settings.code.shell)
-        assertEquals(4, Settings.SCHEMA, "1.7.0 加了语音设置，schema 是 4")
+        assertEquals(5, Settings.SCHEMA, "1.7.0 加了语音和按意思搜，schema 是 5")
     }
 
     @Test

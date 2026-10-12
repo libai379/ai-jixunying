@@ -11,7 +11,12 @@ import com.guixing.jixunying.model.CodeSpec
 import com.guixing.jixunying.model.Command
 import com.guixing.jixunying.model.CommandResult
 import com.guixing.jixunying.model.Conversation
+import com.guixing.jixunying.model.DocHit
+import com.guixing.jixunying.model.EmbedChoice
+import com.guixing.jixunying.model.EmbedModels
+import com.guixing.jixunying.model.EmbedPick
 import com.guixing.jixunying.model.Event
+import com.guixing.jixunying.model.HistoryHit
 import com.guixing.jixunying.model.ImageChoice
 import com.guixing.jixunying.model.ImagePick
 import com.guixing.jixunying.model.JudgePick
@@ -22,10 +27,15 @@ import com.guixing.jixunying.model.ModelInfo
 import com.guixing.jixunying.model.MsgStatus
 import com.guixing.jixunying.model.PairedDevice
 import com.guixing.jixunying.model.Presets
+import com.guixing.jixunying.model.Prices
 import com.guixing.jixunying.model.ProviderConfig
 import com.guixing.jixunying.model.ReplyMode
 import com.guixing.jixunying.model.Role
 import com.guixing.jixunying.model.SearchSource
+import com.guixing.jixunying.model.SemanticEstimatePart
+import com.guixing.jixunying.model.SemanticEstimateResult
+import com.guixing.jixunying.model.SemanticPart
+import com.guixing.jixunying.model.SemanticProgress
 import com.guixing.jixunying.model.Settings
 import com.guixing.jixunying.model.SpeechAudio
 import com.guixing.jixunying.model.SpeechModels
@@ -149,6 +159,20 @@ class Engine(
     /** 本机文档库（AI 能搜、能读）。 */
     private val docs = DocLibrary(java.io.File(storage.root, "docindex").apply { mkdirs() })
 
+    /** 按意思搜：算向量（engine/Embeddings.kt 是接口，model/Semantic.kt 是设置）。 */
+    private val embeddings = Embeddings { proxyFor(it.useProxy) }.also { em ->
+        // 服务商收下了就记一条账（教训 53），花费页里算「按意思搜」这一用途
+        em.onBilled = { p, model, tokens ->
+            runCatching { ledger.add(UsageRecord(now(), UsageKinds.EMBED, p.id, p.name, Thinking.platformOf(p), model, prompt = tokens)) }
+        }
+    }
+
+    /** 本机向量库：数据目录 vectors\ 下的两份（聊天记录、我的文档），见 engine/VectorStore.kt。 */
+    private val vectors = VectorStore(java.io.File(storage.root, "vectors"))
+
+    /** 正在补算的那一份（同一时间只跑一份，见 kickEmbedding）。 */
+    @Volatile private var embedJob: Job? = null
+
     /** 联机设置变了（开关、中转列表）时通知外面重启联机服务。 */
     var onRelaySettingsChanged: (() -> Unit)? = null
 
@@ -211,6 +235,8 @@ class Engine(
                 kotlinx.coroutines.delay(30 * 60_000L)
             }
         }
+        // 按意思搜：启动后把还没算过的聊天记录 / 文档在后台补上（开关开着才动）
+        scope.launch { kotlinx.coroutines.delay(3_000); kickEmbedding() }
     }
 
     // ———————————————— 本机文档 ————————————————
@@ -239,6 +265,8 @@ class Engine(
             refreshDocInfo("准备扫描…")
             runCatching { docs.scan(docRoots()) { p, n -> refreshDocInfo(p, n) } }
             refreshDocInfo()
+            // 扫进来的新文档也要算进按意思搜（开关开着才动）
+            kickEmbedding()
         }
     }
 
@@ -492,6 +520,7 @@ class Engine(
         is Command.SaveSettings -> {
             val before = state.settings.relay
             val docsBefore = state.settings.docs
+            val semanticBefore = state.settings.semantic
             updateState { s ->
                 val oldKeys = s.settings.search.apiKeys
                 val keys = c.settings.search.apiKeys.mapValues { (k, v) -> if (isMaskedKey(v)) oldKeys[k].orEmpty() else v }
@@ -506,8 +535,10 @@ class Engine(
                 val code = if (c.settings.schema >= 3) c.settings.code else s.settings.code
                 // 1.7.0 以前的不认识语音设置（读出来 / 听写用哪家）
                 val speechSettings = if (c.settings.schema >= 4) c.settings.speech else s.settings.speech
+                // 1.7.0 以前的不认识按意思搜设置（开关、向量模型）
+                val semantic = if (c.settings.schema >= 5) c.settings.semantic else s.settings.semantic
                 s.copy(settings = c.settings.copy(search = c.settings.search.copy(apiKeys = keys), costs = s.settings.costs, memory = memory, office = office, code = code,
-                    speech = speechSettings, schema = Settings.SCHEMA))
+                    speech = speechSettings, semantic = semantic, schema = Settings.SCHEMA))
             }
             if (before.enabled != state.settings.relay.enabled || before.brokers != state.settings.relay.brokers) onRelaySettingsChanged?.invoke()
             // 关掉了的后台活不会再跑，它以前的出错提示也就不会「成功一次自己消失」：直接清掉
@@ -515,6 +546,20 @@ class Engine(
                 if (!m.stances) bg.ok(BgJob.STANCES)
                 if (!m.stances || !m.aiVerify) bg.ok(BgJob.AI_VERIFY)
                 if (!m.enabled || !m.autoExtract) bg.ok(BgJob.MEMORY)
+            }
+            // 按意思搜：开关 / 模型变了就照新的来——关掉就停（算好的留着），开了或者换了模型就重新补算
+            if (semanticBefore != state.settings.semantic) {
+                val sem = state.settings.semantic
+                scope.launch(Dispatchers.IO) {
+                    if (!sem.historyOn && !sem.docsOn) {
+                        haltEmbedding()
+                        clearEmbedRunning()
+                        bg.ok(BgJob.EMBED)
+                    } else {
+                        haltEmbedding()
+                        kickEmbedding()
+                    }
+                }
             }
             if (docsBefore != state.settings.docs) rescanDocs()
             // 微信助理换了谁回答 / 联网开关：已有的「微信对话」也一起换（以前只对新对话生效，容易以为没改成）
@@ -658,7 +703,7 @@ class Engine(
         }
         is Command.TidyMemories -> tidyMemories()
         is Command.SearchHistory -> CommandResult(data = AppJson.encodeToString(
-            kotlinx.serialization.builtins.ListSerializer(com.guixing.jixunying.model.HistoryHit.serializer()), searchHistory(c.query, c.limit)))
+            kotlinx.serialization.builtins.ListSerializer(HistoryHit.serializer()), searchHistory(c.query, c.limit).hits))
         is Command.WeixinLogin -> weixin?.login() ?: CommandResult(false, "这台设备没有接微信助理")
         is Command.WeixinVerify -> weixin?.verify(c.code) ?: CommandResult(false, "这台设备没有接微信助理")
         is Command.WeixinLogout -> weixin?.logout() ?: CommandResult(false, "这台设备没有接微信助理")
@@ -670,6 +715,9 @@ class Engine(
         is Command.Speak -> speak(c)
         is Command.SpeakPlan -> speakPlan(c)
         is Command.Transcribe -> transcribe(c)
+        is Command.SemanticEstimate -> semanticEstimate()
+        is Command.SemanticStatus -> CommandResult(data = AppJson.encodeToString(SemanticProgress.serializer(), state.semanticProgress))
+        is Command.SemanticRebuild -> semanticRebuild(c.scope)
         is Command.StanceList -> {
             val list = synchronized(stanceBook) { stanceBook.filter { c.convId.isBlank() || it.convId == c.convId } }
             CommandResult(data = AppJson.encodeToString(kotlinx.serialization.builtins.ListSerializer(StanceTopic.serializer()), list))
@@ -813,6 +861,8 @@ class Engine(
                 runTurn(conv.id, userMsg)
                 // 答完以后在后台：聊天太长就压缩，攒够了就挑出值得长期记住的
                 scope.launch { afterTurn(conv.id) }
+                // 新答的内容也要算进按意思搜（开关开着才动，见 kickEmbedding）
+                kickEmbedding()
             }
         }
         return CommandResult()
@@ -1023,20 +1073,21 @@ class Engine(
     }
 
     /** 搜所有对话的聊天内容，按命中多少、时间新旧排序。 */
-    fun searchHistory(query: String, limit: Int): List<com.guixing.jixunying.model.HistoryHit> {
+    /** 搜所有对话的聊天内容：按字面（关键词）搜。开「按意思搜」时由 searchHistory 和向量的结果合起来排。 */
+    private fun literalHistory(query: String, limit: Int): List<HistoryHit> {
         val terms = Recorder.terms(query)
         if (terms.isEmpty()) return emptyList()
         val need = if (terms.size >= 4) 2 else 1
-        val hits = mutableListOf<Pair<Int, com.guixing.jixunying.model.HistoryHit>>()
+        val hits = mutableListOf<Pair<Int, HistoryHit>>()
         for (conv in state.conversations) {
             for (m in snapshot(conv.id)) {
                 if (m.status == MsgStatus.STREAMING || m.content.isBlank()) continue
                 val sc = Recorder.score(m.content, terms)
                 if (sc < need) continue
-                hits += sc to com.guixing.jixunying.model.HistoryHit(conv.id, conv.title, m.id, speakerName(m), Recorder.snippet(stripThink(m.content), terms), m.createdAt)
+                hits += sc to HistoryHit(conv.id, conv.title, m.id, speakerName(m), Recorder.snippet(stripThink(m.content), terms), m.createdAt)
             }
         }
-        return hits.sortedWith(compareByDescending<Pair<Int, com.guixing.jixunying.model.HistoryHit>> { it.first }.thenByDescending { it.second.time })
+        return hits.sortedWith(compareByDescending<Pair<Int, HistoryHit>> { it.first }.thenByDescending { it.second.time })
             .take(limit).map { it.second }
     }
 
@@ -1546,6 +1597,7 @@ class Engine(
         job.invokeOnCompletion { running[convId]?.remove(job) }
         val produced = try { job.await() } catch (e: CancellationException) { if (!job.isCancelled) throw e; emptyList() }
         scope.launch { afterTurn(convId) }
+        kickEmbedding()
         val ids = produced.map { it.id }.toSet()
         return snapshot(convId).filter { it.id in ids }
     }
@@ -2087,6 +2139,389 @@ class Engine(
         return SpeechTarget(p, choice.modelId)
     }
 
+    // ———————————————— 按意思搜（向量） ————————————————
+
+    /** 一次补算要干的活：以前算过、还作数的段（连向量一起留着）+ 这次要算的段和文字。 */
+    private class EmbedPlan {
+        val entries = ArrayList<VecEntry>()
+        val vectors = ArrayList<FloatArray>()
+        val todo = ArrayList<VecEntry>()
+        val texts = ArrayList<String>()
+    }
+
+    /** 搜聊天记录的结果：命中的片段 + 这次是不是只按字面搜的（工具步骤里写一句）。 */
+    private class HistorySearch(val hits: List<HistoryHit>, val note: String)
+
+    /** 搜文档的结果（同上）。 */
+    private class DocumentSearch(val hits: List<DocHit>, val note: String)
+
+    /**
+     * 开关开着、挑得出向量模型时，在后台补算。新消息答完、文档扫完、设置改了都来叫一声。
+     * 同一时间只跑一份（已经在算就不重复起）；开关关掉时调用方先 haltEmbedding。
+     */
+    fun kickEmbedding() {
+        val sem = state.settings.semantic
+        if (!sem.historyOn && !sem.docsOn) return
+        if (EmbedPick.pick(state) == null) return
+        if (embedJob?.isActive == true) return
+        embedJob = scope.launch(Dispatchers.IO) { embedNow() }
+    }
+
+    /** 停掉正在算的那一份，并等它让开路（改设置、重新算之前用）。 */
+    private suspend fun haltEmbedding() {
+        val old = embedJob ?: return
+        embedJob = null
+        old.cancel()
+        runCatching { old.join() }
+    }
+
+    /** 开关关掉了：进度上不再显示「正在算」（算好的向量留着，不删）。 */
+    private fun clearEmbedRunning() = updateState { s ->
+        s.copy(semanticProgress = SemanticProgress(s.semanticProgress.history.copy(running = false), s.semanticProgress.docs.copy(running = false)))
+    }
+
+    /** 补算一遍：聊天记录和文档各一份。一份出错不影响另一份，出错记进后台出错提示。 */
+    private suspend fun embedNow() {
+        val choice = EmbedPick.pick(state) ?: return
+        var bad = false
+        if (state.settings.semantic.historyOn) bad = !oneSection(VectorStore.HISTORY, choice)
+        if (state.settings.semantic.docsOn) bad = !oneSection(VectorStore.DOCS, choice) || bad
+        // 两份都算成了才算「成功一次」（以前的出错提示自己消失）
+        if (!bad) bg.ok(BgJob.EMBED)
+    }
+
+    private suspend fun oneSection(kind: String, choice: EmbedChoice): Boolean = try {
+        runSection(kind, choice)
+        true
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Throwable) {
+        val reason = friendlyError(e, state.provider(choice.providerId))
+        bg.failed(BgJob.EMBED, reason, "")
+        markProgress(kind, vectors.data(kind).entries.size, state.semanticProgress.of(kind).total, running = false, error = reason)
+        false
+    }
+
+    private fun sectionOn(kind: String) =
+        if (kind == VectorStore.HISTORY) state.settings.semantic.historyOn else state.settings.semantic.docsOn
+
+    /**
+     * 算一份：把还作数的旧段留着，其余的分批发去算；攒一阵（EMBED_SAVE_EVERY 段或 EMBED_SAVE_MS）写一次盘，
+     * 算完、出错、被停下时也写（中途停了也存下算好的那些）。以前每批都整份重写，1 万段约 40MB，要重写一百多次。
+     * 存的向量不是现在这个模型算的（换了服务商 / 模型 / 维度，或者自动挑换了一家）：不自动作废重算——
+     * 那样会悄悄再花一遍钱（主会话审查 10-12）。只标「要重新算」（进度里 stale），搜索先只按字面，等用户点「重新算一遍」。
+     */
+    private suspend fun runSection(kind: String, choice: EmbedChoice) {
+        val p = state.provider(choice.providerId) ?: throw IllegalStateException("向量服务商已经删掉了")
+        val dim = if (EmbedModels.sendsDimensions(p)) EmbedModels.DIM else 0
+        val old = vectors.data(kind)
+        if (!old.isEmpty && !old.matches(choice.platform, choice.modelId, dim)) {
+            markProgress(kind, old.entries.size, old.entries.size, running = false)
+            return
+        }
+        val plan = if (kind == VectorStore.HISTORY) historyPlan() else docsPlan()
+        val total = plan.entries.size + plan.todo.size
+        markProgress(kind, plan.entries.size, total, running = true)
+        if (plan.todo.isEmpty()) {
+            // 没有要算的：但如果留下的比上次少了（消息删了、文档不在了），清单也要落一次盘把它们清掉
+            if (plan.entries.size != old.entries.size) {
+                vectors.write(kind, choice.platform, choice.modelId, if (dim > 0) dim else old.dim, plan.entries, plan.vectors, old.builtAt)
+            }
+            markProgress(kind, plan.entries.size, total, running = false)
+            return
+        }
+        val batch = EmbedModels.batchOf(p)
+        var i = 0
+        var unsaved = plan.entries.size != old.entries.size // 删掉的段也要落盘
+        var savedAt = System.currentTimeMillis()
+        var savedCount = plan.entries.size
+        fun save() {
+            if (!unsaved || plan.vectors.isEmpty()) return
+            vectors.write(kind, choice.platform, choice.modelId, plan.vectors.first().size, plan.entries, plan.vectors, now())
+            unsaved = false
+            savedAt = System.currentTimeMillis()
+            savedCount = plan.entries.size
+        }
+        try {
+            while (i < plan.todo.size) {
+                // 开关中途关掉了就停：已经算好的留着（不删）
+                if (!sectionOn(kind)) {
+                    markProgress(kind, plan.entries.size, total, running = false)
+                    return
+                }
+                val n = minOf(batch, plan.todo.size - i)
+                val res = embeddings.embed(p, choice.modelId, plan.texts.subList(i, i + n))
+                val d = res.vectors.first().size
+                val was = plan.vectors.firstOrNull()?.size ?: 0
+                if (was > 0 && was != d) throw IllegalStateException("向量维度变了（$was → $d），到「按意思搜」里点「重新算一遍」")
+                plan.entries += plan.todo.subList(i, i + n)
+                plan.vectors += res.vectors
+                i += n
+                unsaved = true
+                if (plan.entries.size - savedCount >= EMBED_SAVE_EVERY || System.currentTimeMillis() - savedAt >= EMBED_SAVE_MS) save()
+                markProgress(kind, plan.entries.size, total, running = true)
+            }
+        } finally {
+            // 算完、出错、被停下（取消）都把算好的落盘：花过钱的别丢
+            withContext(NonCancellable) { runCatching { save() } }
+        }
+        markProgress(kind, plan.entries.size, total, running = false)
+    }
+
+    /**
+     * 聊天记录要算哪些段：一条消息一段；超过 500 字的按句号切成几段（相邻重叠 50 字，见 VectorText）。
+     * 正在生成的不算（答完才进）；已经算过而且这段文字没变的留着；消息删了、改了，这里就丢掉重算。
+     */
+    private fun historyPlan(): EmbedPlan {
+        val data = vectors.data(VectorStore.HISTORY)
+        val old = HashMap<String, Int>()
+        data.entries.forEachIndexed { i, e -> old[e.source.key()] = i }
+        val plan = EmbedPlan()
+        for (conv in state.conversations) {
+            for (m in snapshot(conv.id)) {
+                if (m.status != MsgStatus.DONE || m.role == Role.SYSTEM) continue
+                VectorText.chunks(m.content).forEachIndexed { part, text ->
+                    keepOrTodo(plan, old, data, VecSource(convId = conv.id, messageId = m.id, part = part), text)
+                }
+            }
+        }
+        return plan
+    }
+
+    /**
+     * 文档要算哪些段：抽出来的文字按 500 字一段切（相邻重叠 50 字）。
+     * 读不出文字的文档不算（按文件名找就够了）；文件改过（修改时间变了）或者不在了的，丢掉重算。
+     */
+    private fun docsPlan(): EmbedPlan {
+        val data = vectors.data(VectorStore.DOCS)
+        val old = HashMap<String, Int>()
+        data.entries.forEachIndexed { i, e -> old[e.source.key()] = i }
+        // 按文件归好：修改时间没变的文件，以前算的段整份留着，不用把文字从盘上再读一遍
+        // （每答完一轮都会补算一次，以前每次都把所有文档的文字重读、重算指纹，主会话审查 10-12）
+        val byPath = HashMap<String, MutableList<Int>>()
+        data.entries.forEachIndexed { i, e -> if (e.source.path.isNotEmpty()) byPath.getOrPut(e.source.path) { ArrayList() } += i }
+        val plan = EmbedPlan()
+        for (e in docs.all()) {
+            if (e.chars <= 0) continue
+            val kept = byPath[e.path]
+            // 段数也要对得上（算到一半被停下时只存了前几段，这种要读文字把剩下的补上）
+            if (kept != null && kept.all { data.entries[it].source.mtime == e.mtime } &&
+                data.entries[kept[0]].source.of == kept.size && kept.size > 0) {
+                for (i in kept.sortedBy { data.entries[it].source.part }) {
+                    plan.entries += data.entries[i]
+                    plan.vectors += data.vectors[i]
+                    old.remove(data.entries[i].source.key())
+                }
+                continue
+            }
+            val text = docs.text(e.path) ?: continue
+            val parts = VectorText.chunks(text)
+            parts.forEachIndexed { part, t ->
+                keepOrTodo(plan, old, data, VecSource(path = e.path, part = part, mtime = e.mtime, of = parts.size), t)
+            }
+        }
+        return plan
+    }
+
+    /** 这一段以前算过、文字和文件都没变就留着（连向量一起），否则记下来要算。 */
+    private fun keepOrTodo(plan: EmbedPlan, old: HashMap<String, Int>, data: VecData, src: VecSource, text: String) {
+        val h = hashOf(text)
+        val i = old.remove(src.key())
+        if (i != null && data.entries[i].hash == h && data.entries[i].source.mtime == src.mtime) {
+            // 来历换成这次的（老数据里文档没记段数 of，补上，下次就能不读文字直接留）
+            plan.entries += data.entries[i].copy(source = src)
+            plan.vectors += data.vectors[i]
+        } else {
+            plan.todo += VecEntry(src, h)
+            plan.texts += text
+        }
+    }
+
+    private fun hashOf(text: String): String {
+        val d = java.security.MessageDigest.getInstance("SHA-1").digest(text.toByteArray(Charsets.UTF_8))
+        return d.joinToString("") { "%02x".format(it) }.take(16)
+    }
+
+    /** 进度写进 AppState 给界面看（手机遥控电脑时用 Command.SemanticStatus 取）。 */
+    private fun markProgress(kind: String, done: Int, total: Int, running: Boolean, error: String = "") {
+        val data = vectors.data(kind)
+        val part = SemanticPart(done, total, running, error, data.platform, data.model, data.dim, data.builtAt, stale = isStale(kind, data))
+        updateState { s ->
+            s.copy(semanticProgress = if (kind == VectorStore.HISTORY) s.semanticProgress.copy(history = part) else s.semanticProgress.copy(docs = part))
+        }
+    }
+
+    /** 存的向量不是现在挑中的模型算的（换了模型、Key没了）：界面要提示「重新算一遍」，搜索也先不用它。 */
+    private fun isStale(kind: String, data: VecData): Boolean {
+        if (data.isEmpty) return false
+        val choice = EmbedPick.pick(state) ?: return true
+        val p = state.provider(choice.providerId) ?: return true
+        return !data.matches(choice.platform, choice.modelId, if (EmbedModels.sendsDimensions(p)) EmbedModels.DIM else 0)
+    }
+
+    /**
+     * 这一份能不能真的按意思搜：开关开着、挑得出向量模型、这一份算过、而且是现在这个模型算的。
+     * 不满足就返回 null，调用方只按字面搜（这就是「开关关掉、没算过、算出错时行为照旧」的地方）。
+     */
+    private fun semanticFor(kind: String): EmbedChoice? {
+        if (!sectionOn(kind)) return null
+        val choice = EmbedPick.pick(state) ?: return null
+        val p = state.provider(choice.providerId) ?: return null
+        if (!vectors.data(kind).matches(choice.platform, choice.modelId, if (EmbedModels.sendsDimensions(p)) EmbedModels.DIM else 0)) return null
+        return choice
+    }
+
+    /** 把一句话算成向量（会记账，见 Embeddings.onBilled）。 */
+    private suspend fun queryVector(choice: EmbedChoice, text: String): FloatArray {
+        val p = state.provider(choice.providerId) ?: throw IllegalStateException("向量服务商已经删掉了")
+        return embeddings.embed(p, choice.modelId, listOf(text)).vectors.first()
+    }
+
+    /** 按意思搜到的聊天记录：同一条消息只留最接近的那一段，片段就是那一段的话。 */
+    private fun vectorHistoryHits(query: FloatArray, top: Int, minScore: Double): List<HistoryHit> {
+        val byMsg = LinkedHashMap<String, HistoryHit>()
+        for (hit in vectors.search(VectorStore.HISTORY, query, top)) {
+            if (hit.score < minScore) break // 按相似度从高到低排的：低于门槛的都不算「意思相近」
+            val s = hit.entry.source
+            val key = "${s.convId}\u0000${s.messageId}"
+            if (key in byMsg) continue
+            val conv = state.conversation(s.convId) ?: continue
+            val m = snapshot(conv.id).firstOrNull { it.id == s.messageId } ?: continue
+            if (m.status != MsgStatus.DONE) continue
+            val text = VectorText.chunks(m.content).getOrNull(s.part) ?: continue
+            byMsg[key] = HistoryHit(conv.id, conv.title, m.id, speakerName(m), text.take(200), m.createdAt)
+        }
+        return byMsg.values.toList()
+    }
+
+    /** 按意思搜到的文档：一个文件只留一条，片段用最接近的那一段。 */
+    private fun vectorDocHits(query: FloatArray, top: Int, minScore: Double): List<DocHit> {
+        val out = ArrayList<DocHit>()
+        val seen = HashSet<String>()
+        for (hit in vectors.search(VectorStore.DOCS, query, top)) {
+            if (hit.score < minScore) break
+            val e = docs.entryAt(hit.entry.source.path) ?: continue
+            if (!seen.add(e.path)) continue
+            val text = docs.text(e.path) ?: continue
+            val part = VectorText.chunks(text).getOrNull(hit.entry.source.part) ?: continue
+            out += docs.hitOf(e, part.take(140))
+        }
+        return out
+    }
+
+    /**
+     * 倒数排名融合（RRF，k = 60）：同一个东西在两份榜单里都有，就把名次的倒数加起来——
+     * 两边都靠前的排最前，只在一份里靠后的不会挤掉另一份里靠前的。代表那一条用先传进来的那份榜单里的。
+     */
+    private fun <T> rrf(a: List<T>, b: List<T>, limit: Int, key: (T) -> String): List<T> {
+        val score = HashMap<String, Double>()
+        val first = LinkedHashMap<String, T>()
+        for (list in listOf(a, b)) list.forEachIndexed { i, item ->
+            val k = key(item)
+            score[k] = (score[k] ?: 0.0) + 1.0 / (RRF_K + i + 1)
+            if (k !in first) first[k] = item
+        }
+        return score.entries.sortedByDescending { it.value }.take(limit).mapNotNull { first[it.key] }
+    }
+
+    /**
+     * 搜所有对话的聊天内容。开了「按意思搜」而且这一份已经算过时：把问题也算成向量，取最接近的几段，
+     * 和按字面的结果合起来排；否则（没开、没算过、算向量出错）只按字面，note 里写明这次只按字面搜。
+     */
+    private suspend fun searchHistory(query: String, limit: Int): HistorySearch {
+        val literal = literalHistory(query, limit)
+        val choice = semanticFor(VectorStore.HISTORY) ?: return HistorySearch(literal, LITERAL_ONLY)
+        return try {
+            val vec = vectorHistoryHits(queryVector(choice, query), maxOf(limit * 3, 20), EmbedModels.minScore(choice.modelId))
+            if (vec.isEmpty()) HistorySearch(literal, LITERAL_ONLY)
+            else HistorySearch(rrf(literal, vec, limit) { it.messageId }, "这次按意思和字面合起来搜（意思最接近的 ${vec.size} 段）")
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            HistorySearch(literal, "$LITERAL_ONLY（按意思搜出错：${friendlyError(e, state.provider(choice.providerId))}）")
+        }
+    }
+
+    /** 搜本机文档：关键词留空 = 最近改过的（这时不问意思）。开了「我的文档」按意思搜时和 searchHistory 一样合起来排。 */
+    private suspend fun searchDocuments(query: String, limit: Int): DocumentSearch {
+        if (query.isBlank()) return DocumentSearch(withContext(Dispatchers.IO) { docs.recent(limit) }, "")
+        val literal = withContext(Dispatchers.IO) { docs.search(query, limit) }
+        val choice = semanticFor(VectorStore.DOCS) ?: return DocumentSearch(literal, LITERAL_ONLY)
+        return try {
+            val vec = vectorDocHits(queryVector(choice, query), maxOf(limit * 3, 20), EmbedModels.minScore(choice.modelId))
+            if (vec.isEmpty()) DocumentSearch(literal, LITERAL_ONLY)
+            // 代表那一条用向量的（片段是最接近的那段话），名次两种算法照旧各自算
+            else DocumentSearch(rrf(vec, literal, limit) { it.path }, "这次按意思和字面合起来搜（意思最接近的 ${vec.size} 个文件）")
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            DocumentSearch(literal, "$LITERAL_ONLY（按意思搜出错：${friendlyError(e, state.provider(choice.providerId))}）")
+        }
+    }
+
+    /**
+     * 估算「把现有的聊天记录和文档都算成向量」要多少字、几段、大约多少钱。不联网、不花钱：
+     * 只数本机已有的东西；token 按 1 个汉字约 1 个 token 粗估（EmbedModels.TOKEN_NOTE），钱按价格表算。
+     */
+    private fun semanticEstimate(): CommandResult {
+        val choice = EmbedPick.pick(state)
+        val p = choice?.let { state.provider(it.providerId) }
+        val price = choice?.let { Prices.of(it.platform, it.modelId, state.settings.costs.overrides, p?.baseUrl.orEmpty()) }
+        fun part(chars: Int, chunks: Int): SemanticEstimatePart {
+            val tokens = (chars * EmbedModels.TOKENS_PER_CHAR).toLong()
+            val unit = price?.tiers?.firstOrNull()?.input
+            return SemanticEstimatePart(chars, chunks, tokens, if (unit == null) null else tokens * unit / 1_000_000.0)
+        }
+        var hChars = 0
+        var hChunks = 0
+        for (conv in state.conversations) {
+            for (m in snapshot(conv.id)) {
+                if (m.status != MsgStatus.DONE || m.role == Role.SYSTEM) continue
+                for (c in VectorText.chunks(m.content)) { hChars += c.length; hChunks++ }
+            }
+        }
+        var dChars = 0
+        var dChunks = 0
+        for (e in docs.all()) {
+            if (e.chars <= 0) continue
+            val t = docs.text(e.path) ?: continue
+            for (c in VectorText.chunks(t)) { dChars += c.length; dChunks++ }
+        }
+        val res = SemanticEstimateResult(
+            providerId = p?.id.orEmpty(), providerName = p?.name.orEmpty(), model = choice?.modelId.orEmpty(),
+            label = if (choice == null) "" else "${choice.modelId}（${choice.providerName}）",
+            priceText = price?.let { Prices.describe(it) } ?: "价格表里没有这个模型（钱算不出来，token 数是粗估的）",
+            currency = price?.currency ?: "CNY",
+            history = part(hChars, hChunks), docs = part(dChars, dChunks))
+        return CommandResult(data = AppJson.encodeToString(SemanticEstimateResult.serializer(), res))
+    }
+
+    /** 整份作废重算（换了模型、维度时必须）。先把正在算的停下、等它让开路，再作废重算。 */
+    private fun semanticRebuild(which: String): CommandResult {
+        val s = which.trim().lowercase()
+        val kinds = if (s == VectorStore.HISTORY || s == VectorStore.DOCS) listOf(s) else listOf(VectorStore.HISTORY, VectorStore.DOCS)
+        scope.launch(Dispatchers.IO) {
+            haltEmbedding()
+            kinds.forEach { kind ->
+                vectors.reset(kind)
+                markProgress(kind, 0, 0, running = false)
+            }
+            kickEmbedding()
+        }
+        val what = kinds.joinToString("、") { if (it == VectorStore.HISTORY) "聊天记录" else "文档" }
+        return CommandResult(message = if (state.settings.semantic.historyOn || state.settings.semantic.docsOn) "$what 的向量已作废，正在重新算" else "$what 的向量已清掉")
+    }
+
+    private companion object {
+        /** 没按意思搜时工具步骤里写的一句。 */
+        const val LITERAL_ONLY = "这次只按字面搜"
+        /** 倒数排名融合的 k（RRF 论文里的常用取值）。 */
+        const val RRF_K = 60
+        /** 补算时攒够这么多段、或者过了这么久，写一次盘（算完、停下时也写）。 */
+        const val EMBED_SAVE_EVERY = 1000
+        const val EMBED_SAVE_MS = 20_000L
+    }
+
     /** kimi 不为空：用这家 Kimi 的官方搜索接口；它出错就退回设置里的搜索引擎，并在步骤上注明。 */
     private suspend fun runSearch(query: String, sources: MutableList<SearchSource>, kimi: ProviderConfig? = null): Pair<ToolStep, List<SearchSource>> {
         var note = ""
@@ -2176,16 +2611,18 @@ class Engine(
             }
             "search_history" -> {
                 val q = args.str("query").orEmpty().ifBlank { return "参数错误：缺少 query" }
-                val hits = searchHistory(q, 8)
-                updateMessage(convId, msgId, persist = false) { it.copy(tools = it.tools + ToolStep("history", q, ok = hits.isNotEmpty())) }
+                val r = searchHistory(q, 8)
+                val hits = r.hits
+                updateMessage(convId, msgId, persist = false) { it.copy(tools = it.tools + ToolStep("history", q, ok = hits.isNotEmpty(), note = r.note)) }
                 if (hits.isEmpty()) "以前的聊天里没找到和「$q」相关的内容。如实告诉用户。"
                 else hits.joinToString("\n\n") { h -> "[${h.convTitle} · ${dayOf(h.time)} · ${h.sender}] ${h.snippet}" }
             }
             "search_documents" -> {
                 val q = args.str("query").orEmpty().trim()
-                val hits = withContext(Dispatchers.IO) { if (q.isBlank()) docs.recent(10) else docs.search(q, 10) }
+                val r = searchDocuments(q, 10)
+                val hits = r.hits
                 updateMessage(convId, msgId, persist = false) {
-                    it.copy(tools = it.tools + ToolStep("doc", if (q.isBlank()) "看了最近的文档" else "搜文档「$q」· ${hits.size} 个", ok = hits.isNotEmpty()))
+                    it.copy(tools = it.tools + ToolStep("doc", if (q.isBlank()) "看了最近的文档" else "搜文档「$q」· ${hits.size} 个", ok = hits.isNotEmpty(), note = r.note))
                 }
                 if (hits.isEmpty()) "没找到相关的文档（文档库里一共 ${docs.count} 个文件）。如实告诉用户，可以建议换个关键词，或者到「我的文档」里看看收录了哪些文件夹。"
                 else buildString {

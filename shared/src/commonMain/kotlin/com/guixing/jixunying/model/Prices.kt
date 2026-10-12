@@ -97,6 +97,8 @@ object Prices {
             // Z.ai 国际版按美元另有价格，没查
             "api.z.ai" in url -> null
             // 语音：GLM-TTS 2 元 / 万字符；glm-asr-2512 官方按 token 计、给的是「约 0.0002 元/秒」的参考价
+            // 向量：embedding-3 0.5 元 / 百万 token（只有输入，没有输出）
+            m.startsWith("embedding-3") -> cny(0.5, null, 0.0)
             m.startsWith("glm-tts") -> chars(2.0)
             m.startsWith("glm-asr") -> perSec(0.0002, "官方按 token 计，这里按约每秒 0.0002 元估")
             m in setOf("glm-4.7-flash", "glm-4-flash-250414", "glm-4-flash", "glm-z1-flash", "glm-4.6v-flash", "glm-4v-flash", "glm-4.1v-thinking-flash") -> FREE

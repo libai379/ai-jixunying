@@ -149,6 +149,16 @@ sealed interface Command {
         val modelId: String = "",
     ) : Command
 
+    /**
+     * 按意思搜：先估算「把现有的聊天记录和我的文档都算成向量」有多少字、多少段、大约多少钱。
+     * 不联网、不花钱、也不算向量（只按本机已有的东西数一遍），结果 data 是 SemanticEstimateResult 的 JSON。
+     */
+    @Serializable data object SemanticEstimate : Command
+    /** 按意思搜：整份作废重算。scope 是 history / docs / all（留空按 all）。换模型、维度时必须重算。 */
+    @Serializable data class SemanticRebuild(val scope: String = "") : Command
+    /** 按意思搜：查补算进度（和 AppState.semanticProgress 一样，手机遥控电脑时用它）。结果 data 是 SemanticProgress 的 JSON。 */
+    @Serializable data object SemanticStatus : Command
+
     /** 立场档案：取议题（convId 留空 = 全部对话的）。结果 data 是 List<StanceTopic> 的 JSON。 */
     @Serializable data class StanceList(val convId: String = "") : Command
     /** 立场档案：标对错。verdict 是立场的 key，或 StanceTopic.NONE / OPEN，空 = 取消标记。 */

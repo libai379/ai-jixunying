@@ -43,6 +43,8 @@ object UsageKinds {
     const val TTS = "tts"
     /** 听写（ASR，1.7.0）。 */
     const val ASR = "asr"
+    /** 按意思搜（向量，1.7.0）。 */
+    const val EMBED = "embed"
 
     fun label(kind: String) = when (kind) {
         CHAT -> "成员回答"
@@ -55,6 +57,7 @@ object UsageKinds {
         IMAGE -> "画图"
         TTS -> "读出来"
         ASR -> "听写"
+        EMBED -> "按意思搜"
         TEST -> "测试连通"
         else -> "其他"
     }

@@ -2,7 +2,7 @@ package com.guixing.jixunying.model
 
 import kotlinx.serialization.Serializable
 
-/** 记录员在后台干的活（四样）+ 裁判的 AI 核实。 */
+/** 记录员在后台干的活（四样）+ 裁判的 AI 核实 + 按意思搜的补算。 */
 @Serializable
 enum class BgJob {
     /** 聊太长时把前面的聊天压成摘要。 */
@@ -14,7 +14,9 @@ enum class BgJob {
     /** 群聊每轮答完，记下各位的立场和改口。 */
     STANCES,
     /** 立场档案开新议题后，裁判判一次谁对。 */
-    AI_VERIFY;
+    AI_VERIFY,
+    /** 按意思搜：新聊天、新文档在后台补算向量（不是记录员干的活）。 */
+    EMBED;
 
     val label: String get() = when (this) {
         COMPACT -> "压缩聊天"
@@ -22,6 +24,7 @@ enum class BgJob {
         ADDRESSING -> "点名判断"
         STANCES -> "立场档案"
         AI_VERIFY -> "AI 核实"
+        EMBED -> "按意思搜"
     }
 
     /** 出错了会怎样（让人知道要不要管它）。 */
@@ -31,6 +34,7 @@ enum class BgJob {
         ADDRESSING -> "没认出你在叫谁，这次按没点名处理了（照这个对话设的回答方式答）"
         STANCES -> "这一轮各位的立场没记上"
         AI_VERIFY -> "没能判断谁对，这道题不会影响「准确率」统计"
+        EMBED -> "新的聊天 / 文档还没算进去，按意思搜暂时只能搜到以前算过的，照旧能按字面搜"
     }
 }
 
@@ -58,9 +62,10 @@ data class BgProblem(
     val shortReason: String get() = reason.substringBefore("：").take(60)
 
     fun noticeText(): String = buildString {
-        append("记录员「").append(job.label).append("」出错")
+        // 按意思搜不是记录员干的活，提示里别写成「记录员」
+        if (job == BgJob.EMBED) append("「按意思搜」出错") else append("记录员「").append(job.label).append("」出错")
         if (convTitle.isNotBlank()) append("（「").append(convTitle.take(16)).append("」）")
         append("：").append(shortReason).append("。").append(job.consequence).append("。")
-        append("到 设置 → 记忆 可以看详情、换记录员。")
+        append(if (job == BgJob.EMBED) "到 设置 里可以看到详情，也可以重新算一遍。" else "到 设置 → 记忆 可以看详情、换记录员。")
     }
 }

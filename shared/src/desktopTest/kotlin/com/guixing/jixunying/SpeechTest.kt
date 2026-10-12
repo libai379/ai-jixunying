@@ -763,7 +763,7 @@ class SpeechTest {
         // 这一版的界面能改回来
         assertTrue(e.call(Command.SaveSettings(s.copy(speech = SpeechSettings(autoRead = false)))).ok)
         assertEquals(SpeechSettings(autoRead = false), e.state.settings.speech)
-        assertEquals(4, Settings.SCHEMA, "1.7.0 加了语音，schema 是 4")
+        assertEquals(5, Settings.SCHEMA, "1.7.0 加了语音和按意思搜，schema 是 5")
     }
 
     @Test

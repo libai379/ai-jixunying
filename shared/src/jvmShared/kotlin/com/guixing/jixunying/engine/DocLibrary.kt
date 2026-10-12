@@ -218,4 +218,13 @@ class DocLibrary(private val dir: File) {
     }
 
     fun isIndexed(path: String) = entries.containsKey(path)
+
+    /** 收录的全部文档（按意思搜补算时要一个一个过一遍）。 */
+    fun all(): List<DocEntry> = entries.values.toList()
+
+    /** 按完整路径取一个（补算时对来历用，不按文件名猜）。 */
+    fun entryAt(path: String): DocEntry? = entries[path]
+
+    /** 一个文档的一条命中（片段照给）：按意思搜合起来排序时也用它，格式和 search 出来的完全一样。 */
+    fun hitOf(e: DocEntry, snippet: String) = hit(e, snippet)
 }
