@@ -15,7 +15,7 @@ object BillingRules {
             "https://docs.bigmodel.cn/cn/faq/fee-issues", packFirst = true,
         )
         "qwen" -> Rule(
-            "千问AI平台：先扣免费额度，再扣资源包，最后按量付费。按量的钱先冻结、月末统一结算，账单每小时更新，所以控制台的数字和这里的估算可能对不上。",
+            "千问AI平台：先扣免费额度，再扣资源包，最后按量付费。免费额度是每个模型各算各的（通常 100 万 token，一般 90 天有效），这里只能填一个总数、按总数扣。按量的钱先冻结、月末统一结算，账单显示要晚一到几个小时，所以控制台的数字和这里的估算可能对不上。",
             "https://platform.qianwenai.com/docs/resources/free-quota", packFirst = true,
         )
         "mimo" -> Rule(
