@@ -16,16 +16,24 @@ data class PriceTier(
  * 一个模型的价格。币种 CNY（元）或 USD（美元）。
  * @param offPeakHalf DeepSeek 那样分时段：表里是高峰价，北京时间工作日 9–12 点、14–18 点以外半价
  * @param perImage 画图模型每张的价格
+ * @param perChar 读出来每万字符的价格（MiniMax 的算法是 1 个汉字算 2 个字符，见 SpeechUnits.ttsChars）
+ * @param perHour 听写每小时的价格
+ * @param perSecond 听写每秒的价格（智谱官方按 token 计、给的是每秒的参考价）；填了它就不看 perHour
  */
 @Serializable
 data class ModelPrice(
     val currency: String = "CNY",
     val tiers: List<PriceTier> = emptyList(),
     val perImage: Double? = null,
+    val perChar: Double? = null,
+    val perHour: Double? = null,
+    val perSecond: Double? = null,
     val offPeakHalf: Boolean = false,
     val note: String = "",
 ) {
-    val isFree: Boolean get() = (perImage ?: 0.0) == 0.0 && tiers.all { it.input == 0.0 && it.output == 0.0 }
+    val isFree: Boolean
+        get() = (perImage ?: 0.0) == 0.0 && (perChar ?: 0.0) == 0.0 && (perHour ?: 0.0) == 0.0 && (perSecond ?: 0.0) == 0.0 &&
+            tiers.all { it.input == 0.0 && it.output == 0.0 }
 }
 
 /**
@@ -38,6 +46,12 @@ object Prices {
     private fun cny(input: Double, cached: Double?, output: Double, note: String = "") = ModelPrice("CNY", listOf(t(input, cached, output)), note = note)
     private fun usd(input: Double, cached: Double?, output: Double, note: String = "") = ModelPrice("USD", listOf(t(input, cached, output)), note = note)
     private fun img(price: Double, currency: String = "CNY", note: String = "") = ModelPrice(currency, perImage = price, note = note)
+    /** 读出来：每万字符的价格。 */
+    private fun chars(price: Double, note: String = "") = ModelPrice("CNY", perChar = price, note = note)
+    /** 听写：每小时的价格。 */
+    private fun hourly(price: Double, note: String = "") = ModelPrice("CNY", perHour = price, note = note)
+    /** 听写：每秒的价格（官方只给了每秒的估算价时用这个）。 */
+    private fun perSec(price: Double, note: String = "") = ModelPrice("CNY", perSecond = price, note = note)
     private val FREE = ModelPrice("CNY", listOf(t(0.0, 0.0, 0.0)), perImage = 0.0, note = "免费")
     private val FREE_IMAGE = ModelPrice("CNY", perImage = 0.0, note = "免费")
 
@@ -54,6 +68,9 @@ object Prices {
             else -> null
         }
         "mimo" -> when {
+            // 语音：读出来官方写「Free for a limited time」；听写国内 0.5 元 / 小时，按秒记
+            m.startsWith("mimo-v2.5-tts") -> chars(0.0, "限时免费")
+            m.startsWith("mimo-v2.5-asr") -> hourly(0.5)
             m.startsWith("mimo-v2.6-pro-ultraspeed") -> cny(30.0, 0.25, 60.0)
             m.startsWith("mimo-v2.6-pro") || m.startsWith("mimo-v2.5-pro") -> cny(3.0, 0.025, 6.0)
             m.startsWith("mimo-v2.6-flash") || m == "mimo-v2.5" -> cny(1.0, 0.02, 2.0)
@@ -63,6 +80,10 @@ object Prices {
             val global = "minimax.io" in url
             when {
                 m == "image-01" || m == "image-01-live" -> if (global) img(0.0035, "USD") else img(0.025)
+                // 语音：价格出自 platform.minimax.cn 的价格页（国际站的价格没查）
+                m.startsWith("speech-2.8-hd") -> if (global) null else chars(3.5, "1 个汉字算 2 个字符")
+                m.startsWith("speech-2.8-turbo") -> if (global) null else chars(2.0, "1 个汉字算 2 个字符")
+                m.startsWith("asr-1.0") -> if (global) null else hourly(2.5)
                 m.startsWith("minimax-m3.1") -> null
                 // M3 输入超过 512k 整次按长上下文价；国内价已含官方「永久五折」
                 m.startsWith("minimax-m3") -> if (global) ModelPrice("USD", listOf(t(0.30, 0.06, 1.20, 512_000), t(0.60, 0.12, 2.40)))
@@ -75,6 +96,9 @@ object Prices {
         "zhipu" -> when {
             // Z.ai 国际版按美元另有价格，没查
             "api.z.ai" in url -> null
+            // 语音：GLM-TTS 2 元 / 万字符；glm-asr-2512 官方按 token 计、给的是「约 0.0002 元/秒」的参考价
+            m.startsWith("glm-tts") -> chars(2.0)
+            m.startsWith("glm-asr") -> perSec(0.0002, "官方按 token 计，这里按约每秒 0.0002 元估")
             m in setOf("glm-4.7-flash", "glm-4-flash-250414", "glm-4-flash", "glm-z1-flash", "glm-4.6v-flash", "glm-4v-flash", "glm-4.1v-thinking-flash") -> FREE
             m.startsWith("glm-5.3-flashx") -> cny(2.0, 0.57, 7.0)
             m.startsWith("glm-5.3-flash") -> cny(0.8, 0.23, 2.8, "不是免费模型")
@@ -88,6 +112,7 @@ object Prices {
         "qwen" -> when {
             // 百炼国际版按美元另有价格，没查
             "dashscope-intl" in url || "alibabacloud" in url -> null
+            // 读出来 qwen3-tts-flash：官方价格页是动态加载的，没读到数字（未确认），所以不给价（花费页会说没算进去）
             m.startsWith("qwen3.8-max") -> cny(12.0, 1.5, 36.0)
             // qwen3-max、qwen-plus 按整次请求的输入长度分档
             m.startsWith("qwen3-max") -> ModelPrice("CNY", listOf(t(2.5, 0.5, 10.0, 32_000), t(4.0, 0.8, 16.0, 128_000), t(7.0, 1.4, 28.0)))
@@ -173,6 +198,11 @@ object Prices {
     /** 一条记录花了多少（原币种）。没有价格返回 null。 */
     fun cost(r: UsageRecord, price: ModelPrice?): Double? {
         price ?: return null
+        // 语音：读出来按字符、听写按秒（见 SpeechUnits）
+        when (r.unit) {
+            SpeechUnits.CHAR -> return price.perChar?.let { it * r.units / 10_000.0 }
+            SpeechUnits.SECOND -> return price.perSecond?.let { it * r.units } ?: price.perHour?.let { it * r.units / 3600.0 }
+        }
         if (r.images > 0) return price.perImage?.let { it * r.images }
         // 补记的老记录把一次回答里几轮工具调用的输入加在一起了，按它挑档会偏贵：老记录一律按第一档
         val tier = (if (r.backfill) price.tiers.firstOrNull() else price.tiers.firstOrNull { r.prompt <= it.upTo })
@@ -188,7 +218,11 @@ object Prices {
     /** 给人看的单价，比如「输入 2 · 命中 0.04 · 输出 8 元/百万（空闲半价）」。 */
     fun describe(p: ModelPrice): String {
         val unit = if (p.currency == "USD") "美元" else "元"
-        if (p.perImage != null) return if (p.perImage == 0.0) "免费" else "${fmt(p.perImage)} $unit/张" + (if (p.note.isNotBlank()) "（${p.note}）" else "")
+        val tail = if (p.note.isNotBlank()) "（${p.note}）" else ""
+        if (p.perImage != null) return if (p.perImage == 0.0) "免费" else "${fmt(p.perImage)} $unit/张" + tail
+        if (p.perChar != null) return "${fmt(p.perChar)} $unit/万字符" + tail
+        if (p.perSecond != null) return "${fmt(p.perSecond)} $unit/秒" + tail
+        if (p.perHour != null) return "${fmt(p.perHour)} $unit/小时" + tail
         if (p.isFree) return "免费"
         val parts = p.tiers.mapIndexed { i, tier ->
             val head = if (p.tiers.size > 1) (if (tier.upTo == Int.MAX_VALUE) "更长：" else "输入≤${tier.upTo / 1000}K：") else ""

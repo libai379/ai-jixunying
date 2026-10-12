@@ -119,6 +119,36 @@ sealed interface Command {
     /** 把一条回答存成 Word（format = "docx"）或把里面的表格存成 Excel（"xlsx"）。结果 data 是 ExportedFile 的 JSON。 */
     @Serializable data class ExportMessage(val convId: String, val messageId: String, val format: String) : Command
 
+    /**
+     * 语音：把一段文字读出来（docs/向量和语音设计说明.md，2026-10-12）。
+     * 长文字由引擎先清理 Markdown、按所选模型的上限切段，再一段一次请求；结果 data 是 SpeechAudio 的 JSON（一段或多段音频）。
+     * 三家都是本地引擎自己跑（手机遥控电脑时用手机自己的 Key，不经中转传音频），所以不查「允许手机用」。
+     * providerId / modelId / voice 留空 = 用设置里选的（设置也留空就自动挑）。
+     * prepared = true：text 是 SpeakPlan 切好的一段，不再清理 Markdown（清理两遍会把「3.5 元」这类开头再削一次）。
+     */
+    @Serializable data class Speak(
+        val text: String,
+        val providerId: String = "",
+        val modelId: String = "",
+        val voice: String = "",
+        val prepared: Boolean = false,
+    ) : Command
+    /**
+     * 语音：读长回答之前先问引擎「用哪家、切成哪几段」，不花钱、不联网。结果 data 是 SpeechPlan 的 JSON。
+     * 界面拿到以后一段一段发 Speak(prepared = true)、一段一段放：点「停止」就不再往下合成（不再花钱）。
+     */
+    @Serializable data class SpeakPlan(val text: String, val providerId: String = "", val modelId: String = "") : Command
+    /**
+     * 语音：把一段录音听写成文字。audioBase64 是 wav（16 位 PCM）；结果 data 就是识别出来的文字。
+     * 智谱一段最多 30 秒，引擎会按 25 秒切开分开识别再按顺序拼起来。
+     */
+    @Serializable data class Transcribe(
+        val audioBase64: String,
+        val mime: String = "audio/wav",
+        val providerId: String = "",
+        val modelId: String = "",
+    ) : Command
+
     /** 立场档案：取议题（convId 留空 = 全部对话的）。结果 data 是 List<StanceTopic> 的 JSON。 */
     @Serializable data class StanceList(val convId: String = "") : Command
     /** 立场档案：标对错。verdict 是立场的 key，或 StanceTopic.NONE / OPEN，空 = 取消标记。 */
@@ -135,6 +165,32 @@ sealed interface Command {
 
 @Serializable
 data class CommandResult(val ok: Boolean = true, val message: String = "", val data: String = "")
+
+/**
+ * 读出来的结果（Command.Speak 的 data）：一段或多段 wav（16 位 PCM）的 base64。
+ * 长的文字会按所选模型的上限切成几段，界面一段一段放，点「停止」就不再往下合成。
+ */
+@Serializable
+data class SpeechAudio(
+    val mime: String = "audio/wav",
+    val segments: List<String> = emptyList(),
+    /** 用了哪个模型，给人看（比如「mimo-v2.5-tts（小米 MiMo）· 3 段 · 128 字」）。 */
+    val label: String = "",
+    val chars: Int = 0,
+)
+
+/**
+ * 读出来之前切好的段（Command.SpeakPlan 的 data）：已经去掉 Markdown、跳过代码块，每段不超过所选模型的上限。
+ * providerId / modelId 是这次挑中的，界面发 Speak 时原样带上，免得中途改了设置一段一家。
+ */
+@Serializable
+data class SpeechPlan(
+    val providerId: String = "",
+    val modelId: String = "",
+    /** 给人看，比如「mimo-v2.5-tts（小米 MiMo）」。 */
+    val label: String = "",
+    val chunks: List<String> = emptyList(),
+)
 
 /** 聊天记录搜索的一条结果。 */
 @Serializable

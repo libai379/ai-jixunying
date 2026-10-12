@@ -224,6 +224,8 @@ data class Settings(
     val office: OfficeSettings = OfficeSettings(),
     /** Code 栏（1.6.0）：命令外壳、超时、最大步数、允许手机用（见 model/Code.kt）。 */
     val code: CodeSettings = CodeSettings(),
+    /** 语音（1.7.0）：读出来、听写用哪一家、什么音色（见 model/Speech.kt）。 */
+    val speech: SpeechSettings = SpeechSettings(),
     /**
      * 发设置的这一端认得哪一版设置。旧版手机不认识这个字段，发来的就是 0；
      * 电脑看到 0 就保留旧版不认识的那几项（不然手机一改设置就把电脑上的冲回默认值）。
@@ -232,10 +234,11 @@ data class Settings(
 ) {
     companion object {
         /**
-         * 1 = 1.4.0 加了裁判和 AI 核实；2 = 1.5.0 加了 office（Word / Excel）；3 = 1.6.0 加了 code（Code 栏）。
+         * 1 = 1.4.0 加了裁判和 AI 核实；2 = 1.5.0 加了 office（Word / Excel）；3 = 1.6.0 加了 code（Code 栏）；
+         * 4 = 1.7.0 加了 speech（语音）。
          * 以后再加旧版不认识的设置项，就加一，并在 SaveSettings 里保留。
          */
-        const val SCHEMA = 3
+        const val SCHEMA = 4
     }
 }
 

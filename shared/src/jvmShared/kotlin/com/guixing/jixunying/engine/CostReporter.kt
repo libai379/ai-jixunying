@@ -51,7 +51,7 @@ class CostReporter(private val ledger: Ledger, private val stateOf: () -> AppSta
             val p = s.provider(r.providerId)
             val price = Prices.of(r.platform, r.model, overrides, p?.baseUrl.orEmpty())
             val money = Prices.cost(r, price)
-            val missing = r.images == 0 && r.prompt == 0 && r.completion == 0
+            val missing = r.images == 0 && r.prompt == 0 && r.completion == 0 && r.units <= 0.0
             fun add(a: Acc) {
                 a.calls++; a.images += r.images
                 a.prompt += r.prompt; a.cached += r.cached; a.completion += r.completion
@@ -67,6 +67,7 @@ class CostReporter(private val ledger: Ledger, private val stateOf: () -> AppSta
                 r.kind == UsageKinds.CHAT || (r.kind == UsageKinds.IMAGE && r.memberId.isNotBlank()) ->
                     r.memberId to (s.member(r.memberId)?.name ?: "已删除的成员")
                 r.kind == UsageKinds.IMAGE -> "painter" to "画图助手"
+                r.kind == UsageKinds.TTS || r.kind == UsageKinds.ASR -> "speech" to "语音"
                 r.kind == UsageKinds.TEST -> "test" to "测试连通"
                 r.kind == UsageKinds.OTHER -> "other" to "其他"
                 else -> "recorder" to "记录员（后台）"

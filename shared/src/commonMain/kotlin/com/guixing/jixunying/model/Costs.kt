@@ -4,10 +4,13 @@ import kotlinx.serialization.Serializable
 
 /**
  * 记账：每调用一次模型、每画一张图记一条（engine/Ledger.kt 存在 usage\年-月.jsonl）。花费页按这个和价格表估算花了多少钱。
- * @param kind chat = 成员回答；compact / memory / addressing / stances = 记录员的后台活；image = 画图；test = 测试连通；other
+ * @param kind chat = 成员回答；compact / memory / addressing / stances = 记录员的后台活；image = 画图；test = 测试连通；
+ *   tts = 读出来、asr = 听写（语音，见 model/Speech.kt）；other
  * @param platform 哪家平台（Thinking.platformOf，价格表按它查）
  * @param prompt 输入 token（含命中缓存的部分）
  * @param cached 其中命中缓存的
+ * @param units 语音按这个数量记：读出来是字符数、听写是秒数（价格表按 万字符 / 小时 / 秒 算）
+ * @param unit 单位：SpeechUnits.CHAR 或 SECOND；不是语音时是空的
  * @param backfill 从以前的聊天记录补记的（那时没记后台活，也没记具体时段）
  */
 @Serializable
@@ -25,6 +28,8 @@ data class UsageRecord(
     val memberId: String = "",
     val convId: String = "",
     val backfill: Boolean = false,
+    val units: Double = 0.0,
+    val unit: String = "",
 )
 
 object UsageKinds {
@@ -34,6 +39,10 @@ object UsageKinds {
     const val OTHER = "other"
     /** Code 栏的编码循环（docs/Code栏设计说明.md 第 11 节）。 */
     const val CODE = "code"
+    /** 读出来（TTS，1.7.0）。 */
+    const val TTS = "tts"
+    /** 听写（ASR，1.7.0）。 */
+    const val ASR = "asr"
 
     fun label(kind: String) = when (kind) {
         CHAT -> "成员回答"
@@ -44,6 +53,8 @@ object UsageKinds {
         "stances" -> "立场档案"
         "council" -> "会审（互评、汇总）"
         IMAGE -> "画图"
+        TTS -> "读出来"
+        ASR -> "听写"
         TEST -> "测试连通"
         else -> "其他"
     }

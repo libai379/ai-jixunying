@@ -27,6 +27,11 @@ import com.guixing.jixunying.model.ReplyMode
 import com.guixing.jixunying.model.Role
 import com.guixing.jixunying.model.SearchSource
 import com.guixing.jixunying.model.Settings
+import com.guixing.jixunying.model.SpeechAudio
+import com.guixing.jixunying.model.SpeechModels
+import com.guixing.jixunying.model.SpeechPick
+import com.guixing.jixunying.model.SpeechPlan
+import com.guixing.jixunying.model.SpeechUnits
 import com.guixing.jixunying.model.StanceEntry
 import com.guixing.jixunying.model.StanceOption
 import com.guixing.jixunying.model.StanceTopic
@@ -119,6 +124,17 @@ class Engine(
     private val llm = LlmClient { proxyFor(it.useProxy) }
     private val search = WebSearch { state.settings.proxy.trim().ifEmpty { null } }
     private val images = ImageGen { proxyFor(it.useProxy) }
+
+    /** 语音：读出来 / 听写（model/Speech.kt 是设置和数据、engine/Speech.kt 是各家的协议）。 */
+    private val speech = Speech { proxyFor(it.useProxy) }.also { sp ->
+        // 服务商收下了请求就记一条账（教训 53：后面解析、下载失败也已经扣钱了）
+        sp.onBilled = { p, model, units, unit ->
+            runCatching {
+                ledger.add(UsageRecord(now(), if (unit == SpeechUnits.CHAR) UsageKinds.TTS else UsageKinds.ASR,
+                    p.id, p.name, Thinking.platformOf(p), model, units = units, unit = unit))
+            }
+        }
+    }
 
     /** 账本：每次调用模型、每张图记一条，花费页用（见 Ledger.kt、model/Costs.kt）。 */
     private val ledger = Ledger(java.io.File(storage.root, "usage"))
@@ -488,8 +504,10 @@ class Engine(
                 val office = if (c.settings.schema >= 2) c.settings.office else s.settings.office
                 // 1.6.0 以前的不认识 Code 栏设置（外壳、超时、最大步数、允许手机用）
                 val code = if (c.settings.schema >= 3) c.settings.code else s.settings.code
+                // 1.7.0 以前的不认识语音设置（读出来 / 听写用哪家）
+                val speechSettings = if (c.settings.schema >= 4) c.settings.speech else s.settings.speech
                 s.copy(settings = c.settings.copy(search = c.settings.search.copy(apiKeys = keys), costs = s.settings.costs, memory = memory, office = office, code = code,
-                    schema = Settings.SCHEMA))
+                    speech = speechSettings, schema = Settings.SCHEMA))
             }
             if (before.enabled != state.settings.relay.enabled || before.brokers != state.settings.relay.brokers) onRelaySettingsChanged?.invoke()
             // 关掉了的后台活不会再跑，它以前的出错提示也就不会「成功一次自己消失」：直接清掉
@@ -649,6 +667,9 @@ class Engine(
         is Command.WeixinImport -> weixin?.importShared(c.shareJson) ?: CommandResult(false, "这台设备没有接微信助理")
         is Command.WeixinReport -> { weixin?.raiseFence(c.answeredUntil); CommandResult() }
         is Command.ExportMessage -> exportMessage(c)
+        is Command.Speak -> speak(c)
+        is Command.SpeakPlan -> speakPlan(c)
+        is Command.Transcribe -> transcribe(c)
         is Command.StanceList -> {
             val list = synchronized(stanceBook) { stanceBook.filter { c.convId.isBlank() || it.convId == c.convId } }
             CommandResult(data = AppJson.encodeToString(kotlinx.serialization.builtins.ListSerializer(StanceTopic.serializer()), list))
@@ -1993,6 +2014,75 @@ class Engine(
         }
     }
 
+    /** 语音：把文字读出来（docs/向量和语音设计说明.md）。结果 data 是 SpeechAudio 的 JSON（一段或多段 wav 的 base64）。 */
+    private suspend fun speak(c: Command.Speak): CommandResult {
+        val text = c.text.trim()
+        if (text.isEmpty()) return CommandResult(false, "没有可读的文字")
+        val t = speechTarget(c.providerId, c.modelId, tts = true)
+            ?: return CommandResult(false, if (c.providerId.isNotBlank()) "没有这家服务商，或者它不支持读出来" else Speech.NO_TTS + "（去 设置 → 语音 里加一家的 Key）")
+        // 设置里的音色是给设置里选的那一家挑的；那家用不了、自动换到别家时，别把小米的「冰糖」发给智谱
+        val st = state.settings.speech
+        val voice = c.voice.ifBlank { if (t.provider.id == st.ttsProviderId) st.ttsVoice else "" }
+        return try {
+            val spoken = speech.synthesize(t.provider, t.model, voice, st.ttsSpeed, text, prepared = c.prepared)
+            val chars = spoken.sumOf { it.text.length }
+            val label = "${t.model}（${t.provider.name}）· ${spoken.size} 段 · $chars 字"
+            CommandResult(data = AppJson.encodeToString(SpeechAudio.serializer(), SpeechAudio(
+                segments = spoken.map { Base64.getEncoder().encodeToString(it.bytes) },
+                label = label, chars = chars)))
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            CommandResult(false, friendlyError(e, t.provider))
+        }
+    }
+
+    /** 语音：读之前先切段（不联网、不花钱）。结果 data 是 SpeechPlan 的 JSON。 */
+    private fun speakPlan(c: Command.SpeakPlan): CommandResult {
+        val t = speechTarget(c.providerId, c.modelId, tts = true)
+            ?: return CommandResult(false, if (c.providerId.isNotBlank()) "没有这家服务商，或者它不支持读出来" else Speech.NO_TTS + "（去 设置 → 语音 里加一家的 Key）")
+        if (!SpeechModels.supportsTts(t.provider)) return CommandResult(false, Speech.NO_TTS)
+        val chunks = speech.plan(t.provider, c.text)
+        if (chunks.isEmpty()) return CommandResult(false, "这段文字里没有能读的内容（都是代码块或 Markdown 记号）")
+        return CommandResult(data = AppJson.encodeToString(SpeechPlan.serializer(),
+            SpeechPlan(t.provider.id, t.model, "${t.model}（${t.provider.name}）", chunks)))
+    }
+
+    /** 语音：把一段录音听写成文字。audioBase64 是 wav（16 位 PCM）。 */
+    private suspend fun transcribe(c: Command.Transcribe): CommandResult {
+        val wav = runCatching { Base64.getDecoder().decode(c.audioBase64) }.getOrNull()
+        if (wav == null) return CommandResult(false, "这段录音不是有效的 base64")
+        if (wav.isEmpty()) return CommandResult(false, "这段录音是空的")
+        val t = speechTarget(c.providerId, c.modelId, tts = false)
+            ?: return CommandResult(false, if (c.providerId.isNotBlank()) "没有这家服务商，或者它不支持听写" else Speech.NO_ASR + "（去 设置 → 语音 里加一家的 Key）")
+        return try {
+            CommandResult(data = speech.transcribe(t.provider, t.model, wav))
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            CommandResult(false, friendlyError(e, t.provider))
+        }
+    }
+
+    private class SpeechTarget(val provider: ProviderConfig, val model: String)
+
+    /**
+     * 读出来 / 听写用哪家哪个模型：指令里指名了就用指名的；否则交给 SpeechPick——设置 → 语音 里选了且能用就用它，
+     * 选的那家删了、停用了、没填 Key 就按顺序自动挑（和设置页显示的「自动」一致）。挑不出来返回 null。
+     */
+    private fun speechTarget(providerId: String, modelId: String, tts: Boolean): SpeechTarget? {
+        if (providerId.isNotBlank()) {
+            val p = state.provider(providerId) ?: return null
+            val model = modelId.ifBlank {
+                (if (tts) SpeechModels.ttsDefaultOf(p) else SpeechModels.asrDefaultOf(p)).orEmpty()
+            }
+            return SpeechTarget(p, model)
+        }
+        val choice = if (tts) SpeechPick.forTts(state) else SpeechPick.forAsr(state)
+        val p = choice?.let { state.provider(it.providerId) } ?: return null
+        return SpeechTarget(p, choice.modelId)
+    }
+
     /** kimi 不为空：用这家 Kimi 的官方搜索接口；它出错就退回设置里的搜索引擎，并在步骤上注明。 */
     private suspend fun runSearch(query: String, sources: MutableList<SearchSource>, kimi: ProviderConfig? = null): Pair<ToolStep, List<SearchSource>> {
         var note = ""
@@ -2243,6 +2333,7 @@ class Engine(
 
     private fun friendlyErrorRaw(e: Throwable, p: ProviderConfig?): String {
         if (e is ImageDownloadFailed) return "图片画好了，但下载失败（这张已经扣费）：${e.body.take(200)}"
+        if (e is SpeechDownloadFailed) return "声音合成好了，但下载失败（这次已经扣费）：${e.body.take(200)}"
         if (e is ApiException) {
             val body = e.body.take(300)
             val lower = body.lowercase()
