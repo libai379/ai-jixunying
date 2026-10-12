@@ -51,6 +51,7 @@ fun BgProblemsCard(ctl: AppController, problems: List<BgProblem>, onMemoryPage: 
                     Text(formatTime(p.at) + (if (p.convTitle.isNotBlank()) " · 对话「${p.convTitle}」" else ""),
                         style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
                     SelectionContainer { Text(p.reason, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurface) }
+                    if (p.raw.isNotBlank()) SelectionContainer { Text("模型原话：" + p.raw, style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle) }
                     Text(p.job.consequence + "。成功一次这条就会自己消失。", style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         val pad = PaddingValues(horizontal = 0.dp)

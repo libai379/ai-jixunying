@@ -810,7 +810,7 @@ class Engine(
         val prompt = Recorder.extractPrompt(existing, transcriptOf(fresh.takeLast(40), 1500), state.profile.name)
         val r = withContext(Dispatchers.IO) { llm.chat(p, model, listOf(userMsg(prompt)), null, null) { _, _ -> } }
         // 看不懂输出就不挪扫描位置，下次再试
-        val items = Recorder.parseItems(r.content) ?: run { bg.failed(BgJob.MEMORY, BackgroundWatch.UNREADABLE, titleOf(convId)); return }
+        val items = Recorder.parseItems(r.content) ?: run { bg.failed(BgJob.MEMORY, BackgroundWatch.UNREADABLE, titleOf(convId), BackgroundWatch.rawOf(r)); return }
         bg.ok(BgJob.MEMORY)
         storage.saveMemo(convId, storage.loadMemo(convId).copy(scannedUpToTime = fresh.last().createdAt))
         val changed = applyExtracted(items.take(3), existing, state.conversation(convId)?.title.orEmpty())
@@ -1049,7 +1049,7 @@ class Engine(
             val who = r?.let { Addressing.parse(it.content, members) }
             when {
                 r == null -> bg.failed(BgJob.ADDRESSING, "10 秒内没判断出来：记录员 $model 太慢，可以在 设置 → 记忆 换个快一点的", title)
-                who == null -> bg.failed(BgJob.ADDRESSING, BackgroundWatch.UNREADABLE, title)
+                who == null -> bg.failed(BgJob.ADDRESSING, BackgroundWatch.UNREADABLE, title, BackgroundWatch.rawOf(r))
                 else -> bg.ok(BgJob.ADDRESSING)
             }
             who.orEmpty()
@@ -1100,7 +1100,7 @@ class Engine(
             val anonymous = state.settings.memory.judgeAnonymous
             val promptResult = StanceJudge.prompt(open, items, stripThink(ask.content), state.profile.name, ::nameOf, canOpen, anonymous, members)
             val r = withContext(Dispatchers.IO) { llm.chat(p, model, listOf(userMsg(promptResult.prompt)), null, null) { _, _ -> } }
-            val v = StanceJudge.parse(r.content, promptResult.anon) ?: run { bg.failed(BgJob.STANCES, BackgroundWatch.UNREADABLE, titleOf(convId)); return }
+            val v = StanceJudge.parse(r.content, promptResult.anon) ?: run { bg.failed(BgJob.STANCES, BackgroundWatch.UNREADABLE, titleOf(convId), BackgroundWatch.rawOf(r)); return }
             val newTopicId = applyStances(convId, ask, said, independentIds, open, v, canOpen)
             bg.ok(BgJob.STANCES)
             // AI 核实：开新议题后，裁判判一次谁对。另开一个协程，不占着这个对话的锁（下一轮的记录不用等它联网查完）
@@ -1293,7 +1293,7 @@ class Engine(
             }
         }
         val verdict = StanceJudge.parseVerify(r.content, topic.options.map { it.key }, verifyResult.anon)
-            ?: run { bg.failed(BgJob.AI_VERIFY, "裁判的回答看不懂：$model 可能不适合当裁判，可以在 设置 → 记忆 → 立场档案 换一个", titleOf(topic.convId)); return }
+            ?: run { bg.failed(BgJob.AI_VERIFY, "裁判的回答看不懂：$model 可能不适合当裁判，可以在 设置 → 记忆 → 立场档案 换一个", titleOf(topic.convId), BackgroundWatch.rawOf(r)); return }
         // 更新议题
         synchronized(stanceBook) {
             val i = stanceBook.indexOfFirst { it.id == topicId }

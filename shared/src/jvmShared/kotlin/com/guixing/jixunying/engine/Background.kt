@@ -24,12 +24,12 @@ internal class BackgroundWatch(
         lastNotice.remove(job)
     }
 
-    fun failed(job: BgJob, reason: String, convTitle: String = "") {
+    fun failed(job: BgJob, reason: String, convTitle: String = "", raw: String = "") {
         val now = clock()
         var problem: BgProblem? = null
         update { s ->
             val old = s.bgProblems.firstOrNull { it.job == job }
-            val p = BgProblem(job, reason, now, convTitle, (old?.times ?: 0) + 1)
+            val p = BgProblem(job, reason, now, convTitle, (old?.times ?: 0) + 1, raw)
             problem = p
             s.copy(bgProblems = s.bgProblems.filterNot { it.job == job } + p)
         }
@@ -47,6 +47,18 @@ internal class BackgroundWatch(
     }
 
     companion object {
+        /** 「看不懂」时记下模型原话（BgProblem.raw）：正文前 300 字；正文是空的就说清是为什么空。 */
+        fun rawOf(r: ChatResult): String {
+            val text = r.content.replace(Regex("\\s+"), " ").trim()
+            if (text.isNotEmpty()) return text.take(300) + if (text.length > 300) "……（共 ${text.length} 字）" else ""
+            val why = buildList {
+                r.finishReason?.takeIf { it.isNotBlank() }?.let { add("结束原因 $it") }
+                if (r.toolCalls.isNotEmpty()) add("还想调用工具 " + r.toolCalls.joinToString("、") { it.name })
+                if (r.reasoning.isNotEmpty()) add("推理 ${r.reasoning.length} 字")
+            }
+            return "（正文是空的" + (if (why.isEmpty()) "" else "：" + why.joinToString("，")) + "）"
+        }
+
         const val NOTICE_EVERY = 30 * 60_000L
         const val NO_RECORDER = "没有能用的模型当记录员：到 设置 → 模型服务 配一个服务商，或在 设置 → 记忆 里选一个记录员"
         const val UNREADABLE = "记录员的回答看不懂：这个模型可能不适合当记录员，可以在 设置 → 记忆 换一个（mimo-v2.6-flash 这类便宜的就够）"

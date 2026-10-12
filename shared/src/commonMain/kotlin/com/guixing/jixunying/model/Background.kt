@@ -48,6 +48,11 @@ data class BgProblem(
     val convTitle: String = "",
     /** 连续出错几次。 */
     val times: Int = 1,
+    /**
+     * 「看不懂」时模型的原话（前 300 字；正文是空的就写结束原因、有没有还想调工具、推理多长）。
+     * 以前只说「可能不适合」，看不到原话就分不清是格式问题还是模型真不行（用户 2026-10-12 问「DeepSeek 不适合吗」）。
+     */
+    val raw: String = "",
 ) {
     /** 弹提示用的短原因：「API Key 不对或已失效（HTTP 401）」「网络连不上」。 */
     val shortReason: String get() = reason.substringBefore("：").take(60)

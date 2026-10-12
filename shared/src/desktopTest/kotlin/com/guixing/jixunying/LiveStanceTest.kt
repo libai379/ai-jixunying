@@ -124,7 +124,7 @@ class LiveStanceTest {
                 }
             }
             println("\n（AI 核实等了 ${(System.currentTimeMillis() - tv) / 1000} 秒）")
-            e.state.bgProblems.forEach { println("后台出错：${it.job} ${it.reason.take(200)}") }
+            e.state.bgProblems.forEach { println("后台出错：${it.job} ${it.reason.take(200)}" + if (it.raw.isNotBlank()) "\n  模型原话：${it.raw}" else "") }
             for (t in topics()) {
                 println("\n议题：${t.question}")
                 println("  AI 核实：" + (if (t.aiVerdict.isEmpty()) "（没有结论）" else "${t.aiVerdict}；${t.aiReason.take(200)}") +
