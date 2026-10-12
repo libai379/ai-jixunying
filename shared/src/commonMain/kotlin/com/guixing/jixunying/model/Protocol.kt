@@ -25,6 +25,19 @@ sealed interface Command {
     @Serializable data class DeleteConversation(val id: String) : Command
     @Serializable data class LoadMessages(val convId: String) : Command
 
+    /**
+     * Code 栏：新建一个 Code 会话（docs/Code栏设计说明.md 第 1、11 节，2026-10-12）。
+     * 结果 data 是新对话的 id；文件夹必须存在，服务商和模型必须已经加过，模型还要支持调用工具。
+     */
+    @Serializable data class CodeCreate(
+        val folder: String,
+        val providerId: String,
+        val modelId: String,
+        val mode: CodeMode = CodeMode.MANUAL,
+    ) : Command
+    /** Code 栏：换权限档（只影响之后的步骤，已经跑完的不变）。 */
+    @Serializable data class CodeSetMode(val convId: String, val mode: CodeMode) : Command
+
     @Serializable data class SendMessage(
         val convId: String,
         val text: String,

@@ -7,6 +7,7 @@ import com.guixing.jixunying.model.AppState
 import com.guixing.jixunying.model.Attachment
 import com.guixing.jixunying.model.AttachmentKind
 import com.guixing.jixunying.model.BgJob
+import com.guixing.jixunying.model.CodeSpec
 import com.guixing.jixunying.model.Command
 import com.guixing.jixunying.model.CommandResult
 import com.guixing.jixunying.model.Conversation
@@ -132,6 +133,13 @@ class Engine(
 
     /** 联机设置变了（开关、中转列表）时通知外面重启联机服务。 */
     var onRelaySettingsChanged: (() -> Unit)? = null
+
+    /**
+     * Code 栏跑命令的执行器（安全核心，见 engine/code/CodeRunner.kt）。
+     * 电脑上由 Main.kt 设成 CodeShell（底层是 ProcessHandle，安卓 8.0 上没有，所以放在 desktopMain）；
+     * 手机上是 null —— 手机不在本机跑命令，手机上看到的 Code 会话第一期只读。
+     */
+    var codeRunner: com.guixing.jixunying.engine.code.CodeRunner? = null
 
     /** 上一个配对密钥：手机补发的配对请求可能还用旧的，留 3 分钟。 */
     @Volatile private var previousSecret: Pair<String, Long>? = null
@@ -278,6 +286,13 @@ class Engine(
     /** 当前的配对码（给电脑界面显示成二维码）。 */
     fun pairingCode(): com.guixing.jixunying.model.PairingCode =
         com.guixing.jixunying.model.PairingCode(state.hostId, state.pairingSecret, hostName(), state.settings.relay.brokers)
+
+    /**
+     * Code 会话改文件之前存的原样（docs/Code栏设计说明.md 第 5 节）：<数据目录>/code/<对话 id>/。
+     * 会话自己存在 conversations（和普通对话一样），备份另放一处；删会话时用这里的 deleteAll 一起删掉。
+     */
+    private fun codeBackup(convId: String): com.guixing.jixunying.engine.code.CodeBackup =
+        com.guixing.jixunying.engine.code.CodeBackup(File(File(storage.root, "code"), convId))
 
     private fun messages(convId: String): MutableList<Message> = convs.getOrPut(convId) { storage.loadMessages(convId) }
 
@@ -438,7 +453,9 @@ class Engine(
                     judgeAnonymous = s.settings.memory.judgeAnonymous, aiVerify = s.settings.memory.aiVerify, countAiVerdict = s.settings.memory.countAiVerdict)
                 // 1.5.0 以前的不认识 Word / Excel 设置
                 val office = if (c.settings.schema >= 2) c.settings.office else s.settings.office
-                s.copy(settings = c.settings.copy(search = c.settings.search.copy(apiKeys = keys), costs = s.settings.costs, memory = memory, office = office,
+                // 1.6.0 以前的不认识 Code 栏设置（外壳、超时、最大步数、允许手机用）
+                val code = if (c.settings.schema >= 3) c.settings.code else s.settings.code
+                s.copy(settings = c.settings.copy(search = c.settings.search.copy(apiKeys = keys), costs = s.settings.costs, memory = memory, office = office, code = code,
                     schema = Settings.SCHEMA))
             }
             if (before.enabled != state.settings.relay.enabled || before.brokers != state.settings.relay.brokers) onRelaySettingsChanged?.invoke()
@@ -496,6 +513,8 @@ class Engine(
             val atts = snapshot(c.id).flatMap { m -> m.attachments.map { it.id } }
             convs.remove(c.id)
             storage.deleteConversation(c.id, atts)
+            // Code 会话的改动备份（<数据目录>/code/<对话 id>/）跟着会话一起删，别留在盘上白占地方
+            if (state.conversation(c.id)?.isCode == true) codeBackup(c.id).deleteAll()
             if (synchronized(stanceBook) { stanceBook.removeAll { it.convId == c.id } }) storage.saveStances(synchronized(stanceBook) { stanceBook.toList() })
             updateState { s -> s.copy(conversations = s.conversations.filterNot { it.id == c.id }) }
             emit(Event.ConversationRemoved(c.id))
@@ -503,6 +522,37 @@ class Engine(
         }
         is Command.LoadMessages -> {
             emit(Event.Messages(c.convId, snapshot(c.convId)))
+            CommandResult()
+        }
+        is Command.CodeCreate -> {
+            if (c.folder.isBlank()) return CommandResult(false, "还没选项目文件夹")
+            val folder = File(c.folder.trim())
+            if (!folder.exists()) return CommandResult(false, "文件夹不存在：${c.folder}")
+            if (!folder.isDirectory) return CommandResult(false, "这不是文件夹：${c.folder}")
+            val provider = state.provider(c.providerId) ?: return CommandResult(false, "服务商不存在（可能被删了）：${c.providerId}")
+            val model = provider.models.firstOrNull { it.id == c.modelId }
+                ?: return CommandResult(false, "「${provider.name}」里没有模型 ${c.modelId}")
+            // 只有支持调用工具的模型才能进 Code 栏（docs/Code栏设计说明.md 第 2 节）
+            if (!model.tools) return CommandResult(false, "「${model.id}」不能调用工具，干不了 Code 栏的活；到 设置 → 模型服务 换一个支持工具的模型")
+            val conv = Conversation(
+                id = newId(),
+                title = folder.name.ifBlank { folder.path },
+                memberIds = emptyList(),
+                createdAt = now(), updatedAt = now(),
+                code = CodeSpec(folder = folder.absolutePath, providerId = provider.id, modelId = model.id, mode = c.mode),
+            )
+            convs[conv.id] = mutableListOf()
+            updateState { it.copy(conversations = listOf(conv) + it.conversations) }
+            emit(Event.Messages(conv.id, emptyList()))
+            CommandResult(data = conv.id)
+        }
+        is Command.CodeSetMode -> {
+            val conv = state.conversation(c.convId) ?: return CommandResult(false, "对话不存在")
+            val spec = conv.code ?: return CommandResult(false, "这不是 Code 会话")
+            if (spec.mode == c.mode) return CommandResult()
+            updateState { s ->
+                s.copy(conversations = s.conversations.map { if (it.id == conv.id) it.copy(code = spec.copy(mode = c.mode), updatedAt = now()) else it })
+            }
             CommandResult()
         }
         is Command.SendMessage -> send(c)

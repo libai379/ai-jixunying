@@ -222,6 +222,8 @@ data class Settings(
     val costs: CostSettings = CostSettings(),
     /** AI 做 Word / Excel 文件（1.5.0）。 */
     val office: OfficeSettings = OfficeSettings(),
+    /** Code 栏（1.6.0）：命令外壳、超时、最大步数、允许手机用（见 model/Code.kt）。 */
+    val code: CodeSettings = CodeSettings(),
     /**
      * 发设置的这一端认得哪一版设置。旧版手机不认识这个字段，发来的就是 0；
      * 电脑看到 0 就保留旧版不认识的那几项（不然手机一改设置就把电脑上的冲回默认值）。
@@ -230,10 +232,10 @@ data class Settings(
 ) {
     companion object {
         /**
-         * 1 = 1.4.0 加了裁判和 AI 核实；2 = 1.5.0 加了 office（Word / Excel）。
+         * 1 = 1.4.0 加了裁判和 AI 核实；2 = 1.5.0 加了 office（Word / Excel）；3 = 1.6.0 加了 code（Code 栏）。
          * 以后再加旧版不认识的设置项，就加一，并在 SaveSettings 里保留。
          */
-        const val SCHEMA = 2
+        const val SCHEMA = 3
     }
 }
 
@@ -320,8 +322,16 @@ data class Conversation(
      * 不做成 ReplyMode 的新值：旧版手机解不开新的枚举值，整个状态都会读坏；新加的字段旧版直接忽略。
      */
     val council: Boolean = false,
+    /**
+     * Code 栏会话（2026-10-12，docs/Code栏设计说明.md 第 11 节）：不为空就是 Code 会话，复用「对话 + 消息」的存储和推送。
+     * 放在最后加：旧版手机不认识这个字段直接忽略（AppJson.ignoreUnknownKeys），不会读坏整个状态。
+     */
+    val code: CodeSpec? = null,
 ) {
     val isGroup: Boolean get() = memberIds.size > 1
+
+    /** Code 栏会话（侧栏「Code」那一边列的）。 */
+    val isCode: Boolean get() = code != null
 }
 
 @Serializable
@@ -356,14 +366,26 @@ data class ExportedFile(val name: String, val base64: String)
 @Serializable
 data class SearchSource(val title: String, val url: String, val snippet: String = "")
 
-/** AI 回答过程中用到的工具：联网搜索、读网页、画图。 */
+/** AI 回答过程中用到的工具：联网搜索、读网页、画图，以及 Code 栏读文件、改文件、跑命令。 */
 @Serializable
 data class ToolStep(
-    val kind: String, // search / fetch / image
+    /** search / fetch / image / file / memory / history / doc，以及 Code 栏的 read / list / grep / write / edit / run。 */
+    val kind: String,
     val input: String,
     val sources: List<SearchSource> = emptyList(),
     val ok: Boolean = true,
     val note: String = "",
+    /**
+     * 下面四个是 Code 栏用的（2026-10-12，docs/Code栏设计说明.md 第 11 节）；加在最后，聊天里的工具步骤不受影响。
+     */
+    /** 这一步的唯一编号（批准 / 拒绝、看差异都按它找）。 */
+    val id: String = "",
+    /** 工具的输出（截断后的，长的话里面写明被截断了）。 */
+    val output: String = "",
+    /** "" 不用批准 / "waiting" 等用户 / "allowed" 允许了 / "denied" 拒绝了。 */
+    val approval: String = "",
+    /** 这一步改了文件才有；没改文件是 null。 */
+    val change: FileChange? = null,
 )
 
 @Serializable

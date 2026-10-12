@@ -21,6 +21,8 @@ fun main() {
     }
     val storage = Storage(Storage.defaultRoot())
     val engine = Engine(storage)
+    // Code 栏跑命令的执行器（安全核心在 engine/code/CodeShell.kt）：只在电脑上有，手机上是空的（手机不在本机跑命令）
+    engine.codeRunner = com.guixing.jixunying.engine.code.CodeShell()
     // 联机服务：连公共中转，手机在哪儿都能连进来
     val relay = RelayHost(engine)
     engine.onRelaySettingsChanged = { Thread { relay.restart() }.start() }
