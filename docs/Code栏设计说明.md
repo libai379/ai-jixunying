@@ -120,3 +120,39 @@
 3. 命令外壳：Windows 默认用 PowerShell（Windows 10 自带，不用用户另装 Git），设置里可以改成 cmd，或者自己指定一个外壳程序（比如装了 Git Bash 的人）。给模型的工具说明里要写明「当前外壳是什么、工作目录是什么」，这是告诉它环境，不是加限制词。子进程的输出一律按 UTF-8 读，避免中文乱码。
 4. 第一期的模型：服务商里所有支持工具调用的都能选，但只有实测跑通过的才打「已实测」标记，没测过的可选，选的时候提示一句「未实测」。第一期先拿 DeepSeek 的便宜模型跑通和调试，其余几家成员用到时再测。
 5. 会话数据：放在用户数据目录下的 code 子文件夹，一个会话一个 JSON，旁边一个同名文件夹放改动备份。不自动删，用户手动删会话时连备份一起删；备份总量超过 1 GB 时在设置页提醒一次。
+## 11 实现约定（2026-10-12 定，写代码按这个来；要改先问）
+
+总体：Code 会话复用「对话 + 消息」的存储和推送（Conversation、Message、Event.MessageUpsert / MessageDelta，手机同步也跟着走），界面另做一套 CodeScreen。不新开一套存储。
+
+数据（commonMain/model）：
+- Conversation 加 `code: CodeSpec? = null`。不为空就是 Code 会话。CodeSpec：folder（项目文件夹绝对路径）、providerId、modelId、mode（CodeMode：MANUAL 手动 / ACCEPT_EDITS 接受编辑 / PLAN 计划）、fromPhone（第二期用，先留着，默认 false）。Code 会话的 memberIds 为空，channel 为空。
+- ToolStep 加：id（每一步唯一）、output（工具输出，截断后的）、approval（"" 不用批准 / "waiting" 等用户 / "allowed" / "denied"）、change（FileChange?，这一步改了文件才有）。kind 用：read / list / grep / write / edit / run。
+- FileChange：id、path（相对项目文件夹）、added、removed（行数）、created（原来没有这个文件）、review（"" 没处理 / "accepted" / "rejected"）。
+- Settings 加 `code: CodeSettings`：shell（"powershell" / "cmd" / 自定义路径，默认 powershell）、commandTimeoutSec（默认 300）、maxSteps（默认 40）、allowPhone（默认 false，第二期用）。Settings.SCHEMA 加到 3，SaveSettings 里 schema < 3 的保留电脑上的 code 设置（照 office 那样）。
+- 旧版手机不认识这些新字段会直接忽略（AppJson.ignoreUnknownKeys），不许改动已有字段的含义。
+
+指令（Protocol.kt 的 Command，结果都是 CommandResult）：
+- CodeCreate(folder, providerId, modelId, mode)：建会话，data 是新对话 id。文件夹必须存在。
+- CodeSend(convId, text)：发任务，开始跑循环（同一会话已经在跑就排队）。
+- CodeStop(convId)：停：取消模型请求、杀掉正在跑的命令，消息状态 STOPPED。
+- CodeDecide(convId, stepId, allow)：批准或拒绝一步（写文件 / 改文件 / 跑命令）。
+- CodeSetMode(convId, mode)：换权限档（只影响之后的步骤）。
+- CodeDiff(convId, changeId)：data 是这一处改动的统一差异文本（unified diff）。
+- CodeReview(convId, changeId, accept)：接受或拒绝一处改动；拒绝 = 把文件恢复成改之前的样子（原来没有的文件就删掉）。
+- CodeRevertTask(convId, messageId)：撤销这一条回答里的全部改动。
+- 删除会话用已有的 DeleteConversation，同时删掉它的备份文件夹。
+
+引擎（jvmShared/engine）：
+- 安全核心由主会话（读过别人源码的那位）写，放在 engine/code/ 下，写代码的 AI 只调用、不改：CodeGuard（把模型给的路径规范化、限制在项目文件夹里）、CodeShell（按设置的外壳在项目文件夹里跑命令：超时杀整棵进程树、输出按 UTF-8 读并截断、只给最小环境变量）、CodeBackup（改文件之前存原样，按 changeId 还原）。接口以主会话写好的代码为准。
+- 编码循环写在 engine/CodeAgent.kt：用现有的 LlmClient.chat（带 tools）；工具结果超长截断并告诉模型；每一步先按 mode 判断要不要等批准（PLAN 档根本不给写文件和改文件工具，跑命令也一律要批准）；等批准时消息状态保持 STREAMING、对应 ToolStep.approval = "waiting"，用 CompletableDeferred 等 CodeDecide；拒绝时把「用户拒绝了」作为工具结果回给模型。到 maxSteps 停下并在消息里写明。
+- Code 会话不触发记录员的后台活（压缩聊天、挑记忆、点名、立场档案、AI 核实），也不进联网搜索。
+- 记账：UsageTag("code", convId = …)。
+- 备份放在 <数据目录>/code/<convId>/。
+
+界面（commonMain/ui）：
+- 侧栏顶上加「对话 | Code」切换。对话那边的列表不显示 Code 会话；Code 那边列出 Code 会话（标题、文件夹名、在跑 / 等批准 / 做完的状态）和「新建 Code 会话」按钮。
+- 新建对话框：选文件夹（Platform.pickFolder）、选模型（只列支持工具调用的；没实测过的标「未实测」）、选权限档（默认手动）。
+- CodeScreen：上面是会话名、文件夹、权限档切换、「停止」；中间按顺序显示用户的话、AI 的话、每一步工具（折叠成一行，点开看输入和输出）；等批准的那一步显示要改的差异或要跑的命令，带「允许」「拒绝」；改了文件的回答下面显示「改了 N 个文件 +X −Y」，点开是差异查看器（左边文件列表，右边差异，每个文件「接受」「拒绝」）；下面是输入框。
+- 手机上：第一期电脑端能用就行；手机上看到的 Code 会话先只读（第二期再做手机下令）。
+
+测试：照 EngineTest 用假模型服务器；ShotsTest 加 Code 栏的几个场景（会话列表、等批准、差异查看器、新建对话框）。
