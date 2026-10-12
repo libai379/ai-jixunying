@@ -193,10 +193,11 @@ fun Sidebar(ctl: AppController, modifier: Modifier, onNavigate: () -> Unit) {
                     ctl.openSettings(SettingsTab.DEVICES); onNavigate()
                 }
             }
-            // 记录员后台出了错：设置旁边提示一下，点进去直接到「记忆」看原因
+            // 记录员后台出了错：设置旁边亮红点。点进去照样是设置首页（以前直接跳「记忆」，
+            // 出错提示没消之前每次点设置都进记忆，用户 2026-10-12 报的），首页里「记忆」那一项标红
             val bgBad = state.bgProblems.isNotEmpty()
             NavRow(Icons.Rounded.Settings, "设置", if (bgBad) "后台出错" else null, dot = if (bgBad) MaterialTheme.colorScheme.error else null) {
-                ctl.openSettings(if (bgBad) SettingsTab.MEMORY else null); onNavigate()
+                ctl.openSettings(); onNavigate()
             }
         }
     }
