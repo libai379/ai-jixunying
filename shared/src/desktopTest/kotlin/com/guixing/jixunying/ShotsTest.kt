@@ -16,10 +16,12 @@ import com.guixing.jixunying.model.Attachment
 import com.guixing.jixunying.model.AttachmentKind
 import com.guixing.jixunying.model.Conversation
 import com.guixing.jixunying.model.DocSettings
+import com.guixing.jixunying.model.FileChange
 import com.guixing.jixunying.model.Member
 import com.guixing.jixunying.model.MemoryItem
 import com.guixing.jixunying.model.Message
 import com.guixing.jixunying.model.ModelInfo
+import com.guixing.jixunying.model.MsgStatus
 import com.guixing.jixunying.model.ProviderConfig
 import com.guixing.jixunying.model.ReplyMode
 import com.guixing.jixunying.model.Role
@@ -85,6 +87,9 @@ class ShotsTest {
             Conversation("c6", "聊了很久的对话", listOf("ma"), createdAt = now - 950_000_000, updatedAt = now - 900_000_000),
             Conversation("c7", "会审：先学 Python 还是 Java", listOf("ma", "mb"), ReplyMode.INDEPENDENT, createdAt = now - 960_000_000, updatedAt = now - 950_000_000,
                 council = true),
+            // Code 栏：对着一个项目文件夹写代码的会话（成员为空，code 不为空）
+            Conversation("c8", "我的项目", emptyList(), createdAt = now - 900_000, updatedAt = now - 60_000,
+                code = com.guixing.jixunying.model.CodeSpec(File(root, "我的项目").absolutePath, "pd", "deepseek-flash")),
         )
         val st = Storage(root)
         st.saveState(AppState(
@@ -210,6 +215,59 @@ class ShotsTest {
             Message("r3", "c3", Role.AI, "md", "画好了。", attachments = listOf(cat), tools = listOf(ToolStep("image", "月球上喝茶的橘猫，水彩风格")), createdAt = now - 86_000_000,
                 modelLabel = "mimo-v2.6-flash（小米 MiMo）"),
         ))
+        // Code 会话（c8）：一条做完了、带一处改动；一条正等着批准改 README
+        File(root, "我的项目").mkdirs()
+        val diffMain = """
+            |--- a/src/main.py
+            |+++ b/src/main.py
+            |@@ -1,7 +1,10 @@
+            | import os
+            |+import sys
+            |
+            |-def main():
+            |-    print("hello")
+            |+def main(argv):
+            |+    print("hello", argv)
+            |
+            | if __name__ == "__main__":
+            |-    main()
+            |+    main(sys.argv[1:])
+        """.trimMargin()
+        val diffReadme = """
+            |--- a/README.md
+            |+++ b/README.md
+            |@@ -1,3 +1,3 @@
+            | # 我的项目
+            |
+            |-跑法：python src/main.py
+            |+跑法：python src/main.py 参数1 参数2
+        """.trimMargin()
+        // 项目文件夹里真实的文件，外加 s83 的备份：差异查看器里要有真差异可看
+        File(root, "我的项目/src").mkdirs()
+        File(root, "我的项目/src/main.py").writeText("import os\nimport sys\n\ndef main(argv):\n    print(\"hello\", argv)\n\nif __name__ == \"__main__\":\n    main(sys.argv[1:])\n", Charsets.UTF_8)
+        File(root, "我的项目/README.md").writeText("# 我的项目\n\n跑法：python src/main.py\n", Charsets.UTF_8)
+        File(root, "code/c8").mkdirs()
+        File(root, "code/c8/s83.orig").writeText("import os\n\ndef main():\n    print(\"hello\")\n\nif __name__ == \"__main__\":\n    main()\n", Charsets.UTF_8)
+        st.saveMessages("c8", listOf(
+            Message("u8", "c8", Role.USER, USER_ID, "把 src/main.py 改成能接收命令行参数，改完跑一下看看。", createdAt = now - 900_000),
+            Message("r8", "c8", Role.AI, "tool:code",
+                "改好了：**main.py 现在能接收命令行参数**。\n\n- 加了 `sys` 导入；\n- `main()` 改成 `main(argv)`，把参数打进输出；\n- 原来的调用改成 `main(sys.argv[1:])`。\n\n跑了一次 `python src/main.py A B`，退出码 0，输出 `hello ['A', 'B']`。",
+                createdAt = now - 880_000, modelLabel = "deepseek-flash（DeepSeek 4.1 Flash）",
+                tools = listOf(
+                    ToolStep("list", ".", output = "src/\nREADME.md\nrequirements.txt", id = "s81"),
+                    ToolStep("read", "src/main.py", id = "s82",
+                        output = "import os\n\ndef main():\n    print(\"hello\")\n\nif __name__ == \"__main__\":\n    main()"),
+                    ToolStep("edit", "src/main.py", id = "s83", output = diffMain, note = "替换 src/main.py 里的一段",
+                        change = FileChange("s83", "src/main.py", added = 6, removed = 3)),
+                    ToolStep("run", "python src/main.py A B", id = "s84", output = "hello ['A', 'B']", note = "跑完了（退出码 0）"),
+                ), usage = Usage(3200, 800, 900, 12_000)),
+            Message("r8b", "c8", Role.AI, "tool:code", "README 里的用法也得跟着改，我先看一眼再改。",
+                createdAt = now - 60_000, modelLabel = "deepseek-flash（DeepSeek 4.1 Flash）", status = MsgStatus.STREAMING,
+                tools = listOf(
+                    ToolStep("read", "README.md", id = "s85", output = "# 我的项目\n\n跑法：python src/main.py"),
+                    ToolStep("edit", "README.md", id = "s86", output = diffReadme, note = "替换 README.md 里的一段", approval = "waiting"),
+                )),
+        ))
         val e = Engine(Storage(root))
         e.weixin = com.guixing.jixunying.engine.WeixinBridge(e, File(root, "weixin"))
         e.rescanDocs()
@@ -293,6 +351,16 @@ class ShotsTest {
             "settings-search" to "settings:SEARCH", "settings-profile" to "settings:PROFILE", "settings-office" to "settings:OFFICE")
         for ((name, start) in narrow) shoot("phone-$name", 824, 1784, 2f, hub, phone, start)
 
+        // Code 栏：侧栏那一栏（没开会话）、会话本身（含等批准那一步）、差异查看器、新建对话框
+        shoot("desktop-code-tab", 1280, 820, 1f, hub, desktop, "code")
+        shoot("desktop-code", 1280, 820, 1f, hub, desktop, "code:c8")
+        shoot("desktop-code-tall", 1280, 1300, 1f, hub, desktop, "code:c8")
+        shoot("desktop-code-diff", 1280, 820, 1f, hub, desktop, "code:c8#diff")
+        shoot("desktop-code-new", 1280, 820, 1f, hub, desktop, "newcode")
+        shoot("phone-code", 824, 1784, 2f, hub, phone, "code:c8")
+        shoot("phone-code-tab", 824, 1784, 2f, hub, phone, "code")
+        shoot("phone-code-new", 824, 1784, 2f, hub, phone, "newcode")
+
         // 弹窗
         shoot("desktop-convsettings", 1280, 820, 1f, hub, desktop, "conv:c1#convsettings")
         shoot("desktop-convsettings-tall", 1280, 1300, 1f, hub, desktop, "conv:c7#convsettings")
@@ -310,6 +378,10 @@ class ShotsTest {
         shoot("phone-dark-settings-home", 824, 1784, 2f, hub, phone, "settingshome")
         shoot("desktop-dark-member-edit", 1280, 820, 1f, hub, desktop, "settings:MEMBERS#edit")
         shoot("desktop-dark-costs", 1280, 820, 1f, hub, desktop, "costs")
+        shoot("desktop-dark-code", 1280, 820, 1f, hub, desktop, "code:c8")
+        shoot("desktop-dark-code-diff", 1280, 820, 1f, hub, desktop, "code:c8#diff")
+        shoot("desktop-dark-code-new", 1280, 820, 1f, hub, desktop, "newcode")
+        shoot("phone-dark-code", 824, 1784, 2f, hub, phone, "code:c8")
         shoot("desktop-costs-tall", 1280, 2000, 1f, hub, desktop, "costs")
         shoot("desktop-office-tall", 1280, 2600, 1f, hub, desktop, "settings:OFFICE")
 

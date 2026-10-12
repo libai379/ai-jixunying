@@ -59,6 +59,22 @@ data class FileChange(
 )
 
 /**
+ * Code 栏能选哪些模型（docs/Code栏设计说明.md 第 10 节第 4 条，2026-10-12）。
+ * 服务商里所有支持调用工具的模型都能选，只有真跑通过一遍的才标「已实测」，其余标「未实测」（能选，只是没试过）。
+ */
+object CodeModels {
+    /**
+     * 已经用真 Key 跑通过编码循环的模型。键是「平台|模型名小写」，平台取 Thinking.platformOf（按预设编号或接口地址认）。
+     * 主会话用真 Key 跑通后再加进来（2026-10-12 先空着，界面上都标「未实测」）。
+     */
+    val TESTED: Set<String> = emptySet()
+
+    fun keyOf(platform: String, modelId: String) = platform.trim().lowercase() + "|" + modelId.trim().lowercase()
+
+    fun isTested(platform: String, modelId: String) = keyOf(platform, modelId) in TESTED
+}
+
+/**
  * 设置 → Code 栏（docs/Code栏设计说明.md 第 10 节，2026-10-12）。
  * 以后往这里加旧版不认识的新项，记得 Settings.SCHEMA 加一，并在 Engine 的 SaveSettings 里保留电脑上的那几项。
  */

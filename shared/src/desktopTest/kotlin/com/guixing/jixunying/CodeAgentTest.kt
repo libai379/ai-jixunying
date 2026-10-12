@@ -151,6 +151,13 @@ class CodeAgentTest {
                                 1 -> callTool("edit_file", mapOf("path" to "a.txt", "old_text" to "hello world", "new_text" to "hey world"))
                                 else -> say("改了两次。")
                             }
+                            // 一直在读，不停下来（测走满最多步数）
+                            "一直读" in task -> callTool("read_file", mapOf("path" to "a.txt"))
+                            // 慢一点再回答（测同一个会话里第二条排队）
+                            "排队测试" in task -> {
+                                Thread.sleep(700)
+                                say(if ("第二条" in task) "第二条做完了。" else "第一条做完了。")
+                            }
                             else -> say("收到。")
                         }
                     }
@@ -429,6 +436,38 @@ class CodeAgentTest {
         assertTrue("-greeting world" in r.data, r.data)
         assertTrue("+hello world" in r.data, r.data)
         assertTrue("--- a/a.txt" in r.data && "+++ b/a.txt" in r.data, r.data)
+    }
+
+    @Test
+    fun stopsAtMaxSteps() = runBlocking {
+        val e = engine()
+        val conv = codeConv(e)
+        e.call(Command.CodeSend(conv, "一直读文件，别停"))
+        awaitStatus(e, conv, MsgStatus.DONE, timeoutMs = 60_000)
+        val ai = assertNotNull(aiOf(e, conv))
+        // 到上限要停下来告诉用户，不是悄悄结束（docs/Code栏设计说明.md 第 3 节）
+        assertTrue("（到了最多 10 步，停下了）" in ai.content, ai.content)
+        assertEquals(10, ai.tools.count { it.kind == "read" }, "一步不多一步不少，正好走满上限")
+    }
+
+    @Test
+    fun secondTaskQueuesBehindRunningOne() = runBlocking {
+        val e = engine()
+        val conv = codeConv(e)
+        e.call(Command.CodeSend(conv, "排队测试：第一条"))
+        await { aiCount(e, conv) == 1 }
+        // 第一条还在跑的时候再发一条：用户的话先进去，回答排队等
+        assertTrue(e.call(Command.CodeSend(conv, "排队测试：第二条")).ok)
+        delay(250)
+        assertEquals(1, aiCount(e, conv), "同一个会话同时只跑一个循环")
+        assertEquals("排队测试：第二条", listOf(e, conv).last().content, "第二条用户消息要先显示出来")
+        // 第一条做完，第二条才接着开始
+        await { aiCount(e, conv) == 2 }
+        awaitStatus(e, conv, MsgStatus.DONE, minAi = 2)
+        val ai = listOf(e, conv).filter { it.role == Role.AI && it.senderId == CODE_ID }
+        assertEquals("第一条做完了。", ai[0].content.trim())
+        assertEquals("第二条做完了。", ai[1].content.trim())
+        assertTrue(ai[0].createdAt <= ai[1].createdAt)
     }
 
     @Test

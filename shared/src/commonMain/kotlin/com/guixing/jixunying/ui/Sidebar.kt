@@ -6,6 +6,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -65,6 +66,9 @@ import com.guixing.jixunying.model.AppState
 import com.guixing.jixunying.model.Command
 import com.guixing.jixunying.model.Conversation
 import com.guixing.jixunying.model.HistoryHit
+import com.guixing.jixunying.model.Message
+import com.guixing.jixunying.model.MsgStatus
+import com.guixing.jixunying.model.Role
 import kotlinx.serialization.builtins.ListSerializer
 import kotlin.time.Clock
 import kotlin.time.ExperimentalTime
@@ -103,6 +107,83 @@ fun Sidebar(ctl: AppController, modifier: Modifier, onNavigate: () -> Unit) {
             }
         }
         DeviceSwitcher(ctl)
+        Spacer(Modifier.height(10.dp))
+        SidebarTabSwitch(ctl.sidebarTab) { ctl.sidebarTab = it }
+        Spacer(Modifier.height(10.dp))
+        if (ctl.sidebarTab == SidebarTab.CODE) {
+            CodeSessionSidebar(ctl, state, onNavigate)
+        } else {
+            ChatSessionSidebar(ctl, state, query, { query = it }, onNavigate)
+        }
+
+        Column(Modifier.padding(vertical = 10.dp)) {
+            NavRow(Icons.Rounded.FolderOpen, "我的文档", when {
+                !state.settings.docs.enabled -> "已关闭"
+                state.docs.needPermission -> "要授权"
+                state.docs.scanning -> "扫描中…"
+                else -> "${state.docs.count} 个"
+            }, dot = if (state.docs.needPermission) Ext.c.warning else null) { ctl.openPage(MainPage.DOCS); onNavigate() }
+            NavRow(Icons.Rounded.Insights, "立场档案", state.conversations.sumOf { it.stanceTopics }.let { if (it == 0) "还没有" else "$it 题" }) {
+                ctl.openPage(MainPage.STANCES); onNavigate()
+            }
+            NavRow(Icons.Rounded.Groups, "AI 成员", "${state.members.size} 位") { ctl.openSettings(SettingsTab.MEMBERS); onNavigate() }
+            NavRow(Icons.Rounded.Payments, "花费", null) { ctl.openPage(MainPage.COSTS); onNavigate() }
+            val platform = LocalPlatform.current
+            val remote by ctl.hub.remote.collectAsState()
+            val remoteConn = remote?.conn?.collectAsState()?.value
+            if (platform.isDesktop) {
+                NavRow(Icons.Rounded.PhoneAndroid, "手机联机", if (state.devices.isEmpty()) "未配对" else "${state.devices.size} 台",
+                    dot = if (state.relayStatus.startsWith("已连上")) Ext.c.success else null) {
+                    ctl.openSettings(SettingsTab.DEVICES); onNavigate()
+                }
+            } else {
+                NavRow(Icons.Rounded.Computer, "连接电脑", when (remoteConn) {
+                    null -> "未配对"
+                    is ConnState.Connected -> "已连接"
+                    ConnState.Connecting -> "连接中…"
+                    else -> "离线"
+                }, dot = when (remoteConn) { is ConnState.Connected -> Ext.c.success; null -> null; else -> MaterialTheme.colorScheme.error }) {
+                    ctl.openSettings(SettingsTab.DEVICES); onNavigate()
+                }
+            }
+            // 记录员后台出了错：设置旁边亮红点。点进去照样是设置首页（以前直接跳「记忆」，
+            // 出错提示没消之前每次点设置都进记忆，用户 2026-10-12 报的），首页里「记忆」那一项标红
+            val bgBad = state.bgProblems.isNotEmpty()
+            NavRow(Icons.Rounded.Settings, "设置", if (bgBad) "后台出错" else null, dot = if (bgBad) MaterialTheme.colorScheme.error else null) {
+                ctl.openSettings(); onNavigate()
+            }
+        }
+    }
+}
+
+private fun memberNames(state: AppState, c: Conversation) = c.memberIds.mapNotNull { state.member(it)?.name }.joinToString("、")
+
+/** 侧栏顶上「对话 | Code」两个并排的选项，当前选中的高亮。 */
+@Composable
+private fun SidebarTabSwitch(tab: SidebarTab, onPick: (SidebarTab) -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.surface)
+            .border(1.dp, Ext.c.border, RoundedCornerShape(12.dp)).padding(3.dp),
+    ) {
+        SidebarTab.entries.forEach { t ->
+            val on = t == tab
+            Box(
+                Modifier.weight(1f).clip(RoundedCornerShape(9.dp))
+                    .background(if (on) MaterialTheme.colorScheme.primary.copy(alpha = 0.14f) else Color.Transparent)
+                    .clickable { onPick(t) }.padding(vertical = 7.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(t.label, style = MaterialTheme.typography.labelLarge,
+                    color = if (on) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontWeight = if (on) FontWeight.SemiBold else FontWeight.Normal)
+            }
+        }
+    }
+}
+
+/** 「对话」那一栏：新对话按钮、搜索、按时间分组的对话列表（Code 会话不在里面）。 */
+@Composable
+private fun ColumnScope.ChatSessionSidebar(ctl: AppController, state: AppState, query: String, onQuery: (String) -> Unit, onNavigate: () -> Unit) {
         Button(
             onClick = { ctl.showNewChat = true; onNavigate() },
             modifier = Modifier.fillMaxWidth().height(42.dp),
@@ -114,10 +195,12 @@ fun Sidebar(ctl: AppController, modifier: Modifier, onNavigate: () -> Unit) {
             Text("新对话")
         }
         Spacer(Modifier.height(10.dp))
-        TapToSearchField(query, { query = it }, "搜索对话")
+        TapToSearchField(query, onQuery, "搜索对话")
         Spacer(Modifier.height(8.dp))
 
-        val list = state.conversations.filter { query.isBlank() || it.title.contains(query, true) || memberNames(state, it).contains(query, true) }
+        // Code 会话只在「Code」那一栏列，这里不显示
+        val list = state.conversations.filter { !it.isCode }
+            .filter { query.isBlank() || it.title.contains(query, true) || memberNames(state, it).contains(query, true) }
         // 也搜聊天内容（两个字以上，停顿一下再搜，免得每打一个字都搜一遍）
         var hits by remember { mutableStateOf<List<HistoryHit>>(emptyList()) }
         androidx.compose.runtime.LaunchedEffect(query, ctl.backend) {
@@ -167,48 +250,130 @@ fun Sidebar(ctl: AppController, modifier: Modifier, onNavigate: () -> Unit) {
                 }
             }
         }
+}
 
-        Column(Modifier.padding(vertical = 10.dp)) {
-            NavRow(Icons.Rounded.FolderOpen, "我的文档", when {
-                !state.settings.docs.enabled -> "已关闭"
-                state.docs.needPermission -> "要授权"
-                state.docs.scanning -> "扫描中…"
-                else -> "${state.docs.count} 个"
-            }, dot = if (state.docs.needPermission) Ext.c.warning else null) { ctl.openPage(MainPage.DOCS); onNavigate() }
-            NavRow(Icons.Rounded.Insights, "立场档案", state.conversations.sumOf { it.stanceTopics }.let { if (it == 0) "还没有" else "$it 题" }) {
-                ctl.openPage(MainPage.STANCES); onNavigate()
-            }
-            NavRow(Icons.Rounded.Groups, "AI 成员", "${state.members.size} 位") { ctl.openSettings(SettingsTab.MEMBERS); onNavigate() }
-            NavRow(Icons.Rounded.Payments, "花费", null) { ctl.openPage(MainPage.COSTS); onNavigate() }
-            val platform = LocalPlatform.current
-            val remote by ctl.hub.remote.collectAsState()
-            val remoteConn = remote?.conn?.collectAsState()?.value
-            if (platform.isDesktop) {
-                NavRow(Icons.Rounded.PhoneAndroid, "手机联机", if (state.devices.isEmpty()) "未配对" else "${state.devices.size} 台",
-                    dot = if (state.relayStatus.startsWith("已连上")) Ext.c.success else null) {
-                    ctl.openSettings(SettingsTab.DEVICES); onNavigate()
-                }
-            } else {
-                NavRow(Icons.Rounded.Computer, "连接电脑", when (remoteConn) {
-                    null -> "未配对"
-                    is ConnState.Connected -> "已连接"
-                    ConnState.Connecting -> "连接中…"
-                    else -> "离线"
-                }, dot = when (remoteConn) { is ConnState.Connected -> Ext.c.success; null -> null; else -> MaterialTheme.colorScheme.error }) {
-                    ctl.openSettings(SettingsTab.DEVICES); onNavigate()
-                }
-            }
-            // 记录员后台出了错：设置旁边亮红点。点进去照样是设置首页（以前直接跳「记忆」，
-            // 出错提示没消之前每次点设置都进记忆，用户 2026-10-12 报的），首页里「记忆」那一项标红
-            val bgBad = state.bgProblems.isNotEmpty()
-            NavRow(Icons.Rounded.Settings, "设置", if (bgBad) "后台出错" else null, dot = if (bgBad) MaterialTheme.colorScheme.error else null) {
-                ctl.openSettings(); onNavigate()
+/**
+ * 「Code」那一栏（docs/Code栏设计说明.md 第 1、11 节，2026-10-12）：新建按钮 + Code 会话列表
+ * （标题、文件夹名、现在什么状态）。状态要看最后一条回答，所以打开这一栏时把这几个会话的记录取回来。
+ */
+@Composable
+private fun ColumnScope.CodeSessionSidebar(ctl: AppController, state: AppState, onNavigate: () -> Unit) {
+    val platform = LocalPlatform.current
+    Button(
+        onClick = { ctl.showNewCode = true; onNavigate() },
+        modifier = Modifier.fillMaxWidth().height(42.dp),
+        shape = RoundedCornerShape(12.dp),
+        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
+    ) {
+        Icon(Icons.Rounded.Add, null, Modifier.size(18.dp))
+        Spacer(Modifier.width(6.dp))
+        Text("新建 Code 会话")
+    }
+    Spacer(Modifier.height(8.dp))
+
+    val allMessages by ctl.backend.store.messages.collectAsState()
+    val convs = state.conversations.filter { it.isCode }.sortedByDescending { it.updatedAt }
+    // 状态靠最后一条回答判断；没取过记录的会话取一次（不弹提示）
+    androidx.compose.runtime.LaunchedEffect(convs.map { it.id }, ctl.backend) {
+        convs.forEach { c -> if (!ctl.backend.store.hasMessages(c.id)) ctl.run(Command.LoadMessages(c.id), quiet = true) }
+    }
+    if (convs.isEmpty()) {
+        Text(if (platform.isDesktop) "还没有 Code 会话。新建一个，选好项目文件夹和模型就能让它动手。" else "还没有 Code 会话。",
+            style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle, modifier = Modifier.padding(12.dp))
+        Spacer(Modifier.weight(1f))
+        return
+    }
+    LazyColumn(Modifier.weight(1f)) {
+        items(convs, key = { it.id }) { c ->
+            CodeSessionRow(ctl, state, c, allMessages[c.id].orEmpty(),
+                selected = c.id == ctl.currentConvId && ctl.settingsTab == null && ctl.page == null) {
+                ctl.openConversation(c.id); onNavigate()
             }
         }
     }
 }
 
-private fun memberNames(state: AppState, c: Conversation) = c.memberIds.mapNotNull { state.member(it)?.name }.joinToString("、")
+@Composable
+private fun CodeSessionRow(ctl: AppController, state: AppState, c: Conversation, messages: List<Message>, selected: Boolean, onClick: () -> Unit) {
+    var menu by remember { mutableStateOf(false) }
+    var renaming by remember { mutableStateOf(false) }
+    var confirmDelete by remember { mutableStateOf(false) }
+    val status = codeStatus(messages)
+    Row(
+        Modifier.fillMaxWidth().padding(vertical = 1.dp).clip(RoundedCornerShape(10.dp))
+            .background(if (selected) Ext.c.sidebarSelected else Color.Transparent)
+            .clickable(onClick = onClick).padding(start = 8.dp, top = 7.dp, bottom = 7.dp, end = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        MemberAvatar(null, 30.dp, emoji = "🛠️", color = 0xFF4F5BEB)
+        Spacer(Modifier.width(10.dp))
+        Column(Modifier.weight(1f)) {
+            Text(c.title, style = MaterialTheme.typography.bodyMedium, fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(folderName(c.code?.folder.orEmpty()), style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+        Pill(status.label, when (status) {
+            CodeStatus.RUNNING -> MaterialTheme.colorScheme.primary
+            CodeStatus.WAITING -> Ext.c.warning
+            CodeStatus.ERROR -> MaterialTheme.colorScheme.error
+            CodeStatus.DONE -> Ext.c.success
+            CodeStatus.NEW -> Ext.c.subtle
+        })
+        Box {
+            Box(Modifier.size(28.dp).clip(CircleShape).clickable { menu = true }, contentAlignment = Alignment.Center) {
+                Icon(Icons.Rounded.MoreHoriz, "更多", Modifier.size(16.dp), tint = Ext.c.subtle)
+            }
+            DropdownMenu(menu, { menu = false }) {
+                DropdownMenuItem({ Text("重命名") }, leadingIcon = { Icon(Icons.Rounded.Edit, null, Modifier.size(18.dp)) },
+                    onClick = { menu = false; renaming = true })
+                DropdownMenuItem({ Text("删除", color = MaterialTheme.colorScheme.error) }, leadingIcon = { Icon(Icons.Rounded.Delete, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.error) },
+                    onClick = { menu = false; confirmDelete = true })
+            }
+        }
+    }
+    if (renaming) {
+        var title by remember { mutableStateOf(c.title) }
+        AppDialog("重命名会话", { renaming = false }, width = 420.dp, actions = {
+            TextButton({ renaming = false }) { Text("取消") }
+            Button({ renaming = false; ctl.run(Command.UpdateConversation(c.copy(title = title.trim().ifEmpty { c.title }))) }) { Text("保存") }
+        }) { AppTextField(title, { title = it }) }
+    }
+    if (confirmDelete) {
+        AppDialog("删除 Code 会话", { confirmDelete = false }, width = 440.dp, actions = {
+            TextButton({ confirmDelete = false }) { Text("取消") }
+            Button({
+                confirmDelete = false
+                if (ctl.currentConvId == c.id) ctl.currentConvId = state.conversations.firstOrNull { it.id != c.id && !it.isCode }?.id
+                    ?: state.conversations.firstOrNull { it.id != c.id }?.id
+                ctl.run(Command.DeleteConversation(c.id))
+            }, colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)) { Text("删除") }
+        }) {
+            Text("「${c.title}」的对话记录，连同它改文件前存的备份一起删掉，不能恢复。", style = MaterialTheme.typography.bodyMedium)
+        }
+    }
+}
+
+/** 项目文件夹的最后一节（界面上不显示一长串路径）。 */
+internal fun folderName(path: String): String =
+    path.trimEnd('\\', '/').substringAfterLast('\\').substringAfterLast('/').ifBlank { path }
+
+/**
+ * 这个 Code 会话现在什么状态（docs/Code栏设计说明.md 第 1 节）：看最后一条回答——
+ * 还在等批准、正在跑、出错了、还是做完了。
+ */
+enum class CodeStatus(val label: String) {
+    NEW("还没有任务"), RUNNING("在跑"), WAITING("等你批准"), DONE("做完"), ERROR("出错"),
+}
+
+internal fun codeStatus(messages: List<Message>): CodeStatus {
+    val last = messages.lastOrNull { it.role == Role.AI } ?: return CodeStatus.NEW
+    return when {
+        last.status == MsgStatus.STREAMING && last.tools.any { it.approval == "waiting" } -> CodeStatus.WAITING
+        last.status == MsgStatus.STREAMING -> CodeStatus.RUNNING
+        last.status == MsgStatus.ERROR -> CodeStatus.ERROR
+        else -> CodeStatus.DONE
+    }
+}
 
 @Composable
 private fun NavRow(icon: androidx.compose.ui.graphics.vector.ImageVector, title: String, trailing: String?, dot: Color? = null, onClick: () -> Unit) {

@@ -50,6 +50,12 @@ enum class SettingsTab(val title: String) {
 /** 主区域除了对话和设置以外的页面。 */
 enum class MainPage { DOCS, STANCES, COSTS }
 
+/**
+ * 侧栏顶上的两栏（docs/Code栏设计说明.md 第 1、11 节，2026-10-12）：
+ * 「对话」是现在的聊天，「Code」是对着一个项目文件夹写代码的会话。两边各列各的，互不掺和。
+ */
+enum class SidebarTab(val label: String) { CHAT("对话"), CODE("Code") }
+
 /** 要放进某个对话输入框的文件：别的 App 发来的（还没上传），或者文档库里转成的附件。 */
 class Incoming(val files: List<PickedFile> = emptyList(), val attachments: List<com.guixing.jixunying.model.Attachment> = emptyList()) {
     val names: List<String> get() = files.map { it.name } + attachments.map { it.name }
@@ -136,6 +142,11 @@ class AppController(val hub: Hub, val backend: Backend, val scope: CoroutineScop
         if (!backend.store.hasMessages(id)) run(Command.LoadMessages(id))
     }
 
+    /** 侧栏现在看的是「对话」还是「Code」。 */
+    var sidebarTab by mutableStateOf(SidebarTab.CHAT)
+    /** 新建 Code 会话的对话框开着。 */
+    var showNewCode by mutableStateOf(false)
+
     /** 不指定哪一页：手机上先进设置首页（列表），电脑上默认第一页。 */
     fun openSettings(tab: SettingsTab? = null) {
         settingsTab = tab ?: SettingsTab.PROVIDERS
@@ -168,6 +179,12 @@ fun App(hub: Hub, platform: Platform, debugStart: String? = null) {
                             if (s == "stances") c.page = MainPage.STANCES
                             if (s == "costs") c.page = MainPage.COSTS
                             if (s == "settingshome") c.openSettings()
+                            if (s == "newcode") { c.sidebarTab = SidebarTab.CODE; c.showNewCode = true }
+                            // code / code:会话编号 / code:会话编号#diff = 侧栏切到 Code，必要时打开这个会话（#diff 再打开改动查看器）
+                            if (s == "code" || s.startsWith("code:")) {
+                                c.sidebarTab = SidebarTab.CODE
+                                s.removePrefix("code:").substringBefore('#').takeIf { it.isNotBlank() }?.let { c.openConversation(it) }
+                            }
                             if (s.startsWith("conv:")) {
                                 // conv:对话编号@消息编号 = 像从搜索结果点进来一样，跳到那条消息
                                 c.currentConvId = s.removePrefix("conv:").substringBefore('#').substringBefore('@')
@@ -188,9 +205,10 @@ fun App(hub: Hub, platform: Platform, debugStart: String? = null) {
                         platform.clearIncoming()
                     }
                 }
-                // 默认打开最近的对话
+                // 默认打开最近的对话。跳过 Code 会话（主会话审查 10-12 补）：新建的 Code 会话排在最前面，
+                // 启动时侧栏在「对话」那一栏，主区域却打开 Code 会话就对不上了
                 LaunchedEffect(backend, state.conversations.isNotEmpty()) {
-                    if (ctl.currentConvId == null) state.conversations.firstOrNull()?.let {
+                    if (ctl.currentConvId == null) state.conversations.firstOrNull { !it.isCode }?.let {
                         ctl.currentConvId = it.id
                         if (!backend.store.hasMessages(it.id)) ctl.run(Command.LoadMessages(it.id))
                     }
@@ -251,12 +269,17 @@ private fun MainContent(ctl: AppController, wide: Boolean, openDrawer: () -> Uni
                 ctl.page == MainPage.DOCS -> DocsScreen(ctl, wide, openDrawer)
                 ctl.page == MainPage.STANCES -> StancesScreen(ctl, wide, openDrawer)
                 ctl.page == MainPage.COSTS -> CostsScreen(ctl, wide, openDrawer)
-                state.providers.isEmpty() || state.members.isEmpty() -> WelcomeScreen(ctl, wide, openDrawer)
-                ctl.currentConvId != null && state.conversation(ctl.currentConvId!!) != null -> ChatScreen(ctl, ctl.currentConvId!!, wide, openDrawer)
+                state.providers.isEmpty() || (state.members.isEmpty() && ctl.sidebarTab != SidebarTab.CODE) -> WelcomeScreen(ctl, wide, openDrawer)
+                // Code 会话打开时主区域是 CodeScreen（不是聊天），不管侧栏在哪一栏
+                ctl.currentConvId?.let { state.conversation(it) }?.isCode == true -> CodeScreen(ctl, ctl.currentConvId!!, wide, openDrawer)
+                ctl.currentConvId != null && state.conversation(ctl.currentConvId!!) != null ->
+                    if (ctl.sidebarTab == SidebarTab.CODE) CodeEmptyScreen(ctl, wide, openDrawer) else ChatScreen(ctl, ctl.currentConvId!!, wide, openDrawer)
+                ctl.sidebarTab == SidebarTab.CODE -> CodeEmptyScreen(ctl, wide, openDrawer)
                 else -> EmptyChatScreen(ctl, wide, openDrawer)
             }
         }
     }
     if (ctl.showNewChat) NewChatDialog(ctl)
+    if (ctl.showNewCode) NewCodeDialog(ctl)
     ctl.incoming?.let { SendToDialog(ctl, it) }
 }
