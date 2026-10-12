@@ -11,6 +11,8 @@ interface Platform {
     val deviceName: String
     suspend fun pickFiles(imagesOnly: Boolean): List<PickedFile>
     fun decodeImage(bytes: ByteArray): ImageBitmap?
+    /** App 图标（左上角、「关于」页用，和启动图标同一张，tools/make_icons.py 生成）；没有就画老的「集」字方块。 */
+    val brandIcon: ImageBitmap? get() = null
     suspend fun saveFile(name: String, bytes: ByteArray): Boolean
     fun openUrl(url: String)
     /** 把文字编成二维码点阵（电脑端显示配对码用）。 */

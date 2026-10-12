@@ -74,6 +74,11 @@ fun nowMillis(): Long = Clock.System.now().toEpochMilliseconds()
 
 @Composable
 fun BrandMark(size: Int = 30) {
+    // 2026-10-12 起用用户给的图标（和启动图标、电脑窗口图标同一张）
+    LocalPlatform.current.brandIcon?.let { icon ->
+        androidx.compose.foundation.Image(icon, "AI集训营", Modifier.size(size.dp))
+        return
+    }
     Box(
         Modifier.size(size.dp).clip(RoundedCornerShape((size * 0.3).dp))
             .background(Brush.linearGradient(listOf(Color(0xFF6A5CFF), Color(0xFF2EC5CE)))),

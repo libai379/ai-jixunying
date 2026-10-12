@@ -39,31 +39,13 @@ fun main() {
         Window(
             onCloseRequest = { relay.stop(); weixin.stop(); exitApplication() },
             title = "AI集训营",
-            icon = AppIcon,
+            // 窗口和任务栏图标：用户 2026-10-12 给的那张（和安装包、安卓、App 里左上角同一张）
+            icon = platform.brandIcon?.let { androidx.compose.ui.graphics.painter.BitmapPainter(it) },
             state = state,
         ) {
             frame = window
             window.minimumSize = java.awt.Dimension(420, 560)
             App(hub, platform, System.getProperty("jxy.start"))
         }
-    }
-}
-
-/** 窗口和任务栏图标：渐变圆角方块 + 白色「工」字形笔画（和安卓图标一致）。 */
-private object AppIcon : androidx.compose.ui.graphics.painter.Painter() {
-    override val intrinsicSize = androidx.compose.ui.geometry.Size(256f, 256f)
-    override fun androidx.compose.ui.graphics.drawscope.DrawScope.onDraw() {
-        val s = size.minDimension
-        drawRoundRect(
-            androidx.compose.ui.graphics.Brush.linearGradient(listOf(androidx.compose.ui.graphics.Color(0xFF6A5CFF), androidx.compose.ui.graphics.Color(0xFF2EC5CE))),
-            cornerRadius = androidx.compose.ui.geometry.CornerRadius(s * 0.22f),
-        )
-        val w = androidx.compose.ui.graphics.Color.White
-        fun bar(x: Float, y: Float, bw: Float, bh: Float) =
-            drawRect(w, androidx.compose.ui.geometry.Offset(s * x, s * y), androidx.compose.ui.geometry.Size(s * bw, s * bh))
-        bar(0.22f, 0.24f, 0.56f, 0.09f)
-        bar(0.28f, 0.44f, 0.44f, 0.08f)
-        bar(0.22f, 0.66f, 0.56f, 0.09f)
-        bar(0.455f, 0.24f, 0.09f, 0.51f)
     }
 }

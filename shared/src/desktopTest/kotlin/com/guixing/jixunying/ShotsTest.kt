@@ -55,6 +55,8 @@ class ShotsTest {
         }.getOrNull()
         override suspend fun saveFile(name: String, bytes: ByteArray) = false
         override fun openUrl(url: String) {}
+        // 手机上用的是安卓资源里同一张图，截图时从电脑的资源里读
+        override val brandIcon: ImageBitmap? = DesktopPlatform.loadBrandIcon()
     }
 
     private fun seed(root: File, docsDir: File): Engine {

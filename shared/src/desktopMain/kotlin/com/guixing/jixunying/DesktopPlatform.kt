@@ -86,6 +86,16 @@ class DesktopPlatform(private val window: () -> Frame?) : Platform {
         org.jetbrains.skia.Image.makeFromEncoded(bytes).toComposeImageBitmap()
     }.getOrNull()
 
+    override val brandIcon: ImageBitmap? by lazy { loadBrandIcon() }
+
+    companion object {
+        /** shared/src/desktopMain/resources/jxy-app-icon.png（tools/make_icons.py 生成）；窗口图标也用它。 */
+        fun loadBrandIcon(): ImageBitmap? = runCatching {
+            DesktopPlatform::class.java.getResourceAsStream("/jxy-app-icon.png")?.use { it.readBytes() }
+                ?.let { org.jetbrains.skia.Image.makeFromEncoded(it).toComposeImageBitmap() }
+        }.getOrNull()
+    }
+
     override suspend fun saveFile(name: String, bytes: ByteArray): Boolean {
         val target = withContext(Dispatchers.Swing) {
             val dialog = FileDialog(window(), "保存", FileDialog.SAVE)

@@ -34,6 +34,8 @@ compose.desktop {
                 perUserInstall = true
                 menuGroup = "AI集训营"
                 upgradeUuid = "6f1b8c0e-6c3a-4f1e-9a52-3c1f6b2a7d11"
+                // 安装包、exe、开始菜单的图标（tools/make_icons.py 生成）；以前没配，用的是 Compose 默认图标
+                iconFile.set(project.file("icons/ai-jixunying.ico"))
             }
         }
     }

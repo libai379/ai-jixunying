@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 启动图标背景层：原图四角的深蓝（tools/make_icons.py 里说明） -->
+    <color name="ic_launcher_background">#0B1424</color>
+</resources>

@@ -269,6 +269,11 @@ class MainActivity : ComponentActivity() {
             return if (rel.isEmpty()) base else "$base/$rel"
         }
 
+        // res/drawable-nodpi/jxy_app_icon.png（tools/make_icons.py 生成，和启动图标同一张）
+        override val brandIcon: ImageBitmap? by lazy {
+            runCatching { BitmapFactory.decodeResource(resources, R.drawable.jxy_app_icon)?.asImageBitmap() }.getOrNull()
+        }
+
         override fun decodeImage(bytes: ByteArray): ImageBitmap? = runCatching {
             val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
             BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
