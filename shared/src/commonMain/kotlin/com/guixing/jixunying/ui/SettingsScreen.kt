@@ -47,6 +47,7 @@ import androidx.compose.material.icons.rounded.PhoneAndroid
 import androidx.compose.material.icons.rounded.Psychology
 import androidx.compose.material.icons.rounded.PushPin
 import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material.icons.rounded.Terminal
 import androidx.compose.material.icons.rounded.Visibility
 import androidx.compose.material.icons.rounded.VisibilityOff
 import androidx.compose.material3.Button
@@ -103,6 +104,7 @@ private fun tabIcon(t: SettingsTab): ImageVector = when (t) {
     SettingsTab.SEARCH -> Icons.Rounded.Language
     SettingsTab.IMAGE -> Icons.Rounded.Brush
     SettingsTab.OFFICE -> Icons.Rounded.Description
+    SettingsTab.CODE -> Icons.Rounded.Terminal
     SettingsTab.WEIXIN -> Icons.Rounded.Forum
     SettingsTab.DEVICES -> Icons.Rounded.PhoneAndroid
     SettingsTab.APPEARANCE -> Icons.Rounded.Palette
@@ -188,6 +190,7 @@ private fun tabSummary(t: SettingsTab, s: AppState, ctl: AppController): String 
     SettingsTab.SEARCH -> if (s.settings.search.mode == SearchMode.AUTO) "自动" else engineLabel(s.settings.search.engine)
     SettingsTab.IMAGE -> ImagePick.resolve(s).firstOrNull()?.let { (if (ImagePick.isAuto(s)) "自动：" else "") + it.modelId } ?: "没有可用的"
     SettingsTab.OFFICE -> if (!s.settings.office.enabled) "已关闭" else when (s.settings.office.wordStyle) { "formal" -> "正式"; "official" -> "公文"; else -> "通用" }
+    SettingsTab.CODE -> shellLabel(s.settings.code.shell) + if (s.settings.code.allowPhone) " · 手机能用" else " · 手机不能用"
     SettingsTab.WEIXIN -> if (!s.weixinCapable) "在电脑上设置" else if (s.weixin.bound) "已绑定" else "未绑定"
     SettingsTab.DEVICES -> if (ctl.hub.remote.value != null) "已配对" else if (s.devices.isNotEmpty()) "${s.devices.size} 台" else "未配对"
     SettingsTab.APPEARANCE -> listOf("跟随系统", "浅色", "深色").getOrElse(s.settings.darkMode) { "" }
@@ -206,6 +209,7 @@ private fun SettingsPage(ctl: AppController, state: AppState, tab: SettingsTab) 
                 SettingsTab.SEARCH -> SearchPage(ctl, state)
                 SettingsTab.IMAGE -> ImagePage(ctl, state)
                 SettingsTab.OFFICE -> OfficePage(ctl, state)
+                SettingsTab.CODE -> CodePage(ctl, state)
                 SettingsTab.WEIXIN -> WeixinPage(ctl, state)
                 SettingsTab.DEVICES -> DevicesPage(ctl, state)
                 SettingsTab.APPEARANCE -> AppearancePage(ctl, state)

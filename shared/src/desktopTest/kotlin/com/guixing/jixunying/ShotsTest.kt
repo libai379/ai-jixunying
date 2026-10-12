@@ -90,6 +90,9 @@ class ShotsTest {
             // Code 栏：对着一个项目文件夹写代码的会话（成员为空，code 不为空）
             Conversation("c8", "我的项目", emptyList(), createdAt = now - 900_000, updatedAt = now - 60_000,
                 code = com.guixing.jixunying.model.CodeSpec(File(root, "我的项目").absolutePath, "pd", "deepseek-flash")),
+            // 用户按了停止的那条：侧栏要写「停下了」（灰的），不是「做完」
+            Conversation("c9", "旧项目", emptyList(), createdAt = now - 600_000, updatedAt = now - 20_000,
+                code = com.guixing.jixunying.model.CodeSpec(File(root, "旧项目").absolutePath, "pd", "deepseek-flash")),
         )
         val st = Storage(root)
         st.saveState(AppState(
@@ -268,6 +271,19 @@ class ShotsTest {
                     ToolStep("edit", "README.md", id = "s86", output = diffReadme, note = "替换 README.md 里的一段", approval = "waiting"),
                 )),
         ))
+        // 用户按了停止的那条（c9）：最后一条回答是 STOPPED，侧栏的状态要写「停下了」
+        File(root, "旧项目").mkdirs()
+        File(root, "旧项目/README.md").writeText("# 旧项目\n", Charsets.UTF_8)
+        File(root, "code/c9").mkdirs()
+        File(root, "code/c9/s91.orig").writeText("旧的 README 内容\n", Charsets.UTF_8)
+        st.saveMessages("c9", listOf(
+            Message("u9", "c9", Role.USER, USER_ID, "把 README 里的用法补一下。", createdAt = now - 40_000),
+            Message("r9", "c9", Role.AI, "tool:code", "先看一眼 README 现在写了什么。",
+                createdAt = now - 30_000, modelLabel = "deepseek-flash（DeepSeek 4.1 Flash）", status = MsgStatus.STOPPED,
+                tools = listOf(ToolStep("read", "README.md", id = "s91", output = "# 旧项目"))),
+        ))
+        // 备份攒过头（1 GB 以上，设置 → Code 栏 顶上要提醒）：写一个稀疏文件占位，不真占盘
+        java.io.RandomAccessFile(File(root, "code/c8/big.orig"), "rw").use { it.setLength(1_100_000_000L) }
         val e = Engine(Storage(root))
         e.weixin = com.guixing.jixunying.engine.WeixinBridge(e, File(root, "weixin"))
         e.rescanDocs()
@@ -348,7 +364,9 @@ class ShotsTest {
         val narrow = listOf("chat" to "conv:c1", "chat-long" to "conv:c6", "chat-council" to "conv:c7", "docs" to "docs", "stances" to "stances", "chat-stances" to "conv:c5", "costs" to "costs",
             "settings-home" to "settingshome", "settings-image" to "settings:IMAGE",
             "settings-memory" to "settings:MEMORY", "settings-weixin" to "settings:WEIXIN", "settings-providers" to "settings:PROVIDERS",
-            "settings-search" to "settings:SEARCH", "settings-profile" to "settings:PROFILE", "settings-office" to "settings:OFFICE")
+            "settings-search" to "settings:SEARCH", "settings-profile" to "settings:PROFILE", "settings-office" to "settings:OFFICE",
+            // 手机上这一页是只读的（Code 栏只能在电脑上跑）
+            "settings-code" to "settings:CODE")
         for ((name, start) in narrow) shoot("phone-$name", 824, 1784, 2f, hub, phone, start)
 
         // Code 栏：侧栏那一栏（没开会话）、会话本身（含等批准那一步）、差异查看器、新建对话框
@@ -360,6 +378,11 @@ class ShotsTest {
         shoot("phone-code", 824, 1784, 2f, hub, phone, "code:c8")
         shoot("phone-code-tab", 824, 1784, 2f, hub, phone, "code")
         shoot("phone-code-new", 824, 1784, 2f, hub, phone, "newcode")
+        // 手机上顶栏只放得下文件夹最后一节：点一下弹完整路径
+        shoot("phone-code-path", 824, 1784, 2f, hub, phone, "code:c8#path")
+        // 侧栏里那条「停下了」（用户按了停止，不是做完）
+        shoot("desktop-code-stopped", 1280, 820, 1f, hub, desktop, "code")
+        shoot("desktop-code-stopped-conv", 1280, 820, 1f, hub, desktop, "code:c9")
 
         // 弹窗
         shoot("desktop-convsettings", 1280, 820, 1f, hub, desktop, "conv:c1#convsettings")
@@ -382,8 +405,23 @@ class ShotsTest {
         shoot("desktop-dark-code-diff", 1280, 820, 1f, hub, desktop, "code:c8#diff")
         shoot("desktop-dark-code-new", 1280, 820, 1f, hub, desktop, "newcode")
         shoot("phone-dark-code", 824, 1784, 2f, hub, phone, "code:c8")
+        // 设置 → Code 栏（深色）：顶上的 1 GB 提醒、备份大小、错误提示在深色下都要看得清
+        shoot("desktop-dark-settings-code", 1280, 820, 1f, hub, desktop, "settings:CODE")
+        shoot("phone-dark-settings-code", 824, 1784, 2f, hub, phone, "settings:CODE")
         shoot("desktop-costs-tall", 1280, 2000, 1f, hub, desktop, "costs")
         shoot("desktop-office-tall", 1280, 2600, 1f, hub, desktop, "settings:OFFICE")
+        // Code 设置页整页画出来：备份大小那一行要能看到
+        shoot("desktop-settings-code-tall", 1280, 1300, 1f, hub, desktop, "settings:CODE")
+        // 外壳填成一个不存在的路径：输入框和下面那句「这个路径上没有文件」的提示
+        kotlinx.coroutines.runBlocking {
+            val s = e.state.settings
+            e.call(com.guixing.jixunying.model.Command.SaveSettings(s.copy(code = s.code.copy(shell = "F:\\Git\\bin\\没有这个.exe"))))
+        }
+        shoot("desktop-settings-code-custom", 1280, 1300, 1f, hub, desktop, "settings:CODE")
+        kotlinx.coroutines.runBlocking {
+            val s = e.state.settings
+            e.call(com.guixing.jixunying.model.Command.SaveSettings(s.copy(code = s.code.copy(shell = "powershell"))))
+        }
 
         // 编辑成员弹窗整个画出来（窗口拉高），看「思考」下面那行说明：阿德（深度），再把阿智（GLM-5.3 关不掉思考，快速 = 少想）挪到第一个
         kotlinx.coroutines.runBlocking { e.call(com.guixing.jixunying.model.Command.SaveSettings(e.state.settings.copy(darkMode = 1))) }

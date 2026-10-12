@@ -117,6 +117,7 @@ class DesktopPlatform(private val window: () -> Frame?) : Platform {
     }.getOrNull()
 
     override fun openFile(path: String): Boolean = runCatching { Desktop.getDesktop().open(File(path)); true }.getOrDefault(false)
+    override fun fileExists(path: String): Boolean = runCatching { File(path.trim()).isFile }.getOrDefault(false)
 
     override suspend fun openBytes(name: String, bytes: ByteArray): Boolean = withContext(Dispatchers.IO) {
         runCatching {

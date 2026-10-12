@@ -161,15 +161,29 @@ private fun CodeTopBar(ctl: AppController, state: AppState, conv: Conversation, 
                        wide: Boolean, openDrawer: () -> Unit, running: Boolean) {
     val readonly = !LocalPlatform.current.isDesktop
     val provider = state.provider(spec.providerId)
+    // 窄屏那一行只放得下文件夹的最后一节，点一下弹完整的路径（下面弹窗）
+    var showPath by remember(conv.id) { mutableStateOf(false) }
+    // 开发截图用：-Djxy.start=code:会话编号#path 直接把这个弹窗打开
+    LaunchedEffect(Unit) { if (ctl.debugDialog == "path") showPath = true }
+    val subtitle = (if (wide) spec.folder else folderName(spec.folder)) + (provider?.let { " · ${it.name}" } ?: "") + " · ${spec.modelId}"
     Row(Modifier.fillMaxWidth().height(60.dp).padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
         if (!wide) IconButton(onClick = openDrawer) { Icon(Icons.Rounded.Menu, "菜单") }
         Column(Modifier.weight(1f).padding(start = 6.dp)) {
             Text(conv.title, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text(
-                // 窄屏放不下整条路径，只显示最后一节
-                (if (wide) spec.folder else folderName(spec.folder)) + (provider?.let { " · ${it.name}" } ?: "") + " · ${spec.modelId}",
-                style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, maxLines = 1, overflow = TextOverflow.Ellipsis,
-            )
+            if (wide) {
+                Text(subtitle, style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            } else {
+                // 手机上放不下整条路径：显示最后一节，前面加个文件夹图标、点一下看全路径
+                Row(
+                    Modifier.clip(RoundedCornerShape(6.dp)).clickable { showPath = true }.padding(vertical = 2.dp, horizontal = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(Icons.Rounded.FolderOpen, null, Modifier.size(13.dp), tint = MaterialTheme.colorScheme.primary)
+                    Spacer(Modifier.width(4.dp))
+                    Text(subtitle, style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false))
+                }
+            }
         }
         if (running && !readonly) {
             Row(
@@ -188,6 +202,18 @@ private fun CodeTopBar(ctl: AppController, state: AppState, conv: Conversation, 
         }
     }
     HorizontalDivider(color = Ext.c.border)
+    if (showPath) {
+        val clipboard = LocalClipboardManager.current
+        AppDialog("项目文件夹", { showPath = false }, width = 520.dp, actions = {
+            TextButton({ clipboard.setText(AnnotatedString(spec.folder)); ctl.toast("已复制路径") }) { Text("复制路径") }
+            Button({ showPath = false }) { Text("知道了") }
+        }) {
+            Text("AI 只在这个文件夹里读代码、改文件、跑命令，别的地方碰不到。",
+                style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
+            Spacer(Modifier.height(8.dp))
+            SelectionContainer { Text(spec.folder, style = MaterialTheme.typography.bodyMedium) }
+        }
+    }
 }
 
 /** 权限档切换：点一下就生效，不用再去设置里改。 */

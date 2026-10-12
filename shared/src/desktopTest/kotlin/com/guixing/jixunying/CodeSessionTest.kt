@@ -1,5 +1,6 @@
 package com.guixing.jixunying
 
+import com.guixing.jixunying.engine.CodeAgent
 import com.guixing.jixunying.engine.Engine
 import com.guixing.jixunying.engine.Storage
 import com.guixing.jixunying.model.AppJson
@@ -152,6 +153,46 @@ class CodeSessionTest {
         // 普通对话（没有备份文件夹）照样能删，不会去碰 <数据目录>/code/
         assertTrue(e.call(Command.DeleteConversation(plain)).ok)
         assertNull(e.state.conversation(plain))
+    }
+
+    @Test
+    fun backupSizeCountsEveryBackupFile() = runBlocking {
+        val e = engine()
+        // 一个会话都还没有、<数据目录>/code/ 都还没建：算 0，不是报错（设置页要能照常显示）
+        assertTrue(e.call(Command.CodeBackupSize).ok)
+        assertEquals("0", e.call(Command.CodeBackupSize).data)
+
+        val id = e.call(Command.CodeCreate(project.absolutePath, "p1", "code-model")).data
+        val backup = File(File(dir, "code"), id).apply { mkdirs() }
+        File(backup, "ch1.orig").writeText("12345")            // 5 字节
+        File(backup, "ch2.orig").writeText("1234567890")       // 10 字节
+        File(File(backup, "cache"), "ch3.diff").apply { parentFile.mkdirs(); writeText("123") } // 子文件夹里的也算：3 字节
+        assertEquals("18", e.call(Command.CodeBackupSize).data)
+
+        // 数据目录里别的东西不算（只有 code 文件夹里的才算备份）
+        File(dir, "history.jsonl").writeText("y".repeat(200))
+        File(File(dir, "code"), "notes.txt").writeText("zz")   // code 文件夹里的散文件也算（万一有残留）
+        assertEquals("20", e.call(Command.CodeBackupSize).data)
+
+        // 删会话：备份跟着删，数掉回去（Code 设置页的「1 GB 提醒」也就消了）
+        assertTrue(e.call(Command.DeleteConversation(id)).ok)
+        assertEquals("2", e.call(Command.CodeBackupSize).data)
+        File(File(dir, "code"), "notes.txt").delete()
+        assertEquals("0", e.call(Command.CodeBackupSize).data)
+    }
+
+    @Test
+    fun phoneCanStillAskForTheBackupSize() {
+        // 关着「允许手机用 Code 栏」（默认）：动手的指令都拒绝……
+        assertNotNull(CodeAgent.gateFromPhone(Command.CodeCreate(project.absolutePath, "p1", "code-model"), allowPhone = false))
+        assertNotNull(CodeAgent.gateFromPhone(Command.CodeSend("c1", "改一下"), allowPhone = false))
+        assertNotNull(CodeAgent.gateFromPhone(Command.CodeStop("c1"), allowPhone = false))
+        assertNotNull(CodeAgent.gateFromPhone(Command.CodeSetMode("c1", CodeMode.PLAN), allowPhone = false))
+        // ……只读的照常放行：看差异、看备份大小（设置 → Code 栏 要显示电脑上的数）
+        assertNull(CodeAgent.gateFromPhone(Command.CodeDiff("c1", "ch1"), allowPhone = false))
+        assertNull(CodeAgent.gateFromPhone(Command.CodeBackupSize, allowPhone = false))
+        // 电脑上自己发的不拦（gateFromPhone 只在收到手机上来的指令时调）
+        assertNull(CodeAgent.gateFromPhone(Command.CodeSend("c1", "改一下"), allowPhone = true))
     }
 
     @Test

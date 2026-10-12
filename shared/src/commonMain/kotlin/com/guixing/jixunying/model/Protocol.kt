@@ -49,6 +49,11 @@ sealed interface Command {
     @Serializable data class CodeReview(val convId: String, val changeId: String, val accept: Boolean) : Command
     /** Code 栏：撤销这一条回答里的全部改动（从后往前还原）。 */
     @Serializable data class CodeRevertTask(val convId: String, val messageId: String) : Command
+    /**
+     * Code 栏：改前的备份一共占了多少字节（<数据目录>/code/ 底下所有文件加起来）。结果 data 是字节数。
+     * 只读，手机发来也放行；手机遥控电脑时拿到的是电脑上的数（设置 → Code 栏 显示）。
+     */
+    @Serializable data object CodeBackupSize : Command
 
     @Serializable data class SendMessage(
         val convId: String,

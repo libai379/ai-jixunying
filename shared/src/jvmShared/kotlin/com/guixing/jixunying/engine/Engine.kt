@@ -318,6 +318,15 @@ class Engine(
     private fun codeBackup(convId: String): com.guixing.jixunying.engine.code.CodeBackup =
         com.guixing.jixunying.engine.code.CodeBackup(File(File(storage.root, "code"), convId))
 
+    /**
+     * Code 栏的改前备份一共占了多少字节：<数据目录>/code/ 底下所有文件加起来（设置 → Code 栏 显示，超过 1 GB 提醒）。
+     * 读不出来就按 0 算，不为了一个数字让设置页报错。
+     */
+    private fun codeBackupSize(): Long = runCatching {
+        val root = File(storage.root, "code")
+        if (!root.isDirectory) 0L else root.walkTopDown().filter { it.isFile }.sumOf { it.length() }
+    }.getOrDefault(0L)
+
     private fun messages(convId: String): MutableList<Message> = convs.getOrPut(convId) { storage.loadMessages(convId) }
 
     private fun snapshot(convId: String): List<Message> = messages(convId).let { synchronized(it) { it.toList() } }
@@ -601,6 +610,8 @@ class Engine(
         is Command.CodeDiff -> codeAgent.diff(c.convId, c.changeId)
         is Command.CodeReview -> codeAgent.review(c.convId, c.changeId, c.accept)
         is Command.CodeRevertTask -> codeAgent.revertTask(c.convId, c.messageId)
+        // 只读：备份占了多少（手机发来也放行，见 CodeAgent.gateFromPhone 的说明）
+        is Command.CodeBackupSize -> CommandResult(data = codeBackupSize().toString())
         is Command.SendMessage -> send(c)
         is Command.Stop -> { stop(c.convId); CommandResult() }
         is Command.DeleteMessage -> {

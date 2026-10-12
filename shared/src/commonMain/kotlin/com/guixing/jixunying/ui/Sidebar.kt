@@ -317,6 +317,7 @@ private fun CodeSessionRow(ctl: AppController, state: AppState, c: Conversation,
             CodeStatus.WAITING -> Ext.c.warning
             CodeStatus.ERROR -> MaterialTheme.colorScheme.error
             CodeStatus.DONE -> Ext.c.success
+            CodeStatus.STOPPED -> Ext.c.subtle
             CodeStatus.NEW -> Ext.c.subtle
         })
         Box {
@@ -359,10 +360,10 @@ internal fun folderName(path: String): String =
 
 /**
  * 这个 Code 会话现在什么状态（docs/Code栏设计说明.md 第 1 节）：看最后一条回答——
- * 还在等批准、正在跑、出错了、还是做完了。
+ * 还在等批准、正在跑、出错了、用户按了停止、还是做完了。
  */
 enum class CodeStatus(val label: String) {
-    NEW("还没有任务"), RUNNING("在跑"), WAITING("等你批准"), DONE("做完"), ERROR("出错"),
+    NEW("还没有任务"), RUNNING("在跑"), WAITING("等你批准"), STOPPED("停下了"), DONE("做完"), ERROR("出错"),
 }
 
 internal fun codeStatus(messages: List<Message>): CodeStatus {
@@ -371,6 +372,8 @@ internal fun codeStatus(messages: List<Message>): CodeStatus {
         last.status == MsgStatus.STREAMING && last.tools.any { it.approval == "waiting" } -> CodeStatus.WAITING
         last.status == MsgStatus.STREAMING -> CodeStatus.RUNNING
         last.status == MsgStatus.ERROR -> CodeStatus.ERROR
+        // 用户自己按了停止：这不算「做完」，侧栏照实说停下了（灰的，不标绿）
+        last.status == MsgStatus.STOPPED -> CodeStatus.STOPPED
         else -> CodeStatus.DONE
     }
 }
