@@ -65,9 +65,15 @@ data class FileChange(
 object CodeModels {
     /**
      * 已经用真 Key 跑通过编码循环的模型。键是「平台|模型名小写」，平台取 Thinking.platformOf（按预设编号或接口地址认）。
-     * 主会话用真 Key 跑通后再加进来（2026-10-12 先空着，界面上都标「未实测」）。
+     * 主会话用真 Key 跑通后再加进来（LiveCodeTest，JXY_LIVE_CODE=数据文件夹）。
+     * 2026-10-12 05:0x 都是同一个任务（把 greet.txt 第一行的 hello 改成 你好、跑命令确认），都改对、都跑了命令：
+     * - deepseek|deepseek-flash：5 秒，输入 4907（命中缓存 3328）/ 输出 328 token
+     * - minimax|minimax-m3：13 秒；思考写在正文的 <think> 里（界面拆成推理过程显示）
+     * - zhipu|glm-5.3-flash：29 秒
+     * - mimo|mimo-v2.6-flash：16 秒
+     * 当时 PowerShell 读无 BOM 的 UTF-8 文件会乱码，MiniMax、小米多绕了一步；之后 CodeShell 已改成读的命令默认 UTF-8。
      */
-    val TESTED: Set<String> = emptySet()
+    val TESTED: Set<String> = setOf("deepseek|deepseek-flash", "minimax|minimax-m3", "zhipu|glm-5.3-flash", "mimo|mimo-v2.6-flash")
 
     fun keyOf(platform: String, modelId: String) = platform.trim().lowercase() + "|" + modelId.trim().lowercase()
 

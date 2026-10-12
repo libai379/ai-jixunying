@@ -59,9 +59,14 @@ class CodeShell(private val envSource: () -> Map<String, String> = System::geten
         }
 
     private fun commandLine(shell: String, command: String): List<String> = when (shell.trim().lowercase()) {
+        // Windows 自带的 PowerShell 5.1 读没有 BOM 的文件默认按系统编码（中文 Windows 是 GBK），
+        // 我们写的 UTF-8 文件用 Get-Content 一看全是乱码（10-12 真模型测试里 MiniMax、小米都踩了，以为文件坏了）。
+        // 只把「读」的几个命令默认改成 UTF-8；写文件的不改（5.1 的 -Encoding UTF8 会加 BOM）。
         "", "powershell" -> listOf(
             "powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command",
-            "[Console]::OutputEncoding = [Text.UTF8Encoding]::new(\$false); \$OutputEncoding = [Text.UTF8Encoding]::new(\$false); $command",
+            "[Console]::OutputEncoding = [Text.UTF8Encoding]::new(\$false); \$OutputEncoding = [Text.UTF8Encoding]::new(\$false); " +
+                "\$PSDefaultParameterValues['Get-Content:Encoding'] = 'UTF8'; \$PSDefaultParameterValues['Select-String:Encoding'] = 'UTF8'; " +
+                "\$PSDefaultParameterValues['Import-Csv:Encoding'] = 'UTF8'; $command",
         )
         // cmd：没有控制台窗口时 chcp 65001 不生效（10-12 测试里中文成了乱码），输出按系统本地编码（中文 Windows 是 GBK）读
         "cmd" -> listOf("cmd.exe", "/d", "/s", "/c", command)

@@ -206,12 +206,15 @@ class CodeAgent(private val host: CodeHost) {
         if (picked.size < usable.size) parts += buildJsonObject { put("role", "user"); put("content", "（更早的记录太长，已省略）") }
         for (m in picked) {
             val role = if (m.role == Role.USER) "user" else "assistant"
+            // 以前回答里的 <think>…</think>（MiniMax 写在正文里）不再发回去，白占 token（10-12 真模型测试看到的；聊天那边也这么做）
+            val text = if (role == "assistant") m.content.replace(THINK, "").trim() else m.content
+            if (text.isBlank()) continue
             // 有的接口不允许连着两条同一个角色，合并一下
             val last = parts.lastOrNull()?.str("role")
             if (last == role && parts.isNotEmpty()) {
                 val prev = parts.removeAt(parts.size - 1)
-                parts += buildJsonObject { put("role", role); put("content", prev.str("content").orEmpty() + "\n\n" + m.content) }
-            } else parts += buildJsonObject { put("role", role); put("content", m.content) }
+                parts += buildJsonObject { put("role", role); put("content", prev.str("content").orEmpty() + "\n\n" + text) }
+            } else parts += buildJsonObject { put("role", role); put("content", text) }
         }
         while (parts.firstOrNull()?.str("role") == "assistant") parts.removeAt(0)
         return parts
@@ -655,6 +658,7 @@ class CodeAgent(private val host: CodeHost) {
     }
 
     companion object {
+        private val THINK = Regex("<think>[\\s\\S]*?</think>")
         /** 给模型的工具结果最长多少字。 */
         private const val RESULT_LIMIT = 12_000
         /** 界面上一步显示的内容最长多少字。 */

@@ -75,6 +75,10 @@ class CodeSafetyTest {
         assertEquals(3, sh.run("exit 3", root, timeoutSec = 60).exitCode)
         val c = sh.run("echo 中文 cmd", root, shell = "cmd", timeoutSec = 60)
         assertTrue("中文 cmd" in c.output, c.output)
+        // 没有 BOM 的 UTF-8 文件：PowerShell 5.1 默认按 GBK 读成乱码（10-12 真模型测试踩到的），现在读的命令默认 UTF-8
+        File(root, "u8.txt").writeText("你好 world\n", Charsets.UTF_8)
+        val g = sh.run("Get-Content u8.txt; Select-String -Path u8.txt -Pattern 'world' | ForEach-Object { \$_.Line }", root, timeoutSec = 60)
+        assertTrue(g.output.lines().count { "你好 world" in it } >= 2, g.output)
     }
 
     @Test
