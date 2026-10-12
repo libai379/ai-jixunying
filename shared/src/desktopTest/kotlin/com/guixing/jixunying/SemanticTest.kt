@@ -874,7 +874,7 @@ class SemanticTest {
         assertEquals(5, Settings.SCHEMA, "1.7.0 加了语音和按意思搜，schema 是 5")
         assertTrue(e.state.settings.semantic.historyOn)
 
-        // 1.6.0 的手机（schema = 4）不认识这块，发来的是默认值：电脑上改过的要保留
+        // 只认到语音设置的版本（schema = 4，开发中间版）不认识这块，发来的是默认值：电脑上改过的要保留
         assertTrue(e.call(Command.SaveSettings(s.copy(schema = 4, semantic = SemanticSettings()))).ok)
         assertEquals(SemanticSettings(historyOn = true, docsOn = true, providerId = "p-zhipu", model = "embedding-3"), e.state.settings.semantic)
 
