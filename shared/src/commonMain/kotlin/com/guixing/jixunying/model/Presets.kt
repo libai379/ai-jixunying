@@ -56,7 +56,8 @@ object Presets {
             listOf(m("deepseek-flash"), m("deepseek-v4-pro")), "D", 0xFF4D6BFE,
             note = "deepseek-flash 即测评里的 DeepSeek-V4.1-Flash（测评第 2）"),
         ProviderPreset("minimax", "MiniMax 中国版", GROUP_CN, "https://api.minimaxi.com/v1",
-            "https://platform.minimaxi.com/user-center/basic-information/interface-key",
+            // 下面几家的控制台地址 2026-10-12 换成了旧地址自动跳转到的新地址（curl -L 看最终网址），免得以后跳转撤了变 404
+            "https://platform.minimax.cn/console/access?tab=api-keys",
             listOf(m("MiniMax-M3", vision = true), img("image-01")), "M", 0xFFE5484D,
             note = "MiniMax-M3 测评第 1；画图用 image-01"),
         ProviderPreset("mimo", "小米 MiMo", GROUP_CN, "https://api.xiaomimimo.com/v1",
@@ -64,7 +65,9 @@ object Presets {
             listOf(m("mimo-v2.6-pro"), m("mimo-v2.6-flash")), "米", 0xFFFF6900,
             note = "测评第 3、4，最便宜"),
         ProviderPreset("zhipu", "智谱开放平台", GROUP_CN, "https://open.bigmodel.cn/api/paas/v4",
-            "https://open.bigmodel.cn/usercenter/apikeys",
+            // 旧地址 open.bigmodel.cn/usercenter/apikeys 登录后显示 404（用户 2026-10-12 手机截图），
+            // 新地址出自官方快速上手 docs.bigmodel.cn/cn/guide/start/quick-start
+            "https://bigmodel.cn/usercenter/proj-mgmt/apikeys",
             listOf(m("glm-5.3"), m("GLM-5.3-Flash"), m("glm-4.6v", vision = true), img("cogview-4-250304"), img("cogview-3-flash")),
             "Z", 0xFF1F2A44, note = "带官方联网搜索；画图 cogview-3-flash 免费"),
         ProviderPreset("qianwen", "千问AI平台（阿里）", GROUP_CN, "https://maas.qianwenaiapi.com/compatible-mode/v1",
@@ -72,7 +75,7 @@ object Presets {
             listOf(m("qwen3.8-max"), img("qwen-image-3.0"), img("wan2.7-image")), "千", 0xFF6236FF,
             note = "qwen3.8-max 即测评里的 Qwen3-Max；带官方联网搜索；画图千问图像 / 万相"),
         ProviderPreset("moonshot", "Kimi 中国版", GROUP_CN, "https://api.moonshot.cn/v1",
-            "https://platform.moonshot.cn/console/api-keys",
+            "https://platform.kimi.com/console/api-keys",
             listOf(m("kimi-k3", vision = true)), "K", 0xFF111111,
             note = "带官方联网搜索；kimi-k3 只接受 temperature=1，成员里温度留空即可"),
         ProviderPreset("dashscope", "阿里云百炼（通义千问 · 万相）", GROUP_CN, "https://dashscope.aliyuncs.com/compatible-mode/v1",
@@ -126,7 +129,7 @@ object Presets {
 
         // —— 国内专门画图的 ——
         ProviderPreset("kling", "可灵 Kling（快手）", GROUP_IMAGE, "https://api-beijing.klingai.com",
-            "https://app.klingai.com/cn/dev/console/application",
+            "https://klingai.com/app/dev/console/application",
             listOf(img("kling-v3"), img("kling-v2-1")), "灵", 0xFF0B0B0F,
             note = "Key 填 API Key；老账号也可以填「AccessKey:SecretKey」"),
 
@@ -136,7 +139,7 @@ object Presets {
             listOf(m("gpt-5", vision = true), m("gpt-5-mini", vision = true), img("gpt-image-1")),
             "AI", 0xFF10A37F, useProxy = true),
         ProviderPreset("anthropic", "Anthropic Claude", GROUP_GLOBAL, "https://api.anthropic.com/v1",
-            "https://console.anthropic.com/settings/keys",
+            "https://platform.claude.com/settings/keys",
             listOf(m("claude-opus-5-5", vision = true), m("claude-sonnet-5-5", vision = true), m("claude-haiku-4-5", vision = true)),
             "A", 0xFFD97757, useProxy = true, note = "走 Anthropic 官方的 OpenAI 兼容接口"),
         ProviderPreset("gemini", "Google Gemini", GROUP_GLOBAL, "https://generativelanguage.googleapis.com/v1beta/openai",
@@ -150,9 +153,9 @@ object Presets {
         ProviderPreset("groq", "Groq", GROUP_GLOBAL, "https://api.groq.com/openai/v1",
             "https://console.groq.com/keys", listOf(m("llama-3.3-70b-versatile")), "Gq", 0xFFF55036, useProxy = true),
         ProviderPreset("moonshot-global", "Kimi 国际版", GROUP_GLOBAL, "https://api.moonshot.ai/v1",
-            "https://platform.moonshot.ai/console/api-keys", listOf(m("kimi-k3", vision = true)), "K", 0xFF111111),
+            "https://platform.kimi.ai/console/api-keys", listOf(m("kimi-k3", vision = true)), "K", 0xFF111111),
         ProviderPreset("minimax-global", "MiniMax 国际版", GROUP_GLOBAL, "https://api.minimax.io/v1",
-            "https://www.minimax.io/platform/user-center/basic-information/interface-key",
+            "https://platform.minimax.io/console/access",
             listOf(m("MiniMax-M3", vision = true), img("image-01")), "M", 0xFFE5484D),
         ProviderPreset("zai", "Z.ai（智谱国际版）", GROUP_GLOBAL, "https://api.z.ai/api/paas/v4",
             "https://z.ai/manage-apikey/apikey-list", listOf(m("glm-5.3")), "Z", 0xFF1F2A44),
