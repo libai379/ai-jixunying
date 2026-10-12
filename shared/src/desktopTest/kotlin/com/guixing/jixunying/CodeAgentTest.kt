@@ -1,0 +1,520 @@
+package com.guixing.jixunying
+
+import com.guixing.jixunying.client.ConnState
+import com.guixing.jixunying.client.Hub
+import com.guixing.jixunying.engine.CODE_ID
+import com.guixing.jixunying.engine.Engine
+import com.guixing.jixunying.engine.Storage
+import com.guixing.jixunying.model.CodeMode
+import com.guixing.jixunying.model.CodeSettings
+import com.guixing.jixunying.model.Command
+import com.guixing.jixunying.model.ModelInfo
+import com.guixing.jixunying.model.MsgStatus
+import com.guixing.jixunying.model.PairingCode
+import com.guixing.jixunying.model.ProviderConfig
+import com.guixing.jixunying.model.RelaySettings
+import com.guixing.jixunying.model.Role
+import com.guixing.jixunying.model.ToolStep
+import com.guixing.jixunying.relay.RelayHost
+import com.guixing.jixunying.relay.RelayLink
+import com.guixing.jixunying.relay.pairWithHost
+import io.ktor.http.ContentType
+import io.ktor.server.cio.CIO
+import io.ktor.server.engine.EmbeddedServer
+import io.ktor.server.engine.embeddedServer
+import io.ktor.server.request.receiveText
+import io.ktor.server.response.respondTextWriter
+import io.ktor.server.routing.post
+import io.ktor.server.routing.routing
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import java.io.File
+import java.net.ServerSocket
+import java.util.Collections
+import java.util.Properties
+import kotlin.test.AfterTest
+import kotlin.test.BeforeTest
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
+import kotlin.test.assertTrue
+
+/**
+ * Code 栏的编码循环（docs/Code栏设计说明.md 第 3、4、9 节，2026-10-12）：
+ * 用一个假的模型服务器按脚本调工具，把读文件 / 改文件 / 等批准 / 允许 / 拒绝、越界、计划档、
+ * 改错地方、停下、审阅和撤销、差异和记账都跑一遍；末尾再用进程内 MQTT 中转验一遍手机的拦截。
+ * 循环、工具、审批本身在 engine/CodeAgent.kt。
+ */
+class CodeAgentTest {
+    private val requests = Collections.synchronizedList(mutableListOf<JsonObject>())
+    private lateinit var fake: EmbeddedServer<*, *>
+    private var port = 0
+    private lateinit var dir: File
+
+    /** 用户选的那个项目文件夹。 */
+    private lateinit var project: File
+
+    private fun freePort() = ServerSocket(0).use { it.localPort }
+    private fun base() = "http://127.0.0.1:$port"
+
+    @BeforeTest
+    fun setUp() {
+        port = freePort()
+        dir = kotlin.io.path.createTempDirectory("jxy-code-agent").toFile()
+        project = File(dir, "proj").apply { mkdirs() }
+        // 两个样例文件：a.txt 用来改；dup.txt 里「dup」出现两次（测 old_text 不唯一）
+        File(project, "a.txt").writeText("greeting world\n")
+        File(project, "dup.txt").writeText("dup line\ndup line\n")
+
+        fake = embeddedServer(CIO, port = port) {
+            routing {
+                post("/v1/chat/completions") {
+                    val req = Json.parseToJsonElement(call.receiveText()).jsonObject
+                    requests += req
+                    val msgs = req["messages"]!!.jsonArray
+                    val system = (msgs.first().jsonObject["content"] as? JsonPrimitive)?.contentOrNull.orEmpty()
+                    // 任务文字：最后一条 user（后面几轮最后一条是工具结果；一个会话连发两次时前面还有旧任务）
+                    val task = msgs.map { it.jsonObject }.lastOrNull { it["role"]?.jsonPrimitive?.content == "user" }
+                        ?.let { (it["content"] as? JsonPrimitive)?.contentOrNull }.orEmpty()
+                    val toolResults = msgs.map { it.jsonObject }.filter { it["role"]?.jsonPrimitive?.content == "tool" }
+                        .map { (it["content"] as? JsonPrimitive)?.contentOrNull.orEmpty() }
+                    call.respondTextWriter(ContentType.Text.EventStream) {
+                        fun chunk(delta: String) { write("data: {\"choices\":[{\"index\":0,\"delta\":$delta}]}\n\n"); flush() }
+                        fun say(text: String) = chunk(Json.encodeToString(JsonObject.serializer(), JsonObject(mapOf("content" to JsonPrimitive(text)))))
+                        fun callTool(name: String, args: Map<String, String>) {
+                            val argsJson = JsonObject(args.mapValues { JsonPrimitive(it.value) }).toString()
+                            val fn = JsonObject(mapOf("name" to JsonPrimitive(name), "arguments" to JsonPrimitive(argsJson)))
+                            val c = JsonObject(mapOf("index" to JsonPrimitive(0), "id" to JsonPrimitive("t_${name}_${toolResults.size}"), "type" to JsonPrimitive("function"), "function" to fn))
+                            chunk(JsonObject(mapOf("tool_calls" to JsonArray(listOf(c)))).toString())
+                            write("data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n")
+                        }
+                        when {
+                            !system.startsWith("你在帮用户改一个项目里的代码") -> say("（这不是 Code 会话，不该走到这里）")
+                            // 读 → 改 → 看结果说话（允许就说改完了，拒绝就说不改了）
+                            "所有 greeting" in task -> when {
+                                toolResults.isEmpty() -> callTool("read_file", mapOf("path" to "a.txt"))
+                                toolResults.none { "改好了" in it || "用户拒绝了" in it } ->
+                                    callTool("edit_file", mapOf("path" to "a.txt", "old_text" to "greeting world", "new_text" to "hello world"))
+                                toolResults.any { "用户拒绝了" in it } -> say("好的，不改了。")
+                                else -> say("改完了。")
+                            }
+                            // old_text 在文件里找不到
+                            "不存在的文字" in task -> if (toolResults.isEmpty())
+                                callTool("edit_file", mapOf("path" to "a.txt", "old_text" to "根本不存在的文字", "new_text" to "x"))
+                            else say("没找到，那就算了。")
+                            // old_text 出现两次
+                            "重复的文字" in task -> if (toolResults.isEmpty())
+                                callTool("edit_file", mapOf("path" to "dup.txt", "old_text" to "dup", "new_text" to "dup2"))
+                            else say("分不清改哪一处，先不动。")
+                            // 计划档：模型硬要写文件
+                            "计划档" in task -> if (toolResults.isEmpty())
+                                callTool("write_file", mapOf("path" to "d.txt", "content" to "不该被建出来"))
+                            else say("知道了。")
+                            // 越界：先往项目文件夹外面写，再读一个绝对路径
+                            "越界" in task -> when {
+                                toolResults.isEmpty() -> callTool("write_file", mapOf("path" to "../evil.txt", "content" to "不该被写出来"))
+                                toolResults.size == 1 -> callTool("read_file", mapOf("path" to "C:\\Windows\\win.ini"))
+                                else -> say("知道了，只在项目文件夹里干活。")
+                            }
+                            // 跑一个很久的命令（等会要测「停下」）
+                            "长命令" in task -> if (toolResults.isEmpty())
+                                callTool("run_command", mapOf("command" to "Start-Sleep 30"))
+                            else say("跑完了。")
+                            // 改两处：改 a.txt，再新建 b.txt
+                            "改两处" in task -> when {
+                                toolResults.isEmpty() -> callTool("edit_file", mapOf("path" to "a.txt", "old_text" to "greeting world", "new_text" to "hello world"))
+                                toolResults.none { "写好了" in it } -> callTool("write_file", mapOf("path" to "b.txt", "content" to "新建的内容\n"))
+                                else -> say("两处都改了。")
+                            }
+                            // 主会话审查时补的（10-12）：项目里有个目录联接指到外面，外面的文件里有 SECRET_OUTSIDE
+                            "找联接" in task -> if (toolResults.isEmpty())
+                                callTool("grep", mapOf("pattern" to "SECRET_OUTSIDE"))
+                            else say("找完了。")
+                            // 改一个 GBK 编码的老文件
+                            "改GBK" in task -> if (toolResults.isEmpty())
+                                callTool("edit_file", mapOf("path" to "gbk.txt", "old_text" to "中文", "new_text" to "汉字"))
+                            else say("知道了。")
+                            // 同一个文件连改两次
+                            "连改两次" in task -> when (toolResults.size) {
+                                0 -> callTool("edit_file", mapOf("path" to "a.txt", "old_text" to "greeting world", "new_text" to "hello world"))
+                                1 -> callTool("edit_file", mapOf("path" to "a.txt", "old_text" to "hello world", "new_text" to "hey world"))
+                                else -> say("改了两次。")
+                            }
+                            else -> say("收到。")
+                        }
+                    }
+                }
+            }
+        }
+        fake.start(wait = false)
+    }
+
+    @AfterTest
+    fun cleanup() {
+        fake.stop(500, 1_000)
+        dir.deleteRecursively()
+    }
+
+    /** 装好一个能跑 Code 的电脑引擎：执行器、服务商（支持工具）、Code 设置都在。 */
+    private suspend fun engine(): Engine {
+        val e = Engine(Storage(dir))
+        e.codeRunner = com.guixing.jixunying.engine.code.CodeShell()
+        e.call(Command.SaveProvider(ProviderConfig("p1", "custom", "假服务商", "${base()}/v1", "sk-test", listOf(ModelInfo("code-model")))))
+        e.call(Command.SaveSettings(e.state.settings.copy(
+            code = CodeSettings(shell = "powershell", commandTimeoutSec = 120, maxSteps = 10, allowPhone = false),
+        )))
+        return e
+    }
+
+    private suspend fun codeConv(e: Engine, mode: CodeMode = CodeMode.MANUAL): String {
+        val r = e.call(Command.CodeCreate(project.absolutePath, "p1", "code-model", mode))
+        assertTrue(r.ok, r.message)
+        return r.data
+    }
+
+    private fun listOf(e: Engine, conv: String) = e.store.messages.value[conv].orEmpty()
+    private fun aiOf(e: Engine, conv: String) = listOf(e, conv).lastOrNull { it.role == Role.AI && it.senderId == CODE_ID }
+    private fun waitingOf(e: Engine, conv: String): ToolStep? = aiOf(e, conv)?.tools?.lastOrNull { it.approval == "waiting" }
+
+    private suspend fun await(timeoutMs: Long = 30_000, check: () -> Boolean) {
+        withTimeout(timeoutMs) { while (!check()) delay(30) }
+    }
+
+    /** 等某一步推出来等批准，返回那一步。 */
+    private suspend fun awaitWaiting(e: Engine, conv: String, kind: String? = null): ToolStep {
+        await { waitingOf(e, conv)?.let { kind == null || it.kind == kind } == true }
+        return waitingOf(e, conv)!!
+    }
+
+    private fun aiCount(e: Engine, conv: String) = listOf(e, conv).count { it.role == Role.AI && it.senderId == CODE_ID }
+
+    /** 发一条任务，返回发完之后至少该有几条回答消息（同一个会话连发两次时用来等新的那一条）。 */
+    private suspend fun sendTask(e: Engine, conv: String, text: String): Int {
+        val before = aiCount(e, conv)
+        assertTrue(e.call(Command.CodeSend(conv, text)).ok)
+        await { aiCount(e, conv) > before }
+        return before + 1
+    }
+
+    /** 等第 minAi 条（含）之后最后一条回答到某个状态。 */
+    private suspend fun awaitStatus(e: Engine, conv: String, st: MsgStatus, minAi: Int = 1, timeoutMs: Long = 30_000) {
+        await(timeoutMs) {
+            val ai = listOf(e, conv).filter { it.role == Role.AI && it.senderId == CODE_ID }
+            ai.size >= minAi && ai.last().status == st
+        }
+    }
+
+    /** 模型这几轮收到的所有工具结果（用来确认它「看到了什么」）。 */
+    private fun lastToolTexts() = requests.last()["messages"].toString()
+
+    // ———————————————— 主会话审查时补的（10-12） ————————————————
+
+    @Test
+    fun grepDoesNotFollowJunctionOutside() = runBlocking {
+        val outside = File(dir, "outside").apply { mkdirs(); File(this, "secret.txt").writeText("SECRET_OUTSIDE\n") }
+        val link = File(project, "link")
+        val p = ProcessBuilder("cmd.exe", "/c", "mklink", "/J", link.absolutePath, outside.absolutePath).redirectErrorStream(true).start()
+        p.waitFor()
+        if (!link.exists()) { println("建不了目录联接，跳过"); return@runBlocking }
+        try {
+            val e = engine()
+            val conv = codeConv(e)
+            e.call(Command.CodeSend(conv, "找联接里的东西"))
+            awaitStatus(e, conv, MsgStatus.DONE)
+            assertTrue("没找到" in lastToolTexts(), lastToolTexts())
+            assertFalse("secret.txt" in lastToolTexts(), "不能顺着联接读到项目外的文件：" + lastToolTexts())
+        } finally {
+            java.nio.file.Files.delete(link.toPath())
+        }
+    }
+
+    @Test
+    fun editRefusesNonUtf8File() = runBlocking {
+        val gbk = File(project, "gbk.txt").apply { writeBytes("老文件里的中文\n".toByteArray(charset("GBK"))) }
+        val before = gbk.readBytes()
+        val e = engine()
+        val conv = codeConv(e, CodeMode.ACCEPT_EDITS)
+        e.call(Command.CodeSend(conv, "改GBK文件"))
+        awaitStatus(e, conv, MsgStatus.DONE)
+        assertTrue(before.contentEquals(gbk.readBytes()), "GBK 文件一个字节都不能动")
+        assertTrue("不是 UTF-8" in lastToolTexts(), lastToolTexts())
+    }
+
+    @Test
+    fun rejectEarlierChangeAlsoMarksLaterOnSameFile() = runBlocking {
+        val e = engine()
+        val conv = codeConv(e, CodeMode.ACCEPT_EDITS)
+        e.call(Command.CodeSend(conv, "连改两次"))
+        awaitStatus(e, conv, MsgStatus.DONE)
+        assertEquals("hey world\n", File(project, "a.txt").readText())
+        val changes = aiOf(e, conv)!!.tools.mapNotNull { it.change }
+        assertEquals(2, changes.size)
+        val r = e.call(Command.CodeReview(conv, changes[0].id, false))
+        assertTrue(r.ok, r.message)
+        assertEquals("greeting world\n", File(project, "a.txt").readText(), "回到最早的样子")
+        assertTrue("后面的 1 处" in r.message, r.message)
+        await { aiOf(e, conv)!!.tools.mapNotNull { it.change }.all { it.review == "rejected" } }
+        // 再点一次拒绝不做事；已经撤销的不能再「接受」
+        assertTrue(e.call(Command.CodeReview(conv, changes[0].id, false)).ok)
+        assertFalse(e.call(Command.CodeReview(conv, changes[1].id, true)).ok)
+        assertEquals("greeting world\n", File(project, "a.txt").readText())
+    }
+
+    // ———————————————— 单子里的验收项 ————————————————
+
+    @Test
+    fun readEditWaitApprove() = runBlocking {
+        val e = engine()
+        val conv = codeConv(e)
+        e.call(Command.CodeSend(conv, "把所有 greeting 改成 hello"))
+        // 先读了 a.txt（读不用批准），然后要改 a.txt 时停下来等批准
+        val step = awaitWaiting(e, conv, "edit")
+        assertEquals("edit", step.kind)
+        assertEquals("a.txt", step.input)
+        assertTrue("greeting world" in step.output && "hello world" in step.output, step.output)
+        assertEquals("greeting world\n", File(project, "a.txt").readText(), "还没批准，文件不能动")
+
+        assertTrue(e.call(Command.CodeDecide(conv, step.id, true)).ok)
+        awaitStatus(e, conv, MsgStatus.DONE)
+        assertEquals("hello world\n", File(project, "a.txt").readText())
+
+        val ai = assertNotNull(aiOf(e, conv))
+        assertEquals("改完了。", ai.content.trim())
+        val change = assertNotNull(ai.tools.first { it.id == step.id }.change)
+        assertEquals("a.txt", change.path)
+        assertEquals(1, change.added)
+        assertEquals(1, change.removed)
+        assertFalse(change.created, "a.txt 本来就有")
+        assertEquals("", change.review)
+        assertEquals("allowed", ai.tools.first { it.id == step.id }.approval)
+    }
+
+    @Test
+    fun denyLeavesFileUntouched() = runBlocking {
+        val e = engine()
+        val conv = codeConv(e)
+        val before = File(project, "a.txt").readBytes()
+        e.call(Command.CodeSend(conv, "把所有 greeting 改成 hello"))
+        val step = awaitWaiting(e, conv, "edit")
+        assertTrue(e.call(Command.CodeDecide(conv, step.id, false)).ok)
+        awaitStatus(e, conv, MsgStatus.DONE)
+
+        assertContentEqualsString(before, File(project, "a.txt").readBytes(), "拒绝了就不能动文件")
+        val ai = assertNotNull(aiOf(e, conv))
+        assertEquals("好的，不改了。", ai.content.trim())
+        assertEquals("denied", ai.tools.first { it.id == step.id }.approval)
+        assertNull(ai.tools.first { it.id == step.id }.change, "拒绝了不算改动")
+        assertTrue("用户拒绝了" in lastToolTexts(), "模型要收到「用户拒绝了」")
+    }
+
+    @Test
+    fun pathOutsideProjectIsRefused() = runBlocking {
+        val e = engine()
+        val conv = codeConv(e)
+        e.call(Command.CodeSend(conv, "越界测试"))
+        awaitStatus(e, conv, MsgStatus.DONE)
+
+        assertFalse(File(dir, "evil.txt").exists(), "项目文件夹外面不能建文件")
+        assertTrue("外面" in lastToolTexts(), "越界要当面告诉模型")
+        assertTrue("win.ini" in lastToolTexts(), "绝对路径也走同一条检查")
+        // 越界在程序里就挡下了，文件没动，连一步都不留（没执行就不算走过一步）
+        val ai = assertNotNull(aiOf(e, conv))
+        assertTrue(ai.tools.isEmpty(), "越界不执行，消息里不留步骤")
+    }
+
+    @Test
+    fun planModeHasNoWriteTools() = runBlocking {
+        val e = engine()
+        val conv = codeConv(e, CodeMode.PLAN)
+        e.call(Command.CodeSend(conv, "计划档也想写文件"))
+        awaitStatus(e, conv, MsgStatus.DONE)
+
+        // 计划档压根不提供写文件 / 改文件的工具
+        assertTrue(requests.isNotEmpty())
+        assertTrue(requests.none { req -> toolNames(req).any { it == "write_file" || it == "edit_file" } },
+            "计划档不该把写文件的工具发给模型")
+        // 模型硬要调，程序也不执行
+        assertFalse(File(project, "d.txt").exists(), "计划档不能建出文件")
+        val ai = assertNotNull(aiOf(e, conv))
+        val step = ai.tools.single { it.kind == "write" }
+        assertEquals("denied", step.approval)
+        assertTrue("计划档" in lastToolTexts(), "模型要收到「计划档没执行」")
+    }
+
+    @Test
+    fun editFileReportsBadOldText() = runBlocking {
+        val e = engine()
+        val conv = codeConv(e)
+        val a = File(project, "a.txt").readText()
+        val dup = File(project, "dup.txt").readText()
+
+        val n1 = sendTask(e, conv, "改不存在的文字")
+        awaitStatus(e, conv, MsgStatus.DONE, minAi = n1)
+        assertEquals(a, File(project, "a.txt").readText(), "没找到就不能动")
+        assertTrue("没有这段文字" in lastToolTexts(), lastToolTexts())
+
+        val n2 = sendTask(e, conv, "改重复的文字")
+        awaitStatus(e, conv, MsgStatus.DONE, minAi = n2)
+        assertEquals(dup, File(project, "dup.txt").readText(), "不唯一就不能动")
+        assertTrue("出现了 2 次" in lastToolTexts(), lastToolTexts())
+    }
+
+    @Test
+    fun stopWhileCommandRuns() = runBlocking {
+        val e = engine()
+        val conv = codeConv(e)
+        e.call(Command.CodeSend(conv, "跑个长命令"))
+        // 跑命令永远要批准
+        val step = awaitWaiting(e, conv, "run")
+        assertEquals("run", step.kind)
+        assertTrue("Start-Sleep" in step.input, step.input)
+        assertTrue(e.call(Command.CodeDecide(conv, step.id, true)).ok)
+        delay(600) // 让它真的跑起来
+        val t0 = System.currentTimeMillis()
+        e.call(Command.CodeStop(conv))
+        awaitStatus(e, conv, MsgStatus.STOPPED, timeoutMs = 15_000)
+        val took = System.currentTimeMillis() - t0
+        assertTrue(took < 15_000, "停下要快，不能等命令自己跑满 30 秒（用了 ${took}ms）")
+    }
+
+    @Test
+    fun reviewRejectAndRevertTask() = runBlocking {
+        val e = engine()
+        val conv = codeConv(e)
+        val aBefore = File(project, "a.txt").readText()
+        e.call(Command.CodeSend(conv, "改两处"))
+        assertTrue(e.call(Command.CodeDecide(conv, awaitWaiting(e, conv, "edit").id, true)).ok)
+        assertTrue(e.call(Command.CodeDecide(conv, awaitWaiting(e, conv, "write").id, true)).ok)
+        awaitStatus(e, conv, MsgStatus.DONE)
+
+        val ai = assertNotNull(aiOf(e, conv))
+        assertTrue(File(project, "b.txt").exists(), "新建的文件要在")
+        val editChange = assertNotNull(ai.tools.first { it.kind == "edit" }.change)
+        assertTrue(ai.tools.first { it.kind == "write" }.change!!.created, "b.txt 是新建的")
+
+        // 拒绝第一处：a.txt 恢复成改之前
+        assertTrue(e.call(Command.CodeReview(conv, editChange.id, false)).ok)
+        assertEquals(aBefore, File(project, "a.txt").readText())
+        assertEquals("rejected", aiOf(e, conv)!!.tools.first { it.id == editChange.id }.change!!.review)
+
+        // 撤销整条回答：b.txt（新建的）删掉
+        assertTrue(e.call(Command.CodeRevertTask(conv, ai.id)).ok)
+        assertFalse(File(project, "b.txt").exists(), "撤销要把新建的文件删掉")
+        assertTrue(aiOf(e, conv)!!.tools.all { it.change == null || it.change.review == "rejected" })
+    }
+
+    @Test
+    fun diffHasHunksAndCounts() = runBlocking {
+        val e = engine()
+        val conv = codeConv(e)
+        e.call(Command.CodeSend(conv, "把所有 greeting 改成 hello"))
+        assertTrue(e.call(Command.CodeDecide(conv, awaitWaiting(e, conv, "edit").id, true)).ok)
+        awaitStatus(e, conv, MsgStatus.DONE)
+
+        val change = assertNotNull(aiOf(e, conv)).tools.first { it.change != null }.change!!
+        val r = e.call(Command.CodeDiff(conv, change.id))
+        assertTrue(r.ok, r.message)
+        assertTrue("@@ " in r.data, r.data)
+        assertTrue("-greeting world" in r.data, r.data)
+        assertTrue("+hello world" in r.data, r.data)
+        assertTrue("--- a/a.txt" in r.data && "+++ b/a.txt" in r.data, r.data)
+    }
+
+    @Test
+    fun ledgerTaggedCodeAndNoRecorder() = runBlocking {
+        val e = engine()
+        val conv = codeConv(e)
+        e.call(Command.CodeSend(conv, "把所有 greeting 改成 hello"))
+        assertTrue(e.call(Command.CodeDecide(conv, awaitWaiting(e, conv, "edit").id, true)).ok)
+        awaitStatus(e, conv, MsgStatus.DONE)
+        delay(200) // 记账是异步写的
+
+        // 账本里这次调用记成 kind = "code"
+        val usageDir = File(dir, "usage")
+        val text = usageDir.listFiles().orEmpty().filter { it.name.endsWith(".jsonl") }.joinToString("\n") { it.readText() }
+        assertTrue("\"kind\":\"code\"" in text, text)
+        // 记录员的后台活没被叫到：每一轮请求都是 Code 的说明，没有记录员那一套
+        assertTrue(requests.isNotEmpty())
+        assertTrue(requests.all {
+            (it["messages"]!!.jsonArray.first().jsonObject["content"] as? JsonPrimitive)?.contentOrNull.orEmpty()
+                .startsWith("你在帮用户改一个项目里的代码")
+        }, "Code 会话不能触发压缩 / 挑记忆 / 点名 / 立场这些后台活")
+    }
+
+    // ———————————————— 手机经中转发来的 Code 指令 ————————————————
+
+    @Test
+    fun phoneCodeCommandsAreBlockedByDefault() = runBlocking {
+        val mqttPort = freePort()
+        val broker = io.moquette.broker.Server()
+        broker.startServer(io.moquette.broker.config.MemoryConfig(Properties().apply {
+            setProperty("port", mqttPort.toString())
+            setProperty("host", "127.0.0.1")
+            setProperty("websocket_port", "disabled")
+            setProperty("allow_anonymous", "true")
+            setProperty("persistence_enabled", "false")
+            setProperty("netty.mqtt.message_size", (1024 * 1024).toString())
+            setProperty("data_path", File(dir, "mqtt").absolutePath)
+        }))
+        val pcDir = File(dir, "pc").also { it.mkdirs() }
+        val pc = Engine(Storage(pcDir))
+        pc.codeRunner = com.guixing.jixunying.engine.code.CodeShell()
+        pc.call(Command.SaveProvider(ProviderConfig("p1", "custom", "假服务商", "${base()}/v1", "sk-test", listOf(ModelInfo("code-model")))))
+        pc.call(Command.SaveSettings(pc.state.settings.copy(
+            relay = RelaySettings(true, listOf("tcp://127.0.0.1:$mqttPort"), "测试电脑"),
+            code = CodeSettings(shell = "powershell", commandTimeoutSec = 120, maxSteps = 10, allowPhone = false),
+        )))
+        val relay = RelayHost(pc)
+        relay.restart()
+        try {
+            withTimeout(15_000) { while (!pc.state.relayStatus.startsWith("已连上")) delay(100) }
+            val code = PairingCode(pc.state.hostId, pc.state.pairingSecret, "测试电脑", pc.state.settings.relay.brokers)
+            val phoneEngine = Engine(Storage(File(dir, "phone")), isPhone = true)
+            val hub = Hub(phoneEngine, linkFactory = { RelayLink(it) }, pairer = { c, n -> pairWithHost(c, n) }, deviceName = "测试手机")
+            assertTrue(hub.pair(code).isSuccess)
+            val remote = assertNotNull(hub.remote.value)
+            withTimeout(20_000) { while (remote.conn.value !is ConnState.Connected) delay(100) }
+
+            // 电脑上没打开开关：写操作的指令一律被拦下
+            val blocked = remote.call(Command.CodeCreate(project.absolutePath, "p1", "code-model"))
+            assertFalse(blocked.ok, blocked.message)
+            assertTrue("没打开「允许手机用 Code 栏」" in blocked.message, blocked.message)
+            val send = remote.call(Command.CodeSend("随便一个会话", "改点东西"))
+            assertFalse(send.ok)
+            assertTrue("没打开「允许手机用 Code 栏」" in send.message, send.message)
+            // 看差异是只读的，不拦（走到底就是「找不到这处改动」）
+            val diff = remote.call(Command.CodeDiff("随便一个会话", "没有这个改动"))
+            assertFalse(diff.ok)
+            assertTrue("找不到这处改动" in diff.message, diff.message)
+
+            // 电脑上打开开关：手机就能建 Code 会话了
+            pc.call(Command.SaveSettings(pc.state.settings.copy(code = pc.state.settings.code.copy(allowPhone = true))))
+            val ok = remote.call(Command.CodeCreate(project.absolutePath, "p1", "code-model"))
+            assertTrue(ok.ok, ok.message)
+            assertEquals(project.absolutePath, pc.state.conversation(ok.data)?.code?.folder)
+        } finally {
+            relay.stop()
+            broker.stopServer()
+        }
+    }
+
+    private fun toolNames(req: JsonObject): List<String> =
+        (req["tools"] as? JsonArray)?.mapNotNull {
+            it.jsonObject["function"]?.jsonObject?.get("name")?.jsonPrimitive?.content
+        }.orEmpty()
+
+    private fun assertContentEqualsString(expected: ByteArray, actual: ByteArray, message: String) {
+        assertTrue(expected.contentEquals(actual), message)
+    }
+}

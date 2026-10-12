@@ -32,9 +32,12 @@ object UsageKinds {
     const val IMAGE = "image"
     const val TEST = "test"
     const val OTHER = "other"
+    /** Code 栏的编码循环（docs/Code栏设计说明.md 第 11 节）。 */
+    const val CODE = "code"
 
     fun label(kind: String) = when (kind) {
         CHAT -> "成员回答"
+        CODE -> "Code 栏"
         "compact" -> "压缩聊天"
         "memory" -> "挑长期记忆"
         "addressing" -> "点名判断"

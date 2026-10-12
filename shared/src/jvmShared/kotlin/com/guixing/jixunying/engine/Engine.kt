@@ -77,6 +77,8 @@ import java.util.concurrent.ConcurrentHashMap
 const val PAINTER_ID = "tool:image"
 /** 会审模式里写汇总的「主席」（用裁判模型，不是成员）。 */
 const val CHAIR_ID = "tool:chair"
+/** Code 栏的回答（编码循环里的模型，不是成员）。 */
+const val CODE_ID = "tool:code"
 
 /** 一次回答最多调几次工具（搜索、读网页、画图）。 */
 const val MAX_TOOL_USES = 8
@@ -140,6 +142,28 @@ class Engine(
      * 手机上是 null —— 手机不在本机跑命令，手机上看到的 Code 会话第一期只读。
      */
     var codeRunner: com.guixing.jixunying.engine.code.CodeRunner? = null
+
+    /**
+     * Code 栏的编码循环（engine/CodeAgent.kt，docs/Code栏设计说明.md 第 3、11 节）：上面几条 Code 指令由 Engine 转给它，循环本身在它里面跑。
+     * 这里把引擎的几样能力交给它（消息怎么存、怎么推给界面、改前的备份放哪），循环那边不直接翻引擎内部。
+     */
+    private val codeAgent = CodeAgent(object : CodeHost {
+        override val state get() = this@Engine.state
+        override val runner get() = codeRunner
+        override val llmClient get() = llm
+        override fun backupOf(convId: String) = codeBackup(convId)
+        override fun messagesOf(convId: String) = snapshot(convId)
+        override fun newId() = this@Engine.newId()
+        override fun now() = this@Engine.now()
+        override fun addMessage(m: Message) = this@Engine.addMessage(m)
+        override fun updateMessage(convId: String, id: String, persist: Boolean, transform: (Message) -> Message) =
+            this@Engine.updateMessage(convId, id, persist, transform)
+        override fun appendDelta(convId: String, id: String, content: String, reasoning: String) =
+            this@Engine.appendDelta(convId, id, content, reasoning)
+        override fun launch(convId: String, block: suspend () -> Unit) = launchFor(convId) { block() }
+        override fun cancel(convId: String) = stop(convId)
+        override fun friendlyError(e: Throwable, p: ProviderConfig?) = this@Engine.friendlyError(e, p)
+    })
 
     /** 上一个配对密钥：手机补发的配对请求可能还用旧的，留 3 分钟。 */
     @Volatile private var previousSecret: Pair<String, Long>? = null
@@ -525,6 +549,8 @@ class Engine(
             CommandResult()
         }
         is Command.CodeCreate -> {
+            // 第一期 Code 栏只在电脑上用：手机本机没有跑命令的执行器（docs/Code栏设计说明.md 第 6、11 节）
+            if (codeRunner == null) return CommandResult(false, "这台设备不能跑 Code 栏（第一期只在电脑上用）")
             if (c.folder.isBlank()) return CommandResult(false, "还没选项目文件夹")
             val folder = File(c.folder.trim())
             if (!folder.exists()) return CommandResult(false, "文件夹不存在：${c.folder}")
@@ -555,6 +581,26 @@ class Engine(
             }
             CommandResult()
         }
+        is Command.CodeSend -> {
+            val conv = state.conversation(c.convId) ?: return CommandResult(false, "对话不存在")
+            if (conv.code == null) return CommandResult(false, "这不是 Code 会话")
+            if (codeRunner == null) return CommandResult(false, "这台设备不能跑 Code 栏（第一期只在电脑上用）")
+            if (c.text.isBlank()) return CommandResult(false, "空消息")
+            val userMsg = Message(newId(), conv.id, Role.USER, USER_ID, c.text.trim(), createdAt = now())
+            addMessage(userMsg)
+            touchConversation(conv.id, c.text)
+            // 循环本身在 CodeAgent 里；同一个会话已经在跑就排队，前一个跑完接着跑
+            codeAgent.submit(conv.id, userMsg)
+            CommandResult()
+        }
+        is Command.CodeStop -> { codeAgent.stop(c.convId); CommandResult() }
+        is Command.CodeDecide -> {
+            if (!codeAgent.decide(c.convId, c.stepId, c.allow)) return CommandResult(false, "这一步已经不在等你了")
+            CommandResult()
+        }
+        is Command.CodeDiff -> codeAgent.diff(c.convId, c.changeId)
+        is Command.CodeReview -> codeAgent.review(c.convId, c.changeId, c.accept)
+        is Command.CodeRevertTask -> codeAgent.revertTask(c.convId, c.messageId)
         is Command.SendMessage -> send(c)
         is Command.Stop -> { stop(c.convId); CommandResult() }
         is Command.DeleteMessage -> {
@@ -703,11 +749,12 @@ class Engine(
         }
     }
 
-    private fun launchFor(convId: String, block: suspend CoroutineScope.() -> Unit) {
+    private fun launchFor(convId: String, block: suspend CoroutineScope.() -> Unit): Job {
         val set = running.getOrPut(convId) { ConcurrentHashMap.newKeySet() }
         val job = scope.launch(block = block)
         set.add(job)
         job.invokeOnCompletion { set.remove(job) }
+        return job
     }
 
     private fun stop(convId: String) {
@@ -819,6 +866,7 @@ class Engine(
         m.role == Role.USER -> state.profile.name
         m.senderId == PAINTER_ID -> "画图助手"
         m.senderId == CHAIR_ID -> "会审主席"
+        m.senderId == CODE_ID -> "Code 助手"
         else -> state.member(m.senderId)?.name ?: "已移除的成员"
     }
 
@@ -2111,6 +2159,7 @@ class Engine(
                 m.role == Role.USER -> profile.name
                 m.senderId == PAINTER_ID -> "画图助手"
                 m.senderId == CHAIR_ID -> "会审主席"
+                m.senderId == CODE_ID -> "Code 助手"
                 else -> state.member(m.senderId)?.name ?: "已移除的成员"
             } + if (m.stage == "review") "·互评" else ""
             val sb = StringBuilder()

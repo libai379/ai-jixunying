@@ -42,6 +42,8 @@ class CodeSessionTest {
     /** 装好一个服务商的引擎（模型支不支持调用工具由调用方定），并把 Code 设置打开。 */
     private suspend fun engine(tools: Boolean = true): Engine {
         val e = Engine(Storage(dir))
+        // 电脑上跑命令的执行器（桌面端才装得上：安卓没有底层进程接口）。不设的话建不了 Code 会话。
+        e.codeRunner = com.guixing.jixunying.engine.code.CodeShell()
         e.call(Command.SaveProvider(ProviderConfig("p1", "custom", "假服务商", "http://127.0.0.1:1/v1", "sk-test", listOf(ModelInfo("code-model", tools = tools)))))
         val s = e.state.settings
         // 界面发回来的设置带着它认得的版本号（schema = 3），所以这里能改 Code 设置
@@ -99,6 +101,18 @@ class CodeSessionTest {
         assertTrue("不能调用工具" in noTools.message, noTools.message)
 
         assertTrue(e.state.conversations.isEmpty(), "一条都没建成，不能留下半个会话")
+    }
+
+    @Test
+    fun createFailsWithoutRunner() = runBlocking {
+        // 手机本机没有跑命令的执行器（codeRunner = null）：第一期只在电脑上用，建不了 Code 会话
+        val e = Engine(Storage(dir))
+        e.call(Command.SaveProvider(ProviderConfig("p1", "custom", "假服务商", "http://127.0.0.1:1/v1", "sk-test", listOf(ModelInfo("code-model", tools = true)))))
+        assertNull(e.codeRunner, "这台（手机）没有跑命令的执行器")
+        val r = e.call(Command.CodeCreate(project.absolutePath, "p1", "code-model"))
+        assertFalse(r.ok)
+        assertTrue("这台设备不能跑 Code 栏" in r.message, r.message)
+        assertTrue(e.state.conversations.isEmpty())
     }
 
     @Test

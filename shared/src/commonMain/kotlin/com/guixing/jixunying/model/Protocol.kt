@@ -37,6 +37,18 @@ sealed interface Command {
     ) : Command
     /** Code 栏：换权限档（只影响之后的步骤，已经跑完的不变）。 */
     @Serializable data class CodeSetMode(val convId: String, val mode: CodeMode) : Command
+    /** Code 栏：发一条任务，开始跑编码循环（同一个会话已经在跑就排队，前一个跑完接着跑）。 */
+    @Serializable data class CodeSend(val convId: String, val text: String) : Command
+    /** Code 栏：停下这个会话正在跑的循环（模型请求和正在跑的命令都停），消息状态变 STOPPED。 */
+    @Serializable data class CodeStop(val convId: String) : Command
+    /** Code 栏：批准或拒绝一步（写文件 / 改文件 / 跑命令）。针对具体某一步，没有超时自动放行。 */
+    @Serializable data class CodeDecide(val convId: String, val stepId: String, val allow: Boolean) : Command
+    /** Code 栏：某一处改动的统一差异（unified diff）。结果 data 是差异文本。 */
+    @Serializable data class CodeDiff(val convId: String, val changeId: String) : Command
+    /** Code 栏：接受或拒绝一处改动；拒绝 = 把文件恢复成改之前的样子（原来没有的文件就删掉）。 */
+    @Serializable data class CodeReview(val convId: String, val changeId: String, val accept: Boolean) : Command
+    /** Code 栏：撤销这一条回答里的全部改动（从后往前还原）。 */
+    @Serializable data class CodeRevertTask(val convId: String, val messageId: String) : Command
 
     @Serializable data class SendMessage(
         val convId: String,
