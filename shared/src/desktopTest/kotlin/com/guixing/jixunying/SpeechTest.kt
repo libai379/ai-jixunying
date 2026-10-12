@@ -607,6 +607,9 @@ class SpeechTest {
         assertFalse("E-" in asr, asr)
         assertTrue(Prices.describe(Prices.of("minimax", "speech-2.8-hd", baseUrl = "https://api.minimaxi.com/v1")!!).startsWith("3.5 元/万字符"))
         assertTrue(Prices.describe(Prices.of("mimo", "mimo-v2.5-asr", baseUrl = "https://api.xiaomimimo.com/v1")!!).startsWith("0.5 元/小时"))
+        // 向量模型只收输入：不写「输出 0」
+        val embed = Prices.describe(Prices.of("zhipu", "embedding-3", baseUrl = "https://open.bigmodel.cn/api/paas/v4")!!)
+        assertEquals("0.5 元/百万 token（只按输入算）", embed)
     }
 
     // ———————————————— 自动挑（SpeechPick） ————————————————

@@ -33,6 +33,24 @@ import com.guixing.jixunying.model.Usage
 import com.guixing.jixunying.ui.App
 import com.guixing.jixunying.ui.PickedFile
 import com.guixing.jixunying.ui.Platform
+import io.ktor.http.ContentType
+import io.ktor.http.HttpStatusCode
+import io.ktor.server.cio.CIO
+import io.ktor.server.engine.EmbeddedServer
+import io.ktor.server.engine.embeddedServer
+import io.ktor.server.request.receiveText
+import io.ktor.server.response.respondText
+import io.ktor.server.routing.post
+import io.ktor.server.routing.routing
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.jetbrains.skia.EncodedImageFormat
 import java.io.File
 import java.util.Base64
@@ -88,14 +106,71 @@ class ShotsTest {
         }
     }
 
-    private fun seed(root: File, docsDir: File): Engine {
+    /**
+     * 截图用的数据。按意思搜那几张要另开数据目录：switches 开着的时候引擎真的会去算向量
+     * （真算要联网、花钱），所以给它一个假向量服务器（semanticSwitches + zhipuUrl）。
+     */
+    /**
+     * 截图用的假向量服务器（真算一遍要联网、要花钱、还要等）：
+     * mode = hang 永远不回（看「正在算…」）、bad 回一句 Key 不对（看「出错了」）、ok 正常算（看算完的样子）。
+     * base 给服务商的 baseUrl 用，引擎会往 {base}/embeddings 发。
+     */
+    private class FakeEmbed(private val mode: String) {
+        private val port = java.net.ServerSocket(0).use { it.localPort }
+        val base = "http://127.0.0.1:$port/v1"
+        private val srv: EmbeddedServer<*, *> = embeddedServer(CIO, port = port) {
+            routing {
+                post("/v1/embeddings") {
+                    when (mode) {
+                        "hang" -> awaitCancellation()
+                        "bad" -> call.respondText("""{"error":{"message":"Invalid API key"}}""", ContentType.Application.Json, HttpStatusCode.Unauthorized)
+                        else -> {
+                            val req = Json.parseToJsonElement(call.receiveText()).jsonObject
+                            val input = req["input"]!!.jsonArray.map { it.jsonPrimitive.content }
+                            val dim = (req["dimensions"] as? JsonPrimitive)?.intOrNull ?: 8
+                            val data = JsonArray(input.mapIndexed { i, _ ->
+                                JsonObject(mapOf(
+                                    "index" to JsonPrimitive(i),
+                                    "embedding" to JsonArray(MutableList(dim) { 0.5f }.map { JsonPrimitive(it) }),
+                                ))
+                            })
+                            val out = JsonObject(mapOf(
+                                "data" to data,
+                                "usage" to JsonObject(mapOf("prompt_tokens" to JsonPrimitive(input.sumOf { it.length }))),
+                            ))
+                            call.respondText(out.toString(), ContentType.Application.Json)
+                        }
+                    }
+                }
+            }
+        }.also { it.start(wait = false) }
+        fun stop() = srv.stop(100, 200)
+    }
+
+    /** 等引擎算到某个样子（等不到就报错：截图错了要看见，不能悄悄拍一张看不出问题的图）。 */
+    private fun waitFor(what: String, ms: Long = 30_000, cond: () -> Boolean) {
+        val end = System.currentTimeMillis() + ms
+        while (System.currentTimeMillis() < end) {
+            if (cond()) return
+            Thread.sleep(50)
+        }
+        error("等不到：$what（等了 ${ms / 1000} 秒）")
+    }
+
+    private fun seed(
+        root: File,
+        docsDir: File,
+        semantic: com.guixing.jixunying.model.SemanticSettings = com.guixing.jixunying.model.SemanticSettings(),
+        zhipuUrl: String = "https://open.bigmodel.cn/api/paas/v4",
+        extraProviders: List<ProviderConfig> = emptyList(),
+    ): Engine {
         val providers = listOf(
             ProviderConfig("pd", "deepseek", "DeepSeek 4.1 Flash", "https://api.deepseek.com", "sk-1234567890abcdef", listOf(ModelInfo("deepseek-flash"))),
             ProviderConfig("pm", "minimax", "MiniMax 中国版", "https://api.minimaxi.com/v1", "eyJhbGciOi.xxxxx", listOf(ModelInfo("MiniMax-M3", vision = true))),
-            ProviderConfig("pz", "zhipu", "智谱开放平台", "https://open.bigmodel.cn/api/paas/v4", "abcd.efgh",
+            ProviderConfig("pz", "zhipu", "智谱开放平台", zhipuUrl, "abcd.efgh",
                 listOf(ModelInfo("GLM-5.3-Flash"), ModelInfo("cogview-3-flash", tools = false, imageGen = true))),
             ProviderConfig("pi", "mimo", "小米 MiMo", "https://api.xiaomimimo.com/v1", "sk-mimo-xxxx", listOf(ModelInfo("mimo-v2.6-flash"))),
-        )
+        ) + extraProviders
         val members = listOf(
             Member("ma", "阿德", "🧠", 0xFF5B6CFF, "pd", "deepseek-flash", "全能助手，回答准确、条理清楚，遇到事实问题先查证再说。",
                 thinking = com.guixing.jixunying.model.ThinkingMode.DEEP),
@@ -129,8 +204,7 @@ class ShotsTest {
                 MemoryItem("m2", "希望回答先给结论，少用术语", "偏好", "租房合同要注意什么", now, now),
                 MemoryItem("m3", "正在找房，预算每月 5000 以内", "事实", "租房合同要注意什么", now, now),
             ),
-            settings = Settings(proxy = "127.0.0.1:10809", docs = DocSettings(folders = listOf(docsDir.path))),
-            hostId = "h1", pairingSecret = Base64.getEncoder().encodeToString(ByteArray(16) { 1 }),
+            settings = Settings(proxy = "127.0.0.1:10809", docs = DocSettings(folders = listOf(docsDir.path)), semantic = semantic),            hostId = "h1", pairingSecret = Base64.getEncoder().encodeToString(ByteArray(16) { 1 }),
             // 记录员后台出过错：设置 → 记忆、立场档案页、侧栏「设置」上都要看得到
             bgProblems = listOf(
                 com.guixing.jixunying.model.BgProblem(com.guixing.jixunying.model.BgJob.STANCES,
@@ -403,7 +477,8 @@ class ShotsTest {
         for ((name, start) in wide) shoot("desktop-$name", 1280, 820, 1f, hub, desktop, start)
         val narrow = listOf("chat" to "conv:c1", "chat-long" to "conv:c6", "chat-council" to "conv:c7", "docs" to "docs", "stances" to "stances", "chat-stances" to "conv:c5", "costs" to "costs",
             "settings-home" to "settingshome", "settings-image" to "settings:IMAGE",
-            "settings-memory" to "settings:MEMORY", "settings-weixin" to "settings:WEIXIN", "settings-providers" to "settings:PROVIDERS",
+            "settings-memory" to "settings:MEMORY", "settings-semantic" to "settings:SEMANTIC",
+            "settings-weixin" to "settings:WEIXIN", "settings-providers" to "settings:PROVIDERS",
             "settings-search" to "settings:SEARCH", "settings-profile" to "settings:PROFILE", "settings-office" to "settings:OFFICE",
             // 手机上这一页是只读的（Code 栏只能在电脑上跑）
             "settings-code" to "settings:CODE")
@@ -445,6 +520,63 @@ class ShotsTest {
         shoot("phone-settings-members", 824, 1784, 2f, hub, phone, "settings:MEMBERS")
         shoot("phone-member-edit", 824, 1784, 2f, hub, phone, "settings:MEMBERS#edit")
         shoot("phone-devices", 824, 1784, 2f, hub, phone, "settings:DEVICES")
+
+        // ———— 按意思搜（1.7.0）————
+        // 这一页（都没开、自动挑中智谱）在上面那一圈里已经出了：desktop-settings-semantic / phone-settings-semantic。
+        // 这里补：估算弹窗、进度、正在算、出错、要重算、换服务商前的确认。
+        shoot("desktop-settings-semantic-estimate", 1280, 1300, 1f, hub, desktop, "settings:SEMANTIC#estimate")
+        shoot("phone-settings-semantic-estimate", 824, 1784, 2f, hub, phone, "settings:SEMANTIC#estimate")
+        shoot("desktop-settings-semantic-rebuild", 1280, 1300, 1f, hub, desktop, "settings:SEMANTIC#rebuild")
+
+        // 另开一台引擎真的算一遍（假向量服务器：真算要联网、花钱、还要等）：进度、算完、换一家要重算
+        val embOk = FakeEmbed("ok")
+        val qwen = ProviderConfig("pq", "qwen", "千问 AI 平台", embOk.base, "sk-qwen-xxxx", listOf(ModelInfo("qwen3.8-max")))
+        val semiOn = com.guixing.jixunying.model.SemanticSettings(historyOn = true)
+        val doneEngine = seed(File(tmp, "sem-done"), docs, semantic = semiOn, zhipuUrl = embOk.base, extraProviders = listOf(qwen))
+        waitFor("聊天记录算完") {
+            val h = doneEngine.state.semanticProgress.history
+            h.total > 0 && !h.running && h.error.isBlank() && h.done >= h.total
+        }
+        val doneHub = Hub(doneEngine)
+        shoot("desktop-settings-semantic-done", 1280, 820, 1f, doneHub, desktop, "settings:SEMANTIC")
+        shoot("phone-settings-semantic-done", 824, 1784, 2f, doneHub, phone, "settings:SEMANTIC")
+        // 换到千问：以前用智谱算的不能用了 → 进度里标「要重新算一遍」，旁边一个「重新算一遍」按钮
+        kotlinx.coroutines.runBlocking {
+            doneEngine.call(com.guixing.jixunying.model.Command.SaveSettings(
+                doneEngine.state.settings.copy(semantic = semiOn.copy(providerId = "pq"))))
+        }
+        waitFor("标成要重新算") { doneEngine.state.semanticProgress.history.stale }
+        shoot("desktop-settings-semantic-stale", 1280, 820, 1f, doneHub, desktop, "settings:SEMANTIC")
+        shoot("phone-settings-semantic-stale", 824, 1784, 2f, doneHub, phone, "settings:SEMANTIC")
+        // 换了服务商 / 模型要重算：确认弹窗里按新那家的价格估（现在是千问，点回自动 = 智谱，弹窗显示智谱的价）
+        shoot("desktop-settings-semantic-change", 1280, 1300, 1f, doneHub, desktop, "settings:SEMANTIC#change")
+        // 深色下这一页也要看得清（进度条、那句「要重新算一遍」、重新算一遍按钮）
+        kotlinx.coroutines.runBlocking {
+            doneEngine.call(com.guixing.jixunying.model.Command.SaveSettings(doneEngine.state.settings.copy(darkMode = 2)))
+        }
+        shoot("desktop-dark-settings-semantic-stale", 1280, 820, 1f, doneHub, desktop, "settings:SEMANTIC")
+        shoot("phone-dark-settings-semantic-stale", 824, 1784, 2f, doneHub, phone, "settings:SEMANTIC")
+
+        // 正在算：假服务器一直不回
+        val embHang = FakeEmbed("hang")
+        val runEngine = seed(File(tmp, "sem-run"), docs, semantic = com.guixing.jixunying.model.SemanticSettings(docsOn = true), zhipuUrl = embHang.base)
+        waitFor("进度上写着正在算") { runEngine.state.semanticProgress.docs.running }
+        shoot("desktop-settings-semantic-running", 1280, 820, 1f, Hub(runEngine), desktop, "settings:SEMANTIC")
+
+        // 出错：假服务器回 401（进度里写引擎的原话，同时照「后台出错提示」那一套记一笔）
+        val embBad = FakeEmbed("bad")
+        val errEngine = seed(File(tmp, "sem-bad"), docs, semantic = com.guixing.jixunying.model.SemanticSettings(docsOn = true), zhipuUrl = embBad.base)
+        waitFor("进度上报出错") { errEngine.state.semanticProgress.docs.error.isNotBlank() }
+        shoot("desktop-settings-semantic-error", 1280, 820, 1f, Hub(errEngine), desktop, "settings:SEMANTIC")
+
+        // 一家能算的都没有（把智谱删了）：整页灰掉，顶上写清楚去哪儿加
+        val noEmb = seed(File(tmp, "sem-none"), docs)
+        kotlinx.coroutines.runBlocking { noEmb.call(com.guixing.jixunying.model.Command.DeleteProvider("pz")) }
+        shoot("desktop-settings-semantic-noprovider", 1280, 820, 1f, Hub(noEmb), desktop, "settings:SEMANTIC")
+        shoot("phone-settings-semantic-noprovider", 824, 1784, 2f, Hub(noEmb), phone, "settings:SEMANTIC")
+        // 假服务器收工（正在挂着的那个请求会失败，等引擎把状态写完再删临时目录）
+        listOf(embOk, embHang, embBad).forEach { it.stop() }
+        Thread.sleep(500)
         // 深色
         kotlinx.coroutines.runBlocking { e.call(com.guixing.jixunying.model.Command.SaveSettings(e.state.settings.copy(darkMode = 2))) }
         shoot("desktop-dark-chat", 1280, 820, 1f, hub, desktop, "conv:c1")
@@ -459,6 +591,8 @@ class ShotsTest {
         shoot("desktop-dark-code-new", 1280, 820, 1f, hub, desktop, "newcode")
         // 深色：设置 → 语音（这一页有单选框、滑块、开关、按钮，都要看得清）
         shoot("desktop-dark-settings-speech", 1280, 820, 1f, hub, av, "settings:SPEECH")
+        // 深色：设置 → 按意思搜（都没开的样子）
+        shoot("desktop-dark-settings-semantic", 1280, 820, 1f, hub, desktop, "settings:SEMANTIC")
         shoot("desktop-dark-speaking", 1280, 820, 1f, Hub(HangingSpeech(e)), av, "conv:c1#speak")
         shoot("phone-dark-code", 824, 1784, 2f, hub, phone, "code:c8")
         // 设置 → Code 栏（深色）：顶上的 1 GB 提醒、备份大小、错误提示在深色下都要看得清

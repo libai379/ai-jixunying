@@ -23,6 +23,39 @@ class LiveSemanticTest {
         return d / (Math.sqrt(x) * Math.sqrt(y))
     }
 
+    /**
+     * 拿一份已经算好向量的数据（比如从模拟器导出来的 files/data）直接搜几句话，看按意思搜搜不搜得到、门槛挡不挡得住不相关的。
+     * 只在设了 JXY_LIVE_SEMANTIC_DATA=数据文件夹 时跑：整个文件夹复制到临时文件夹再用。每句问话算一次向量（几个 token）。
+     */
+    @Test
+    fun searchWithRealVectors() = runBlocking {
+        val src = System.getenv("JXY_LIVE_SEMANTIC_DATA") ?: return@runBlocking
+        val tmp = kotlin.io.path.createTempDirectory("jxy-live-semantic-data").toFile()
+        try {
+            File(src).copyRecursively(tmp)
+            val e = Engine(Storage(tmp))
+            println("进度：${e.state.semanticProgress.history.text}")
+            // 每句问话对库里每一段的相似度（定门槛用：短问句对长段落，和两句短句子之间不一样）
+            val store = com.guixing.jixunying.engine.VectorStore(File(tmp, "vectors"))
+            val p = e.state.providers.first { Thinking.platformOf(it) == "zhipu" && it.enabled && it.apiKey.isNotBlank() }
+            val em = Embeddings { null }
+            val qs = listOf("保证金怎么退回来", "押金条款要注意什么", "房东扣钱有什么规定", "孩子发烧怎么办", "红烧肉怎么做", "how to get my deposit back")
+            val qv = em.embed(p, EmbedModels.ZHIPU, qs).vectors
+            qs.forEachIndexed { i, q ->
+                val hits = store.search(com.guixing.jixunying.engine.VectorStore.HISTORY, qv[i], 10)
+                println("相似度「$q」：" + hits.joinToString("、") { "%.3f".format(it.score) })
+            }
+            for (q in listOf("保证金怎么退回来", "房东扣钱有什么规定", "孩子发烧怎么办", "红烧肉怎么做", "how to get my deposit back")) {
+                val r = e.call(com.guixing.jixunying.model.Command.SearchHistory(q, 8))
+                val hits = com.guixing.jixunying.model.AppJson.decodeFromString(
+                    kotlinx.serialization.builtins.ListSerializer(com.guixing.jixunying.model.HistoryHit.serializer()), r.data)
+                println("搜「$q」：${hits.size} 条" + hits.joinToString("") { "\n    · ${it.convTitle} · ${it.sender}：${it.snippet.take(40)}" })
+            }
+        } finally {
+            tmp.deleteRecursively()
+        }
+    }
+
     @Test
     fun measureTokensAndSimilarity() = runBlocking {
         val src = System.getenv("JXY_LIVE_SEMANTIC") ?: return@runBlocking

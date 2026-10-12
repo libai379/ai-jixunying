@@ -226,6 +226,10 @@ object Prices {
         if (p.perSecond != null) return "${fmt(p.perSecond)} $unit/秒" + tail
         if (p.perHour != null) return "${fmt(p.perHour)} $unit/小时" + tail
         if (p.isFree) return "免费"
+        // 只收输入的（向量模型）：不写「输出 0」，读着绕
+        p.tiers.singleOrNull()?.takeIf { it.output == 0.0 && it.cached == null && it.input > 0.0 }?.let {
+            return "${fmt(it.input)} $unit/百万 token（只按输入算）" + tail
+        }
         val parts = p.tiers.mapIndexed { i, tier ->
             val head = if (p.tiers.size > 1) (if (tier.upTo == Int.MAX_VALUE) "更长：" else "输入≤${tier.upTo / 1000}K：") else ""
             head + "输入 ${fmt(tier.input)}" + (tier.cached?.let { " · 命中 ${fmt(it)}" } ?: "") + " · 输出 ${fmt(tier.output)}"

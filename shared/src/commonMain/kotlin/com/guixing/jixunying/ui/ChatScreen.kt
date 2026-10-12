@@ -444,7 +444,9 @@ private fun ToolStepView(t: ToolStep) {
         }
         AnimatedVisibility(open) {
             Column(Modifier.padding(start = 8.dp, top = 6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                if (t.note.isNotEmpty()) Text(t.note, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                // 说明不一定是出错（比如「这次按意思和字面合起来搜」）：真出错才用红色
+                if (t.note.isNotEmpty()) Text(t.note, style = MaterialTheme.typography.bodySmall,
+                    color = if (!t.ok || "出错" in t.note) MaterialTheme.colorScheme.error else Ext.c.subtle)
                 val platform = LocalPlatform.current
                 t.sources.forEachIndexed { i, s ->
                     Column(Modifier.clip(RoundedCornerShape(6.dp)).clickable { platform.openUrl(s.url) }.padding(4.dp)) {

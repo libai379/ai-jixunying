@@ -52,10 +52,14 @@ object EmbedModels {
 
     /**
      * 按意思搜的门槛：余弦相似度低于它的不算「意思相近」，不放进结果（不然库里随便什么都会被排进来）。
-     * 10-12 用智谱 embedding-3 真 Key 量了 3 个问题、15 句（LiveSemanticTest）：意思相近的 0.707～0.776，
-     * 不相关的 0.476～0.596，取中间的 0.62。别的模型没量过，先不设门槛（0 = 不挡），量过再加。
+     * 10-12 用智谱 embedding-3 真 Key 量了两种（LiveSemanticTest）：
+     * - 两句短句子之间：意思相近 0.707～0.776，不相关 0.476～0.596；
+     * - 短问句对库里 500 字一段的长回答（库里大多是这种）：相关的 0.39～0.60，不相关的 0.23～0.32。
+     * 两种范围重叠，一个数顾不全；先按第二种取中间的 0.36（当初按第一种定 0.62，模拟器上实测按意思一条都搜不到）。
+     * 代价：短消息之间不相关的（0.48～0.60）也会放进来，由成员自己看片段判断。样本少，未确认，用得多了再调。
+     * 别的模型没量过，先不设门槛（0 = 不挡）。
      */
-    fun minScore(model: String): Double = if (model == ZHIPU) 0.62 else 0.0
+    fun minScore(model: String): Double = if (model == ZHIPU) 0.36 else 0.0
 
     private val defaults = mapOf("zhipu" to ZHIPU, "qwen" to QWEN)
 

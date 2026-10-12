@@ -47,7 +47,7 @@ import kotlinx.coroutines.launch
 val LocalSnackbar = androidx.compose.runtime.staticCompositionLocalOf { SnackbarHostState() }
 
 enum class SettingsTab(val title: String) {
-    PROVIDERS("模型服务"), MEMBERS("AI 成员"), PROFILE("我的资料"), MEMORY("记忆"), SEARCH("联网搜索"), IMAGE("画图"), SPEECH("语音"),
+    PROVIDERS("模型服务"), MEMBERS("AI 成员"), PROFILE("我的资料"), MEMORY("记忆"), SEMANTIC("按意思搜"), SEARCH("联网搜索"), IMAGE("画图"), SPEECH("语音"),
     OFFICE("Word / Excel / PPT"),
     CODE("Code 栏"),
     WEIXIN("微信"), DEVICES("联机"), APPEARANCE("外观"), ABOUT("关于"),
@@ -148,6 +148,25 @@ class AppController(
                 val local = hub.local
                 val r = local.call(Command.SaveSettings(transform(local.store.state.value.settings).copy(schema = com.guixing.jixunying.model.Settings.SCHEMA)))
                 if (!r.ok) snackbar.showSnackbar(r.message.ifBlank { "保存失败" }, duration = SnackbarDuration.Long)
+            } finally {
+                settingsLock.unlock()
+            }
+        }
+    }
+
+    /**
+     * 改设置、改完接着做一件事（按意思搜换了服务商 / 模型要「重新算一遍」）。
+     * 设置得先落地再重算：不然重算的时候引擎还按旧的那家挑，又拿旧那家跑一遍、白花一次钱（1.7.0）。
+     */
+    fun updateSettingsThen(
+        transform: (com.guixing.jixunying.model.Settings) -> com.guixing.jixunying.model.Settings,
+        then: suspend () -> Unit,
+    ) {
+        scope.launch {
+            settingsLock.lock()
+            try {
+                val r = backend.call(Command.SaveSettings(transform(backend.store.state.value.settings).copy(schema = com.guixing.jixunying.model.Settings.SCHEMA)))
+                if (!r.ok) snackbar.showSnackbar(r.message.ifBlank { "保存失败" }, duration = SnackbarDuration.Long) else then()
             } finally {
                 settingsLock.unlock()
             }

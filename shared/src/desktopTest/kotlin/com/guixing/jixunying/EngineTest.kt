@@ -894,7 +894,11 @@ class EngineTest {
         requests.clear()
         e.call(Command.SendMessage(conv, "1.5 和 1.12 哪个大？"))
         withTimeout(30_000) {
-            while (e.store.messages.value[conv].orEmpty().filter { it.role == Role.AI }.let { ai -> ai.size < 5 || ai.any { it.status == MsgStatus.STREAMING } }) delay(50)
+            // 还要等「回答甲」换回真名：引擎在主席写完以后才另起一步换（Engine.runCouncil 末尾），
+            // 只等「都写完」偶尔会赶在换名之前查（10-12 全量跑时三次失败一次）
+            while (e.store.messages.value[conv].orEmpty().filter { it.role == Role.AI }.let { ai ->
+                    ai.size < 5 || ai.any { it.status == MsgStatus.STREAMING } || ai.filter { it.stage == "review" }.any { "（回答" !in it.content }
+                }) delay(50)
         }
         val ai = e.store.messages.value[conv]!!.filter { it.role == Role.AI }
         val reviews = ai.filter { it.stage == "review" }

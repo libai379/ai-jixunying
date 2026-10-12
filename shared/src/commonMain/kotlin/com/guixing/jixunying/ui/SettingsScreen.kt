@@ -41,6 +41,7 @@ import androidx.compose.material.icons.rounded.Forum
 import androidx.compose.material.icons.rounded.Groups
 import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.Language
+import androidx.compose.material.icons.rounded.ManageSearch
 import androidx.compose.material.icons.rounded.Menu
 import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.Palette
@@ -103,6 +104,7 @@ private fun tabIcon(t: SettingsTab): ImageVector = when (t) {
     SettingsTab.MEMBERS -> Icons.Rounded.Groups
     SettingsTab.PROFILE -> Icons.Rounded.Badge
     SettingsTab.MEMORY -> Icons.Rounded.Psychology
+    SettingsTab.SEMANTIC -> Icons.Rounded.ManageSearch
     SettingsTab.SEARCH -> Icons.Rounded.Language
     SettingsTab.IMAGE -> Icons.Rounded.Brush
     SettingsTab.SPEECH -> Icons.Rounded.Mic
@@ -190,6 +192,8 @@ private fun tabSummary(t: SettingsTab, s: AppState, ctl: AppController): String 
     SettingsTab.MEMBERS -> if (s.members.isEmpty()) "还没有" else "${s.members.size} 位"
     SettingsTab.PROFILE -> s.profile.name
     SettingsTab.MEMORY -> if (!s.settings.memory.enabled) "已关闭" else "${s.memories.size} 条"
+    // 按意思搜这一页读写的是「数据在哪台设备」（遥控电脑时是电脑上的），所以看 s 就行
+    SettingsTab.SEMANTIC -> SemanticUi.summary(s.settings.semantic, s.semanticProgress)
     SettingsTab.SEARCH -> if (s.settings.search.mode == SearchMode.AUTO) "自动" else engineLabel(s.settings.search.engine)
     SettingsTab.IMAGE -> ImagePick.resolve(s).firstOrNull()?.let { (if (ImagePick.isAuto(s)) "自动：" else "") + it.modelId } ?: "没有可用的"
     // 语音这一页读写的是这台设备自己的设置（手机上遥控电脑时也是本机的），所以这里看本机
@@ -213,6 +217,7 @@ private fun SettingsPage(ctl: AppController, state: AppState, tab: SettingsTab) 
                 SettingsTab.MEMBERS -> MembersPage(ctl, state)
                 SettingsTab.PROFILE -> ProfilePage(ctl, state)
                 SettingsTab.MEMORY -> MemoryPage(ctl, state)
+                SettingsTab.SEMANTIC -> SemanticPage(ctl)
                 SettingsTab.SEARCH -> SearchPage(ctl, state)
                 SettingsTab.IMAGE -> ImagePage(ctl, state)
                 SettingsTab.SPEECH -> SpeechPage(ctl)
