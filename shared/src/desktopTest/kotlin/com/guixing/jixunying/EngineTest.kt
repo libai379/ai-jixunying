@@ -683,6 +683,48 @@ class EngineTest {
         assertEquals(mine, e.state.settings.costs)
     }
 
+    /**
+     * 手填余额（2026-10-12）：查不了的平台照控制台填，之后按账本估算；填之前的调用不算；
+     * 智谱这类先扣资源包 token 再扣钱；旧版手机发来的 SaveCosts / SaveSettings 冲不掉；能清除。
+     */
+    @Test
+    fun manualBalance() = runBlocking {
+        val e = Engine(Storage(dir))
+        e.call(Command.SaveProvider(ProviderConfig("pi", "mimo", "小米", "${base()}/v1", "k", listOf(ModelInfo("mimo-v2.6-flash")))))
+        e.call(Command.SaveProvider(ProviderConfig("pz", "zhipu", "智谱", "https://open.bigmodel.cn/api/paas/v4", "abcd.efgh", listOf(ModelInfo("glm-5.3")))))
+        assertTrue(e.call(Command.SaveManualBalance("pi", com.guixing.jixunying.model.ManualBalance(10.0, "CNY", at = 0))).ok)
+        assertTrue(e.call(Command.SaveManualBalance("pz", com.guixing.jixunying.model.ManualBalance(5.0, "CNY", at = 0, packTokens = 1_000_000))).ok)
+        assertFalse(e.call(Command.SaveManualBalance("pz", com.guixing.jixunying.model.ManualBalance(5.0, "EUR", at = 0))).ok, "只认人民币、美元")
+        val at = e.state.settings.costs.manual["pi"]!!.at
+        assertTrue(at > 0, "保存时记下时间")
+        val ledger = com.guixing.jixunying.engine.Ledger(File(dir, "usage"))
+        fun rec(t: Long, pid: String, platform: String, model: String, prompt: Int, completion: Int) =
+            com.guixing.jixunying.model.UsageRecord(at = t, kind = "chat", providerId = pid, provider = pid, platform = platform, model = model, prompt = prompt, completion = completion)
+        // 填之前的不算
+        ledger.add(rec(at - 1000, "pi", "mimo", "mimo-v2.6-flash", 1_000_000, 1_000_000))
+        // 小米：100 万输入 + 100 万输出 = 1 + 2 = 3 元 → 约剩 7 元
+        ledger.add(rec(at + 1000, "pi", "mimo", "mimo-v2.6-flash", 1_000_000, 1_000_000))
+        // 智谱：150 万输入，资源包 100 万先扣，剩下 50 万按 glm-5.3 输入 8 元 / 百万 = 4 元 → 约剩 1 元，资源包扣光
+        ledger.add(rec(at + 2000, "pz", "zhipu", "glm-5.3", 1_500_000, 0))
+        suspend fun balances() = AppJson.decodeFromString(kotlinx.serialization.builtins.ListSerializer(com.guixing.jixunying.model.BalanceInfo.serializer()), e.call(Command.GetBalances).data).associateBy { it.providerId }
+        val list = balances()
+        assertTrue(list["pi"]!!.estimated && list["pi"]!!.ok)
+        assertEquals(7.0, list["pi"]!!.amount!!, 1e-9)
+        assertTrue("约剩 ¥7.00" in list["pi"]!!.text, list["pi"]!!.text)
+        assertEquals(1.0, list["pz"]!!.amount!!, 1e-9)
+        assertTrue("资源包 / 免费额度约剩 0 token" in list["pz"]!!.text, list["pz"]!!.text)
+
+        // 旧版手机：SaveCosts 里没有手填这块，SaveSettings 里连花费设置都没有
+        e.call(Command.SaveCosts(com.guixing.jixunying.model.CostSettings(usdRate = 7.2)))
+        e.call(Command.SaveSettings(e.state.settings.copy(costs = com.guixing.jixunying.model.CostSettings())))
+        assertEquals(7.2, e.state.settings.costs.usdRate)
+        assertEquals(setOf("pi", "pz"), e.state.settings.costs.manual.keys, "手填的还在")
+
+        assertTrue(e.call(Command.SaveManualBalance("pi", null)).ok)
+        assertEquals(setOf("pz"), e.state.settings.costs.manual.keys)
+        assertFalse(balances()["pi"]!!.estimated, "清除以后回到「到控制台看」")
+    }
+
     @Test
     fun platformNativeSearch() = runBlocking {
         val (e, _) = engineWithMembers("小智")

@@ -56,6 +56,8 @@ sealed interface Command {
     @Serializable data class SaveCosts(val costs: CostSettings) : Command
     /** 查各家余额（能查的直接查，查不了的给控制台链接）。结果 data 是 List<BalanceInfo> 的 JSON。 */
     @Serializable data object GetBalances : Command
+    /** 手动填 / 改 / 清除某个服务商的余额（balance = null 是清除）。单独一条指令：旧版手机发的 SaveCosts 不认识这块，不能让它冲掉。 */
+    @Serializable data class SaveManualBalance(val providerId: String, val balance: ManualBalance?) : Command
     /** 后台出错的提示「知道了」：先不显示（再出错还会提示）。 */
     @Serializable data class DismissBgProblem(val job: BgJob) : Command
     /** 搜所有对话的聊天内容。结果 data 是 List<HistoryHit> 的 JSON。 */

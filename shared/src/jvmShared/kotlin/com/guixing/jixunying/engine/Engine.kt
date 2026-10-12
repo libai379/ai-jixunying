@@ -394,12 +394,30 @@ class Engine(
         is Command.DismissBgProblem -> { bg.dismiss(c.job); CommandResult() }
         is Command.SaveCosts -> {
             if (c.costs.usdRate <= 0) return CommandResult(false, "汇率要大于 0")
-            updateState { it.copy(settings = it.settings.copy(costs = c.costs)) }
+            // 手填的余额只走 SaveManualBalance 改：1.5.0 的手机发来的 SaveCosts 里没有这块
+            updateState { it.copy(settings = it.settings.copy(costs = c.costs.copy(manual = it.settings.costs.manual))) }
+            CommandResult()
+        }
+        is Command.SaveManualBalance -> {
+            val b = c.balance
+            if (b != null && (b.amount.isNaN() || b.packTokens < 0 || b.currency !in setOf("CNY", "USD"))) return CommandResult(false, "金额或 token 数不对")
+            updateState { s ->
+                val m = s.settings.costs.manual.let { if (b == null) it - c.providerId else it + (c.providerId to b.copy(at = if (b.at > 0) b.at else now())) }
+                s.copy(settings = s.settings.copy(costs = s.settings.costs.copy(manual = m)))
+            }
             CommandResult()
         }
         is Command.GetBalances -> {
+            val manual = state.settings.costs.manual
             val list = coroutineScope {
-                state.providers.filter { it.enabled }.map { p -> async(Dispatchers.IO) { balances.query(p, now()) } }.awaitAll()
+                state.providers.filter { it.enabled }.map { p ->
+                    async(Dispatchers.IO) {
+                        val b = balances.query(p, now())
+                        val m = manual[p.id]
+                        // 接口查到了就用接口的；查不了、出错了，有手填的就按手填的估算
+                        if (m == null) b else if (b.ok) b.copy(manual = m) else withManual(b, p, m)
+                    }
+                }.awaitAll()
             }
             CommandResult(data = AppJson.encodeToString(kotlinx.serialization.builtins.ListSerializer(com.guixing.jixunying.model.BalanceInfo.serializer()), list))
         }
@@ -1197,6 +1215,20 @@ class Engine(
 
     /** 正在核实的议题（同一道题不同时跑两次，免得重复花钱）。 */
     private val verifying: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
+    /** 手填的余额：按填写以后这家的调用估算花了多少（CostReporter.manualEstimate），给出约剩多少。 */
+    private fun withManual(b: com.guixing.jixunying.model.BalanceInfo, p: ProviderConfig, m: com.guixing.jixunying.model.ManualBalance): com.guixing.jixunying.model.BalanceInfo {
+        val e = costs.manualEstimate(p.id, m)
+        val left = m.amount - e.spent
+        fun money(v: Double) = (if (m.currency == "USD") "$" else "¥") + "%.2f".format(v)
+        fun tokens(n: Long) = if (n >= 10_000) "%.1f 万 token".format(n / 10_000.0) else "$n token"
+        val text = buildString {
+            append("手填 ").append(money(m.amount)).append("，之后估算用了 ").append(money(e.spent)).append("，约剩 ").append(money(left))
+            if (m.packTokens > 0) append("；资源包 / 免费额度约剩 ").append(tokens(e.packLeft))
+            if (e.unpriced > 0) append("（有 ${e.unpriced} 次调用价格表里没有，没算进去）")
+        }
+        return b.copy(ok = true, amount = left, currency = m.currency, text = text, manual = m, estimated = true)
+    }
 
     /**
      * AI 核实一道题：出错、看不懂、没有能用的裁判，都记进后台出错提示（不悄悄停掉）。

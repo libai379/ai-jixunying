@@ -300,25 +300,27 @@ private fun BalancesCard(ctl: AppController) {
     var busy by remember { mutableStateOf(false) }
     var result by remember(ctl.remoteMode) { mutableStateOf(lastBalances[ctl.remoteMode]) }
     var failed by remember { mutableStateOf<String?>(null) }
+    var editing by remember { mutableStateOf<BalanceInfo?>(null) }
     val platform = LocalPlatform.current
+    fun query() {
+        busy = true; failed = null
+        ctl.run(Command.GetBalances, quiet = true) { r ->
+            busy = false
+            if (!r.ok) failed = r.message.ifBlank { "没查成（电脑上的 AI集训营 可能是老版本）" }
+            if (r.ok) runCatching { AppJson.decodeFromString(ListSerializer(BalanceInfo.serializer()), r.data) }.getOrNull()?.let {
+                val got = nowMillis() to it
+                result = got; lastBalances[ctl.remoteMode] = got
+            }
+        }
+    }
     SectionCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text("余额", style = MaterialTheme.typography.titleSmall)
-                Text(result?.let { "${formatTime(it.first)}查的" } ?: "用你填的 Key 去各家查；有的平台没有查余额的接口，给你控制台链接",
+                Text(result?.let { "${formatTime(it.first)}查的" } ?: "用你填的 Key 去各家查；没有查余额接口的平台，可以照控制台手动填，之后按花费估算",
                     style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
             }
-            Button(enabled = !busy, onClick = {
-                busy = true; failed = null
-                ctl.run(Command.GetBalances, quiet = true) { r ->
-                    busy = false
-                    if (!r.ok) failed = r.message.ifBlank { "没查成（电脑上的 AI集训营 可能是老版本）" }
-                    if (r.ok) runCatching { AppJson.decodeFromString(ListSerializer(BalanceInfo.serializer()), r.data) }.getOrNull()?.let {
-                        val got = nowMillis() to it
-                        result = got; lastBalances[ctl.remoteMode] = got
-                    }
-                }
-            }) { Text(if (busy) "正在查…" else if (result == null) "查余额" else "再查一次") }
+            Button(enabled = !busy, onClick = { query() }) { Text(if (busy) "正在查…" else if (result == null) "查余额" else "再查一次") }
         }
         failed?.let { TestResultBox(false, it) { failed = null } }
         result?.second?.forEach { b ->
@@ -328,12 +330,66 @@ private fun BalancesCard(ctl: AppController) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(b.provider, style = MaterialTheme.typography.bodyMedium)
                         if (b.unofficial) { Spacer(Modifier.width(6.dp)); Pill("非公开接口", Ext.c.subtle) }
+                        if (b.estimated) { Spacer(Modifier.width(6.dp)); Pill("手填 · 估算", Ext.c.subtle) }
                     }
                     Text(b.text, style = MaterialTheme.typography.bodySmall,
                         color = when { b.ok -> MaterialTheme.colorScheme.onSurface; b.supported -> MaterialTheme.colorScheme.error; else -> Ext.c.subtle })
+                    b.manual?.let { m ->
+                        Text(if (b.estimated) "${formatTime(m.at)} 填的；控制台上的数变了就重新填一次" else "接口查到了，手填的（${formatTime(m.at)}）没用上",
+                            style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
+                    }
                 }
-                if (!b.ok && b.consoleUrl.isNotBlank()) TextButton({ platform.openUrl(b.consoleUrl) }) { Text("去控制台 ›", style = MaterialTheme.typography.labelMedium) }
+                Column(horizontalAlignment = Alignment.End) {
+                    if ((!b.ok || b.estimated) && b.consoleUrl.isNotBlank()) TextButton({ platform.openUrl(b.consoleUrl) }) { Text("去控制台 ›", style = MaterialTheme.typography.labelMedium) }
+                    if (!b.ok || b.manual != null) TextButton({ editing = b }) { Text(if (b.manual != null) "改手填" else "手填余额", style = MaterialTheme.typography.labelMedium) }
+                }
             }
+        }
+    }
+    editing?.let { b -> ManualBalanceDialog(ctl, b, onSaved = { editing = null; query() }, onClose = { editing = null }) }
+}
+
+/**
+ * 手动填余额（用户 2026-10-12：「手动输入也要计算，如何计算去官网找说明」）。
+ * 填控制台上现在的可用余额；智谱、千问这类先扣资源包 / 免费额度的，再填还剩多少 token。保存时记下时间，之后按花费估算。
+ */
+@Composable
+private fun ManualBalanceDialog(ctl: AppController, b: BalanceInfo, onSaved: () -> Unit, onClose: () -> Unit) {
+    val state by ctl.backend.store.state.collectAsState()
+    val rule = state.provider(b.providerId)?.let { com.guixing.jixunying.model.BillingRules.of(com.guixing.jixunying.model.Thinking.platformOf(it)) }
+    val old = b.manual
+    var amount by remember { mutableStateOf(old?.amount?.toString().orEmpty()) }
+    var usd by remember { mutableStateOf((old?.currency ?: b.currency) == "USD") }
+    var packWan by remember { mutableStateOf(old?.packTokens?.takeIf { it > 0 }?.let { (it / 10_000.0).toString() }.orEmpty()) }
+    var error by remember { mutableStateOf<String?>(null) }
+    val amountNum = amount.trim().toDoubleOrNull()
+    val packNum = if (packWan.isBlank()) 0.0 else packWan.trim().toDoubleOrNull()
+    val platform = LocalPlatform.current
+    AppDialog("手填余额 · ${b.provider}", onClose, width = 480.dp, actions = {
+        if (old != null) TextButton({ ctl.run(Command.SaveManualBalance(b.providerId, null), quiet = true) { onSaved() } }) { Text("清除手填") }
+        Spacer(Modifier.weight(1f))
+        TextButton(onClose) { Text("取消") }
+        Button(enabled = amountNum != null && packNum != null && packNum >= 0, onClick = {
+            val m = com.guixing.jixunying.model.ManualBalance(amountNum!!, if (usd) "USD" else "CNY", at = 0, packTokens = (packNum!! * 10_000).toLong())
+            ctl.run(Command.SaveManualBalance(b.providerId, m), quiet = true) { r -> if (r.ok) onSaved() else error = r.message.ifBlank { "没存上（电脑上的 AI集训营 可能是老版本）" } }
+        }) { Text("保存") }
+    }) {
+        Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState())) {
+            Text("照控制台上现在的「可用余额」填。保存时记下现在的时间，之后按这家的调用和价格表估算还剩多少（只是估算，以控制台为准）。",
+                style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
+            Spacer(Modifier.height(10.dp))
+            Segmented(listOf("CNY" to "人民币", "USD" to "美元"), if (usd) "USD" else "CNY") { usd = it == "USD" }
+            Spacer(Modifier.height(10.dp))
+            FieldLabel("可用余额（${if (usd) "美元" else "元"}）")
+            AppTextField(amount, { amount = it.filter { c -> c.isDigit() || c == '.' || c == '-' } }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
+            FieldLabel("资源包 / 免费额度还剩多少万 token（没有就空着）", if (rule?.packFirst == true) "这家先扣这个，扣完才扣钱" else null)
+            AppTextField(packWan, { packWan = it.filter { c -> c.isDigit() || c == '.' } }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
+            if (rule != null) {
+                Spacer(Modifier.height(10.dp))
+                Text("怎么扣钱（官方说明）：" + rule.text, style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
+                TextButton({ platform.openUrl(rule.source) }, contentPadding = PaddingValues(0.dp)) { Text("看官方原文 ›", style = MaterialTheme.typography.labelSmall) }
+            }
+            error?.let { Text(it, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error) }
         }
     }
 }

@@ -46,11 +46,29 @@ object UsageKinds {
     }
 }
 
-/** 花费设置：美元折人民币的汇率；用户改过的单价（键见 Prices.key）。 */
+/**
+ * 花费设置：美元折人民币的汇率；用户改过的单价（键见 Prices.key）；手动填的余额（键是服务商 id）。
+ * manual 只走 Command.SaveManualBalance 改：SaveCosts、SaveSettings 都保留原值（旧版手机不认识这块，发来的是空的）。
+ */
 @Serializable
 data class CostSettings(
     val usdRate: Double = 7.1,
     val overrides: Map<String, ModelPrice> = emptyMap(),
+    val manual: Map<String, ManualBalance> = emptyMap(),
+)
+
+/**
+ * 手动填的余额（2026-10-12 用户要的：查不了余额的平台自己填，「手动输入也要计算」）。
+ * 填的时候记下时间；之后按账本里这家的调用和价格表估算花了多少：先扣资源包 / 免费额度的 token，再扣钱（各家顺序见 BillingRules）。
+ * @param amount 填的时候控制台上的可用余额
+ * @param packTokens 资源包 / 免费额度还剩多少 token（会先扣这个；0 = 没有）
+ */
+@Serializable
+data class ManualBalance(
+    val amount: Double,
+    val currency: String = "CNY",
+    val at: Long,
+    val packTokens: Long = 0,
 )
 
 /**
@@ -109,6 +127,7 @@ data class CostReport(
  * @param text 给人看的：「可用 ¥12.34（其中赠送 ¥2.00）」或者查不了的原因
  * @param consoleUrl 查不了时去哪看
  * @param unofficial 用的是没写进公开文档的接口（可能哪天就不能用了）
+ * @param manual 这家手动填过余额（接口查不了时 amount / text 是按它估算的，estimated = true）
  */
 @Serializable
 data class BalanceInfo(
@@ -122,4 +141,6 @@ data class BalanceInfo(
     val consoleUrl: String = "",
     val unofficial: Boolean = false,
     val at: Long = 0,
+    val manual: ManualBalance? = null,
+    val estimated: Boolean = false,
 )

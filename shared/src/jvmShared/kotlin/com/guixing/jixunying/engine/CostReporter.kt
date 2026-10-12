@@ -115,6 +115,41 @@ class CostReporter(private val ledger: Ledger, private val stateOf: () -> AppSta
         return out
     }
 
+    /**
+     * 手填余额以后这家服务商花了多少（换成手填的币种）。按时间顺序：每条调用的 token 先从资源包 / 免费额度里扣
+     * （BillingRules：智谱、千问是先扣这个的），扣不完的部分按价格表算钱；画图按张算钱，不扣 token。
+     * @return spent 花了多少；packLeft 资源包还剩多少 token；unpriced 价格表里没有、没算进去的调用次数
+     */
+    fun manualEstimate(providerId: String, m: com.guixing.jixunying.model.ManualBalance): ManualEstimate {
+        val s = stateOf()
+        val rate = s.settings.costs.usdRate
+        var pack = m.packTokens
+        var spent = 0.0
+        var unpriced = 0
+        for (r in ledger.since(m.at).filter { it.providerId == providerId && it.at > m.at }) {
+            val tokens = (r.prompt + r.completion).toLong()
+            var share = 1.0
+            if (pack > 0 && r.images == 0 && tokens > 0) {
+                val use = minOf(pack, tokens)
+                pack -= use
+                share = (tokens - use).toDouble() / tokens
+            }
+            if (share <= 0.0) continue
+            val price = Prices.of(r.platform, r.model, s.settings.costs.overrides, s.provider(r.providerId)?.baseUrl.orEmpty())
+            val c = Prices.cost(r, price)
+            if (c == null || price == null) { unpriced++; continue }
+            val inCurrency = when {
+                price.currency == m.currency -> c
+                price.currency == "USD" -> c * rate
+                else -> c / rate
+            }
+            spent += inCurrency * share
+        }
+        return ManualEstimate(spent, pack, unpriced)
+    }
+
+    class ManualEstimate(val spent: Double, val packLeft: Long, val unpriced: Int)
+
     /** 测试和界面用：单条记录的钱（原币种）。 */
     fun costOf(r: UsageRecord): Double? {
         val s = stateOf()
