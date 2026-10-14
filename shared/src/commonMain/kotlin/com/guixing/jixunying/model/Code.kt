@@ -100,3 +100,20 @@ data class CodeSettings(
     /** 允许手机使用 Code 栏（第二期；默认关，手机上只能选电脑上已经建过的项目文件夹）。 */
     val allowPhone: Boolean = false,
 )
+
+/**
+ * 手机遥控电脑时 Code 栏能做什么（docs/Code栏设计说明.md 第 6 节，2026-10-13）。
+ * 真正把关的是电脑上的 engine/code/PhoneGate；这里是它和手机界面共用的那几条判断（界面据此决定显示哪些按钮）。
+ */
+object CodePhone {
+    /** 电脑上给这个会话选过「接受编辑」，手机才能切过去。旧会话没记 pcMode：电脑上建的按它现在的档算。 */
+    fun mayAcceptEdits(spec: CodeSpec): Boolean =
+        (spec.pcMode ?: if (!spec.fromPhone) spec.mode else null) == CodeMode.ACCEPT_EDITS
+
+    /** 手机上新建能选的档（不含「接受编辑」）。 */
+    val createModes: List<CodeMode> = listOf(CodeMode.MANUAL, CodeMode.PLAN)
+
+    /** 电脑上已有 Code 会话的项目文件夹（去重：不分大小写、不管结尾斜杠）。手机新建对话框只能从这里选。 */
+    fun folders(s: AppState): List<String> =
+        s.conversations.mapNotNull { it.code?.folder }.distinctBy { it.trimEnd('\\', '/').lowercase() }
+}

@@ -137,9 +137,9 @@ class PhoneGateTest {
     fun oldSessionsWithoutPcMode() {
         // 1.7.0 建的会话没有 pcMode：电脑上建的按它现在的档算，手机建的不算
         val pcSpec = com.guixing.jixunying.model.CodeSpec("G:\\p", "p1", "m", CodeMode.ACCEPT_EDITS)
-        assertTrue(PhoneGate.pcAllowsAcceptEdits(pcSpec))
-        assertFalse(PhoneGate.pcAllowsAcceptEdits(pcSpec.copy(mode = CodeMode.MANUAL)))
-        assertFalse(PhoneGate.pcAllowsAcceptEdits(pcSpec.copy(fromPhone = true)))
+        assertTrue(com.guixing.jixunying.model.CodePhone.mayAcceptEdits(pcSpec))
+        assertFalse(com.guixing.jixunying.model.CodePhone.mayAcceptEdits(pcSpec.copy(mode = CodeMode.MANUAL)))
+        assertFalse(com.guixing.jixunying.model.CodePhone.mayAcceptEdits(pcSpec.copy(fromPhone = true)))
     }
 
     @Test
@@ -159,6 +159,6 @@ class PhoneGateTest {
         e.call(Command.CodeCreate(project.absolutePath, "p1", "code-model"))
         e.call(Command.CodeCreate(project.absolutePath + "\\", "p1", "code-model"))
         e.call(Command.CodeCreate(other.absolutePath, "p1", "code-model"))
-        assertEquals(2, PhoneGate.folders(e.state).size)
+        assertEquals(2, com.guixing.jixunying.model.CodePhone.folders(e.state).size)
     }
 }

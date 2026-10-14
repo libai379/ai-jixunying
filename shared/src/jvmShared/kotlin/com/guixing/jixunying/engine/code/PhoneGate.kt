@@ -2,7 +2,7 @@ package com.guixing.jixunying.engine.code
 
 import com.guixing.jixunying.model.AppState
 import com.guixing.jixunying.model.CodeMode
-import com.guixing.jixunying.model.CodeSpec
+import com.guixing.jixunying.model.CodePhone
 import com.guixing.jixunying.model.Command
 import com.guixing.jixunying.model.CommandResult
 import java.io.File
@@ -41,13 +41,13 @@ object PhoneGate {
         if (!s.settings.code.allowPhone) return refuse(c, OFF)
         return when (c) {
             is Command.CodeCreate -> {
-                if (c.mode == CodeMode.ACCEPT_EDITS) return refuse(c, "手机上新建只能选「手动」或「计划」；要「接受编辑」请在电脑上切")
+                if (c.mode !in CodePhone.createModes) return refuse(c, "手机上新建只能选「手动」或「计划」；要「接受编辑」请在电脑上切")
                 val folder = knownFolder(c.folder, s) ?: return refuse(c, "手机上只能用电脑上已经建过 Code 会话的项目文件夹")
                 Verdict(c.copy(folder = folder, fromPhone = true))
             }
             is Command.CodeSetMode -> {
                 val spec = s.conversation(c.convId)?.code ?: return Verdict(c.copy(fromPhone = true)) // 不存在的会话交给引擎报错
-                if (c.mode == CodeMode.ACCEPT_EDITS && !pcAllowsAcceptEdits(spec)) {
+                if (c.mode == CodeMode.ACCEPT_EDITS && !CodePhone.mayAcceptEdits(spec)) {
                     return refuse(c, "「接受编辑」要在电脑上给这个会话打开，手机上只能换「手动」或「计划」")
                 }
                 Verdict(c.copy(fromPhone = true))
@@ -57,19 +57,11 @@ object PhoneGate {
         }
     }
 
-    /** 电脑上给这个会话选过「接受编辑」。旧会话没记 pcMode：电脑上建的就按它现在的档算。 */
-    fun pcAllowsAcceptEdits(spec: CodeSpec): Boolean =
-        (spec.pcMode ?: if (!spec.fromPhone) spec.mode else null) == CodeMode.ACCEPT_EDITS
-
     /** 手机给的文件夹对上电脑上已有 Code 会话的哪个（规范化后比，Windows 不分大小写）；对不上返回 null。 */
     fun knownFolder(asked: String, s: AppState): String? {
         val want = norm(asked) ?: return null
         return s.conversations.mapNotNull { it.code?.folder }.firstOrNull { norm(it).equals(want, ignoreCase = true) }
     }
-
-    /** 电脑上已有 Code 会话的项目文件夹（去重，手机新建对话框里列这些）。 */
-    fun folders(s: AppState): List<String> =
-        s.conversations.mapNotNull { it.code?.folder }.distinctBy { norm(it)?.lowercase() ?: it }
 
     private fun norm(p: String): String? {
         val t = p.trim().removeSurrounding("\"").trim()
