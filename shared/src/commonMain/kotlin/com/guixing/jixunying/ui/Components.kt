@@ -205,7 +205,9 @@ fun AppDialog(
                     }
                 }
                 Spacer(Modifier.size(10.dp))
-                Column(Modifier.heightIn(max = 620.dp)) { content() }
+                // 内容区：最高 620，但窗口矮的时候先让出标题和底下按钮的位置、剩下的才给内容（weight，不占满）。
+                // 以前固定 620，窗口矮（用户 10-14 截图：新建 Code 会话）时「建好」被挤到窗口外面，只看得见右上角的叉
+                Column(Modifier.weight(1f, fill = false).heightIn(max = 620.dp)) { content() }
                 Row(Modifier.fillMaxWidth().padding(top = 16.dp), horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.End), verticalAlignment = Alignment.CenterVertically, content = actions)
             }
         }

@@ -514,6 +514,8 @@ class ShotsTest {
         shoot("desktop-code-tall", 1280, 1300, 1f, hub, desktop, "code:c8")
         shoot("desktop-code-diff", 1280, 820, 1f, hub, desktop, "code:c8#diff")
         shoot("desktop-code-new", 1280, 820, 1f, hub, desktop, "newcode")
+        // 窗口矮（用户 10-14 截图：「建好」被挤到窗口外）：按钮要一直在对话框底部看得见
+        shoot("desktop-code-new-short", 1280, 600, 1f, hub, desktop, "newcode")
         shoot("phone-code", 824, 1784, 2f, hub, phone, "code:c8")
         shoot("phone-code-tab", 824, 1784, 2f, hub, phone, "code")
         shoot("phone-code-new", 824, 1784, 2f, hub, phone, "newcode")
