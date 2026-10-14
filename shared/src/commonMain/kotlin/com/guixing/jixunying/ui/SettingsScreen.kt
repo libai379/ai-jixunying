@@ -940,6 +940,21 @@ private fun AboutPage(ctl: AppController) {
             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
+    Spacer(Modifier.height(12.dp))
+    // 开发者署名（用户 2026-10-14 定：用「癸星科技」这个名字）
+    SectionCard {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("开发", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+            Text(com.guixing.jixunying.model.APP_DEVELOPER, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
+        }
+        Spacer(Modifier.height(8.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("版本", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+            Text(com.guixing.jixunying.model.APP_VERSION, style = MaterialTheme.typography.bodyMedium, color = Ext.c.subtle)
+        }
+        Spacer(Modifier.height(12.dp))
+        Text("© 2026 ${com.guixing.jixunying.model.APP_DEVELOPER}", style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
+    }
 }
 
 /** 模型名输入框：能直接打字，右边箭头点开是这个服务商已知的模型（带看图、测评标记）。 */

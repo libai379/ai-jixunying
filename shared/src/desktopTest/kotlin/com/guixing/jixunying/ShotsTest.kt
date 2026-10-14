@@ -453,8 +453,9 @@ class ShotsTest {
         val tmp = kotlin.io.path.createTempDirectory("jxy-scroll").toFile()
         val hub = Hub(seed(File(tmp, "data"), File(tmp, "文档").apply { mkdirs() }))
         val desktop = DesktopPlatform { null }
-        // 侧栏位置（1280×820）：绳子剪几段 210、租房合同 260、聊了很久的对话 490；聊天区中间 (800, 400)
-        val c5 = Offset(140f, 210f); val c1 = Offset(140f, 260f); val c6 = Offset(140f, 490f); val chat = Offset(800f, 400f)
+        // 侧栏位置（1280×820）：绳子剪几段 299、租房合同 349、聊了很久的对话 579；聊天区中间 (800, 400)
+        // 10-14 侧栏改版后列表上面多了三张卡片，原来的 210 / 260 / 490 会点到卡片上（打开「我的文档」，后台扫描从别的线程改状态，截图偶发报错）
+        val c5 = Offset(140f, 299f); val c1 = Offset(140f, 349f); val c6 = Offset(140f, 579f); val chat = Offset(800f, 400f)
         val up = List(8) { chat to -30f }
         shootSteps("scroll-c1-then-long", hub, desktop, "conv:c1", listOf(c6 to 0f))
         shootSteps("scroll-up-then-c5", hub, desktop, "conv:c6", up + listOf(c5 to 0f))
