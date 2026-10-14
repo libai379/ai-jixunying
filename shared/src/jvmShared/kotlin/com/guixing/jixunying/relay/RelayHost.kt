@@ -1,6 +1,6 @@
 package com.guixing.jixunying.relay
 
-import com.guixing.jixunying.engine.CodeAgent
+import com.guixing.jixunying.engine.code.PhoneGate
 import com.guixing.jixunying.engine.Engine
 import com.guixing.jixunying.model.AppJson
 import com.guixing.jixunying.model.Event
@@ -102,9 +102,9 @@ class RelayHost(private val engine: Engine) {
                     if (f.wantState || first) enqueue(deviceId, WireFrame.Evt(Event.State(engine.remoteView(engine.state))))
                 }
                 is WireFrame.Req -> scope?.launch {
-                    // 手机遥控电脑：Code 栏的写操作默认拦下来（电脑上「设置 → Code 栏」打开「允许手机用 Code 栏」才放行）
-                    val gate = CodeAgent.gateFromPhone(f.command, engine.state.settings.code.allowPhone)
-                    val r = gate ?: engine.call(f.command)
+                    // 手机遥控电脑：先过 PhoneGate（Code 栏的写操作默认拦下；打开了也有限制；保存设置不许动 Code 栏那几项）
+                    val v = PhoneGate.check(f.command, engine.state)
+                    val r = v.refusal ?: engine.call(v.command)
                     enqueue(deviceId, WireFrame.Res(f.reqId, r))
                 }
                 else -> Unit

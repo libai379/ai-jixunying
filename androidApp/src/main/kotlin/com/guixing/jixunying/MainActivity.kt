@@ -340,6 +340,10 @@ class MainActivity : ComponentActivity() {
 
         override val canPlayAudio = true
 
+        override fun log(tag: String, text: String) {
+            android.util.Log.i(tag, text)
+        }
+
         override suspend fun playWav(bytes: ByteArray) {
             val file = withContext(Dispatchers.IO) {
                 File(cacheDir, "speak-${System.currentTimeMillis()}.wav").also { it.writeBytes(bytes) }
@@ -351,17 +355,29 @@ class MainActivity : ComponentActivity() {
                     mp = p
                     p.setDataSource(file.absolutePath)
                     p.prepare()
-                    kotlinx.coroutines.suspendCancellableCoroutine<Unit> { cont ->
-                        var done = false
-                        p.setOnCompletionListener { if (!done) { done = true; cont.resume(Unit) } }
-                        p.setOnErrorListener { _, what, extra ->
-                            if (!done) { done = true; cont.resumeWithException(IllegalStateException("这段音频放不出来（错误 $what/$extra）")) }
-                            true
+                    val dur = p.duration
+                    log("JxySpeech", "放音开始 ${bytes.size} 字节，时长 $dur 毫秒")
+                    // 兜底：「放完」回调万一不来（用户 10-13 报「只读第一句就卡住」，模拟器上没复现），
+                    // 过了这段的时长再多等 5 秒就当放完，接着放下一段，不让整条卡死
+                    val limit = if (dur > 0) dur + 5_000L else 10 * 60_000L
+                    val finished = kotlinx.coroutines.withTimeoutOrNull(limit) {
+                        kotlinx.coroutines.suspendCancellableCoroutine<Unit> { cont ->
+                            var done = false
+                            p.setOnCompletionListener { if (!done) { done = true; cont.resume(Unit) } }
+                            p.setOnErrorListener { _, what, extra ->
+                                if (!done) { done = true; cont.resumeWithException(IllegalStateException("这段音频放不出来（错误 $what/$extra）")) }
+                                true
+                            }
+                            cont.invokeOnCancellation { runCatching { p.stop() } } // 点了「停止」或者超时
+                            p.start()
                         }
-                        cont.invokeOnCancellation { runCatching { p.stop() } } // 点了「停止」
-                        p.start()
                     }
+                    if (finished == null) log("JxySpeech", "放完的回调没来，$limit 毫秒后当放完（播放位置 ${runCatching { p.currentPosition }.getOrDefault(-1)}）")
+                    else log("JxySpeech", "放音结束")
                 }
+            } catch (e: Throwable) {
+                log("JxySpeech", "放音出错或停止：${e::class.simpleName} ${e.message.orEmpty()}")
+                throw e
             } finally {
                 // 取消的时候也要 release，所以套 NonCancellable
                 withContext(kotlinx.coroutines.NonCancellable + Dispatchers.Main) { runCatching { mp?.release() } }

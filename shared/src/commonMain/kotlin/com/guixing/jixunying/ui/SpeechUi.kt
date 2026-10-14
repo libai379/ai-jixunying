@@ -152,8 +152,11 @@ class SpeechPlayer(private val ctl: AppController) {
                 fail(r.message.ifBlank { "这段文字读不出来（引擎没有返回内容）" })
                 return
             }
+            log("读 $messageId：${plan.label}，${plan.chunks.size} 段 ${plan.chunks.map { it.length }}")
             speak(local, plan)
+            log("读完 $messageId")
         } catch (e: CancellationException) {
+            log("停了 $messageId")
             throw e // 点了「停止」
         } catch (e: Throwable) {
             fail("读出来失败了：${reason(e)}")
@@ -199,7 +202,9 @@ class SpeechPlayer(private val ctl: AppController) {
 
     /** 让引擎合成一段，返回一段或多段 wav。用 Result 而不是抛异常：async 里抛会把旁边正在放的那段也取消掉。 */
     private suspend fun synth(local: Backend, plan: SpeechPlan, text: String): Result<List<ByteArray>> = try {
+        val t0 = kotlin.time.TimeSource.Monotonic.markNow()
         val r = local.call(Command.Speak(text, plan.providerId, plan.modelId, prepared = true))
+        log("合成 ${text.length} 字：${if (r.ok) "成功" else "失败 " + r.message}，${t0.elapsedNow().inWholeMilliseconds} 毫秒")
         if (!r.ok) {
             Result.failure(IllegalStateException(r.message.ifBlank { "服务商没有返回音频" }))
         } else {
@@ -210,10 +215,15 @@ class SpeechPlayer(private val ctl: AppController) {
     } catch (e: CancellationException) {
         throw e
     } catch (e: Throwable) {
+        log("合成 ${text.length} 字出错：${e::class.simpleName} ${e.message.orEmpty()}")
         Result.failure(e)
     }
 
+    /** 诊断日志（安卓进系统日志，tag JxySpeech；见 Platform.log）。 */
+    private fun log(text: String) = ctl.platform.log("JxySpeech", text)
+
     private fun fail(text: String) {
+        log("失败提示：$text")
         queue.clear()
         readingId = null
         preparing = false

@@ -34,8 +34,13 @@ data class CodeSpec(
     val providerId: String,
     val modelId: String,
     val mode: CodeMode = CodeMode.MANUAL,
-    /** 这个会话是从手机发起的（第二期用，先留着；电脑端要能明显标出来）。 */
+    /** 这个会话是从手机发起的（电脑端要明显标出来）。 */
     val fromPhone: Boolean = false,
+    /**
+     * 电脑上最后给这个会话选的权限档（2026-10-13，第二期）。手机不能比电脑放得更宽：
+     * 「接受编辑」只有电脑上选过，手机才能切过去（engine/code/PhoneGate）。null = 旧版建的会话或手机建的、电脑还没选过。
+     */
+    val pcMode: CodeMode? = null,
 )
 
 /**

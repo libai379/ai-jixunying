@@ -1,6 +1,5 @@
 package com.guixing.jixunying
 
-import com.guixing.jixunying.engine.CodeAgent
 import com.guixing.jixunying.engine.Engine
 import com.guixing.jixunying.engine.Storage
 import com.guixing.jixunying.model.AppJson
@@ -179,20 +178,6 @@ class CodeSessionTest {
         assertEquals("2", e.call(Command.CodeBackupSize).data)
         File(File(dir, "code"), "notes.txt").delete()
         assertEquals("0", e.call(Command.CodeBackupSize).data)
-    }
-
-    @Test
-    fun phoneCanStillAskForTheBackupSize() {
-        // 关着「允许手机用 Code 栏」（默认）：动手的指令都拒绝……
-        assertNotNull(CodeAgent.gateFromPhone(Command.CodeCreate(project.absolutePath, "p1", "code-model"), allowPhone = false))
-        assertNotNull(CodeAgent.gateFromPhone(Command.CodeSend("c1", "改一下"), allowPhone = false))
-        assertNotNull(CodeAgent.gateFromPhone(Command.CodeStop("c1"), allowPhone = false))
-        assertNotNull(CodeAgent.gateFromPhone(Command.CodeSetMode("c1", CodeMode.PLAN), allowPhone = false))
-        // ……只读的照常放行：看差异、看备份大小（设置 → Code 栏 要显示电脑上的数）
-        assertNull(CodeAgent.gateFromPhone(Command.CodeDiff("c1", "ch1"), allowPhone = false))
-        assertNull(CodeAgent.gateFromPhone(Command.CodeBackupSize, allowPhone = false))
-        // 电脑上自己发的不拦（gateFromPhone 只在收到手机上来的指令时调）
-        assertNull(CodeAgent.gateFromPhone(Command.CodeSend("c1", "改一下"), allowPhone = true))
     }
 
     @Test

@@ -61,6 +61,11 @@ interface Platform {
      * 协程被取消时（点了「停止」）要马上停下、把放音设备放掉，不要再出声。
      */
     suspend fun playWav(bytes: ByteArray) {}
+    /**
+     * 写一行诊断日志（不进界面）。安卓写进系统日志（插线后 adb logcat -s JxySpeech 能看），电脑上什么都不做。
+     * 2026-10-13 加：用户报「读出来有的只读第一句就卡住」，模拟器上复现不出来，留着日志等真机插线时看。
+     */
+    fun log(tag: String, text: String) {}
     /** 这台设备能不能录音（输入框旁边的话筒按钮）。默认不能。 */
     val canRecord: Boolean get() = false
     /**

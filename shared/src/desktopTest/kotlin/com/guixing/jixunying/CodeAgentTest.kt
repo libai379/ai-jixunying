@@ -537,11 +537,21 @@ class CodeAgentTest {
             assertFalse(diff.ok)
             assertTrue("找不到这处改动" in diff.message, diff.message)
 
-            // 电脑上打开开关：手机就能建 Code 会话了
+            // 手机自己发保存设置想打开开关、换外壳：Code 栏那几项保留电脑上的（10-13 审出的漏洞，PhoneGate）
+            val forged = remote.call(Command.SaveSettings(pc.state.settings.copy(code = CodeSettings(shell = "C:\\evil.exe", allowPhone = true))))
+            assertTrue(forged.ok, forged.message)
+            assertFalse(pc.state.settings.code.allowPhone, "手机不能自己打开「允许手机用 Code 栏」")
+            assertEquals("powershell", pc.state.settings.code.shell)
+            assertFalse(remote.call(Command.CodeCreate(project.absolutePath, "p1", "code-model")).ok)
+
+            // 电脑上打开开关：电脑上建过会话的文件夹，手机就能建 Code 会话了（标成手机发起）
             pc.call(Command.SaveSettings(pc.state.settings.copy(code = pc.state.settings.code.copy(allowPhone = true))))
+            assertFalse(remote.call(Command.CodeCreate(project.absolutePath, "p1", "code-model")).ok, "电脑上还没建过这个文件夹的会话")
+            assertTrue(pc.call(Command.CodeCreate(project.absolutePath, "p1", "code-model")).ok)
             val ok = remote.call(Command.CodeCreate(project.absolutePath, "p1", "code-model"))
             assertTrue(ok.ok, ok.message)
             assertEquals(project.absolutePath, pc.state.conversation(ok.data)?.code?.folder)
+            assertEquals(true, pc.state.conversation(ok.data)?.code?.fromPhone)
         } finally {
             relay.stop()
             broker.stopServer()

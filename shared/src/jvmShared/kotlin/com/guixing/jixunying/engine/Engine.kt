@@ -637,7 +637,8 @@ class Engine(
                 title = folder.name.ifBlank { folder.path },
                 memberIds = emptyList(),
                 createdAt = now(), updatedAt = now(),
-                code = CodeSpec(folder = folder.absolutePath, providerId = provider.id, modelId = model.id, mode = c.mode),
+                code = CodeSpec(folder = folder.absolutePath, providerId = provider.id, modelId = model.id, mode = c.mode,
+                    fromPhone = c.fromPhone, pcMode = if (c.fromPhone) null else c.mode),
             )
             convs[conv.id] = mutableListOf()
             updateState { it.copy(conversations = listOf(conv) + it.conversations) }
@@ -647,9 +648,11 @@ class Engine(
         is Command.CodeSetMode -> {
             val conv = state.conversation(c.convId) ?: return CommandResult(false, "对话不存在")
             val spec = conv.code ?: return CommandResult(false, "这不是 Code 会话")
-            if (spec.mode == c.mode) return CommandResult()
+            // 电脑上选的档记下来：手机能切到哪档以它为准（PhoneGate）
+            val next = spec.copy(mode = c.mode, pcMode = if (c.fromPhone) spec.pcMode else c.mode)
+            if (next == spec) return CommandResult()
             updateState { s ->
-                s.copy(conversations = s.conversations.map { if (it.id == conv.id) it.copy(code = spec.copy(mode = c.mode), updatedAt = now()) else it })
+                s.copy(conversations = s.conversations.map { if (it.id == conv.id) it.copy(code = next, updatedAt = now()) else it })
             }
             CommandResult()
         }
@@ -673,7 +676,7 @@ class Engine(
         is Command.CodeDiff -> codeAgent.diff(c.convId, c.changeId)
         is Command.CodeReview -> codeAgent.review(c.convId, c.changeId, c.accept)
         is Command.CodeRevertTask -> codeAgent.revertTask(c.convId, c.messageId)
-        // 只读：备份占了多少（手机发来也放行，见 CodeAgent.gateFromPhone 的说明）
+        // 只读：备份占了多少（手机发来也放行，见 engine/code/PhoneGate）
         is Command.CodeBackupSize -> CommandResult(data = codeBackupSize().toString())
         is Command.SendMessage -> send(c)
         is Command.Stop -> { stop(c.convId); CommandResult() }

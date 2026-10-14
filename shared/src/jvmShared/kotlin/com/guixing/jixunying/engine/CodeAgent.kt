@@ -677,17 +677,7 @@ class CodeAgent(private val host: CodeHost) {
         private const val WORK_BUDGET = 150_000
         /** 省略时最近几步原样留着。 */
         private const val KEEP_TAIL = 10
-
-        /**
-         * 手机经加密中转发来的指令：电脑上没打开「允许手机用 Code 栏」时，Code 栏的写操作一律拒绝。
-         * CodeDiff 只是看差异，放行。返回 null = 放行。
-         */
-        fun gateFromPhone(c: Command, allowPhone: Boolean): CommandResult? {
-            if (allowPhone) return null
-            val hit = c is Command.CodeCreate || c is Command.CodeSend || c is Command.CodeStop || c is Command.CodeDecide ||
-                c is Command.CodeSetMode || c is Command.CodeReview || c is Command.CodeRevertTask
-            return if (hit) CommandResult(false, "电脑上没打开「允许手机用 Code 栏」") else null
-        }
+        // 手机发来的指令怎么拦：见 engine/code/PhoneGate（安全核心）
     }
 }
 
