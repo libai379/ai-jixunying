@@ -43,6 +43,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
@@ -251,7 +252,8 @@ fun TapToSearchField(value: String, onChange: (String) -> Unit, placeholder: Str
     Row(
         modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).background(MaterialTheme.colorScheme.surface)
             .border(1.dp, Ext.c.border, RoundedCornerShape(10.dp))
-            .then(if (!active) Modifier.clickable { active = true; focusedOnce = false } else Modifier)
+            // 外面这一层不抢焦点（侧栏抽屉一拉开会把焦点给第一个能点的，显出一块灰底）；点了以后里面的输入框照常拿焦点
+            .then(if (!active) Modifier.focusProperties { canFocus = false }.clickable { active = true; focusedOnce = false } else Modifier)
             .padding(horizontal = 10.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {

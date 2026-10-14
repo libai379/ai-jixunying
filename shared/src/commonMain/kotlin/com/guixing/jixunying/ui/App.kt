@@ -328,7 +328,8 @@ private fun MainLayout(ctl: AppController) {
                 Box(Modifier.weight(1f).fillMaxHeight()) { MainContent(ctl, wide = true, openDrawer = {}) }
             }
         } else {
-            val drawer = rememberDrawerState(DrawerValue.Closed)
+            // 开发截图用：起始参数带 #drawer 就让手机上的侧栏一打开就展开（看侧栏改版的样子）
+            val drawer = rememberDrawerState(if (ctl.debugDialog == "drawer") DrawerValue.Open else DrawerValue.Closed)
             val scope = rememberCoroutineScope()
             // 返回键：先关侧栏；在设置的某一页就回设置首页；再关设置 / 文档页；最后才交给系统（退出）
             LocalPlatform.current.BackHandler(drawer.isOpen || ctl.settingsTab != null || ctl.page != null) {

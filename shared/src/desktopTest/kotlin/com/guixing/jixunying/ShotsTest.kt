@@ -518,6 +518,9 @@ class ShotsTest {
         shoot("phone-code-new", 824, 1784, 2f, hub, phone, "newcode")
         // 手机上顶栏只放得下文件夹最后一节：点一下弹完整路径
         shoot("phone-code-path", 824, 1784, 2f, hub, phone, "code:c8#path")
+        // 侧栏改版（2026-10-14 用户给的图）：手机上把侧栏拉出来看
+        shoot("phone-sidebar", 824, 1784, 2f, hub, phone, "conv:c1#drawer")
+        shoot("phone-sidebar-code", 824, 1784, 2f, hub, phone, "code:#drawer")
         // 侧栏里那条「停下了」（用户按了停止，不是做完）
         shoot("desktop-code-stopped", 1280, 820, 1f, hub, desktop, "code")
         shoot("desktop-code-stopped-conv", 1280, 820, 1f, hub, desktop, "code:c9")

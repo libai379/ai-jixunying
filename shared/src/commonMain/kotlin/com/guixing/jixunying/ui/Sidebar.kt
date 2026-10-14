@@ -1,8 +1,13 @@
 package com.guixing.jixunying.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material.icons.rounded.Tune
+import androidx.compose.material.icons.rounded.Flag
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -97,107 +102,137 @@ fun Sidebar(ctl: AppController, modifier: Modifier, onNavigate: () -> Unit) {
     val state by ctl.backend.store.state.collectAsState()
     var query by remember { mutableStateOf("") }
 
-    Column(modifier.background(Ext.c.sidebar).padding(horizontal = 12.dp)) {
-        Row(Modifier.padding(start = 6.dp, top = 16.dp, bottom = 14.dp), verticalAlignment = Alignment.CenterVertically) {
-            BrandMark()
-            Spacer(Modifier.width(10.dp))
-            Column {
-                Text("AI集训营", style = MaterialTheme.typography.titleMedium)
-                Text("多模型助手 · 数据只在本机", style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
-            }
-        }
-        DeviceSwitcher(ctl)
-        Spacer(Modifier.height(10.dp))
-        SidebarTabSwitch(ctl.sidebarTab) { ctl.sidebarTab = it }
-        Spacer(Modifier.height(10.dp))
-        if (ctl.sidebarTab == SidebarTab.CODE) {
-            CodeSessionSidebar(ctl, state, onNavigate)
-        } else {
-            ChatSessionSidebar(ctl, state, query, { query = it }, onNavigate)
-        }
-
-        Column(Modifier.padding(vertical = 10.dp)) {
-            NavRow(Icons.Rounded.FolderOpen, "我的文档", when {
-                !state.settings.docs.enabled -> "已关闭"
-                state.docs.needPermission -> "要授权"
-                state.docs.scanning -> "扫描中…"
-                else -> "${state.docs.count} 个"
-            }, dot = if (state.docs.needPermission) Ext.c.warning else null) { ctl.openPage(MainPage.DOCS); onNavigate() }
-            NavRow(Icons.Rounded.Insights, "立场档案", state.conversations.sumOf { it.stanceTopics }.let { if (it == 0) "还没有" else "$it 题" }) {
-                ctl.openPage(MainPage.STANCES); onNavigate()
-            }
-            NavRow(Icons.Rounded.Groups, "AI 成员", "${state.members.size} 位") { ctl.openSettings(SettingsTab.MEMBERS); onNavigate() }
-            NavRow(Icons.Rounded.Payments, "花费", null) { ctl.openPage(MainPage.COSTS); onNavigate() }
-            val platform = LocalPlatform.current
-            val remote by ctl.hub.remote.collectAsState()
-            val remoteConn = remote?.conn?.collectAsState()?.value
-            if (platform.isDesktop) {
-                NavRow(Icons.Rounded.PhoneAndroid, "手机联机", if (state.devices.isEmpty()) "未配对" else "${state.devices.size} 台",
-                    dot = if (state.relayStatus.startsWith("已连上")) Ext.c.success else null) {
-                    ctl.openSettings(SettingsTab.DEVICES); onNavigate()
-                }
-            } else {
-                NavRow(Icons.Rounded.Computer, "连接电脑", when (remoteConn) {
-                    null -> "未配对"
-                    is ConnState.Connected -> "已连接"
-                    ConnState.Connecting -> "连接中…"
-                    else -> "离线"
-                }, dot = when (remoteConn) { is ConnState.Connected -> Ext.c.success; null -> null; else -> MaterialTheme.colorScheme.error }) {
-                    ctl.openSettings(SettingsTab.DEVICES); onNavigate()
+    // 2026-10-14 按用户给的改版图排（「侧边栏改版 · 改前 vs 改后」）：
+    // 顶上 名字 → 「对话 | Code」标签和设备下拉一行 → 搜索框和「+」一行 → 我的文档 / 立场档案 / AI 成员三张小卡片 →
+    // 列表 → 最底下一行「花费」「设置」。原来在底下的「连接电脑 / 手机联机」收进了设备下拉。
+    val code = ctl.sidebarTab == SidebarTab.CODE
+    val codeAccess = CodeUi.access(LocalPlatform.current.isDesktop, ctl.remoteMode, state.settings.code.allowPhone)
+    Column(modifier.background(Ext.c.sidebar)) {
+        Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
+            // 接焦点用的空点（什么都不画）：手机上抽屉一拉开，系统把焦点交给侧栏里第一个能拿焦点的东西，
+            // 落在标签、下拉、「+」上都会显出一块灰色的焦点底色；让它落在这里
+            Box(Modifier.size(0.dp).focusable())
+            Row(Modifier.padding(start = 6.dp, top = 16.dp, bottom = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                BrandMark(36)
+                Spacer(Modifier.width(10.dp))
+                Column {
+                    Text("AI集训营", style = MaterialTheme.typography.titleMedium)
+                    Text("多模型助手 · 数据只在本机", style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
                 }
             }
+            Row(Modifier.fillMaxWidth().padding(start = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                SidebarTabs(ctl.sidebarTab) { if (it != ctl.sidebarTab) { ctl.sidebarTab = it; query = "" } }
+                Spacer(Modifier.weight(1f))
+                DeviceMenu(ctl, state, onNavigate)
+            }
+            Spacer(Modifier.height(10.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                TapToSearchField(query, { query = it }, if (code) "搜索 Code 会话" else "搜索对话", Modifier.weight(1f))
+                // 新对话 / 新建 Code 会话（Code 栏在这台设备上动不了时不给，见 CodeUi）
+                val canNew = !code || codeAccess.canAct
+                if (canNew) {
+                    Spacer(Modifier.width(8.dp))
+                    Box(
+                        Modifier.size(40.dp).clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.primary)
+                            .clickable { if (code) ctl.showNewCode = true else ctl.showNewChat = true; onNavigate() },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(Icons.Rounded.Add, if (code) "新建 Code 会话" else "新对话", Modifier.size(22.dp), tint = MaterialTheme.colorScheme.onPrimary)
+                    }
+                }
+            }
+            Spacer(Modifier.height(10.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                QuickCard(Icons.Rounded.FolderOpen, "我的文档", when {
+                    !state.settings.docs.enabled -> "已关闭"
+                    state.docs.needPermission -> "要授权"
+                    state.docs.scanning -> "扫描中…"
+                    else -> "${state.docs.count} 个"
+                }, dot = if (state.docs.needPermission) Ext.c.warning else null) { ctl.openPage(MainPage.DOCS); onNavigate() }
+                QuickCard(Icons.Rounded.Flag, "立场档案", state.conversations.sumOf { it.stanceTopics }.let { if (it == 0) "还没有" else "$it 题" }) {
+                    ctl.openPage(MainPage.STANCES); onNavigate()
+                }
+                QuickCard(Icons.Rounded.Groups, "AI 成员", "${state.members.size} 位") { ctl.openSettings(SettingsTab.MEMBERS); onNavigate() }
+            }
+            Spacer(Modifier.height(4.dp))
+            if (code) CodeSessionSidebar(ctl, state, query, codeAccess, onNavigate)
+            else ChatSessionSidebar(ctl, state, query, onNavigate)
+        }
+        HorizontalDivider(color = Ext.c.border)
+        Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            BottomItem(Icons.Rounded.Payments, "花费", null) { ctl.openPage(MainPage.COSTS); onNavigate() }
+            Spacer(Modifier.width(6.dp))
             // 记录员后台出了错：设置旁边亮红点。点进去照样是设置首页（以前直接跳「记忆」，
             // 出错提示没消之前每次点设置都进记忆，用户 2026-10-12 报的），首页里「记忆」那一项标红
             val bgBad = state.bgProblems.isNotEmpty()
-            NavRow(Icons.Rounded.Settings, "设置", if (bgBad) "后台出错" else null, dot = if (bgBad) MaterialTheme.colorScheme.error else null) {
-                ctl.openSettings(); onNavigate()
-            }
+            BottomItem(Icons.Rounded.Tune, "设置", if (bgBad) MaterialTheme.colorScheme.error else null) { ctl.openSettings(); onNavigate() }
         }
     }
 }
 
 private fun memberNames(state: AppState, c: Conversation) = c.memberIds.mapNotNull { state.member(it)?.name }.joinToString("、")
 
-/** 侧栏顶上「对话 | Code」两个并排的选项，当前选中的高亮。 */
+/** 「对话 | Code」两个文字标签，选中的那个变主色、底下一道短横线。 */
 @Composable
-private fun SidebarTabSwitch(tab: SidebarTab, onPick: (SidebarTab) -> Unit) {
-    Row(
-        Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.surface)
-            .border(1.dp, Ext.c.border, RoundedCornerShape(12.dp)).padding(3.dp),
-    ) {
+private fun SidebarTabs(tab: SidebarTab, onPick: (SidebarTab) -> Unit) {
+    Row(verticalAlignment = Alignment.Bottom) {
         SidebarTab.entries.forEach { t ->
             val on = t == tab
-            Box(
-                Modifier.weight(1f).clip(RoundedCornerShape(9.dp))
-                    .background(if (on) MaterialTheme.colorScheme.primary.copy(alpha = 0.14f) else Color.Transparent)
-                    .clickable { onPick(t) }.padding(vertical = 7.dp),
-                contentAlignment = Alignment.Center,
+            Column(
+                Modifier.clip(RoundedCornerShape(8.dp)).clickable { onPick(t) }.padding(horizontal = 8.dp, vertical = 4.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                Text(t.label, style = MaterialTheme.typography.labelLarge,
+                Text(t.label, style = MaterialTheme.typography.titleSmall,
                     color = if (on) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                     fontWeight = if (on) FontWeight.SemiBold else FontWeight.Normal)
+                Spacer(Modifier.height(4.dp))
+                Box(Modifier.width(22.dp).height(2.5.dp).clip(RoundedCornerShape(2.dp))
+                    .background(if (on) MaterialTheme.colorScheme.primary else Color.Transparent))
             }
         }
     }
 }
 
-/** 「对话」那一栏：新对话按钮、搜索、按时间分组的对话列表（Code 会话不在里面）。 */
+/** 搜索框下面那三张小卡片之一：图标、名字、一行状态（原来侧栏底下的「我的文档」「立场档案」「AI 成员」）。 */
 @Composable
-private fun ColumnScope.ChatSessionSidebar(ctl: AppController, state: AppState, query: String, onQuery: (String) -> Unit, onNavigate: () -> Unit) {
-        Button(
-            onClick = { ctl.showNewChat = true; onNavigate() },
-            modifier = Modifier.fillMaxWidth().height(42.dp),
-            shape = RoundedCornerShape(12.dp),
-            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
-        ) {
-            Icon(Icons.Rounded.Add, null, Modifier.size(18.dp))
-            Spacer(Modifier.width(6.dp))
-            Text("新对话")
+private fun RowScope.QuickCard(icon: androidx.compose.ui.graphics.vector.ImageVector, title: String, sub: String, dot: Color? = null, onClick: () -> Unit) {
+    Column(
+        Modifier.weight(1f).clip(RoundedCornerShape(14.dp)).background(MaterialTheme.colorScheme.surface)
+            .clickable(onClick = onClick).padding(horizontal = 10.dp, vertical = 10.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(icon, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (dot != null) {
+                Spacer(Modifier.weight(1f))
+                Box(Modifier.size(7.dp).clip(CircleShape).background(dot))
+            }
         }
-        Spacer(Modifier.height(10.dp))
-        TapToSearchField(query, onQuery, "搜索对话")
         Spacer(Modifier.height(8.dp))
+        Text(title, style = MaterialTheme.typography.labelLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(sub, style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
+}
 
+/** 最底下那一行的「花费」「设置」。 */
+@Composable
+private fun BottomItem(icon: androidx.compose.ui.graphics.vector.ImageVector, title: String, dot: Color?, onClick: () -> Unit) {
+    Row(
+        Modifier.clip(RoundedCornerShape(10.dp)).clickable(onClick = onClick).padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(icon, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        Spacer(Modifier.width(6.dp))
+        Text(title, style = MaterialTheme.typography.bodyMedium)
+        if (dot != null) {
+            Spacer(Modifier.width(5.dp))
+            Box(Modifier.size(7.dp).clip(CircleShape).background(dot))
+        }
+    }
+}
+
+/** 「对话」那一栏：按时间分组的对话列表（Code 会话不在里面）。新对话按钮和搜索框在 Sidebar 顶上。 */
+@Composable
+private fun ColumnScope.ChatSessionSidebar(ctl: AppController, state: AppState, query: String, onNavigate: () -> Unit) {
         // Code 会话只在「Code」那一栏列，这里不显示
         val list = state.conversations.filter { !it.isCode }
             .filter { query.isBlank() || it.title.contains(query, true) || memberNames(state, it).contains(query, true) }
@@ -257,28 +292,19 @@ private fun ColumnScope.ChatSessionSidebar(ctl: AppController, state: AppState, 
  * （标题、文件夹名、现在什么状态）。状态要看最后一条回答，所以打开这一栏时把这几个会话的记录取回来。
  */
 @Composable
-private fun ColumnScope.CodeSessionSidebar(ctl: AppController, state: AppState, onNavigate: () -> Unit) {
-    // 这台设备上能不能动手（电脑上照旧；手机要连着电脑、电脑上还开着「允许手机用 Code 栏」）：不能就不给新建
-    val access = CodeUi.access(LocalPlatform.current.isDesktop, ctl.remoteMode, state.settings.code.allowPhone)
-    if (access.canAct) {
-        Button(
-            onClick = { ctl.showNewCode = true; onNavigate() },
-            modifier = Modifier.fillMaxWidth().height(42.dp),
-            shape = RoundedCornerShape(12.dp),
-            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
-        ) {
-            Icon(Icons.Rounded.Add, null, Modifier.size(18.dp))
-            Spacer(Modifier.width(6.dp))
-            Text("新建 Code 会话")
-        }
-        Spacer(Modifier.height(8.dp))
-    }
-
+private fun ColumnScope.CodeSessionSidebar(ctl: AppController, state: AppState, query: String, access: CodeAccess, onNavigate: () -> Unit) {
+    // 「+」在 Sidebar 顶上（这台设备上动不了时不给，见 CodeUi）
     val allMessages by ctl.backend.store.messages.collectAsState()
-    val convs = state.conversations.filter { it.isCode }.sortedByDescending { it.updatedAt }
+    val all = state.conversations.filter { it.isCode }.sortedByDescending { it.updatedAt }
     // 状态靠最后一条回答判断；没取过记录的会话取一次（不弹提示）
-    androidx.compose.runtime.LaunchedEffect(convs.map { it.id }, ctl.backend) {
-        convs.forEach { c -> if (!ctl.backend.store.hasMessages(c.id)) ctl.run(Command.LoadMessages(c.id), quiet = true) }
+    androidx.compose.runtime.LaunchedEffect(all.map { it.id }, ctl.backend) {
+        all.forEach { c -> if (!ctl.backend.store.hasMessages(c.id)) ctl.run(Command.LoadMessages(c.id), quiet = true) }
+    }
+    val convs = all.filter { query.isBlank() || it.title.contains(query, true) || it.code?.folder.orEmpty().contains(query, true) }
+    if (all.isNotEmpty() && convs.isEmpty()) {
+        Text("没找到", style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle, modifier = Modifier.padding(12.dp))
+        Spacer(Modifier.weight(1f))
+        return
     }
     if (convs.isEmpty()) {
         Text(
@@ -396,20 +422,38 @@ internal fun codeStatus(messages: List<Message>): CodeStatus {
     }
 }
 
+/**
+ * 群聊的头像（2026-10-14 改版图）：最多四位成员，每位一个小圆、成员颜色打底、名字最后一个字（阿德 → 德），2×2 排；
+ * 两位时上下居中并排，三位时上面两位、下面一位居中；超过四位只画前四位。
+ */
 @Composable
-private fun NavRow(icon: androidx.compose.ui.graphics.vector.ImageVector, title: String, trailing: String?, dot: Color? = null, onClick: () -> Unit) {
-    Row(
-        Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).clickable(onClick = onClick).padding(horizontal = 10.dp, vertical = 9.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Icon(icon, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-        Spacer(Modifier.width(10.dp))
-        Text(title, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
-        if (dot != null) {
-            Box(Modifier.size(7.dp).clip(CircleShape).background(dot))
-            Spacer(Modifier.width(6.dp))
+private fun GroupAvatar(members: List<com.guixing.jixunying.model.Member>, size: androidx.compose.ui.unit.Dp = 36.dp) {
+    val cell = size / 2
+    val shown = members.take(4)
+    val slots = when (shown.size) {
+        2 -> listOf(0f to 0.5f, 1f to 0.5f)
+        3 -> listOf(0f to 0f, 1f to 0f, 0.5f to 1f)
+        else -> listOf(0f to 0f, 1f to 0f, 0f to 1f, 1f to 1f)
+    }
+    val fontSize = (cell.value * 0.5f).sp
+    Box(Modifier.size(size)) {
+        shown.forEachIndexed { i, m ->
+            val (x, y) = slots[i]
+            Box(
+                Modifier.offset(cell * x, cell * y).size(cell).padding(0.5.dp).clip(CircleShape).background(Color(m.color)),
+                contentAlignment = Alignment.Center,
+            ) {
+                // 行高等于字号、去掉字体自带的上下留白：不然小圆里的字会被往下挤、下半截被裁掉
+                Text(m.name.trim().takeLast(1).ifBlank { "?" }, color = Color.White, fontWeight = FontWeight.Bold, maxLines = 1,
+                    style = androidx.compose.ui.text.TextStyle(
+                        fontSize = fontSize, lineHeight = fontSize,
+                        lineHeightStyle = androidx.compose.ui.text.style.LineHeightStyle(
+                            androidx.compose.ui.text.style.LineHeightStyle.Alignment.Center,
+                            androidx.compose.ui.text.style.LineHeightStyle.Trim.Both,
+                        ),
+                    ))
+            }
         }
-        if (trailing != null) Text(trailing, style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
     }
 }
 
@@ -425,15 +469,10 @@ private fun ConversationRow(ctl: AppController, state: AppState, c: Conversation
             .clickable(onClick = onClick).padding(start = 8.dp, top = 7.dp, bottom = 7.dp, end = 2.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Box(Modifier.size(30.dp)) {
-            when {
-                members.isEmpty() -> MemberAvatar(null, 30.dp, emoji = "💬")
-                members.size == 1 -> MemberAvatar(members[0], 30.dp)
-                else -> {
-                    MemberAvatar(members[0], 21.dp)
-                    Box(Modifier.offset(9.dp, 9.dp)) { MemberAvatar(members[1], 21.dp) }
-                }
-            }
+        when {
+            members.isEmpty() -> MemberAvatar(null, 36.dp, emoji = "💬")
+            members.size == 1 -> MemberAvatar(members[0], 36.dp)
+            else -> GroupAvatar(members)
         }
         Spacer(Modifier.width(10.dp))
         Column(Modifier.weight(1f)) {

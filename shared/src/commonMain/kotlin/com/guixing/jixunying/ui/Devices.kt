@@ -14,10 +14,15 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Computer
+import androidx.compose.material.icons.rounded.ExpandMore
+import androidx.compose.material.icons.rounded.Link
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.PhoneAndroid
@@ -86,38 +91,74 @@ fun RemoteBanner(ctl: AppController) {
     }
 }
 
-/** 侧栏顶上的设备切换：本机 / 配对的电脑。只在手机配对过电脑后出现。 */
+/**
+ * 侧栏右上角的设备下拉（2026-10-14 用户给的侧栏改版图）：显示现在操作的是哪台，角上一个小点表示联机状态。
+ * 手机：下拉里是「本机」、配对过的电脑（带连接状态）、「连接电脑…」（原来侧栏底下那一项收进来了）；
+ *   点是绿的 = 连着电脑，红的 = 配对过但没连上，没配对就不显示点。
+ * 电脑：下拉里是「本机」和「手机联机…」；点是绿的 = 已经连上中转（手机能找到这台电脑）。
+ */
 @Composable
-fun DeviceSwitcher(ctl: AppController) {
+fun DeviceMenu(ctl: AppController, state: com.guixing.jixunying.model.AppState, onNavigate: () -> Unit) {
+    val platform = LocalPlatform.current
     val remote by ctl.hub.remote.collectAsState()
     val useRemote by ctl.hub.useRemote.collectAsState()
-    val r = remote ?: return
-    val conn by r.conn.collectAsState()
-    Row(
-        Modifier.fillMaxWidth().padding(bottom = 10.dp).clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.surface)
-            .border(1.dp, Ext.c.border, RoundedCornerShape(12.dp)).padding(3.dp),
-    ) {
-        @Composable
-        fun seg(selected: Boolean, icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, dot: Color?, onClick: () -> Unit) {
-            Row(
-                Modifier.weight(1f).clip(RoundedCornerShape(9.dp))
-                    .background(if (selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.12f) else Color.Transparent)
-                    .clickable(onClick = onClick).padding(vertical = 7.dp),
-                horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Icon(icon, null, Modifier.size(15.dp), tint = if (selected) MaterialTheme.colorScheme.primary else Ext.c.subtle)
-                Spacer(Modifier.width(5.dp))
-                Text(label, style = MaterialTheme.typography.labelMedium, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                    color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
-                if (dot != null) {
-                    Spacer(Modifier.width(5.dp))
-                    Box(Modifier.size(7.dp).clip(CircleShape).background(dot))
-                }
-            }
+    val conn = remote?.conn?.collectAsState()?.value
+    val onRemote = useRemote && remote != null
+    var open by remember { mutableStateOf(false) }
+    val dot: Color? = when {
+        platform.isDesktop -> if (state.relayStatus.startsWith("已连上")) Ext.c.success else null
+        conn == null -> null
+        conn is ConnState.Connected -> Ext.c.success
+        else -> MaterialTheme.colorScheme.error
+    }
+    val label = if (onRemote) remote!!.host.hostName.ifBlank { "电脑" } else "本机"
+    Box {
+        Row(
+            Modifier.clip(RoundedCornerShape(50)).background(MaterialTheme.colorScheme.surface)
+                .border(1.dp, Ext.c.border, RoundedCornerShape(50))
+                .clickable { open = true }.padding(start = 10.dp, end = 6.dp, top = 6.dp, bottom = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(if (onRemote || platform.isDesktop) Icons.Rounded.Computer else Icons.Rounded.PhoneAndroid, null,
+                Modifier.size(15.dp), tint = if (onRemote) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.width(5.dp))
+            Text(label, style = MaterialTheme.typography.labelMedium, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.widthIn(max = 96.dp),
+                color = if (onRemote) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface)
+            Icon(Icons.Rounded.ExpandMore, "切换设备", Modifier.size(16.dp), tint = Ext.c.subtle)
         }
-        seg(!useRemote, Icons.Rounded.PhoneAndroid, "本机", null) { ctl.hub.useRemote.value = false }
-        seg(useRemote, Icons.Rounded.Computer, r.host.hostName.ifBlank { "电脑" },
-            if (conn is ConnState.Connected) Ext.c.success else MaterialTheme.colorScheme.error) { ctl.hub.useRemote.value = true }
+        if (dot != null) {
+            Box(Modifier.align(Alignment.TopEnd).offset(x = 2.dp, y = (-2).dp).size(9.dp).clip(CircleShape)
+                .background(MaterialTheme.colorScheme.surface).padding(1.5.dp).clip(CircleShape).background(dot))
+        }
+        androidx.compose.material3.DropdownMenu(open, { open = false }) {
+            androidx.compose.material3.DropdownMenuItem(
+                { Text(if (platform.isDesktop) "本机（这台电脑）" else "本机（这台手机）") },
+                leadingIcon = { Icon(if (platform.isDesktop) Icons.Rounded.Computer else Icons.Rounded.PhoneAndroid, null, Modifier.size(18.dp)) },
+                trailingIcon = { if (!onRemote) Icon(Icons.Rounded.Check, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary) },
+                onClick = { open = false; ctl.hub.useRemote.value = false },
+            )
+            remote?.let { r ->
+                androidx.compose.material3.DropdownMenuItem(
+                    {
+                        Column {
+                            Text(r.host.hostName.ifBlank { "电脑" })
+                            Text(conn?.let { connText(it) }.orEmpty(), style = MaterialTheme.typography.labelSmall,
+                                color = if (conn is ConnState.Connected) Ext.c.success else Ext.c.subtle)
+                        }
+                    },
+                    leadingIcon = { Icon(Icons.Rounded.Computer, null, Modifier.size(18.dp)) },
+                    trailingIcon = { if (onRemote) Icon(Icons.Rounded.Check, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary) },
+                    onClick = { open = false; ctl.hub.useRemote.value = true },
+                )
+            }
+            androidx.compose.material3.HorizontalDivider(color = Ext.c.border)
+            androidx.compose.material3.DropdownMenuItem(
+                { Text(if (platform.isDesktop) "手机联机…" else if (remote == null) "连接电脑…" else "连接电脑设置…") },
+                leadingIcon = { Icon(if (platform.isDesktop) Icons.Rounded.PhoneAndroid else Icons.Rounded.Link, null, Modifier.size(18.dp)) },
+                onClick = { open = false; ctl.openSettings(SettingsTab.DEVICES); onNavigate() },
+            )
+        }
     }
 }
 
