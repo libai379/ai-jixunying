@@ -69,7 +69,13 @@ object UsageKinds {
  */
 @Serializable
 data class CostSettings(
+    /** 1 美元折多少人民币。usdAuto 开着时由引擎联网自动更新（engine/UsdRate，最多 12 小时一次）；7.1 只是还没取到时的初始值。 */
     val usdRate: Double = 7.1,
+    /** 汇率自动更新（2026-10-14 用户要的，默认开）；用户手动填了汇率就关掉。 */
+    val usdAuto: Boolean = true,
+    /** 最近一次自动取到汇率的时间、从哪取的（界面显示「几点从哪取的」）。0 = 还没取到过。 */
+    val usdRateAt: Long = 0,
+    val usdRateFrom: String = "",
     val overrides: Map<String, ModelPrice> = emptyMap(),
     val manual: Map<String, ManualBalance> = emptyMap(),
 )

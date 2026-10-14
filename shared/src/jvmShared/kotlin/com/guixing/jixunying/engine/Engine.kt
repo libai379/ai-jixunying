@@ -110,6 +110,8 @@ class Engine(
     private val isPhone: Boolean = false,
     /** 启动后自动扫描本机文档。自动测试里关掉（-Djxy.docs.autoscan=false），免得去扫开发机上真实的文档。 */
     private val autoScanDocs: Boolean = System.getProperty("jxy.docs.autoscan") != "false",
+    /** 启动后自动联网更新美元汇率。自动测试里关掉（-Djxy.fx.auto=false），免得每个测试都去联网。 */
+    private val autoUsdRate: Boolean = System.getProperty("jxy.fx.auto") != "false",
 ) : Backend {
     override val store = ClientStore()
     override val isHost = true
@@ -152,6 +154,8 @@ class Engine(
     /** 花费页：按账本和价格表估算；能查余额的平台查余额。 */
     private val costs = CostReporter(ledger, { state })
     private val balances = Balances { proxyFor(it.useProxy) }
+    /** 取汇率的（测试里换成指向本地假服务器的）。 */
+    internal var usdRates = UsdRate({ state.settings.proxy.trim().ifEmpty { null } })
 
     /** 记录员后台活出错时记下来、提示用户（以前悄悄停掉）。 */
     private val bg = BackgroundWatch({ state }, { f -> updateState(f) }, { emit(Event.Notice(it, error = true)) })
@@ -237,6 +241,34 @@ class Engine(
         }
         // 按意思搜：启动后把还没算过的聊天记录 / 文档在后台补上（开关开着才动）
         scope.launch { kotlinx.coroutines.delay(3_000); kickEmbedding() }
+        // 美元汇率：启动后取一次，之后每小时看一眼，上次取到超过 12 小时就再取（开着「自动更新」才取）
+        if (autoUsdRate) scope.launch {
+            kotlinx.coroutines.delay(5_000)
+            while (true) {
+                refreshUsdRate(force = false)
+                kotlinx.coroutines.delay(60 * 60_000L)
+            }
+        }
+    }
+
+    /**
+     * 联网取最新的美元汇率（engine/UsdRate）。force = false 时只在开着自动更新、并且上次取到超过 12 小时才取。
+     * 取不到不改原来的汇率，只返回失败（界面上点「现在更新」时显示原因）。
+     */
+    suspend fun refreshUsdRate(force: Boolean): CommandResult {
+        val c = state.settings.costs
+        if (!force && (!c.usdAuto || now() - c.usdRateAt < UsdRate.EVERY_MS)) return CommandResult()
+        return try {
+            val r = usdRates.fetch()
+            val rate = kotlin.math.round(r.rate * 10_000) / 10_000
+            updateState { s -> s.copy(settings = s.settings.copy(costs = s.settings.costs.copy(
+                usdRate = rate, usdAuto = true, usdRateAt = now(), usdRateFrom = r.source))) }
+            CommandResult(message = "1 美元 = $rate 元（${r.source}）")
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            CommandResult(false, "取不到最新汇率：${e.message ?: e::class.simpleName}；先用原来的 ${c.usdRate}")
+        }
     }
 
     // ———————————————— 本机文档 ————————————————
@@ -499,6 +531,7 @@ class Engine(
             }
             CommandResult()
         }
+        is Command.RefreshUsdRate -> refreshUsdRate(force = true)
         is Command.GetBalances -> {
             val manual = state.settings.costs.manual
             val list = coroutineScope {

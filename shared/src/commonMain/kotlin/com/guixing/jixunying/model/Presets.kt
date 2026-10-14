@@ -16,6 +16,8 @@ data class ProviderPreset(
     val badgeColor: Long,
     val useProxy: Boolean = false,
     val note: String = "",
+    /** 看余额的页面（花费页「去控制台」跳这里）；空的就跳 keyUrl。2026-10-14 用户给了智谱、小米、千问三家的。 */
+    val balanceUrl: String = "",
 )
 
 private fun m(id: String, vision: Boolean = false, tools: Boolean = true) = ModelInfo(id, vision = vision, tools = tools)
@@ -63,17 +65,19 @@ object Presets {
         ProviderPreset("mimo", "小米 MiMo", GROUP_CN, "https://api.xiaomimimo.com/v1",
             "https://platform.xiaomimimo.com/",
             listOf(m("mimo-v2.6-pro"), m("mimo-v2.6-flash")), "米", 0xFFFF6900,
-            note = "测评第 3、4，最便宜"),
+            note = "测评第 3、4，最便宜", balanceUrl = "https://platform.xiaomimimo.com/console/balance"),
         ProviderPreset("zhipu", "智谱开放平台", GROUP_CN, "https://open.bigmodel.cn/api/paas/v4",
             // 旧地址 open.bigmodel.cn/usercenter/apikeys 登录后显示 404（用户 2026-10-12 手机截图），
             // 新地址出自官方快速上手 docs.bigmodel.cn/cn/guide/start/quick-start
             "https://bigmodel.cn/usercenter/proj-mgmt/apikeys",
             listOf(m("glm-5.3"), m("GLM-5.3-Flash"), m("glm-4.6v", vision = true), img("cogview-4-250304"), img("cogview-3-flash")),
-            "Z", 0xFF1F2A44, note = "带官方联网搜索；画图 cogview-3-flash 免费"),
+            "Z", 0xFF1F2A44, note = "带官方联网搜索；画图 cogview-3-flash 免费",
+            balanceUrl = "https://bigmodel.cn/finance-center/finance/overview"),
         ProviderPreset("qianwen", "千问AI平台（阿里）", GROUP_CN, "https://maas.qianwenaiapi.com/compatible-mode/v1",
             "https://platform.qianwenai.com/docs/api-reference/preparation/api-key",
             listOf(m("qwen3.8-max"), img("qwen-image-3.0"), img("wan2.7-image")), "千", 0xFF6236FF,
-            note = "qwen3.8-max 即测评里的 Qwen3-Max；带官方联网搜索；画图千问图像 / 万相"),
+            note = "qwen3.8-max 即测评里的 Qwen3-Max；带官方联网搜索；画图千问图像 / 万相",
+            balanceUrl = "https://platform.qianwenai.com/home"),
         ProviderPreset("moonshot", "Kimi 中国版", GROUP_CN, "https://api.moonshot.cn/v1",
             "https://platform.kimi.com/console/api-keys",
             listOf(m("kimi-k3", vision = true)), "K", 0xFF111111,

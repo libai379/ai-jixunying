@@ -126,7 +126,9 @@ fun CostsScreen(ctl: AppController, wide: Boolean, openDrawer: () -> Unit) {
                 Spacer(Modifier.height(12.dp))
                 BalancesCard(ctl)
                 Spacer(Modifier.height(12.dp))
-                RateCard(ctl, state.settings.costs.usdRate)
+                // 用了按美元收费的服务（账本里有美元花费、或者加了海外服务商）才说「正在用」；只用国内几家时说明用不上
+                val usesUsd = (report?.total?.usd ?: 0.0) > 0 || state.providers.any { it.enabled && com.guixing.jixunying.model.Presets.byId(it.presetId).group == com.guixing.jixunying.model.Presets.GROUP_GLOBAL }
+                RateCard(ctl, state.settings.costs, usesUsd)
             }
         }
     }
@@ -414,23 +416,61 @@ private fun ManualBalanceDialog(ctl: AppController, b: BalanceInfo, onSaved: () 
     }
 }
 
+/**
+ * 美元汇率（2026-10-14 改）：海外服务（OpenAI、Gemini、海外版 MiniMax / Kimi 等）按美元计价，花费合计时按它折成人民币。
+ * 默认自动更新：引擎联网取最新的（engine/UsdRate，最多 12 小时一次）；用户自己填了数就改成手动，点「改回自动」恢复。
+ */
 @Composable
-private fun RateCard(ctl: AppController, rate: Double) {
-    // 别处（比如手机）改了汇率，这里跟着变
+private fun RateCard(ctl: AppController, costs: com.guixing.jixunying.model.CostSettings, usesUsd: Boolean) {
+    val rate = costs.usdRate
+    // 别处（比如手机）改了汇率、或者自动更新了，这里跟着变
     var text by remember(rate) { mutableStateOf(rate.toString()) }
+    var busy by remember { mutableStateOf(false) }
     val bad = text.toDoubleOrNull()?.let { it <= 0 } ?: true
-    AutoSave(text, rate.toString()) { v ->
-        v.toDoubleOrNull()?.takeIf { it > 0 }?.let { r -> ctl.run(Command.SaveCosts(ctl.backend.store.state.value.settings.costs.copy(usdRate = r)), quiet = true) }
+    // 手动模式下才自动保存输入框；自动模式下输入框是只读显示
+    if (!costs.usdAuto) AutoSave(text, rate.toString()) { v ->
+        v.toDoubleOrNull()?.takeIf { it > 0 }?.let { r -> ctl.run(Command.SaveCosts(ctl.backend.store.state.value.settings.costs.copy(usdRate = r, usdAuto = false)), quiet = true) }
     }
     SectionCard {
-        FieldLabel("美元汇率", "海外服务按美元计价，合计时按这个折成人民币")
+        FieldLabel("美元汇率", "海外服务按美元计价，合计花费时按这个折成人民币")
+        if (!usesUsd) {
+            Text("你现在用的几家都按人民币收费，这个汇率暂时用不上；以后加了按美元收费的海外服务（OpenAI、Gemini、海外版 MiniMax / Kimi 等）才用它折算。",
+                style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, modifier = Modifier.padding(bottom = 8.dp))
+        }
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("1 美元 = ", style = MaterialTheme.typography.bodyMedium)
-            AppTextField(text, { text = it.filter { c -> c.isDigit() || c == '.' }.take(6) }, modifier = Modifier.width(110.dp),
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
+            if (costs.usdAuto) {
+                Text(rate.toString(), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+            } else {
+                AppTextField(text, { text = it.filter { c -> c.isDigit() || c == '.' }.take(6) }, modifier = Modifier.width(110.dp),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
+            }
             Text(" 元", style = MaterialTheme.typography.bodyMedium)
+            Spacer(Modifier.weight(1f))
+            TextButton(enabled = !busy, onClick = {
+                busy = true
+                ctl.run(Command.RefreshUsdRate, quiet = true) { r ->
+                    busy = false
+                    ctl.toast(if (r.ok) "汇率更新了：${r.message}" else r.message)
+                }
+            }) { Text(if (busy) "正在取…" else if (costs.usdAuto) "现在更新" else "改回自动", style = MaterialTheme.typography.labelMedium) }
         }
-        if (bad) Text("填一个大于 0 的数，比如 7.1", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error)
+        Text(
+            when {
+                !costs.usdAuto -> "手动填的，不会自动更新。点「改回自动」联网取最新汇率。"
+                costs.usdRateAt > 0 -> "自动更新：${formatTime(costs.usdRateAt)} 从 ${costs.usdRateFrom} 取的，之后每 12 小时取一次。"
+                else -> "自动更新：还没取到（要联网）；取到之前先按 $rate 算。"
+            },
+            style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, modifier = Modifier.padding(top = 4.dp),
+        )
+        if (costs.usdAuto) {
+            TextButton({ ctl.run(Command.SaveCosts(ctl.backend.store.state.value.settings.costs.copy(usdAuto = false)), quiet = true) },
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp)) {
+                Text("改成自己填", style = MaterialTheme.typography.labelSmall)
+            }
+        } else if (bad) {
+            Text("填一个大于 0 的数，比如 6.7", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error)
+        }
     }
 }
 

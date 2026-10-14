@@ -86,6 +86,8 @@ sealed interface Command {
     @Serializable data class GetCosts(val period: String = "month") : Command
     /** 花费设置（汇率、自填单价）单独保存：旧版手机发来的 SaveSettings 里没有这块，不能让它冲掉。 */
     @Serializable data class SaveCosts(val costs: CostSettings) : Command
+    /** 现在就联网取一次最新的美元汇率（不管上次是什么时候取的），并把汇率改回自动更新。 */
+    @Serializable data object RefreshUsdRate : Command
     /** 查各家余额（能查的直接查，查不了的给控制台链接）。结果 data 是 List<BalanceInfo> 的 JSON。 */
     @Serializable data object GetBalances : Command
     /** 手动填 / 改 / 清除某个服务商的余额（balance = null 是清除）。单独一条指令：旧版手机发的 SaveCosts 不认识这块，不能让它冲掉。 */

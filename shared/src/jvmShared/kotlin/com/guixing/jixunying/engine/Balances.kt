@@ -29,7 +29,8 @@ class Balances(private val proxyOf: (ProviderConfig) -> String?) {
     private fun noV1(p: ProviderConfig) = root(p).removeSuffix("/v1")
 
     /** 控制台地址：取预设里申请 Key 的那个网站。 */
-    private fun console(p: ProviderConfig): String = Presets.byId(p.presetId).keyUrl.ifBlank { "" }
+    /** 「去控制台」跳哪：有看余额的页面就跳它（用户 2026-10-14 给的），没有就跳 Key 管理页。 */
+    private fun console(p: ProviderConfig): String = Presets.byId(p.presetId).let { it.balanceUrl.ifBlank { it.keyUrl } }
 
     suspend fun query(p: ProviderConfig, now: Long): BalanceInfo {
         val base = BalanceInfo(p.id, p.name, supported = false, consoleUrl = console(p), at = now)
