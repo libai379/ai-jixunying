@@ -121,6 +121,47 @@ class DesktopPlatform(private val window: () -> Frame?) : Platform {
     override fun openFile(path: String): Boolean = runCatching { Desktop.getDesktop().open(File(path)); true }.getOrDefault(false)
     override fun fileExists(path: String): Boolean = runCatching { File(path.trim()).isFile }.getOrDefault(false)
 
+    // ---- Code 栏的系统通知（第二期 2026-10-13，设计说明第 1 节）：用系统托盘的气泡。
+    //      托盘不支持（有些精简版 Windows、无桌面会话）就什么都不做，绝不抛出来影响主流程。
+
+    private val convRequest = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
+    override val openConvRequest: kotlinx.coroutines.flow.StateFlow<String?> get() = convRequest
+    override fun clearOpenConvRequest() { convRequest.value = null }
+
+    /** 应用在不在前台：窗口有没有焦点。窗口还没建好（启动那一下）当前台，免得平白弹通知。 */
+    override val inForeground: Boolean get() = runCatching { window()?.isActive ?: true }.getOrDefault(true)
+
+    /** 最后一条通知说的是哪个会话：点托盘图标就打开它。 */
+    private var noticeConv: String? = null
+    private var tray: java.awt.TrayIcon? = null
+
+    override fun notify(id: String, title: String, text: String, convId: String) {
+        noticeConv = convId
+        runCatching {
+            val t = tray ?: makeTray() ?: return@runCatching
+            t.displayMessage(title, text, java.awt.TrayIcon.MessageType.NONE)
+        }
+    }
+
+    /** 建托盘图标（第一次弹通知时建，之后一直用这一个）。建不出来返回 null。 */
+    private fun makeTray(): java.awt.TrayIcon? = runCatching {
+        if (!java.awt.SystemTray.isSupported()) return null
+        val img = DesktopPlatform::class.java.getResourceAsStream("/jxy-app-icon.png")?.use { javax.imageio.ImageIO.read(it) }
+            ?: java.awt.image.BufferedImage(16, 16, java.awt.image.BufferedImage.TYPE_INT_ARGB)
+        val t = java.awt.TrayIcon(img, "AI集训营")
+        t.isImageAutoSize = true
+        // 点一下：把窗口叫到前面，并切到通知说的那个会话（界面在 App 里收）
+        t.addActionListener {
+            noticeConv?.let { convRequest.value = it }
+            runCatching {
+                window()?.apply { isVisible = true; state = Frame.NORMAL; toFront() }
+            }
+        }
+        java.awt.SystemTray.getSystemTray().add(t)
+        tray = t
+        t
+    }.getOrNull()
+
     override suspend fun openBytes(name: String, bytes: ByteArray): Boolean = withContext(Dispatchers.IO) {
         runCatching {
             val dir = File(System.getProperty("java.io.tmpdir"), "AI集训营").apply { mkdirs() }

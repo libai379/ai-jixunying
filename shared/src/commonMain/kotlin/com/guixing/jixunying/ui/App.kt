@@ -79,6 +79,9 @@ class AppController(
     /** 读出来（「读出来」按钮、回答完自动读）。 */
     val speech = SpeechPlayer(this)
 
+    /** Code 栏做完 / 等你批准时的系统通知（第二期，2026-10-13）。 */
+    val codeNotice = CodeNotifier(this)
+
     var currentConvId by mutableStateOf<String?>(null)
     var page by mutableStateOf<MainPage?>(null)
     /** 等用户选「发到哪个对话」的文件。 */
@@ -216,6 +219,9 @@ fun App(hub: Hub, platform: Platform, debugStart: String? = null) {
     val remote by hub.remote.collectAsState()
     val backend: Backend = remote?.takeIf { useRemote } ?: hub.local
     val state by backend.store.state.collectAsState()
+    // 点了 Code 栏的通知（安卓）或者托盘图标（电脑）要打开哪个会话。放在 key(backend) 外面：
+    // 要打开的是电脑上的会话而现在看的是本机时，切过去以后这个还得留着（第二期 2026-10-13）
+    var pendingConv by remember { mutableStateOf<String?>(null) }
     AppTheme(state.settings.darkMode) {
         val snackbar = remember { SnackbarHostState() }
         CompositionLocalProvider(LocalPlatform provides platform, LocalSnackbar provides snackbar) {
@@ -261,6 +267,30 @@ fun App(hub: Hub, platform: Platform, debugStart: String? = null) {
                         .first { (it[id]?.any { m -> m.role == Role.AI && m.content.isNotBlank() }) == true }[id].orEmpty()
                     val m = msgs.lastOrNull { it.role == Role.AI && it.content.isNotBlank() && it.status == MsgStatus.DONE } ?: return@LaunchedEffect
                     ctl.speech.read(m.id, splitThink(m.content).first)
+                }
+                // Code 栏的通知（第二期）：某一步开始等批准、或者一条回答做完了，应用不在前台（或没打开那个会话）时弹一条
+                LaunchedEffect(backend) {
+                    backend.store.messages.collect { ctl.codeNotice.onMessages(it) }
+                }
+                // 点了通知（安卓）或者托盘图标（电脑）：切到那个 Code 会话
+                val convRequest by platform.openConvRequest.collectAsState()
+                LaunchedEffect(convRequest) {
+                    convRequest?.let { pendingConv = it; platform.clearOpenConvRequest() }
+                }
+                LaunchedEffect(pendingConv, state.conversations.isEmpty(), backend) {
+                    val id = pendingConv ?: return@LaunchedEffect
+                    if (state.conversation(id) != null) {
+                        pendingConv = null
+                        ctl.sidebarTab = SidebarTab.CODE
+                        ctl.openConversation(id)
+                    } else if (state.conversations.isEmpty()) {
+                        // 状态还没来（刚打开应用、刚连上电脑）：等它一下，别当没有
+                    } else if (ctl.hub.remote.value != null && !ctl.remoteMode) {
+                        // 本机没有这个会话：通知说的是电脑上的 Code 会话，切到电脑再看
+                        ctl.hub.useRemote.value = true
+                    } else {
+                        pendingConv = null
+                    }
                 }
                 // 别的 App 发来的文件（安卓：微信里「用其他应用打开」）：问发到哪个对话
                 val incomingFiles by platform.incomingFiles.collectAsState()

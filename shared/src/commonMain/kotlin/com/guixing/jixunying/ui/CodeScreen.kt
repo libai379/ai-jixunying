@@ -42,6 +42,7 @@ import androidx.compose.material.icons.rounded.ExpandLess
 import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.FolderOpen
 import androidx.compose.material.icons.rounded.Menu
+import androidx.compose.material.icons.rounded.PhoneAndroid
 import androidx.compose.material.icons.rounded.Psychology
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Stop
@@ -89,6 +90,7 @@ import androidx.compose.ui.unit.sp
 import com.guixing.jixunying.model.AppState
 import com.guixing.jixunying.model.CodeMode
 import com.guixing.jixunying.model.CodeModels
+import com.guixing.jixunying.model.CodePhone
 import com.guixing.jixunying.model.CodeSpec
 import com.guixing.jixunying.model.Command
 import com.guixing.jixunying.model.Conversation
@@ -104,9 +106,10 @@ import kotlinx.coroutines.launch
 private const val STEP_LINES = 80
 
 /**
- * Code 会话的主区域（docs/Code栏设计说明.md 第 1、11 节，2026-10-12）。
+ * Code 会话的主区域（docs/Code栏设计说明.md 第 1、6、11 节，2026-10-12 / 第二期 2026-10-13）。
  * 上面是会话名、文件夹、权限档和「停止」，中间按顺序显示说过的话和每一步工具，下面是输入框。
- * 第一期只在电脑上动手：手机上看得到过程和改动，发任务、批准、接受都要在电脑上做。
+ * 第二期起手机上也能动手：手机遥控电脑、且电脑上打开了「允许手机用 Code 栏」时，发任务、停止、
+ * 批准某一步、逐个文件接受 / 拒绝都能用；「接受编辑」档和「全部撤销」只能在电脑上做（CodeUi / CodePhone）。
  */
 @Composable
 fun CodeScreen(ctl: AppController, convId: String, wide: Boolean, openDrawer: () -> Unit) {
@@ -115,7 +118,8 @@ fun CodeScreen(ctl: AppController, convId: String, wide: Boolean, openDrawer: ()
     val conv = state.conversation(convId) ?: return
     val spec = conv.code ?: return
     val messages = allMessages[convId].orEmpty()
-    val readonly = !LocalPlatform.current.isDesktop
+    // 能不能动手：电脑上照旧；手机上要连着电脑、电脑上还开着「允许手机用 Code 栏」
+    val access = CodeUi.access(LocalPlatform.current.isDesktop, ctl.remoteMode, state.settings.code.allowPhone)
     // 差异查看器打开在哪个回答上（点「改了 N 个文件」进来）
     var diffMessage by remember(convId) { mutableStateOf("") }
     LaunchedEffect(convId, ctl.backend) {
@@ -132,34 +136,37 @@ fun CodeScreen(ctl: AppController, convId: String, wide: Boolean, openDrawer: ()
     val running = messages.lastOrNull()?.status == MsgStatus.STREAMING
 
     Column(Modifier.fillMaxSize()) {
-        CodeTopBar(ctl, state, conv, spec, wide, openDrawer, running)
+        CodeTopBar(ctl, state, conv, spec, wide, openDrawer, running, access)
         Box(Modifier.weight(1f).fillMaxWidth()) {
-            CodeMessageList(ctl, state, conv, messages) { diffMessage = it }
+            CodeMessageList(ctl, state, conv, messages, access.canAct) { diffMessage = it }
         }
-        if (readonly) ReadonlyNote() else CodeComposer(ctl, conv, running)
+        if (access.canAct) CodeComposer(ctl, conv, running) else CodeBottomNote(access)
     }
-    if (diffMessage.isNotBlank()) ChangesDialog(ctl, conv, diffMessage) { diffMessage = "" }
+    if (diffMessage.isNotBlank()) ChangesDialog(ctl, conv, diffMessage, access) { diffMessage = "" }
 }
 
-/** 手机上：看得到，动不了。 */
+/**
+ * 手机上动不了时的说明（原来放输入框的位置）：开关没开写清去哪儿打开，本机写清要先连上电脑。
+ */
 @Composable
-private fun ReadonlyNote() {
+private fun CodeBottomNote(access: CodeAccess) {
     Row(
         Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 14.dp, top = 4.dp)
             .clip(RoundedCornerShape(12.dp)).background(Ext.c.sidebarSelected).padding(horizontal = 12.dp, vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically,
+        verticalAlignment = Alignment.Top,
     ) {
         Icon(Icons.Rounded.Computer, null, Modifier.size(16.dp), tint = Ext.c.subtle)
         Spacer(Modifier.width(8.dp))
-        Text("Code 栏第一期只在电脑上操作：手机上能看过程和改动，发任务和批准要在电脑上做。",
-            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(
+            if (access == CodeAccess.LOCKED) CodeUi.LOCKED_NOTE else CodeUi.NO_LOCAL_NOTE,
+            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 
 @Composable
 private fun CodeTopBar(ctl: AppController, state: AppState, conv: Conversation, spec: CodeSpec,
-                       wide: Boolean, openDrawer: () -> Unit, running: Boolean) {
-    val readonly = !LocalPlatform.current.isDesktop
+                       wide: Boolean, openDrawer: () -> Unit, running: Boolean, access: CodeAccess) {
     val provider = state.provider(spec.providerId)
     // 窄屏那一行只放得下文件夹的最后一节，点一下弹完整的路径（下面弹窗）
     var showPath by remember(conv.id) { mutableStateOf(false) }
@@ -169,7 +176,15 @@ private fun CodeTopBar(ctl: AppController, state: AppState, conv: Conversation, 
     Row(Modifier.fillMaxWidth().height(60.dp).padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
         if (!wide) IconButton(onClick = openDrawer) { Icon(Icons.Rounded.Menu, "菜单") }
         Column(Modifier.weight(1f).padding(start = 6.dp)) {
-            Text(conv.title, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(conv.title, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false))
+                // 手机发起的会话：电脑上要一眼看得出来（设计说明第 6 节）
+                if (spec.fromPhone) {
+                    Spacer(Modifier.width(8.dp))
+                    PhoneMadeMark()
+                }
+            }
             if (wide) {
                 Text(subtitle, style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, maxLines = 1, overflow = TextOverflow.Ellipsis)
             } else {
@@ -185,7 +200,7 @@ private fun CodeTopBar(ctl: AppController, state: AppState, conv: Conversation, 
                 }
             }
         }
-        if (running && !readonly) {
+        if (running && access.canAct) {
             Row(
                 Modifier.clip(RoundedCornerShape(50)).border(1.dp, Ext.c.border, RoundedCornerShape(50))
                     .clickable { ctl.run(Command.CodeStop(conv.id)) }.padding(horizontal = 10.dp, vertical = 6.dp),
@@ -197,7 +212,7 @@ private fun CodeTopBar(ctl: AppController, state: AppState, conv: Conversation, 
             }
             Spacer(Modifier.width(10.dp))
         }
-        CodeModePicker(spec.mode, readonly) { m ->
+        CodeModePicker(spec.mode, CodeUi.modesFor(access, spec), enabled = access.canAct) { m ->
             ctl.run(Command.CodeSetMode(conv.id, m), okText = "权限档换成「${m.label}」")
         }
     }
@@ -216,18 +231,37 @@ private fun CodeTopBar(ctl: AppController, state: AppState, conv: Conversation, 
     }
 }
 
-/** 权限档切换：点一下就生效，不用再去设置里改。 */
+/**
+ * 「手机发起」小标记（设计说明第 6 节）：手机开出来的 Code 会话，电脑上要一眼看得出来。
+ */
 @Composable
-private fun CodeModePicker(mode: CodeMode, readonly: Boolean, onPick: (CodeMode) -> Unit) {
+private fun PhoneMadeMark() {
+    Row(
+        Modifier.clip(RoundedCornerShape(50)).background(MaterialTheme.colorScheme.primary.copy(alpha = 0.12f))
+            .padding(horizontal = 7.dp, vertical = 3.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(Icons.Rounded.PhoneAndroid, null, Modifier.size(12.dp), tint = MaterialTheme.colorScheme.primary)
+        Spacer(Modifier.width(4.dp))
+        Text("手机发起", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+    }
+}
+
+/**
+ * 权限档切换：点一下就生效，不用再去设置里改。
+ * modes 是这台设备上能选的档（手机上只有手动、计划，见 CodeUi.modesFor）。
+ */
+@Composable
+private fun CodeModePicker(mode: CodeMode, modes: List<CodeMode>, enabled: Boolean, onPick: (CodeMode) -> Unit) {
     Row(
         Modifier.clip(RoundedCornerShape(50)).border(1.dp, Ext.c.border, RoundedCornerShape(50)).padding(2.dp),
     ) {
-        CodeMode.entries.forEach { m ->
+        modes.forEach { m ->
             val on = m == mode
             Box(
                 Modifier.clip(RoundedCornerShape(50))
                     .background(if (on) MaterialTheme.colorScheme.primary.copy(alpha = 0.14f) else Color.Transparent)
-                    .clickable(enabled = !readonly) { if (!on) onPick(m) }
+                    .clickable(enabled = enabled) { if (!on) onPick(m) }
                     .padding(horizontal = 10.dp, vertical = 5.dp),
             ) {
                 Text(m.label, style = MaterialTheme.typography.labelMedium,
@@ -238,7 +272,7 @@ private fun CodeModePicker(mode: CodeMode, readonly: Boolean, onPick: (CodeMode)
 }
 
 @Composable
-private fun CodeMessageList(ctl: AppController, state: AppState, conv: Conversation, messages: List<Message>, onDiff: (String) -> Unit) {
+private fun CodeMessageList(ctl: AppController, state: AppState, conv: Conversation, messages: List<Message>, canAct: Boolean, onDiff: (String) -> Unit) {
     // 和聊天一样从底下往上排：打开会话停在最新一行的最后（教训 60），每个会话各记各的位置
     val listState = remember(conv.id) { LazyListState() }
     val newestFirst = remember(messages) { messages.asReversed() }
@@ -262,7 +296,7 @@ private fun CodeMessageList(ctl: AppController, state: AppState, conv: Conversat
         item(key = "bottom") { Spacer(Modifier.height(24.dp)) }
         items(newestFirst, key = { it.id }) { m ->
             Box(Modifier.widthIn(max = 860.dp).fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
-                if (m.role == Role.USER) CodeUserMessage(ctl, m) else CodeAiMessage(ctl, state, m, onDiff)
+                if (m.role == Role.USER) CodeUserMessage(ctl, m) else CodeAiMessage(ctl, state, m, canAct, onDiff)
             }
         }
         item(key = "top") {
@@ -310,7 +344,7 @@ private fun CodeUserMessage(ctl: AppController, m: Message) {
 }
 
 @Composable
-private fun CodeAiMessage(ctl: AppController, state: AppState, m: Message, onDiff: (String) -> Unit) {
+private fun CodeAiMessage(ctl: AppController, state: AppState, m: Message, canAct: Boolean, onDiff: (String) -> Unit) {
     val clipboard = LocalClipboardManager.current
     val (body, thinkInline) = remember(m.content) { splitThink(m.content) }
     val reasoning = (m.reasoning + if (thinkInline.isNotEmpty()) "\n$thinkInline" else "").trim()
@@ -328,7 +362,7 @@ private fun CodeAiMessage(ctl: AppController, state: AppState, m: Message, onDif
             }
             Spacer(Modifier.height(6.dp))
             // 每一步工具一行，点开看输入和输出；等批准的那一步自己展开
-            m.tools.forEach { CodeToolStep(ctl, m, it) }
+            m.tools.forEach { CodeToolStep(ctl, m, it, canAct) }
             if (reasoning.isNotEmpty()) CodeReasoning(reasoning, streaming = m.status == MsgStatus.STREAMING && body.isEmpty())
             if (body.isNotBlank()) SelectionContainer { MarkdownText(body) }
             if (m.status == MsgStatus.STREAMING && body.isEmpty() && reasoning.isEmpty() && m.tools.isEmpty()) CodeThinking()
@@ -355,8 +389,9 @@ private fun CodeThinking() {
 
 /** 一步工具：一行摘要，点开看输入和输出；等批准的那一步默认展开，带「允许」「拒绝」。 */
 @Composable
-private fun CodeToolStep(ctl: AppController, msg: Message, t: ToolStep) {
-    val readonly = !LocalPlatform.current.isDesktop
+private fun CodeToolStep(ctl: AppController, msg: Message, t: ToolStep, canAct: Boolean) {
+    // 这台设备上动不了（手机本机、或者电脑上没开「允许手机用 Code 栏」）时只能看
+    val readonly = !canAct
     val waiting = t.approval == "waiting"
     var open by remember(t.id) { mutableStateOf(false) }
     val expanded = open || waiting
@@ -544,8 +579,9 @@ private fun ChangesBar(changes: List<FileChange>, onClick: () -> Unit) {
  * 每个文件能「接受」「拒绝」，拒绝前先问一句；底下还能「全部撤销」这条回答里的改动。
  */
 @Composable
-private fun ChangesDialog(ctl: AppController, conv: Conversation, messageId: String, onClose: () -> Unit) {
-    val readonly = !LocalPlatform.current.isDesktop
+private fun ChangesDialog(ctl: AppController, conv: Conversation, messageId: String, access: CodeAccess, onClose: () -> Unit) {
+    // 手机上能动手时，逐个文件接受 / 拒绝和电脑上一样能用；只有「全部撤销」得回电脑上做
+    val readonly = !access.canAct
     val all by ctl.backend.store.messages.collectAsState()
     val msg = all[conv.id].orEmpty().firstOrNull { it.id == messageId } ?: return
     val changes = msg.tools.mapNotNull { it.change }.distinctBy { it.path }
@@ -599,7 +635,8 @@ private fun ChangesDialog(ctl: AppController, conv: Conversation, messageId: Str
                 Button({ val id = confirmReject; confirmReject = ""; review(id, false); picked = id },
                     colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)) { Text("确定拒绝") }
             } else {
-                if (!readonly && changes.any { it.review != "rejected" }) {
+                // 「全部撤销」只能在电脑上做（PhoneGate 会拒），手机上换成一行小字
+                if (access == CodeAccess.FULL && changes.any { it.review != "rejected" }) {
                     Box(
                         Modifier.clip(RoundedCornerShape(50)).border(1.dp, Ext.c.border, RoundedCornerShape(50))
                             .clickable { confirmRevert = true }.padding(horizontal = 14.dp, vertical = 8.dp),
@@ -614,6 +651,10 @@ private fun ChangesDialog(ctl: AppController, conv: Conversation, messageId: Str
                 } else if (confirmReject.isNotEmpty()) {
                     Warn("拒绝「${changes.firstOrNull { it.id == confirmReject }?.path.orEmpty()}」会把这个文件恢复成改之前的样子" +
                         "（这个文件后面的改动也会一起撤掉）。")
+                }
+                if (access == CodeAccess.PHONE) {
+                    Text(CodeUi.REVERT_ONLY_ON_PC, style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle,
+                        modifier = Modifier.padding(bottom = 8.dp))
                 }
                 if (side) {
                     Row(Modifier.fillMaxWidth().height(430.dp)) {
@@ -817,6 +858,8 @@ private fun CodeComposer(ctl: AppController, conv: Conversation, running: Boolea
     var text by remember(conv.id) { mutableStateOf(TextFieldValue("")) }
     fun send() {
         if (text.text.isBlank()) return
+        // 手机上：等批准、做完时要弹通知，趁现在（应用在前台）问一下通知权限
+        if (!platform.isDesktop) platform.askNotifyPermission()
         ctl.run(Command.CodeSend(conv.id, text.text))
         text = TextFieldValue("")
     }
@@ -879,7 +922,7 @@ private fun CodeComposer(ctl: AppController, conv: Conversation, running: Boolea
 @Composable
 fun CodeEmptyScreen(ctl: AppController, wide: Boolean, openDrawer: () -> Unit) {
     val state by ctl.backend.store.state.collectAsState()
-    val platform = LocalPlatform.current
+    val access = CodeUi.access(LocalPlatform.current.isDesktop, ctl.remoteMode, state.settings.code.allowPhone)
     val codeConvs = state.conversations.filter { it.isCode }
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().height(60.dp).padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -889,24 +932,27 @@ fun CodeEmptyScreen(ctl: AppController, wide: Boolean, openDrawer: () -> Unit) {
         HorizontalDivider(color = Ext.c.border)
         Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
             Column(Modifier.widthIn(max = 620.dp).padding(24.dp)) {
-                if (!platform.isDesktop) {
-                    Text("Code 栏第一期只在电脑上用", style = MaterialTheme.typography.titleMedium)
+                // 这台设备上动不了就只说清楚为什么、去哪儿打开；能动手（电脑上、或者手机遥控电脑且电脑开着开关）才给新建
+                if (!access.canAct) {
+                    Text(if (access == CodeAccess.LOCKED) CodeUi.LOCKED_TITLE else CodeUi.NO_LOCAL_TITLE,
+                        style = MaterialTheme.typography.titleMedium)
                     Spacer(Modifier.height(8.dp))
-                    Text("在电脑上建好会话以后，手机上能看它做了什么、改了哪些文件。",
+                    Text(if (access == CodeAccess.LOCKED) CodeUi.LOCKED_NOTE else CodeUi.NO_LOCAL_NOTE,
                         style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    return@Column
+                } else {
+                    Text("让 AI 对着一个项目文件夹写代码", style = MaterialTheme.typography.titleMedium)
+                    Spacer(Modifier.height(8.dp))
+                    Text("选一个项目文件夹，它就能读代码、改文件、跑命令；它做的每一步都写在对话里给你看，" +
+                        "改文件、跑命令要不要先问你，由权限档说了算，随时能换。每个会话一个文件夹，互不影响。",
+                        style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Spacer(Modifier.height(16.dp))
+                    Button(onClick = { ctl.showNewCode = true }, shape = RoundedCornerShape(12.dp)) {
+                        Icon(Icons.Rounded.Add, null, Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("新建 Code 会话")
+                    }
                 }
-                Text("让 AI 对着一个项目文件夹写代码", style = MaterialTheme.typography.titleMedium)
-                Spacer(Modifier.height(8.dp))
-                Text("选一个项目文件夹，它就能读代码、改文件、跑命令；它做的每一步都写在对话里给你看，" +
-                    "改文件、跑命令要不要先问你，由权限档说了算，随时能换。每个会话一个文件夹，互不影响。",
-                    style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Spacer(Modifier.height(16.dp))
-                Button(onClick = { ctl.showNewCode = true }, shape = RoundedCornerShape(12.dp)) {
-                    Icon(Icons.Rounded.Add, null, Modifier.size(18.dp))
-                    Spacer(Modifier.width(6.dp))
-                    Text("新建 Code 会话")
-                }
+                // 动不了也一样能打开看（手机上遥控电脑、电脑上没开开关时就是这样）
                 if (codeConvs.isNotEmpty()) {
                     Spacer(Modifier.height(20.dp))
                     Text("已经有的会话", style = MaterialTheme.typography.labelMedium, color = Ext.c.subtle)
@@ -937,6 +983,9 @@ fun NewCodeDialog(ctl: AppController) {
     val state by ctl.backend.store.state.collectAsState()
     val platform = LocalPlatform.current
     val scope = rememberCoroutineScope()
+    val access = CodeUi.access(platform.isDesktop, ctl.remoteMode, state.settings.code.allowPhone)
+    // 手机上不能弹系统选择器（选出来的路径是手机上的，电脑上没有）：只能从电脑上已有会话的文件夹里挑
+    val pcFolders = remember(state.conversations) { CodePhone.folders(state) }
     var folder by remember { mutableStateOf("") }
     var picked by remember { mutableStateOf("") }
     var mode by remember { mutableStateOf(CodeMode.MANUAL) }
@@ -947,13 +996,14 @@ fun NewCodeDialog(ctl: AppController) {
 
     AppDialog("新建 Code 会话", { ctl.showNewCode = false }, width = 560.dp, actions = {
         TextButton({ ctl.showNewCode = false }) { Text("取消") }
-        if (platform.isDesktop) {
+        if (access.canAct) {
             Button(
                 enabled = !busy && folder.isNotBlank() && chosen != null,
                 onClick = {
                     val (p, m) = chosen ?: return@Button
                     busy = true
                     error = ""
+                    if (!platform.isDesktop) platform.askNotifyPermission()
                     ctl.run(Command.CodeCreate(folder, p.id, m.id, mode), quiet = true) { r ->
                         busy = false
                         if (r.ok) { ctl.showNewCode = false; ctl.openConversation(r.data) }
@@ -964,21 +1014,45 @@ fun NewCodeDialog(ctl: AppController) {
         }
     }) {
         Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState())) {
-            if (!platform.isDesktop) {
-                Text("Code 栏第一期只在电脑上用", style = MaterialTheme.typography.titleSmall)
+            if (!access.canAct) {
+                Text(if (access == CodeAccess.LOCKED) CodeUi.LOCKED_TITLE else CodeUi.NO_LOCAL_TITLE, style = MaterialTheme.typography.titleSmall)
                 Spacer(Modifier.height(8.dp))
-                Text("要在电脑上新建 Code 会话。电脑上建好以后，这里能看它做了什么、改了哪些文件。",
+                Text(if (access == CodeAccess.LOCKED) CodeUi.LOCKED_NOTE else CodeUi.NO_LOCAL_NOTE,
                     style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 return@Column
             }
             FieldLabel("项目文件夹", "这个会话只在这个文件夹里读写")
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Text(folder.ifBlank { "还没选" }, style = MaterialTheme.typography.bodyMedium,
-                    color = if (folder.isBlank()) Ext.c.subtle else MaterialTheme.colorScheme.onSurface,
-                    maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-                Spacer(Modifier.width(8.dp))
-                TextButton({ scope.launch { platform.pickFolder("选择项目文件夹")?.let { folder = it } } }) {
-                    Text(if (folder.isBlank()) "选择文件夹" else "换一个")
+            if (platform.isDesktop) {
+                // 电脑上照旧：弹系统的文件夹选择器
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text(folder.ifBlank { "还没选" }, style = MaterialTheme.typography.bodyMedium,
+                        color = if (folder.isBlank()) Ext.c.subtle else MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                    Spacer(Modifier.width(8.dp))
+                    TextButton({ scope.launch { platform.pickFolder("选择项目文件夹")?.let { folder = it } } }) {
+                        Text(if (folder.isBlank()) "选择文件夹" else "换一个")
+                    }
+                }
+            } else if (pcFolders.isEmpty()) {
+                Text(NO_PC_FOLDER, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+            } else {
+                // 手机上不弹系统选择器（手机上选的路径电脑上没有）：只从电脑上已有 Code 会话的文件夹里挑一个
+                Column(Modifier.fillMaxWidth().heightIn(max = 180.dp).verticalScroll(rememberScrollState())) {
+                    pcFolders.forEach { f ->
+                        val on = f == folder
+                        Row(
+                            Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp))
+                                .background(if (on) Ext.c.sidebarSelected else Color.Transparent)
+                                .clickable { folder = f }.padding(horizontal = 8.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            RadioButton(on, { folder = f })
+                            Column(Modifier.weight(1f)) {
+                                Text(folderName(f), style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text(f, style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
+                        }
+                    }
                 }
             }
             Spacer(Modifier.height(10.dp))
@@ -1008,7 +1082,7 @@ fun NewCodeDialog(ctl: AppController) {
             }
             Spacer(Modifier.height(12.dp))
             FieldLabel("权限档", "之后随时能在会话上面换")
-            CodeMode.entries.forEach { m ->
+            CodeUi.createModesFor(access).forEach { m ->
                 Row(
                     Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).clickable { mode = m }.padding(horizontal = 4.dp, vertical = 4.dp),
                     verticalAlignment = Alignment.CenterVertically,
@@ -1031,6 +1105,9 @@ fun NewCodeDialog(ctl: AppController) {
         }
     }
 }
+
+/** 手机新建会话时，电脑上一个 Code 会话都没有：没法选文件夹，先说清楚怎么办。 */
+private const val NO_PC_FOLDER = "电脑上还没有 Code 会话。先在电脑上建一个，手机上才能选它的文件夹。"
 
 private fun modeDesc(m: CodeMode) = when (m) {
     CodeMode.MANUAL -> "改文件、跑命令之前都先问你（默认）"

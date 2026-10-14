@@ -195,6 +195,9 @@ class ShotsTest {
             // 用户按了停止的那条：侧栏要写「停下了」（灰的），不是「做完」
             Conversation("c9", "旧项目", emptyList(), createdAt = now - 600_000, updatedAt = now - 20_000,
                 code = com.guixing.jixunying.model.CodeSpec(File(root, "旧项目").absolutePath, "pd", "deepseek-flash")),
+            // 手机发起建的（第二期 2026-10-13）：电脑上侧栏和会话上面都要标「手机发起」
+            Conversation("c10", "手机建的会话", emptyList(), createdAt = now - 300_000, updatedAt = now - 10_000,
+                code = com.guixing.jixunying.model.CodeSpec(File(root, "我的项目").absolutePath, "pd", "deepseek-flash", fromPhone = true)),
         )
         val st = Storage(root)
         st.saveState(AppState(
@@ -396,6 +399,13 @@ class ShotsTest {
                 createdAt = now - 30_000, modelLabel = "deepseek-flash（DeepSeek 4.1 Flash）", status = MsgStatus.STOPPED,
                 tools = listOf(ToolStep("read", "README.md", id = "s91", output = "# 旧项目"))),
         ))
+        // 手机发起的那个会话（c10）：一条做完了的记录，侧栏的状态才不是「新」
+        st.saveMessages("c10", listOf(
+            Message("u10", "c10", Role.USER, USER_ID, "手机上让它把 README 补一下。", createdAt = now - 300_000),
+            Message("r10", "c10", Role.AI, "tool:code", "补好了，README 里加上了安装和运行两节。",
+                createdAt = now - 290_000, modelLabel = "deepseek-flash（DeepSeek 4.1 Flash）",
+                tools = listOf(ToolStep("edit", "README.md", id = "s101", output = diffReadme, change = FileChange("s101", "README.md", added = 4, removed = 1)))),
+        ))
         // 备份攒过头（1 GB 以上，设置 → Code 栏 顶上要提醒）：写一个稀疏文件占位，不真占盘
         java.io.RandomAccessFile(File(root, "code/c8/big.orig"), "rw").use { it.setLength(1_100_000_000L) }
         val e = Engine(Storage(root))
@@ -511,6 +521,9 @@ class ShotsTest {
         // 侧栏里那条「停下了」（用户按了停止，不是做完）
         shoot("desktop-code-stopped", 1280, 820, 1f, hub, desktop, "code")
         shoot("desktop-code-stopped-conv", 1280, 820, 1f, hub, desktop, "code:c9")
+        // 手机发起的会话（c10）：侧栏那一行和会话上面都要标「手机发起」（第二期）
+        shoot("desktop-code-fromphone", 1280, 820, 1f, hub, desktop, "code")
+        shoot("desktop-code-fromphone-conv", 1280, 820, 1f, hub, desktop, "code:c10")
 
         // 弹窗
         shoot("desktop-convsettings", 1280, 820, 1f, hub, desktop, "conv:c1#convsettings")
@@ -654,6 +667,69 @@ class ShotsTest {
         val (hubB, _) = phoneHub(File(tmp, "phone-b"))
         Thread.sleep(3_000)
         shoot("phone-weixin-shared", 824, 1784, 2f, hubB, phone, "settings:WEIXIN")
+
+        // ———— 手机下令（第二期 2026-10-13）：手机遥控电脑上的 Code 栏 ————
+        // 假的电脑线路：一连上就把电脑的状态发过来，要记录的时候（LoadMessages）回一份。
+        // 真的走中转要开 MQTT、要配对，截图不该联网（全流程在 CodeAgentTest.phoneThroughRelay 里测）。
+        class CodeHostLink(val host: AppState, val msgs: Map<String, List<Message>>) : com.guixing.jixunying.client.FrameLink {
+            override val online = kotlinx.coroutines.flow.MutableStateFlow(true)
+            override val incoming = kotlinx.coroutines.flow.MutableSharedFlow<com.guixing.jixunying.model.WireFrame>(extraBufferCapacity = 64)
+            override suspend fun send(frame: com.guixing.jixunying.model.WireFrame) {
+                when (frame) {
+                    is com.guixing.jixunying.model.WireFrame.Hello -> {
+                        incoming.emit(com.guixing.jixunying.model.WireFrame.Evt(com.guixing.jixunying.model.Event.State(host)))
+                        msgs.forEach { (cid, list) -> incoming.emit(com.guixing.jixunying.model.WireFrame.Evt(com.guixing.jixunying.model.Event.Messages(cid, list))) }
+                    }
+                    is com.guixing.jixunying.model.WireFrame.Req -> {
+                        val cmd = frame.command
+                        val res = when (cmd) {
+                            is com.guixing.jixunying.model.Command.LoadMessages -> {
+                                incoming.emit(com.guixing.jixunying.model.WireFrame.Evt(com.guixing.jixunying.model.Event.Messages(cmd.convId, msgs[cmd.convId].orEmpty())))
+                                com.guixing.jixunying.model.CommandResult()
+                            }
+                            // 看差异只是读文件、不改东西，直接拿真的引擎算一份出来（差异查看器里要有真差异可看）
+                            is com.guixing.jixunying.model.Command.CodeDiff -> kotlinx.coroutines.runBlocking { e.call(cmd) }
+                            else -> com.guixing.jixunying.model.CommandResult()
+                        }
+                        incoming.emit(com.guixing.jixunying.model.WireFrame.Res(frame.reqId, res))
+                    }
+                    else -> {}
+                }
+            }
+            override fun close() {}
+        }
+        val seeded = Storage(File(tmp, "data"))
+        val codeMsgs: Map<String, List<Message>> = mapOf(
+            "c8" to seeded.loadMessages("c8"), "c9" to seeded.loadMessages("c9"), "c10" to seeded.loadMessages("c10"),
+        )
+        /** 手机，遥控着「电脑」（host 就是电脑那份状态，只有开关和文件夹列表按场景改）。 */
+        fun codePhoneHub(root: File, allowPhone: Boolean, withCode: Boolean, msgs: Map<String, List<Message>> = codeMsgs): Hub {
+            val host = e.state.copy(
+                settings = e.state.settings.copy(code = e.state.settings.code.copy(allowPhone = allowPhone)),
+                conversations = if (withCode) e.state.conversations else e.state.conversations.filterNot { it.isCode },
+                // 电脑上支持调用工具的模型（新建对话框的模型列表要照电脑上的列），画图那个不算
+                providers = e.state.providers.map { p -> p.copy(models = p.models.map { m -> if (m.imageGen) m else m.copy(tools = true) }) },
+            )
+            val pe = Engine(Storage(root), isPhone = true)
+            val h = Hub(pe, linkFactory = { CodeHostLink(host, msgs) }, deviceName = "SM-S938U")
+            h.attach(com.guixing.jixunying.model.PairedHost("h1", "我的电脑", "d1", "k", emptyList()))
+            h.useRemote.value = true // 侧栏顶上切到「电脑」（attach 只连上，不切）
+            return h
+        }
+        // 电脑上开着「允许手机用 Code 栏」：能发任务、能停止、等批准那一步能允许 / 拒绝，权限档只列手动 / 计划
+        val codePhone = codePhoneHub(File(tmp, "code-phone"), allowPhone = true, withCode = true)
+        shoot("phone-code-can-act", 824, 1784, 2f, codePhone, phone, "code:c8")
+        // 手机上新建 Code 会话：项目文件夹只能从电脑上已有的会话里选（不弹系统选择器）
+        shoot("phone-code-new-folders", 824, 1784, 2f, codePhone, phone, "newcode")
+        // 差异查看器：手机上能逐个文件接受 / 拒绝，「全部撤销」不显示、换成一行小字
+        shoot("phone-code-diff", 824, 1784, 2f, codePhone, phone, "code:c8#diff")
+        // 电脑上一个 Code 会话都没有：说清楚，建不了
+        val codePhoneNone = codePhoneHub(File(tmp, "code-phone-none"), allowPhone = true, withCode = false)
+        shoot("phone-code-new-nofolder", 824, 1784, 2f, codePhoneNone, phone, "newcode")
+        // 电脑上没打开那个开关：只能看，底下写清楚去哪儿打开
+        val codePhoneLocked = codePhoneHub(File(tmp, "code-phone-locked"), allowPhone = false, withCode = true)
+        shoot("phone-code-locked", 824, 1784, 2f, codePhoneLocked, phone, "code:c8")
+        shoot("phone-code-locked-tab", 824, 1784, 2f, codePhoneLocked, phone, "code")
 
         // 空白状态：第一次打开
         val empty = Engine(Storage(File(tmp, "empty")))

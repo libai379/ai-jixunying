@@ -54,6 +54,29 @@ interface Platform {
     /** 别的 App 用「打开方式 / 分享」发来的文件（比如在微信里点文件 → 用其他应用打开）。 */
     val incomingFiles: kotlinx.coroutines.flow.StateFlow<List<PickedFile>> get() = NoIncoming
     fun clearIncoming() {}
+
+    /**
+     * 应用现在在不在前台（2026-10-13，Code 栏的通知用）：不在前台时才弹系统通知。
+     * 电脑上看窗口有没有在焦点上；不认识「前台」的台面（测试、截图）都当前台，这样不会平白弹通知。
+     */
+    val inForeground: Boolean get() = true
+
+    /**
+     * 弹一条系统通知（Code 栏某一步开始等批准、或者一条回答做完了）。id 相同的会盖掉旧的。
+     * convId 是这条通知说的是哪个 Code 会话：点通知要能打开应用并切到那个会话（见 openConvRequest）。
+     * 默认什么都不做（不认识通知的平台、测试里）。
+     */
+    fun notify(id: String, title: String, text: String, convId: String) {}
+
+    /** 要用通知之前问一下权限（安卓 13 起要用户同意）。在用户正操作的时候调（应用在前台，弹窗出得来）。默认什么都不做。 */
+    fun askNotifyPermission() {}
+
+    /**
+     * 点了通知要打开哪个 Code 会话（界面消费掉以后调 clearOpenConvRequest）。默认一直没有。
+     * 手机上是 MainActivity 从通知的 Intent 里取出来，电脑上是托盘图标被点了。
+     */
+    val openConvRequest: kotlinx.coroutines.flow.StateFlow<String?> get() = NoConvRequest
+    fun clearOpenConvRequest() {}
     /** 这台设备能不能放声音（回答下面「读出来」按钮、设置里的「试听」）。默认不能。 */
     val canPlayAudio: Boolean get() = false
     /**
@@ -80,5 +103,6 @@ interface Platform {
 }
 
 private val NoIncoming = kotlinx.coroutines.flow.MutableStateFlow<List<PickedFile>>(emptyList())
+private val NoConvRequest = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
 
 val LocalPlatform = staticCompositionLocalOf<Platform> { error("Platform not provided") }

@@ -59,6 +59,9 @@ class JxyApp : Application() {
     /** 手机在接微信：绑定了、「这台手机接微信」开着。这时要开前台服务，不然系统会把应用关掉。 */
     fun phoneAnswersWeixin() = weixin.isBound && engine.state.settings.weixin.enabled
 
+    /** 应用现在在不在前台（Code 栏只在不在前台时弹通知，第二期 2026-10-13）。 */
+    val inForeground: Boolean get() = visible > 0
+
     fun weixinStatus(): String = engine.state.weixin.status
 
     /** 通知上点「关掉」：把「这台手机接微信」关掉（和设置里关一样）。 */
@@ -141,6 +144,16 @@ class JxyApp : Application() {
 }
 
 class MainActivity : ComponentActivity() {
+    companion object {
+        /** 通知 / 托盘带过来的「要点开哪个 Code 会话」（第二期 2026-10-13）。 */
+        const val EXTRA_CONV = "jxy.code.conv"
+        /** Code 栏的通知渠道（Android 8 起必须先建渠道，通知才出得来）。 */
+        private const val CHANNEL_CODE = "code"
+    }
+
+    /** 点了 Code 栏的通知要打开哪个会话（界面收掉以后调 clearOpenConvRequest）。 */
+    private val openConv = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
+
     private var pickResult: CompletableDeferred<List<Uri>>? = null
     private var saveResult: CompletableDeferred<Uri?>? = null
     private var scanResult: CompletableDeferred<String?>? = null
@@ -196,9 +209,54 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    // ---- Code 栏的通知（第二期 2026-10-13）：某一步开始等批准、或者一条回答做完了，不在前台时弹一条。
+    //      Android 13 起要用户同意才能显示通知：第一次用到时问一下（没同意就不弹，不打扰）。
+
+    private fun showCodeNotify(key: String, title: String, text: String, convId: String) {
+        // 没权限就不弹。权限在用户手机上动手（发任务、新建会话）时问（askCodeNotifyPermission）：
+        // 那时应用一定在前台；在这里问的话应用多半在后台，弹窗出不来（主会话审查 10-13）
+        if (!canPostNotifications()) return
+        runCatching {
+            getSystemService(android.app.NotificationManager::class.java)
+                .createNotificationChannel(android.app.NotificationChannel(CHANNEL_CODE, "Code 栏", android.app.NotificationManager.IMPORTANCE_DEFAULT).apply {
+                    description = "Code 栏做完一件事、或者停下来等你批准"
+                })
+            // 请求码按会话分开、并且 UPDATE_CURRENT：附加内容不参与 PendingIntent 的比较，
+            // 都用 0 的话系统会复用第一条的，点后来的通知打开的还是第一个会话（主会话审查 10-13）
+            val open = android.app.PendingIntent.getActivity(
+                this, convId.hashCode(),
+                Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP).putExtra(EXTRA_CONV, convId),
+                android.app.PendingIntent.FLAG_IMMUTABLE or android.app.PendingIntent.FLAG_UPDATE_CURRENT,
+            )
+            val n = android.app.Notification.Builder(this, CHANNEL_CODE)
+                .setSmallIcon(R.drawable.ic_notify)
+                .setContentTitle(title)
+                .setContentText(text)
+                .setStyle(android.app.Notification.BigTextStyle().bigText(text))
+                .setAutoCancel(true)
+                .setContentIntent(open)
+                .build()
+            // 同一件事（同一个 key）盖掉旧的，不同的事各占一条
+            getSystemService(android.app.NotificationManager::class.java).notify(key.hashCode(), n)
+        }
+    }
+
+    private fun canPostNotifications() = Build.VERSION.SDK_INT < 33 ||
+        checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) == android.content.pm.PackageManager.PERMISSION_GRANTED
+
+    /** 问一次通知权限（Code 栏用；和接微信那条各问各的，那边被拒了这边还能问一次）。 */
+    private var askedCodeNotify = false
+    private fun askCodeNotifyPermission() {
+        if (canPostNotifications() || askedCodeNotify) return
+        askedCodeNotify = true
+        runCatching { askNotify.launch(android.Manifest.permission.POST_NOTIFICATIONS) }
+    }
+
     @Suppress("DEPRECATION")
     private fun handleIncoming(intent: Intent?) {
         intent ?: return
+        // 从 Code 栏的通知点进来：界面打开以后切到那个会话（第二期 2026-10-13）
+        intent.getStringExtra(EXTRA_CONV)?.takeIf { it.isNotBlank() }?.let { openConv.value = it }
         val uris: List<Uri> = when (intent.action) {
             Intent.ACTION_VIEW -> listOfNotNull(intent.data)
             Intent.ACTION_SEND -> listOfNotNull(
@@ -240,6 +298,20 @@ class MainActivity : ComponentActivity() {
 
         override val incomingFiles get() = incoming
         override fun clearIncoming() { incoming.value = emptyList() }
+
+        // ---- Code 栏的通知（第二期 2026-10-13）
+        override val inForeground: Boolean get() = (application as JxyApp).inForeground
+        override val openConvRequest get() = openConv
+        override fun clearOpenConvRequest() { openConv.value = null }
+
+        override fun askNotifyPermission() {
+            runOnUiThread { if (!isFinishing) askCodeNotifyPermission() }
+        }
+
+        override fun notify(id: String, title: String, text: String, convId: String) {
+            // 通知要在主线程发（请求权限的 launcher 也只能在主线程用）
+            runOnUiThread { if (!isFinishing) runCatching { showCodeNotify(id, title, text, convId) } }
+        }
 
         override fun openFile(path: String): Boolean = runCatching {
             val f = File(path)

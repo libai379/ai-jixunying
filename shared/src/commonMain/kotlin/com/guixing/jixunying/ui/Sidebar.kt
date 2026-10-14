@@ -258,18 +258,21 @@ private fun ColumnScope.ChatSessionSidebar(ctl: AppController, state: AppState, 
  */
 @Composable
 private fun ColumnScope.CodeSessionSidebar(ctl: AppController, state: AppState, onNavigate: () -> Unit) {
-    val platform = LocalPlatform.current
-    Button(
-        onClick = { ctl.showNewCode = true; onNavigate() },
-        modifier = Modifier.fillMaxWidth().height(42.dp),
-        shape = RoundedCornerShape(12.dp),
-        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
-    ) {
-        Icon(Icons.Rounded.Add, null, Modifier.size(18.dp))
-        Spacer(Modifier.width(6.dp))
-        Text("新建 Code 会话")
+    // 这台设备上能不能动手（电脑上照旧；手机要连着电脑、电脑上还开着「允许手机用 Code 栏」）：不能就不给新建
+    val access = CodeUi.access(LocalPlatform.current.isDesktop, ctl.remoteMode, state.settings.code.allowPhone)
+    if (access.canAct) {
+        Button(
+            onClick = { ctl.showNewCode = true; onNavigate() },
+            modifier = Modifier.fillMaxWidth().height(42.dp),
+            shape = RoundedCornerShape(12.dp),
+            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
+        ) {
+            Icon(Icons.Rounded.Add, null, Modifier.size(18.dp))
+            Spacer(Modifier.width(6.dp))
+            Text("新建 Code 会话")
+        }
+        Spacer(Modifier.height(8.dp))
     }
-    Spacer(Modifier.height(8.dp))
 
     val allMessages by ctl.backend.store.messages.collectAsState()
     val convs = state.conversations.filter { it.isCode }.sortedByDescending { it.updatedAt }
@@ -278,7 +281,12 @@ private fun ColumnScope.CodeSessionSidebar(ctl: AppController, state: AppState, 
         convs.forEach { c -> if (!ctl.backend.store.hasMessages(c.id)) ctl.run(Command.LoadMessages(c.id), quiet = true) }
     }
     if (convs.isEmpty()) {
-        Text(if (platform.isDesktop) "还没有 Code 会话。新建一个，选好项目文件夹和模型就能让它动手。" else "还没有 Code 会话。",
+        Text(
+            when {
+                access.canAct -> "还没有 Code 会话。新建一个，选好项目文件夹和模型就能让它动手。"
+                access == CodeAccess.LOCKED -> "电脑上还没有 Code 会话。要新建得在电脑上做。"
+                else -> "还没有 Code 会话。"
+            },
             style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle, modifier = Modifier.padding(12.dp))
         Spacer(Modifier.weight(1f))
         return
@@ -310,7 +318,17 @@ private fun CodeSessionRow(ctl: AppController, state: AppState, c: Conversation,
         Column(Modifier.weight(1f)) {
             Text(c.title, style = MaterialTheme.typography.bodyMedium, fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
                 maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text(folderName(c.code?.folder.orEmpty()), style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                // 手机发起的会话：电脑上要一眼看得出来（设计说明第 6 节，第二期）
+                if (c.code?.fromPhone == true) {
+                    Icon(Icons.Rounded.PhoneAndroid, null, Modifier.size(11.dp), tint = MaterialTheme.colorScheme.primary)
+                    Spacer(Modifier.width(3.dp))
+                    Text("手机发起", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+                    Spacer(Modifier.width(4.dp))
+                }
+                Text(folderName(c.code?.folder.orEmpty()), style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
         }
         Pill(status.label, when (status) {
             CodeStatus.RUNNING -> MaterialTheme.colorScheme.primary
