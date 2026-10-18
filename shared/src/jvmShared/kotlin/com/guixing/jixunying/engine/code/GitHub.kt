@@ -90,6 +90,41 @@ class GitHub(private val runner: CodeRunner, private val shell: String, private 
         return Result(r.ok, out.toString().trim())
     }
 
+    /**
+     * PR 的检查状态（2026-10-18，开发补齐第 9 样；Claude 桌面 App 的 CI status bar：「Claude Code uses the GitHub CLI to poll check results」）。
+     * 返回（PR 网址, 状态：OPEN / MERGED / CLOSED, 每项检查「名字：结果」）；没有 PR 返回 null。
+     */
+    suspend fun prChecks(dir: File): Triple<String, String, List<Pair<String, String>>>? {
+        val r = run(gh("pr view --json url,state,statusCheckRollup"), dir, 60)
+        if (!r.ok) return null
+        val o = runCatching { kotlinx.serialization.json.Json.parseToJsonElement(r.text.substring(r.text.indexOf('{'))) as kotlinx.serialization.json.JsonObject }.getOrNull() ?: return null
+        fun s(e: kotlinx.serialization.json.JsonElement?) = (e as? kotlinx.serialization.json.JsonPrimitive)?.content.orEmpty()
+        val checks = (o["statusCheckRollup"] as? kotlinx.serialization.json.JsonArray).orEmpty().mapNotNull { e ->
+            val c = e as? kotlinx.serialization.json.JsonObject ?: return@mapNotNull null
+            val name = s(c["name"]).ifBlank { s(c["context"]) }
+            // CheckRun：status 没完就是 IN_PROGRESS / QUEUED，完了看 conclusion；StatusContext 看 state
+            val result = s(c["conclusion"]).ifBlank { s(c["state"]) }.ifBlank { s(c["status"]) }.uppercase()
+            name to result
+        }
+        return Triple(s(o["url"]), s(o["state"]), checks)
+    }
+
+    /** 最近一次失败的检查日志（只要失败的那几步，最后 15000 字）。 */
+    suspend fun failedLog(dir: File): String {
+        val list = run(gh("run list --limit 5 --json databaseId,conclusion,headBranch"), dir, 60)
+        val branch = run("git branch --show-current", dir, 30).text.trim()
+        val arr = runCatching { kotlinx.serialization.json.Json.parseToJsonElement(list.text.substring(list.text.indexOf('['))) as kotlinx.serialization.json.JsonArray }.getOrNull()
+            ?: return "取不到检查记录：" + list.text.take(300)
+        val id = arr.mapNotNull { it as? kotlinx.serialization.json.JsonObject }.firstOrNull {
+            (it["conclusion"] as? kotlinx.serialization.json.JsonPrimitive)?.content == "failure" &&
+                (branch.isEmpty() || (it["headBranch"] as? kotlinx.serialization.json.JsonPrimitive)?.content == branch)
+        }?.get("databaseId")?.let { (it as kotlinx.serialization.json.JsonPrimitive).content } ?: return "最近没有失败的检查。"
+        return run(gh("run view $id --log-failed"), dir, 120).text.takeLast(15_000)
+    }
+
+    /** 全过了自动合并（squash；仓库设置里要先打开自动合并）。 */
+    suspend fun autoMerge(dir: File): Result = run(gh("pr merge --auto --squash"), dir, 120)
+
     /** 开一个控制台窗口跑 gh auth login --web（要用户在浏览器里点同意，程序替不了）。 */
     fun openLoginWindow(dir: File): Boolean = runCatching {
         val cmd = withProxy(gh("auth login --web --git-protocol https"))

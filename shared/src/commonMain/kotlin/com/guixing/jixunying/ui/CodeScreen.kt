@@ -157,6 +157,7 @@ fun CodeScreen(ctl: AppController, convId: String, wide: Boolean, openDrawer: ()
     }) {
         Column(Modifier.fillMaxSize()) {
             CodeTopBar(ctl, state, conv, spec, wide, openDrawer, running, access)
+            if (spec.prUrl.isNotBlank() && platform.isDesktop && !ctl.remoteMode) CiBar(ctl, conv, spec)
             Box(Modifier.weight(1f).fillMaxWidth()) {
                 CodeMessageList(ctl, state, conv, messages, access.canAct) { diffMessage = it }
             }
@@ -303,6 +304,49 @@ private fun CodeTopBar(ctl: AppController, state: AppState, conv: Conversation, 
     }
     HorizontalDivider(color = Ext.c.border)
     if (showPath) WorkspaceDialog(ctl, conv, spec) { showPath = false }
+}
+
+/**
+ * PR 的检查状态条（2026-10-18，开发补齐第 9 样；Claude 桌面 App 的 CI status bar）。
+ * 每分钟用 gh 查一次；失败了「让 AI 修」（把失败日志交给 AI），「全过了自动合并」。
+ */
+@Composable
+private fun CiBar(ctl: AppController, conv: Conversation, spec: CodeSpec) {
+    val platform = LocalPlatform.current
+    var state by remember(conv.id) { mutableStateOf("") }
+    var checks by remember(conv.id) { mutableStateOf(emptyList<Pair<String, String>>()) }
+    var tick by remember(conv.id) { mutableStateOf(0) }
+    LaunchedEffect(conv.id, tick) {
+        while (true) {
+            val r = ctl.backend.call(Command.CodeGit(conv.id, "checks"))
+            runCatching {
+                val o = kotlinx.serialization.json.Json.parseToJsonElement(r.data) as kotlinx.serialization.json.JsonObject
+                state = (o["state"] as kotlinx.serialization.json.JsonPrimitive).content
+                checks = (o["checks"] as kotlinx.serialization.json.JsonArray).map { a ->
+                    val l = a as kotlinx.serialization.json.JsonArray
+                    (l[0] as kotlinx.serialization.json.JsonPrimitive).content to (l[1] as kotlinx.serialization.json.JsonPrimitive).content
+                }
+            }
+            kotlinx.coroutines.delay(60_000)
+        }
+    }
+    val failed = checks.count { it.second in setOf("FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED") }
+    val passed = checks.count { it.second in setOf("SUCCESS", "NEUTRAL", "SKIPPED") }
+    val pending = checks.size - failed - passed
+    Row(
+        Modifier.fillMaxWidth().background(if (failed > 0) MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.5f) else Ext.c.sidebarSelected)
+            .padding(horizontal = 16.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text("PR " + when (state) { "MERGED" -> "已合并"; "CLOSED" -> "已关闭"; "OPEN" -> "开着"; "" -> "…"; else -> state } +
+            (if (checks.isEmpty()) "" else " · 检查 ${checks.size} 项：过了 $passed" + (if (failed > 0) "，失败 $failed" else "") + (if (pending > 0) "，在跑 $pending" else "")),
+            style = MaterialTheme.typography.labelMedium, color = if (failed > 0) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+        if (failed > 0) TextButton({ ctl.run(Command.CodeGit(conv.id, "ci_fix"), okText = "把失败日志交给 AI 了") }) { Text("让 AI 修") }
+        if (state == "OPEN") TextButton({ ctl.run(Command.CodeGit(conv.id, "automerge")) }) { Text("全过了自动合并") }
+        TextButton({ tick++ }) { Text("刷新") }
+        TextButton({ platform.openUrl(spec.prUrl) }) { Text("打开") }
+    }
 }
 
 /** 终端里的一行记录：敲的命令（带当时的目录）和输出。 */

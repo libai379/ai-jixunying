@@ -59,6 +59,8 @@ data class CodeSpec(
      * 检查员拦下的再问用户。和 openAll 一样不做成 CodeMode 新值（旧手机读不坏）；界面上是「接受编辑 + 这个开关」。只能在电脑上打开。
      */
     val autoMode: Boolean = false,
+    /** 这个会话开过的 PR 网址（2026-10-18）：不为空时会话顶上显示检查状态。 */
+    val prUrl: String = "",
 )
 
 /**

@@ -959,10 +959,25 @@ class Engine(
                     if (!a.ok) CommandResult(false, a.text.take(300), data = a.text)
                     else gh.push(dir).let { CommandResult(it.ok, if (it.ok) "提交并推上去了" else it.text.take(300), data = a.text + "\n" + it.text) }
                 }
+                "checks" -> {
+                    val t = gh.prChecks(dir) ?: return CommandResult(false, "这个分支还没有 PR")
+                    if (t.first.isNotBlank() && spec.prUrl != t.first) updateCodeSpec(c.convId) { it.copy(prUrl = t.first) }
+                    CommandResult(data = buildJsonObject {
+                        put("url", t.first); put("state", t.second)
+                        putJsonArray("checks") { t.third.forEach { (n, r) -> add(buildJsonArray { add(n); add(r) }) } }
+                    }.toString())
+                }
+                "ci_fix" -> {
+                    val log = gh.failedLog(dir)
+                    if (log.startsWith("最近没有失败")) return CommandResult(false, log)
+                    call(Command.CodeSend(c.convId, "PR 的自动检查失败了，下面是失败的日志。找出原因、改好，再跑一遍相关的测试确认：\n\n```\n$log\n```"))
+                }
+                "automerge" -> gh.autoMerge(dir).let { CommandResult(it.ok, if (it.ok) "设好了：检查全过就自动合并" else it.text.take(300), data = it.text) }
                 "pr" -> {
                     val a = gh.commit(dir, c.message)
                     val b = if (a.ok) gh.push(dir) else a
                     val p = if (b.ok) gh.pr(dir) else b
+                    Regex("https://github\\.com/\\S+/pull/\\d+").find(p.text)?.value?.let { u -> updateCodeSpec(c.convId) { it.copy(prUrl = u) } }
                     CommandResult(p.ok, if (p.ok) "PR 开好了：" + (Regex("https://\\S+").find(p.text)?.value ?: "") else p.text.take(300), data = listOf(a.text, b.text, p.text).distinct().joinToString("\n"))
                 }
                 "create" -> gh.create(dir, c.name.ifBlank { dir.name }, c.private, c.message).let {

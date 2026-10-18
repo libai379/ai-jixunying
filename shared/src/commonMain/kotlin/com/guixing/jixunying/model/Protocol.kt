@@ -45,7 +45,8 @@ sealed interface Command {
     /**
      * Code 栏连 GitHub（2026-10-18，engine/code/GitHub）：op =
      * "repo" 看项目的 Git 状态（data 是 JSON：repo / branch / changes / remote / ahead）；"commit" 提交全部改动；
-     * "push" 推上去；"commit_push" 提交并推；"pr" 推上去并开 PR；"create" 还不是仓库的，建仓库并上传（name、private）。
+     * "push" 推上去；"commit_push" 提交并推；"pr" 推上去并开 PR；"create" 还不是仓库的，建仓库并上传（name、private）；
+     * 2026-10-18：「checks」PR 的检查状态（data 是 JSON：url / state / checks:[[名字, 结果]]）；「ci_fix」把失败日志交给 AI 修；「automerge」全过了自动合并。
      * 结果 data 是命令的输出。只有 "repo" 手机上能用（PhoneGate）。
      */
     @Serializable data class CodeGit(val convId: String, val op: String, val message: String = "", val name: String = "", val private: Boolean = true) : Command
