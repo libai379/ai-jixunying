@@ -283,12 +283,36 @@ private fun WorkspaceDialog(ctl: AppController, conv: Conversation, spec: CodeSp
         Button(onClose) { Text("好了") }
     }) {
         Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState())) {
-            Text("工作区里的文件 AI 读的时候不用问你，改的时候看权限档。工作区外面的文件（比如 G 盘别的地方）也能读能改，" +
-                "但每次都会先停下来问你；批准时可以顺便把那个文件夹加进来。",
+            Text("电脑上的文件 AI 都能读，不用问。工作区里的改动看权限档；工作区外面的（比如 G 盘别的地方）改之前会先问你，" +
+                "选「全部放开」就都不问；批准时可以顺便把那个文件夹加进来。",
                 style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
             Spacer(Modifier.height(10.dp))
             FieldLabel("项目文件夹", "命令在这里跑")
-            SelectionContainer { Text(spec.folder, style = MaterialTheme.typography.bodyMedium) }
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                SelectionContainer(Modifier.weight(1f)) { Text(spec.folder, style = MaterialTheme.typography.bodyMedium) }
+                if (canEdit) TextButton({
+                    scope.launch {
+                        val f = platform.pickFolder("换一个项目文件夹") ?: return@launch
+                        ctl.run(Command.CodeSetProject(conv.id, folder = f), okText = "项目文件夹换成 ${folderName(f)}")
+                    }
+                }) { Text("换一个") }
+            }
+            Spacer(Modifier.height(12.dp))
+            FieldLabel("模型", "只列能调用工具的")
+            val st by ctl.backend.store.state.collectAsState()
+            val options = st.providers.filter { it.enabled }.flatMap { p -> p.models.filter { it.tools }.map { p to it } }
+            options.forEach { (p, m) ->
+                val on = p.id == spec.providerId && m.id == spec.modelId
+                Row(
+                    Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).background(if (on) Ext.c.sidebarSelected else Color.Transparent)
+                        .clickable(enabled = canEdit && !on) { ctl.run(Command.CodeSetProject(conv.id, providerId = p.id, modelId = m.id), okText = "模型换成 ${m.id}") }
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    RadioButton(on, null, enabled = canEdit)
+                    Text("${p.name} · ${m.id}", style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+            }
             Spacer(Modifier.height(12.dp))
             FieldLabel("加进来的文件夹", if (spec.extraPaths.isEmpty()) "还没有" else null)
             spec.extraPaths.forEach { p ->
@@ -399,7 +423,7 @@ private fun CodeMessageList(ctl: AppController, state: AppState, conv: Conversat
         item(key = "top") {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Spacer(Modifier.height(16.dp))
-                Text("项目文件夹：${conv.code?.folder.orEmpty()}（工作区外面的文件也能读写，会先问你）",
+                Text("项目文件夹：${conv.code?.folder.orEmpty()}（电脑上的文件都能读；改工作区外面的会先问你）",
                     style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
                 Spacer(Modifier.height(24.dp))
             }
@@ -1151,7 +1175,8 @@ fun CodeEmptyScreen(ctl: AppController, wide: Boolean, openDrawer: () -> Unit) {
                         "改文件、跑命令要不要先问你，由权限档说了算，随时能换。每个会话一个文件夹，互不影响。",
                         style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Spacer(Modifier.height(16.dp))
-                    Button(onClick = { ctl.showNewCode = true }, shape = RoundedCornerShape(12.dp)) {
+                    val isDesktopHere = LocalPlatform.current.isDesktop
+                    Button(onClick = { ctl.newCode(isDesktopHere) }, shape = RoundedCornerShape(12.dp)) {
                         Icon(Icons.Rounded.Add, null, Modifier.size(18.dp))
                         Spacer(Modifier.width(6.dp))
                         Text("新建 Code 会话")

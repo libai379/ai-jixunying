@@ -99,6 +99,7 @@ fun BrandMark(size: Int = 30) {
 
 @Composable
 fun Sidebar(ctl: AppController, modifier: Modifier, onNavigate: () -> Unit) {
+    val isDesktopHere = LocalPlatform.current.isDesktop
     val state by ctl.backend.store.state.collectAsState()
     var query by remember { mutableStateOf("") }
 
@@ -134,7 +135,7 @@ fun Sidebar(ctl: AppController, modifier: Modifier, onNavigate: () -> Unit) {
                     Spacer(Modifier.width(8.dp))
                     Box(
                         Modifier.size(40.dp).clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.primary)
-                            .clickable { if (code) ctl.showNewCode = true else ctl.showNewChat = true; onNavigate() },
+                            .clickable { if (code) ctl.newCode(isDesktopHere) else ctl.showNewChat = true; onNavigate() },
                         contentAlignment = Alignment.Center,
                     ) {
                         Icon(Icons.Rounded.Add, if (code) "新建 Code 会话" else "新对话", Modifier.size(22.dp), tint = MaterialTheme.colorScheme.onPrimary)

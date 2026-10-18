@@ -695,18 +695,26 @@ class Engine(
         is Command.CodeCreate -> {
             // 第一期 Code 栏只在电脑上用：手机本机没有跑命令的执行器（docs/Code栏设计说明.md 第 6、11 节）
             if (codeRunner == null) return CommandResult(false, "这台设备不能跑 Code 栏（第一期只在电脑上用）")
-            if (c.folder.isBlank()) return CommandResult(false, "还没选项目文件夹")
-            val folder = File(c.folder.trim())
-            if (!folder.exists()) return CommandResult(false, "文件夹不存在：${c.folder}")
-            if (!folder.isDirectory) return CommandResult(false, "这不是文件夹：${c.folder}")
-            val provider = state.provider(c.providerId) ?: return CommandResult(false, "服务商不存在（可能被删了）：${c.providerId}")
-            val model = provider.models.firstOrNull { it.id == c.modelId }
-                ?: return CommandResult(false, "「${provider.name}」里没有模型 ${c.modelId}")
+            // 2026-10-17 用户：「新建 code 对话，为什么还需要选择一个文件夹」——不用先选：
+            // 没给文件夹就用上一个 Code 会话的（还在的话），再没有就用户文件夹；没给模型就用上一个会话的，再没有就第一个能调工具的
+            val last = state.conversations.firstNotNullOfOrNull { it.code }
+            val folderPath = c.folder.trim().ifBlank { last?.folder?.takeIf { File(it).isDirectory } ?: System.getProperty("user.home") }
+            val folder = File(folderPath)
+            if (!folder.exists()) return CommandResult(false, "文件夹不存在：$folderPath")
+            if (!folder.isDirectory) return CommandResult(false, "这不是文件夹：$folderPath")
+            val pick = if (c.providerId.isNotBlank()) c.providerId to c.modelId else
+                (last?.let { l -> state.provider(l.providerId)?.takeIf { p -> p.enabled && p.models.any { it.id == l.modelId && it.tools } }?.let { l.providerId to l.modelId } }
+                    ?: state.providers.filter { it.enabled }.firstNotNullOfOrNull { p -> p.models.firstOrNull { it.tools }?.let { p.id to it.id } })
+                    ?: return CommandResult(false, "还没有能调用工具的模型：先到 设置 → 模型服务 加一个")
+            val provider = state.provider(pick.first) ?: return CommandResult(false, "服务商不存在（可能被删了）：${pick.first}")
+            val model = provider.models.firstOrNull { it.id == pick.second }
+                ?: return CommandResult(false, "「${provider.name}」里没有模型 ${pick.second}")
             // 只有支持调用工具的模型才能进 Code 栏（docs/Code栏设计说明.md 第 2 节）
             if (!model.tools) return CommandResult(false, "「${model.id}」不能调用工具，干不了 Code 栏的活；到 设置 → 模型服务 换一个支持工具的模型")
             val conv = Conversation(
                 id = newId(),
-                title = folder.name.ifBlank { folder.path },
+                // 标题先叫「新对话」：第一条任务发出去就换成任务的开头（和聊天一样）；文件夹在侧栏和顶栏另外显示
+                title = "新对话",
                 memberIds = emptyList(),
                 createdAt = now(), updatedAt = now(),
                 code = CodeSpec(folder = folder.absolutePath, providerId = provider.id, modelId = model.id, mode = c.mode,
@@ -716,6 +724,36 @@ class Engine(
             updateState { it.copy(conversations = listOf(conv) + it.conversations) }
             emit(Event.Messages(conv.id, emptyList()))
             CommandResult(data = conv.id)
+        }
+        is Command.CodeSetProject -> {
+            val conv = state.conversation(c.convId) ?: return CommandResult(false, "对话不存在")
+            val spec = conv.code ?: return CommandResult(false, "这不是 Code 会话")
+            var next = spec
+            if (c.folder.isNotBlank()) {
+                val f = File(c.folder.trim())
+                if (!f.isDirectory) return CommandResult(false, "不是文件夹或者不存在：${c.folder}")
+                next = next.copy(folder = f.absolutePath)
+            }
+            if (c.providerId.isNotBlank()) {
+                val p = state.provider(c.providerId) ?: return CommandResult(false, "服务商不存在：${c.providerId}")
+                val m = p.models.firstOrNull { it.id == c.modelId } ?: return CommandResult(false, "「${p.name}」里没有模型 ${c.modelId}")
+                if (!m.tools) return CommandResult(false, "「${m.id}」不能调用工具，干不了 Code 栏的活")
+                next = next.copy(providerId = p.id, modelId = m.id)
+            }
+            if (next == spec) return CommandResult()
+            // 换了文件夹：以前改动记录里相对旧文件夹的路径换成完整路径，撤销照样找得到文件
+            if (next.folder != spec.folder) {
+                val old = File(spec.folder)
+                for (m in snapshot(conv.id)) {
+                    if (m.tools.none { it.change != null && !File(it.change.path).isAbsolute }) continue
+                    updateMessage(conv.id, m.id) { msg -> msg.copy(tools = msg.tools.map { t ->
+                        val ch = t.change
+                        if (ch == null || File(ch.path).isAbsolute) t else t.copy(change = ch.copy(path = File(old, ch.path).absolutePath))
+                    }) }
+                }
+            }
+            updateCodeSpec(conv.id) { next }
+            CommandResult()
         }
         is Command.CodeSetMode -> {
             val conv = state.conversation(c.convId) ?: return CommandResult(false, "对话不存在")

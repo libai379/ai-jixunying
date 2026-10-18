@@ -37,6 +37,11 @@ sealed interface Command {
         /** 手机发来的（电脑收到手机的指令时由 PhoneGate 填 true，手机自己填的不算）。 */
         val fromPhone: Boolean = false,
     ) : Command
+    /**
+     * Code 栏：换这个会话的项目文件夹 / 模型（2026-10-17，新建不再先选，开起来以后随时换）。空字符串 = 这一样不换。
+     * 换文件夹时，以前改动记录里的相对路径换成完整路径，照样能撤销。只能在电脑上换（PhoneGate）。
+     */
+    @Serializable data class CodeSetProject(val convId: String, val folder: String = "", val providerId: String = "", val modelId: String = "") : Command
     /** Code 栏：换权限档（只影响之后的步骤，已经跑完的不变）。fromPhone 同上。 */
     @Serializable data class CodeSetMode(val convId: String, val mode: CodeMode, val fromPhone: Boolean = false,
         /** 2026-10-17：「全部放开」（CodeSpec.openAll）。手机发来 true 的一律拒（PhoneGate）。 */

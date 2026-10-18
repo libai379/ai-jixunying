@@ -64,7 +64,8 @@ class CodeSessionTest {
         assertEquals(CodeMode.MANUAL, code.mode, "没说就是默认的手动档")
         assertFalse(code.fromPhone)
         assertTrue(conv.isCode)
-        assertEquals(project.name, conv.title, "标题用文件夹名")
+        // 2026-10-17：标题先叫「新对话」，第一条任务发出去换成任务开头（文件夹在侧栏、顶栏另外显示）
+        assertEquals("新对话", conv.title)
         assertTrue(conv.memberIds.isEmpty(), "Code 会话没有成员")
         assertTrue(conv.createdAt > 0 && conv.updatedAt > 0)
         // 存储和推送跟普通对话一样：排在最前面，消息列表推一个空的

@@ -448,6 +448,32 @@ class CodeAgentTest {
         assertTrue("src/deep/x/Hello.kt" in lastToolTexts())
     }
 
+    /** 2026-10-17：新建不用先选——文件夹、模型用上一个会话的；开起来以后能换文件夹，以前的改动照样能撤销。 */
+    @Test
+    fun createWithoutPickingAndSwitchFolder() = runBlocking {
+        val e = engine()
+        val first = codeConv(e)
+        val r = e.call(Command.CodeCreate("", "", ""))
+        assertTrue(r.ok, r.message)
+        val spec = e.state.conversation(r.data)!!.code!!
+        assertEquals(e.state.conversation(first)!!.code!!.folder, spec.folder, "用上一个会话的文件夹")
+        assertEquals("code-model", spec.modelId)
+        // 在旧文件夹里改一处，再换文件夹：撤销照样恢复旧文件夹里的那个文件
+        e.call(Command.CodeSetMode(first, CodeMode.ACCEPT_EDITS))
+        e.call(Command.CodeSend(first, "所有 greeting"))
+        awaitStatus(e, first, MsgStatus.DONE)
+        val ch = aiOf(e, first)!!.tools.mapNotNull { it.change }.single()
+        val other = File(dir, "另一个项目").apply { mkdirs() }
+        assertTrue(e.call(Command.CodeSetProject(first, folder = other.absolutePath)).ok)
+        assertEquals(other.absolutePath, e.state.conversation(first)!!.code!!.folder)
+        assertTrue(e.call(Command.CodeReview(first, ch.id, false)).ok)
+        assertEquals("greeting world\n", File(project, "a.txt").readText(), "换了文件夹也能撤销旧文件夹里的改动")
+        // 手机换不了
+        val on = e.state.copy(settings = e.state.settings.copy(code = e.state.settings.code.copy(allowPhone = true)))
+        assertNotNull(com.guixing.jixunying.engine.code.PhoneGate.check(Command.CodeSetProject(first, folder = "C:\\"), on).refusal)
+        Unit
+    }
+
     /** 2026-10-17：fetch_url 不问（和对话栏统一，读网页不改本机任何东西）。 */
     @Test
     fun fetchUrlReadsWithoutAsking() = runBlocking {
