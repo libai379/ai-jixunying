@@ -522,6 +522,22 @@ class CodeAgentTest {
         assertNull(com.guixing.jixunying.engine.AutoJudge.parse("我觉得可以"))
     }
 
+    /** 2026-10-18 「@」补全文件名：名字开头对上的排前面，node_modules 不翻；@ 的位置和插入。 */
+    @Test
+    fun atMentionSuggestsFiles() = runBlocking {
+        File(project, "src/LoginPage.kt").apply { parentFile.mkdirs(); writeText("x") }
+        File(project, "docs/login-notes.md").apply { parentFile.mkdirs(); writeText("x") }
+        File(project, "node_modules/login/index.js").apply { parentFile.mkdirs(); writeText("x") }
+        val e = engine()
+        val conv = codeConv(e)
+        val got = Json.parseToJsonElement(e.call(Command.FileSuggest(conv, "login")).data).jsonArray.map { it.jsonPrimitive.content }
+        assertEquals(listOf("src/LoginPage.kt", "docs/login-notes.md"), got, "开头对上的在前，node_modules 不翻")
+        val v = androidx.compose.ui.text.input.TextFieldValue("看看 @log", androidx.compose.ui.text.TextRange(7))
+        assertEquals("log", com.guixing.jixunying.ui.atQuery(v))
+        assertEquals(null, com.guixing.jixunying.ui.atQuery(androidx.compose.ui.text.input.TextFieldValue("a@b", androidx.compose.ui.text.TextRange(3))), "邮箱里的 @ 不算")
+        assertEquals("看看 @src/LoginPage.kt ", com.guixing.jixunying.ui.insertAt(v, "src/LoginPage.kt").text)
+    }
+
     /** 2026-10-18 待办清单：认 [x] / [>] / [ ] 和 Markdown 写法；一条回答里只留最新的一张。 */
     @Test
     fun todosUpdateInPlace() = runBlocking {

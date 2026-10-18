@@ -1295,8 +1295,12 @@ private fun CodeComposer(ctl: AppController, conv: Conversation, running: Boolea
         text = TextFieldValue("")
         pending.clear()
     }
+    // 打「@」补全文件名（2026-10-18）
+    val fileQuery = atQuery(text)
+    val fileHits = rememberFileSuggestions(ctl, conv.id, fileQuery)
     Column(Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 14.dp, top = 4.dp), horizontalAlignment = Alignment.CenterHorizontally) {
         Column(Modifier.widthIn(max = 860.dp).fillMaxWidth()) {
+            if (fileQuery != null) FileSuggestList(fileHits) { text = insertAt(text, it) }
             Surface(shape = RoundedCornerShape(22.dp), color = MaterialTheme.colorScheme.surface, border = BorderStroke(1.dp, Ext.c.border), shadowElevation = 3.dp) {
                 Column(Modifier.padding(start = 14.dp, end = 10.dp, top = 10.dp, bottom = 8.dp)) {
                     PendingStrip(ctl, pending)
@@ -1312,7 +1316,9 @@ private fun CodeComposer(ctl: AppController, conv: Conversation, running: Boolea
                             cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
                             modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).onPreviewKeyEvent { e ->
                                 if (platform.isDesktop && e.type == KeyEventType.KeyDown && (e.key == Key.Enter || e.key == Key.NumPadEnter) && !e.isShiftPressed) {
-                                    send(); true
+                                    // 正在补全文件名：回车选第一个
+                                    if (fileQuery != null && fileHits.isNotEmpty()) text = insertAt(text, fileHits.first()) else send()
+                                    true
                                 } else if (platform.isDesktop && e.type == KeyEventType.KeyDown && e.key == Key.V && (e.isCtrlPressed || e.isMetaPressed) && platform.clipboardHasFiles()) {
                                     // 剪贴板里是截图或复制的文件：当附件放进来；是文字就照常粘贴
                                     scope.launch {

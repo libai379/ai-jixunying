@@ -55,6 +55,11 @@ sealed interface Command {
      * 只能在电脑上用（PhoneGate）。
      */
     @Serializable data class TermRun(val convId: String, val command: String, val cwd: String = "") : Command
+    /**
+     * 输入框打「@」补全文件名（2026-10-18，开发补齐第 5 样）：Code 会话在项目文件夹里找，对话在拖进来的文件夹里找。
+     * data 是 JSON 数组（最多 20 个）：Code 会话给相对路径，对话给完整路径。
+     */
+    @Serializable data class FileSuggest(val convId: String, val query: String) : Command
     /** 后台命令（2026-10-18）：看输出（data 是最后一截输出）。 */
     @Serializable data class BgOutput(val convId: String, val id: String) : Command
     /** 后台命令：停掉。手机发来的拒绝（PhoneGate 不拦也行，停掉只会更安全——放行）。 */

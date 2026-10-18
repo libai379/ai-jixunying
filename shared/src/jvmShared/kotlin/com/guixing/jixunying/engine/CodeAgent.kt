@@ -226,6 +226,7 @@ class CodeAgent(private val host: CodeHost) {
             append("当前外壳：").append(shellLabel(code.shell)).append("；命令的工作目录就是项目文件夹；单条命令最多跑 ")
             append(code.commandTimeoutSec).append(" 秒，超时会把进程连同它的子进程杀掉。\n")
             append("系统是 Windows，文件按 UTF-8 读写。\n")
+            append("用户消息里「@路径」是点名给你的文件，先读它。\n")
             append("可以用的工具：read_file（读文件，可指定行范围；图片、PDF、Word、Excel 也能读）、list_dir（列目录）、grep（按内容查找）、find_files（按文件名找）")
             if (spec.mode != CodeMode.PLAN) append("、write_file（新建或整个重写）、edit_file（局部替换）")
             append("、run_command（跑一条命令，返回退出码和输出）、web_search（联网搜索）、fetch_url（读网页）。")

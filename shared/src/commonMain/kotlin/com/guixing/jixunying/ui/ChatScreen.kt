@@ -1096,6 +1096,10 @@ private fun Composer(ctl: AppController, state: AppState, conv: Conversation, ru
 
     Column(Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 14.dp, top = 4.dp), horizontalAlignment = Alignment.CenterHorizontally) {
         Column(Modifier.widthIn(max = 860.dp).fillMaxWidth()) {
+            // 打「@」时拖进来的文件夹里的文件也列出来（2026-10-18，和 Code 栏一样）
+            val fileQuery = if (conv.grantedPaths.isNotEmpty()) atQuery(text) else null
+            val fileHits = rememberFileSuggestions(ctl, conv.id, fileQuery)
+            if (fileQuery != null && fileHits.isNotEmpty() && (suggestions.isEmpty() || fileQuery.length >= 2)) FileSuggestList(fileHits) { text = insertAt(text, it) }
             if (suggestions.isNotEmpty()) {
                 Surface(shape = RoundedCornerShape(12.dp), border = BorderStroke(1.dp, Ext.c.border), shadowElevation = 6.dp, modifier = Modifier.padding(bottom = 6.dp).widthIn(max = 320.dp)) {
                     Column(Modifier.padding(4.dp)) {
@@ -1142,7 +1146,8 @@ private fun Composer(ctl: AppController, state: AppState, conv: Conversation, ru
                             cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
                             modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).onPreviewKeyEvent { e ->
                                 if (platform.isDesktop && e.type == KeyEventType.KeyDown && (e.key == Key.Enter || e.key == Key.NumPadEnter) && !e.isShiftPressed) {
-                                    if (suggestions.isNotEmpty()) insertMention(suggestions.first().first) else send()
+                                    if (fileQuery != null && fileHits.isNotEmpty() && suggestions.isEmpty()) text = insertAt(text, fileHits.first())
+                                    else if (suggestions.isNotEmpty()) insertMention(suggestions.first().first) else send()
                                     true
                                 } else if (platform.isDesktop && e.type == KeyEventType.KeyDown && e.key == Key.V && (e.isCtrlPressed || e.isMetaPressed) && platform.clipboardHasFiles()) {
                                     // 剪贴板里是截图或复制的文件：当附件放进来；是文字就照常粘贴

@@ -124,3 +124,54 @@ fun TodoCard(lines: String) {
         }
     }
 }
+
+/** 光标前面正在打的「@xxx」（没有空白），返回 xxx；不在打就返回 null。 */
+fun atQuery(v: androidx.compose.ui.text.input.TextFieldValue): String? {
+    val before = v.text.substring(0, v.selection.start.coerceIn(0, v.text.length))
+    val at = before.lastIndexOf('@')
+    if (at < 0) return null
+    if (at > 0 && !before[at - 1].isWhitespace()) return null
+    val q = before.substring(at + 1)
+    return if (q.any { it.isWhitespace() } || q.length > 60) null else q
+}
+
+/** 把光标前的「@xxx」换成「@路径 」。路径里有空格的加引号。 */
+fun insertAt(v: androidx.compose.ui.text.input.TextFieldValue, path: String): androidx.compose.ui.text.input.TextFieldValue {
+    val cursor = v.selection.start.coerceIn(0, v.text.length)
+    val at = v.text.substring(0, cursor).lastIndexOf('@')
+    val token = if (path.any { it.isWhitespace() }) "\"$path\"" else path
+    val nt = v.text.substring(0, at) + "@" + token + " " + v.text.substring(cursor)
+    return androidx.compose.ui.text.input.TextFieldValue(nt, androidx.compose.ui.text.TextRange(at + token.length + 2))
+}
+
+/** 按「@xxx」去电脑上找文件（停 200 毫秒再找，免得每打一个字找一次）。 */
+@Composable
+fun rememberFileSuggestions(ctl: AppController, convId: String, query: String?): List<String> {
+    var list by remember(convId) { mutableStateOf(emptyList<String>()) }
+    LaunchedEffect(convId, query) {
+        if (query == null) { list = emptyList(); return@LaunchedEffect }
+        kotlinx.coroutines.delay(200)
+        val r = ctl.backend.call(Command.FileSuggest(convId, query))
+        list = runCatching { (kotlinx.serialization.json.Json.parseToJsonElement(r.data) as kotlinx.serialization.json.JsonArray).map { (it as kotlinx.serialization.json.JsonPrimitive).content } }.getOrDefault(emptyList())
+    }
+    return list
+}
+
+/** 输入框上方弹出的文件建议列表。 */
+@Composable
+fun FileSuggestList(files: List<String>, onPick: (String) -> Unit) {
+    if (files.isEmpty()) return
+    androidx.compose.material3.Surface(shape = RoundedCornerShape(12.dp), border = androidx.compose.foundation.BorderStroke(1.dp, Ext.c.border),
+        shadowElevation = 6.dp, modifier = Modifier.padding(bottom = 6.dp).widthIn(max = 520.dp)) {
+        Column(Modifier.padding(4.dp).heightIn(max = 260.dp).verticalScroll(rememberScrollState())) {
+            files.forEach { f ->
+                Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).clickable { onPick(f) }.padding(horizontal = 8.dp, vertical = 5.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    Text(f.substringAfterLast('/').substringAfterLast('\\'), style = MaterialTheme.typography.bodyMedium, maxLines = 1)
+                    Spacer(Modifier.width(8.dp))
+                    Text(f, style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+            }
+        }
+    }
+}

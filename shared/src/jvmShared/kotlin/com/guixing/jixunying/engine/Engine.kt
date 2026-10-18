@@ -890,6 +890,34 @@ class Engine(
             val r = runner.run(cmd, dir, state.settings.code.shell, state.settings.code.commandTimeoutSec, 30_000)
             reply(dir, r.output + if (r.timedOut) "\n（超时了，已经停掉；开起来不结束的命令末尾加 & 放后台）" else "", r.exitCode)
         }
+        is Command.FileSuggest -> {
+            val conv = state.conversation(c.convId) ?: return CommandResult(false, "对话不存在")
+            val roots = conv.code?.let { listOf(File(it.folder)) } ?: conv.grantedPaths.map { File(it) }.filter { it.isDirectory }
+            val q = c.query.trim().lowercase().replace('\\', '/')
+            val hits = withContext(Dispatchers.IO) {
+                val out = mutableListOf<Pair<Int, String>>()
+                for (root in roots) {
+                    val queue = ArrayDeque<File>().apply { add(root) }
+                    var n = 0
+                    while (queue.isNotEmpty() && n < 20_000) {
+                        val f = queue.removeFirst()
+                        if (f.isDirectory) {
+                            if (f != root && f.name in SKIP_DIRS) continue
+                            f.listFiles()?.forEach { queue.add(it) }
+                            continue
+                        }
+                        n++
+                        val rel = root.toPath().relativize(f.toPath()).toString().replace('\\', '/')
+                        val name = f.name.lowercase()
+                        // 名字开头对上的排前面，其次名字里有，再次路径里有
+                        val rank = when { q.isEmpty() -> 3; name.startsWith(q) -> 0; q in name -> 1; q in rel.lowercase() -> 2; else -> -1 }
+                        if (rank >= 0) out += rank to (if (conv.code != null) rel else f.absolutePath)
+                    }
+                }
+                out.sortedWith(compareBy({ it.first }, { it.second.length })).take(20).map { it.second }
+            }
+            CommandResult(data = kotlinx.serialization.json.JsonArray(hits.map { kotlinx.serialization.json.JsonPrimitive(it) }).toString())
+        }
         is Command.BgOutput -> {
             val out = codeRunner?.backgroundOutput(c.id) ?: return CommandResult(false, "这个后台命令已经不在了")
             CommandResult(data = out)
@@ -3198,6 +3226,8 @@ class Engine(
     }
 
     private companion object {
+        /** 补全文件名时不进去翻的文件夹。 */
+        val SKIP_DIRS = setOf(".git", "node_modules", "build", ".gradle", ".idea", "dist", "out", "target", ".venv", "venv", "__pycache__", ".next", ".kotlin")
         /** 后台命令输出里的本机网址（开发服务器）。 */
         val LOCAL_URL = Regex("https?://(localhost|127\\.0\\.0\\.1|0\\.0\\.0\\.0|\\[::1\\])(:\\d+)?[^\\s'\"<>]*")
         /** 没按意思搜时工具步骤里写的一句。 */
