@@ -949,6 +949,28 @@ class CodeAgent(private val host: CodeHost) {
             if (later.isNotEmpty()) "（这些文件在后面回答里的 ${later.size} 处改动也一起撤掉了）" else "")
     }
 
+    /**
+     * 回到这里（2026-10-18）：这条用户任务（含）往后，所有没撤销的改动从后往前还原，消息全删；返回任务原文。
+     * 先停掉正在跑的（不然一边还原一边又在改）。
+     */
+    suspend fun rewind(convId: String, messageId: String): CommandResult {
+        val guard = guardOf(convId) ?: return CommandResult(false, "这不是 Code 会话")
+        val all = host.messagesOf(convId)
+        val idx = all.indexOfFirst { it.id == messageId }
+        if (idx < 0 || all[idx].role != Role.USER) return CommandResult(false, "找不到这条任务")
+        stop(convId)
+        val later = all.subList(idx, all.size)
+        val changes = later.flatMap { m -> m.tools.mapNotNull { it.change } }.filter { it.review != "rejected" }
+        val backup = host.backupOf(convId)
+        var done = 0
+        for (c in changes.asReversed()) {
+            val file = guard.resolve(c.path) ?: continue
+            if (withContext(Dispatchers.IO) { backup.restore(c.id, file) }) done++
+        }
+        host.removeMessages(convId, later.map { it.id })
+        return CommandResult(message = "回到了这条任务之前：还原了 $done 处改动，后面的对话删掉了", data = all[idx].content)
+    }
+
     /** 会话里按时间顺序排在 ids 里最早那一处之后、改的是同一个文件、还没拒绝的改动。 */
     private fun laterChanges(convId: String, ids: Set<String>, path: String): List<FileChange> {
         val all = host.messagesOf(convId).flatMap { m -> m.tools.mapNotNull { it.change } }
@@ -1088,6 +1110,8 @@ interface CodeHost {
         ToolStep("search", query, ok = false, note = "这台设备不能联网搜索") to emptyList()
     /** 打开一个网页，返回正文文字；打不开抛异常。 */
     suspend fun fetchUrl(url: String): String = throw IllegalStateException("这台设备不能读网页")
+    /** 删掉这些消息（「回到这里」用）。 */
+    fun removeMessages(convId: String, ids: List<String>) {}
     /** 长会话压缩（2026-10-18，开发补齐第 6 样）：记录员写的前情摘要和它管到哪个时间；没有就是（""，0）。 */
     fun summaryOf(convId: String): Pair<String, Long> = "" to 0L
     /** 一次任务做完以后，在后台看要不要压缩（和对话栏同一套 compactIfLong）。 */

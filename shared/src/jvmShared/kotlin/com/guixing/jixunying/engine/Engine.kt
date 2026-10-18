@@ -215,6 +215,12 @@ class Engine(
         override suspend fun autoCheck(convId: String, request: String, action: String) = autoVerdict(convId, request, action)
         override fun startBackground(convId: String, command: String, dir: File) = this@Engine.startBackground(convId, command, dir)
         override fun summaryOf(convId: String) = storage.loadMemo(convId).let { it.summary to it.upToTime }
+        override fun removeMessages(convId: String, ids: List<String>) {
+            val list = messages(convId)
+            synchronized(list) { list.removeAll { it.id in ids } }
+            save(convId)
+            ids.forEach { emit(Event.MessageRemoved(convId, it)) }
+        }
         override fun compactLater(convId: String) { scope.launch { runCatching { compactIfLong(convId) } } }
         override fun backgroundOutput(id: String) = codeRunner?.backgroundOutput(id)
         override fun stopBackground(convId: String, id: String) { codeRunner?.stopBackground(id); markBg(convId, id) { it.copy(running = false) } }
@@ -863,6 +869,7 @@ class Engine(
         is Command.CodeDiff -> codeAgent.diff(c.convId, c.changeId)
         is Command.CodeReview -> codeAgent.review(c.convId, c.changeId, c.accept)
         is Command.CodeRevertTask -> codeAgent.revertTask(c.convId, c.messageId)
+        is Command.CodeRewind -> codeAgent.rewind(c.convId, c.messageId)
         // 只读：备份占了多少（手机发来也放行，见 engine/code/PhoneGate）
         is Command.CodeBackupSize -> CommandResult(data = codeBackupSize().toString())
         is Command.TermRun -> {

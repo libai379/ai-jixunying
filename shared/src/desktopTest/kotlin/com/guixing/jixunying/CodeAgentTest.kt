@@ -524,6 +524,27 @@ class CodeAgentTest {
         assertNull(com.guixing.jixunying.engine.AutoJudge.parse("我觉得可以"))
     }
 
+    /** 2026-10-18 回到这里：这条任务（含）往后的改动还原、消息删掉，任务原文交回去；手机上不许。 */
+    @Test
+    fun rewindRestoresFilesAndDropsMessages() = runBlocking {
+        val e = engine()
+        val conv = codeConv(e, CodeMode.ACCEPT_EDITS)
+        e.call(Command.CodeSend(conv, "所有 greeting"))
+        awaitStatus(e, conv, MsgStatus.DONE)
+        assertEquals("hello world\n", File(project, "a.txt").readText())
+        val n = sendTask(e, conv, "列待办")
+        awaitStatus(e, conv, MsgStatus.DONE, minAi = n)
+        val first = listOf(e, conv).first { it.role == Role.USER }
+        val r = e.call(Command.CodeRewind(conv, first.id))
+        assertTrue(r.ok, r.message)
+        assertEquals("所有 greeting", r.data)
+        assertEquals("greeting world\n", File(project, "a.txt").readText(), "改动还原了")
+        assertTrue(listOf(e, conv).isEmpty(), "这条任务往后的消息都删了")
+        val on = e.state.copy(settings = e.state.settings.copy(code = e.state.settings.code.copy(allowPhone = true)))
+        assertNotNull(com.guixing.jixunying.engine.code.PhoneGate.check(Command.CodeRewind(conv, first.id), on).refusal)
+        Unit
+    }
+
     /** 2026-10-18 长会话压缩：太长了让记录员压成摘要，之后的任务开头带着摘要、不再发压掉的原文。 */
     @Test
     fun longSessionGetsCompacted() = runBlocking {

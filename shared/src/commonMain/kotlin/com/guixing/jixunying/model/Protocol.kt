@@ -105,6 +105,11 @@ sealed interface Command {
     @Serializable data class CodeDiff(val convId: String, val changeId: String) : Command
     /** Code 栏：接受或拒绝一处改动；拒绝 = 把文件恢复成改之前的样子（原来没有的文件就删掉）。 */
     @Serializable data class CodeReview(val convId: String, val changeId: String, val accept: Boolean) : Command
+    /**
+     * Code 栏「回到这里」（2026-10-18，开发补齐第 8 样）：从这条用户任务开始（含）往后的改动全部还原、消息全部删掉。
+     * data 是这条任务的原文（界面放回输入框）。正在跑的先停。手机上不许（一次动一大片，PhoneGate）。
+     */
+    @Serializable data class CodeRewind(val convId: String, val messageId: String) : Command
     /** Code 栏：撤销这一条回答里的全部改动（从后往前还原）。 */
     @Serializable data class CodeRevertTask(val convId: String, val messageId: String) : Command
     /**

@@ -41,6 +41,7 @@ import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.ExpandLess
 import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.FolderOpen
+import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.Terminal
 import androidx.compose.material.icons.rounded.CloudUpload
 import androidx.compose.material.icons.rounded.HourglassTop
@@ -672,8 +673,24 @@ private fun CodeUserMessage(ctl: AppController, m: Message) {
         if (m.content.isNotBlank()) Surface(shape = RoundedCornerShape(18.dp, 4.dp, 18.dp, 18.dp), color = Ext.c.userBubble, modifier = Modifier.widthIn(max = 620.dp)) {
             SelectionContainer { MarkdownText(m.content, Modifier.padding(horizontal = 14.dp, vertical = 10.dp), color = Ext.c.onUserBubble) }
         }
+        var confirm by remember(m.id) { mutableStateOf(false) }
         Row(Modifier.padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
             SmallCodeAction(Icons.Rounded.ContentCopy, "复制") { clipboard.setText(AnnotatedString(m.content)); ctl.toast("已复制") }
+            // 回到这里（2026-10-18，开发补齐第 8 样）：电脑上才有
+            if (LocalPlatform.current.isDesktop && !ctl.remoteMode) SmallCodeAction(Icons.Rounded.History, "回到这里：这条任务之后改过的文件全部还原，后面的对话删掉，任务放回输入框") { confirm = true }
+        }
+        if (confirm) AppDialog("回到这条任务之前？", { confirm = false }, width = 460.dp, actions = {
+            TextButton({ confirm = false }) { Text("取消") }
+            Button({
+                confirm = false
+                ctl.run(Command.CodeRewind(m.convId, m.id), quiet = true) { r ->
+                    ctl.toast(r.message.ifBlank { if (r.ok) "回去了" else "没成功" })
+                    if (r.ok) ctl.composerDraft = m.convId to r.data
+                }
+            }, colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)) { Text("回到这里") }
+        }) {
+            Text("从这条任务开始，AI 改过的文件都会恢复成改之前的样子，之后的对话全部删掉；这条任务的文字放回输入框，你可以改一改再发。",
+                style = MaterialTheme.typography.bodyMedium)
         }
     }
 }
@@ -1331,6 +1348,14 @@ private fun CodeComposer(ctl: AppController, conv: Conversation, running: Boolea
         }
     }
     fun pick(imagesOnly: Boolean) { scope.launch { add(platform.pickFiles(imagesOnly)) } }
+    // 「回到这里」放回来的任务文字
+    val draft = ctl.composerDraft
+    LaunchedEffect(draft, conv.id) {
+        val (cid, t) = draft ?: return@LaunchedEffect
+        if (cid != conv.id) return@LaunchedEffect
+        ctl.composerDraft = null
+        text = TextFieldValue(t, TextRange(t.length))
+    }
     // 拖进来、粘贴进来的（CodeScreen 收到后放进 composerInbox）
     val inbox = ctl.composerInbox
     LaunchedEffect(inbox, conv.id) {
