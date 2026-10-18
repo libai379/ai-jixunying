@@ -512,6 +512,28 @@ class CodeAgentTest {
         assertNull(com.guixing.jixunying.engine.AutoJudge.parse("我觉得可以"))
     }
 
+    /** 2026-10-18 终端：在项目文件夹里跑；cd 只换目录、记得住；末尾 & 放后台；手机上用不了。 */
+    @Test
+    fun terminalRunsAndRemembersCd() = runBlocking {
+        val e = engine()
+        val conv = codeConv(e)
+        File(project, "sub").mkdirs()
+        fun data(r: com.guixing.jixunying.model.CommandResult) = Json.parseToJsonElement(r.data).jsonObject.mapValues { it.value.jsonPrimitive.content }
+        val r1 = data(e.call(Command.TermRun(conv, "Write-Output TERM_OK")))
+        assertTrue("TERM_OK" in r1["output"]!!)
+        assertEquals("0", r1["code"])
+        val r2 = data(e.call(Command.TermRun(conv, "cd sub")))
+        assertEquals(File(project, "sub").canonicalPath, r2["cwd"])
+        val r3 = data(e.call(Command.TermRun(conv, "(Get-Location).Path", r2["cwd"]!!)))
+        assertTrue(r3["output"]!!.trim().endsWith("sub"), r3["output"])
+        val r4 = data(e.call(Command.TermRun(conv, "Start-Sleep 30 &")))
+        assertTrue("后台" in r4["output"]!!)
+        e.state.conversation(conv)!!.background.forEach { e.call(Command.BgStop(conv, it.id)) }
+        val on = e.state.copy(settings = e.state.settings.copy(code = e.state.settings.code.copy(allowPhone = true)))
+        assertNotNull(com.guixing.jixunying.engine.code.PhoneGate.check(Command.TermRun(conv, "dir"), on).refusal)
+        Unit
+    }
+
     /** 2026-10-18 后台命令：开起来马上返回编号；认出输出里的本机网址；read_output 看得到；停得掉。 */
     @Test
     fun backgroundCommandRunsAndStops() = runBlocking {

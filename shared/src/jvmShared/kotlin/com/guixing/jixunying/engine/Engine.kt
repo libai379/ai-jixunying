@@ -863,6 +863,33 @@ class Engine(
         is Command.CodeRevertTask -> codeAgent.revertTask(c.convId, c.messageId)
         // 只读：备份占了多少（手机发来也放行，见 engine/code/PhoneGate）
         is Command.CodeBackupSize -> CommandResult(data = codeBackupSize().toString())
+        is Command.TermRun -> {
+            val spec = state.conversation(c.convId)?.code ?: return CommandResult(false, "这不是 Code 会话")
+            val runner = codeRunner ?: return CommandResult(false, "这台设备不能跑命令")
+            val dir = File(c.cwd.ifBlank { spec.folder })
+            val cmd = c.command.trim()
+            fun reply(cwd: File, out: String, code: Int?) = CommandResult(data = buildJsonObject {
+                put("cwd", cwd.absolutePath); put("output", out); put("code", code?.toString() ?: "")
+            }.toString())
+            // cd：只换目录（每条命令是单独跑的，cd 本身留不住，在这里记）
+            val cd = Regex("^(cd|chdir|Set-Location|sl)(\\s+(.*))?$", RegexOption.IGNORE_CASE).find(cmd)
+            if (cd != null) {
+                val arg = cd.groupValues[3].trim().removeSurrounding("\"").removeSurrounding("'")
+                val next = when {
+                    arg.isEmpty() -> File(spec.folder)
+                    arg == "~" -> File(System.getProperty("user.home"))
+                    File(arg).isAbsolute -> File(arg)
+                    else -> File(dir, arg)
+                }.let { runCatching { it.canonicalFile }.getOrDefault(it) }
+                return if (next.isDirectory) reply(next, "", 0) else reply(dir, "没有这个文件夹：${next.path}", 1)
+            }
+            if (cmd.endsWith("&")) {
+                val id = startBackground(c.convId, cmd.removeSuffix("&").trim(), dir)
+                return reply(dir, if (id != null) "在后台跑了（编号 $id），输入框上面那一条能看输出、停掉" else "后台开不起来", if (id != null) 0 else 1)
+            }
+            val r = runner.run(cmd, dir, state.settings.code.shell, state.settings.code.commandTimeoutSec, 30_000)
+            reply(dir, r.output + if (r.timedOut) "\n（超时了，已经停掉；开起来不结束的命令末尾加 & 放后台）" else "", r.exitCode)
+        }
         is Command.BgOutput -> {
             val out = codeRunner?.backgroundOutput(c.id) ?: return CommandResult(false, "这个后台命令已经不在了")
             CommandResult(data = out)

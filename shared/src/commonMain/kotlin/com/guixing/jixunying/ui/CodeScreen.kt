@@ -41,6 +41,7 @@ import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.ExpandLess
 import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.FolderOpen
+import androidx.compose.material.icons.rounded.Terminal
 import androidx.compose.material.icons.rounded.CloudUpload
 import androidx.compose.material.icons.rounded.HourglassTop
 import androidx.compose.material.icons.rounded.Menu
@@ -158,6 +159,7 @@ fun CodeScreen(ctl: AppController, convId: String, wide: Boolean, openDrawer: ()
             Box(Modifier.weight(1f).fillMaxWidth()) {
                 CodeMessageList(ctl, state, conv, messages, access.canAct) { diffMessage = it }
             }
+            if (ctl.codeTerminalOpen && access.canAct && platform.isDesktop && !ctl.remoteMode) TerminalPanel(ctl, conv, spec)
             BackgroundBar(ctl, conv)
             if (access.canAct) CodeComposer(ctl, conv, running) else CodeBottomNote(access)
         }
@@ -242,6 +244,19 @@ private fun CodeTopBar(ctl: AppController, state: AppState, conv: Conversation, 
         // 上传到 GitHub（2026-10-18）：电脑上才有
         var showGit by remember(conv.id) { mutableStateOf(ctl.debugDialog == "git") }
         if (LocalPlatform.current.isDesktop && !ctl.remoteMode) {
+            // 终端（2026-10-18，开发补齐第 2 样）：开关在会话之间共用
+            Row(
+                Modifier.clip(RoundedCornerShape(50)).border(1.dp, if (ctl.codeTerminalOpen) MaterialTheme.colorScheme.primary else Ext.c.border, RoundedCornerShape(50))
+                    .clickable { ctl.codeTerminalOpen = !ctl.codeTerminalOpen }.padding(horizontal = 9.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(Icons.Rounded.Terminal, "终端", Modifier.size(15.dp), tint = MaterialTheme.colorScheme.primary)
+                if (wide) {
+                    Spacer(Modifier.width(4.dp))
+                    Text("终端", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+            Spacer(Modifier.width(8.dp))
             Row(
                 Modifier.clip(RoundedCornerShape(50)).border(1.dp, Ext.c.border, RoundedCornerShape(50))
                     .clickable { showGit = true }.padding(horizontal = 9.dp, vertical = 6.dp),
@@ -287,6 +302,95 @@ private fun CodeTopBar(ctl: AppController, state: AppState, conv: Conversation, 
     }
     HorizontalDivider(color = Ext.c.border)
     if (showPath) WorkspaceDialog(ctl, conv, spec) { showPath = false }
+}
+
+/** 终端里的一行记录：敲的命令（带当时的目录）和输出。 */
+private class TermLine(val cwd: String, val command: String, var output: String, var code: String)
+
+/** 每个会话的终端记录（切走再回来还在；程序重开清空）。 */
+private val termLogs = mutableMapOf<String, androidx.compose.runtime.snapshots.SnapshotStateList<TermLine>>()
+private val termCwds = mutableMapOf<String, String>()
+
+/**
+ * 内置终端（2026-10-18，开发补齐第 2 样；Claude 桌面 App 会话里的 Terminal）：在项目文件夹里自己敲命令，
+ * 和 AI 用同一个执行器、同一个外壳。不是真的交互式控制台：每条命令单独跑完拿输出；cd 由程序记住；末尾带 & 放后台。
+ */
+@Composable
+private fun TerminalPanel(ctl: AppController, conv: Conversation, spec: CodeSpec) {
+    val log = remember(conv.id) { termLogs.getOrPut(conv.id) { androidx.compose.runtime.mutableStateListOf() } }
+    var cwd by remember(conv.id) { mutableStateOf(termCwds[conv.id] ?: spec.folder) }
+    var input by remember(conv.id) { mutableStateOf(TextFieldValue("")) }
+    var busy by remember(conv.id) { mutableStateOf(false) }
+    var histIdx by remember(conv.id) { mutableStateOf(-1) }
+    val scroll = rememberScrollState()
+    LaunchedEffect(log.size, log.lastOrNull()?.output?.length) { scroll.animateScrollTo(scroll.maxValue) }
+    fun run() {
+        val cmd = input.text.trim()
+        if (cmd.isEmpty() || busy) return
+        if (cmd == "clear" || cmd == "cls") { log.clear(); input = TextFieldValue(""); return }
+        val line = TermLine(cwd, cmd, "…", "")
+        log.add(line)
+        input = TextFieldValue("")
+        histIdx = -1
+        busy = true
+        ctl.run(Command.TermRun(conv.id, cmd, cwd), quiet = true) { r ->
+            busy = false
+            val o = runCatching { kotlinx.serialization.json.Json.parseToJsonElement(r.data) as kotlinx.serialization.json.JsonObject }.getOrNull()
+            val out = o?.get("output")?.let { (it as kotlinx.serialization.json.JsonPrimitive).content } ?: r.message
+            val idx = log.indexOf(line)
+            if (idx >= 0) log[idx] = TermLine(line.cwd, line.command, out, o?.get("code")?.let { (it as kotlinx.serialization.json.JsonPrimitive).content }.orEmpty())
+            o?.get("cwd")?.let { cwd = (it as kotlinx.serialization.json.JsonPrimitive).content; termCwds[conv.id] = cwd }
+        }
+    }
+    val mono = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace)
+    Column(
+        Modifier.fillMaxWidth().padding(horizontal = 16.dp).heightIn(max = 280.dp).clip(RoundedCornerShape(12.dp))
+            .background(Color(0xFF16181D)).padding(10.dp),
+    ) {
+        Column(Modifier.weight(1f, fill = false).verticalScroll(scroll)) {
+            if (log.isEmpty()) Text("终端：在这里自己敲命令（在项目文件夹里跑，cd 换目录，末尾加 & 放后台，clear 清屏）。", style = mono, color = Color(0xFF8A90A0))
+            log.forEach { l ->
+                SelectionContainer {
+                    Column {
+                        Text("${folderName(l.cwd)}> ${l.command}", style = mono, color = Color(0xFF7DD3FC))
+                        if (l.output.isNotBlank()) Text(l.output.trimEnd().takeLast(20_000), style = mono,
+                            color = if (l.code.isNotEmpty() && l.code != "0") Color(0xFFFCA5A5) else Color(0xFFE5E7EB))
+                    }
+                }
+            }
+        }
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 4.dp)) {
+            Text("${folderName(cwd)}> ", style = mono, color = Color(0xFF7DD3FC))
+            BasicTextField(
+                value = input, onValueChange = { input = it }, singleLine = true,
+                textStyle = mono.copy(color = Color(0xFFE5E7EB)), cursorBrush = SolidColor(Color(0xFFE5E7EB)),
+                modifier = Modifier.weight(1f).onPreviewKeyEvent { e ->
+                    if (e.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                    val cmds = log.map { it.command }
+                    when (e.key) {
+                        Key.Enter, Key.NumPadEnter -> { run(); true }
+                        Key.DirectionUp -> {
+                            if (cmds.isNotEmpty()) {
+                                histIdx = if (histIdx < 0) cmds.lastIndex else (histIdx - 1).coerceAtLeast(0)
+                                input = TextFieldValue(cmds[histIdx], TextRange(cmds[histIdx].length))
+                            }
+                            true
+                        }
+                        Key.DirectionDown -> {
+                            if (histIdx >= 0) {
+                                histIdx++
+                                input = if (histIdx > cmds.lastIndex) { histIdx = -1; TextFieldValue("") } else TextFieldValue(cmds[histIdx], TextRange(cmds[histIdx].length))
+                            }
+                            true
+                        }
+                        else -> false
+                    }
+                },
+            )
+            if (busy) CircularProgressIndicator(Modifier.size(12.dp), strokeWidth = 2.dp, color = Color(0xFF7DD3FC))
+        }
+    }
+    Spacer(Modifier.height(6.dp))
 }
 
 /**

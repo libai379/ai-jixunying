@@ -205,6 +205,9 @@ class AppController(
     /** 新建 Code 会话的对话框开着。 */
     var showNewCode by mutableStateOf(false)
 
+    /** Code 会话的终端面板开着没有（2026-10-18；会话之间共用这个开关）。 */
+    var codeTerminalOpen by mutableStateOf(false)
+
     /**
      * 新建 Code 会话（2026-10-17：电脑上不弹窗，直接开一个——文件夹、模型用上一次的，开起来以后在「工作区」里随时换）。
      * 手机遥控电脑时照旧弹选择框（只能从电脑上已有的文件夹里挑）。开不了（比如还没有能调工具的模型）也弹选择框，里面会写原因。

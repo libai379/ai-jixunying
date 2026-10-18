@@ -49,6 +49,7 @@ object PhoneGate {
             // 2026-10-18 上传到 GitHub：手机上只能看状态，提交、推送、建仓库、登录都在电脑上做
             is Command.CodeGit -> if (c.op != "repo") return refuse(c, "上传到 GitHub 只能在电脑上做")
             is Command.GitHubLogin -> return refuse(c, "登录 GitHub 只能在电脑上做")
+            is Command.TermRun -> return refuse(c, "终端只能在电脑上用")
             // 手机改对话设置：电脑上的「全部放开」「不用再问的文件夹」、Code 会话的设定一律保留
             // （手机不能放宽；旧版手机不认识这几个字段，发回来是默认值，不保留会把电脑上的冲掉）
             is Command.UpdateConversation -> {

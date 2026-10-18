@@ -49,6 +49,12 @@ sealed interface Command {
      * 结果 data 是命令的输出。只有 "repo" 手机上能用（PhoneGate）。
      */
     @Serializable data class CodeGit(val convId: String, val op: String, val message: String = "", val name: String = "", val private: Boolean = true) : Command
+    /**
+     * Code 会话的终端（2026-10-18，开发补齐第 2 样）：用户自己敲的一条命令，在 cwd 里跑（空 = 项目文件夹）。
+     * data 是 JSON：{"cwd": 跑完以后的目录, "output": 输出, "code": 退出码}。「cd 目录」只换目录不跑；末尾带 & 的放后台。
+     * 只能在电脑上用（PhoneGate）。
+     */
+    @Serializable data class TermRun(val convId: String, val command: String, val cwd: String = "") : Command
     /** 后台命令（2026-10-18）：看输出（data 是最后一截输出）。 */
     @Serializable data class BgOutput(val convId: String, val id: String) : Command
     /** 后台命令：停掉。手机发来的拒绝（PhoneGate 不拦也行，停掉只会更安全——放行）。 */
