@@ -736,7 +736,7 @@ class Engine(
                 s.copy(extraPaths = s.extraPaths + paths.filter { p -> s.extraPaths.none { it.equals(p, ignoreCase = true) } })
             }
             val text = c.text.trim() + if (paths.isEmpty()) "" else
-                (if (c.text.isBlank()) "" else "\n\n") + "附上的文件（在这台电脑上）：\n" + paths.joinToString("\n") { "- $it" }
+                (if (c.text.isBlank()) "" else "\n\n") + "附上的文件 / 文件夹（在这台电脑上，已经加进工作区，用 read_file / list_dir 直接读）：\n" + paths.joinToString("\n") { "- $it" }
             val userMsg = Message(newId(), conv.id, Role.USER, USER_ID, text, attachments = atts, createdAt = now())
             addMessage(userMsg)
             touchConversation(conv.id, c.text.ifBlank { atts.firstOrNull()?.name ?: paths.firstOrNull()?.let { File(it).name }.orEmpty() })

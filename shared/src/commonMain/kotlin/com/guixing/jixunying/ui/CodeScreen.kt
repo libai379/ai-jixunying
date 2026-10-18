@@ -149,7 +149,7 @@ fun CodeScreen(ctl: AppController, convId: String, wide: Boolean, openDrawer: ()
     var dragging by remember { mutableStateOf(false) }
     Box(platform.fileDropTarget(Modifier.fillMaxSize(), onHover = { dragging = it && access.canAct }) { files ->
         if (!access.canAct) return@fileDropTarget
-        if (files.isEmpty()) ctl.toast("没读到文件（文件夹和 50MB 以上的文件放不进来；文件夹可以在「工作区」里加）")
+        if (files.isEmpty()) ctl.toast("没认出拖进来的是什么（不是文件、图片，也不是路径）")
         else ctl.composerInbox = convId to Incoming(files = files)
     }) {
         Column(Modifier.fillMaxSize()) {
@@ -1006,7 +1006,17 @@ private fun CodeComposer(ctl: AppController, conv: Conversation, running: Boolea
     var uploading by remember(conv.id) { mutableStateOf(0) }
 
     fun add(files: List<PickedFile>) {
+        // 2026-10-17 用户：「把所有限制全部删掉，随意加任何文件」。照 Claude Code：电脑上的文件、文件夹只把路径交给 AI，
+        // 不上传、不限大小（AI 用 read_file 去读，已经加进工作区，不用再问）；只有图片还要传上去给能看图的模型看。
+        // 手机遥控电脑时手机上的路径电脑上没有，照旧上传。
+        val local = platform.isDesktop && !ctl.remoteMode
         files.forEach { f ->
+            val isImage = f.mime.startsWith("image/") || f.name.substringAfterLast('.', "").lowercase() in setOf("png", "jpg", "jpeg", "webp", "gif", "bmp")
+            if (local && f.path.isNotBlank() && (!isImage || f.pathOnly)) {
+                if (pending.none { it.local && it.path.equals(f.path, ignoreCase = true) }) pending.add(PendingFile(f.name, path = f.path, local = true))
+                return@forEach
+            }
+            if (f.pathOnly) { ctl.toast("「${f.name}」读不了内容，也没有路径，放不进来"); return@forEach }
             val p = PendingFile(f.name, path = f.path)
             pending.add(p)
             uploading++
@@ -1034,8 +1044,8 @@ private fun CodeComposer(ctl: AppController, conv: Conversation, running: Boolea
         if (uploading > 0) return
         val ids = pending.mapNotNull { it.att?.id }
         // 原路径只在电脑上自己用时才有意义（手机遥控电脑时手机上的路径电脑上没有）
-        val paths = if (platform.isDesktop && !ctl.remoteMode) pending.filter { it.att != null }.mapNotNull { it.path.ifBlank { null } } else emptyList()
-        if (text.text.isBlank() && ids.isEmpty()) return
+        val paths = if (platform.isDesktop && !ctl.remoteMode) pending.filter { it.att != null || it.local }.mapNotNull { it.path.ifBlank { null } }.distinct() else emptyList()
+        if (text.text.isBlank() && ids.isEmpty() && paths.isEmpty()) return
         // 手机上：等批准、做完时要弹通知，趁现在（应用在前台）问一下通知权限
         if (!platform.isDesktop) platform.askNotifyPermission()
         ctl.run(Command.CodeSend(conv.id, text.text, ids, paths))
@@ -1080,7 +1090,7 @@ private fun CodeComposer(ctl: AppController, conv: Conversation, running: Boolea
                             Text("上一条还在做，这条会排在后面", style = MaterialTheme.typography.labelSmall, color = Ext.c.warning)
                         }
                         Spacer(Modifier.weight(1f))
-                        val canSend = (text.text.isNotBlank() || pending.any { it.att != null }) && uploading == 0
+                        val canSend = (text.text.isNotBlank() || pending.any { it.att != null || it.local }) && uploading == 0
                         Box(
                             Modifier.size(36.dp).clip(CircleShape)
                                 .background(if (canSend) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceContainerHighest)

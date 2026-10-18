@@ -37,10 +37,56 @@ class DesktopPlatform(private val window: () -> Frame?) : Platform {
 
     private fun mimeOf(f: File): String = runCatching { Files.probeContentType(f.toPath()) }.getOrNull() ?: "application/octet-stream"
 
-    /** 读拖进来 / 粘贴进来的文件：文件夹跳过，单个超过 50MB 的跳过（上传也传不了那么大）。 */
-    private fun readFiles(list: List<*>): List<PickedFile> = list.filterIsInstance<File>()
-        .filter { it.isFile && it.length() <= 50L * 1024 * 1024 }
-        .map { f -> PickedFile(f.name, mimeOf(f), f.readBytes(), f.absolutePath) }
+    /**
+     * 读拖进来 / 粘贴进来的文件。2026-10-17 用户：「把所有限制全部删掉，随意加任何文件」——
+     * 不再跳过任何东西：文件夹、超过 50MB 的文件、读不了的（被占用、没权限）都照样交出去，只是不读内容（pathOnly），
+     * 用的地方按路径处理（Code 栏直接把路径给 AI）。一个文件出错不连累别的。
+     */
+    private fun readFiles(list: List<*>): List<PickedFile> = list.mapNotNull { x ->
+        val f = when (x) {
+            is File -> x
+            is java.nio.file.Path -> x.toFile()
+            is String -> File(x)
+            else -> null
+        } ?: return@mapNotNull null
+        if (f.isDirectory || f.length() > 50L * 1024 * 1024) return@mapNotNull PickedFile(f.name.ifBlank { f.path }, if (f.isDirectory) "inode/directory" else mimeOf(f), ByteArray(0), f.absolutePath, pathOnly = true)
+        val bytes = runCatching { f.readBytes() }.onFailure { log("JxyDrop", "读不了 ${f.absolutePath}：$it") }.getOrNull()
+        PickedFile(f.name, mimeOf(f), bytes ?: ByteArray(0), f.absolutePath, pathOnly = bytes == null)
+    }
+
+    /** 拖进来的东西能认出哪些：文件列表、网址列表（file:// 的转成文件）、图片（从浏览器 / 微信拖的图）、一段是路径的文字。 */
+    internal fun readTransfer(t: java.awt.datatransfer.Transferable): List<PickedFile> {
+        val flavors = t.transferDataFlavors.orEmpty()
+        log("JxyDrop", "松开：" + flavors.joinToString { it.mimeType.substringBefore(';') }.take(400))
+        runCatching {
+            if (t.isDataFlavorSupported(java.awt.datatransfer.DataFlavor.javaFileListFlavor)) {
+                val files = readFiles(t.getTransferData(java.awt.datatransfer.DataFlavor.javaFileListFlavor) as List<*>)
+                if (files.isNotEmpty()) return files
+            }
+        }.onFailure { log("JxyDrop", "文件列表读不了：$it") }
+        // text/uri-list：一行一个网址，file:// 的是本机文件
+        flavors.firstOrNull { it.mimeType.startsWith("text/uri-list") && it.representationClass == String::class.java }?.let { fl ->
+            runCatching {
+                val uris = (t.getTransferData(fl) as String).lines().map { it.trim() }.filter { it.startsWith("file:") }
+                val files = readFiles(uris.mapNotNull { u -> runCatching { File(java.net.URI(u)) }.getOrNull() })
+                if (files.isNotEmpty()) return files
+            }.onFailure { log("JxyDrop", "网址列表读不了：$it") }
+        }
+        runCatching {
+            if (t.isDataFlavorSupported(java.awt.datatransfer.DataFlavor.imageFlavor)) {
+                val img = t.getTransferData(java.awt.datatransfer.DataFlavor.imageFlavor) as java.awt.Image
+                return listOf(PickedFile("图片_${stamp()}.png", "image/png", imageToPng(img)))
+            }
+        }.onFailure { log("JxyDrop", "图片读不了：$it") }
+        runCatching {
+            if (t.isDataFlavorSupported(java.awt.datatransfer.DataFlavor.stringFlavor)) {
+                val s = (t.getTransferData(java.awt.datatransfer.DataFlavor.stringFlavor) as String).trim().removeSurrounding("\"")
+                val paths = s.lines().map { it.trim().removeSurrounding("\"") }.filter { it.isNotEmpty() && File(it).exists() }
+                if (paths.isNotEmpty()) return readFiles(paths)
+            }
+        }.onFailure { log("JxyDrop", "文字读不了：$it") }
+        return emptyList()
+    }
 
     private fun stamp() = java.time.LocalDateTime.now().format(java.time.format.DateTimeFormatter.ofPattern("MMdd_HHmmss"))
 
@@ -65,24 +111,41 @@ class DesktopPlatform(private val window: () -> Frame?) : Platform {
     @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class, androidx.compose.ui.ExperimentalComposeUiApi::class)
     override fun fileDropTarget(modifier: androidx.compose.ui.Modifier, onHover: (Boolean) -> Unit, onFiles: (List<PickedFile>) -> Unit): androidx.compose.ui.Modifier =
         modifier.then(androidx.compose.ui.Modifier.dragAndDropTarget(
-            shouldStartDragAndDrop = { e -> e.awtTransferable.isDataFlavorSupported(java.awt.datatransfer.DataFlavor.javaFileListFlavor) },
+            // 2026-10-17：什么都接（以前只认文件列表，从浏览器、微信拖的图、网址列表都进不来）；认不出来的在 onDrop 里说
+            shouldStartDragAndDrop = { e ->
+                log("JxyDrop", "开始拖：" + runCatching { e.awtTransferable.transferDataFlavors.joinToString { it.mimeType.substringBefore(';') } }.getOrDefault("?").take(400))
+                true
+            },
             target = object : androidx.compose.ui.draganddrop.DragAndDropTarget {
                 override fun onEntered(event: androidx.compose.ui.draganddrop.DragAndDropEvent) = onHover(true)
                 override fun onExited(event: androidx.compose.ui.draganddrop.DragAndDropEvent) = onHover(false)
                 override fun onEnded(event: androidx.compose.ui.draganddrop.DragAndDropEvent) = onHover(false)
                 override fun onDrop(event: androidx.compose.ui.draganddrop.DragAndDropEvent): Boolean {
                     onHover(false)
-                    val list = runCatching { event.awtTransferable.getTransferData(java.awt.datatransfer.DataFlavor.javaFileListFlavor) as List<*> }.getOrNull() ?: return false
-                    dropScope.launch {
-                        val files = readFiles(list)
-                        withContext(Dispatchers.Swing) { onFiles(files) }
-                    }
+                    // 内容要在这里（松开的这一刻）取出来：过了这一刻系统就收回了
+                    val files = runCatching { readTransfer(event.awtTransferable) }.onFailure { log("JxyDrop", "读拖进来的东西出错：$it") }.getOrDefault(emptyList())
+                    log("JxyDrop", "认出 ${files.size} 个：" + files.joinToString { "${it.path.ifBlank { it.name }}（${it.bytes.size} 字节${if (it.pathOnly) "，只给路径" else ""}）" }.take(800))
+                    dropScope.launch { withContext(Dispatchers.Swing) { onFiles(files) } }
                     return true
                 }
             },
         ))
 
     private val dropScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + Dispatchers.IO)
+
+    /**
+     * 诊断日志（2026-10-17：用户报「拖进去没动、第二次失败」，我碰不了用户的屏幕，只能留日志等用户再拖一次看）。
+     * 写在 <数据目录>\logs\jxy.log，超过 2MB 就从头写。不写文件内容、不写 Key。
+     */
+    override fun log(tag: String, text: String) {
+        runCatching {
+            val dir = File(System.getProperty("jxy.data") ?: (System.getenv("APPDATA") ?: (System.getProperty("user.home") + "/.config")) + "/ai-jixunying", "logs")
+            dir.mkdirs()
+            val f = File(dir, "jxy.log")
+            if (f.length() > 2L * 1024 * 1024) f.writeText("")
+            f.appendText("${java.time.LocalDateTime.now().toString().take(19)} [$tag] $text\n", Charsets.UTF_8)
+        }
+    }
 
     override fun decodeImage(bytes: ByteArray): ImageBitmap? = runCatching {
         org.jetbrains.skia.Image.makeFromEncoded(bytes).toComposeImageBitmap()

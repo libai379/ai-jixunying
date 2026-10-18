@@ -143,7 +143,7 @@ fun ChatScreen(ctl: AppController, convId: String, wide: Boolean, openDrawer: ()
     val platform = LocalPlatform.current
     var dragging by remember { mutableStateOf(false) }
     Box(platform.fileDropTarget(Modifier.fillMaxSize(), onHover = { dragging = it }) { files ->
-        if (files.isEmpty()) ctl.toast("没读到文件（文件夹和 50MB 以上的文件放不进来）")
+        if (files.isEmpty()) ctl.toast("没认出拖进来的是什么（不是文件、图片，也不是路径）")
         else ctl.composerInbox = convId to Incoming(files = files)
     }) {
         Column(Modifier.fillMaxSize()) {
@@ -733,7 +733,9 @@ private fun ImagePreview(ctl: AppController, a: Attachment, onClose: () -> Unit)
 // ———————————————— 输入框 ————————————————
 
 /** 输入框里待发的附件（上传中 / 传好了 / 失败了）。path 是电脑上的原路径（Code 栏用，2026-10-17）。 */
-internal class PendingFile(val name: String, var att: Attachment? = null, var failed: Boolean = false, val path: String = "")
+internal class PendingFile(val name: String, var att: Attachment? = null, var failed: Boolean = false, val path: String = "",
+    /** 只给路径、不上传（Code 栏里电脑上的文件和文件夹，2026-10-17）。 */
+    val local: Boolean = false)
 
 /** 输入框上面那一排待发的附件：图片显示缩略图，文档显示名字，都能点叉去掉（聊天和 Code 栏共用）。 */
 @Composable
@@ -742,7 +744,21 @@ internal fun PendingStrip(ctl: AppController, pending: androidx.compose.runtime.
         Row(Modifier.horizontalScroll(rememberScrollState()).padding(bottom = 8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             pending.forEach { p ->
                 val att = p.att
-                if (att == null) {
+                if (p.local) {
+                    // 只给路径的（Code 栏）：名字 + 完整路径，能去掉
+                    Row(
+                        Modifier.clip(RoundedCornerShape(10.dp)).border(1.dp, Ext.c.border, RoundedCornerShape(10.dp)).padding(start = 10.dp, top = 6.dp, bottom = 6.dp, end = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(Icons.Rounded.AttachFile, null, Modifier.size(14.dp), tint = MaterialTheme.colorScheme.primary)
+                        Spacer(Modifier.width(6.dp))
+                        Column(Modifier.widthIn(max = 260.dp)) {
+                            Text(p.name, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(p.path, style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                        IconButton(onClick = { pending.remove(p) }, Modifier.size(22.dp)) { Icon(Icons.Rounded.Close, "移除", Modifier.size(12.dp)) }
+                    }
+                } else if (att == null) {
                     Row(
                         Modifier.clip(RoundedCornerShape(10.dp)).border(1.dp, Ext.c.border, RoundedCornerShape(10.dp)).padding(10.dp),
                         verticalAlignment = Alignment.CenterVertically,
@@ -831,7 +847,10 @@ private fun Composer(ctl: AppController, state: AppState, conv: Conversation, ru
         if (cid != conv.id) return@LaunchedEffect
         ctl.composerInbox = null
         inc.attachments.forEach { pending.add(PendingFile(it.name, it)) }
-        inc.files.forEach { f ->
+        // 文件夹、太大的、读不了的只有路径：聊天要传内容，放不进来，说清楚去 Code 栏
+        val (pathOnly, readable) = inc.files.partition { it.pathOnly }
+        if (pathOnly.isNotEmpty()) ctl.toast("「${pathOnly.joinToString("、") { it.name }}」是文件夹、超过 50MB 或读不了，聊天里放不进来；Code 栏可以直接用它的路径")
+        readable.forEach { f ->
             val p = PendingFile(f.name)
             pending.add(p)
             uploading++

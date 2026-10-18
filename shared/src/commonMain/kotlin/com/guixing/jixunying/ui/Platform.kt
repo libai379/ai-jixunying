@@ -4,7 +4,11 @@ import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.ImageBitmap
 
 /** path：电脑上这个文件原来的完整路径（选的、拖进来的、复制的文件才有；截图、手机上是空的）。Code 栏要把它告诉模型。 */
-class PickedFile(val name: String, val mime: String, val bytes: ByteArray, val path: String = "")
+/**
+ * pathOnly（2026-10-17）：只有路径、没读内容（文件夹、超过 50MB 的、被占用读不了的）。
+ * Code 栏照样能用（把路径交给 AI）；聊天里放不进来（聊天要把内容传上去）。
+ */
+class PickedFile(val name: String, val mime: String, val bytes: ByteArray, val path: String = "", val pathOnly: Boolean = false)
 
 /**
  * 用户没给麦克风权限时 startRecording 返回的这句话。
