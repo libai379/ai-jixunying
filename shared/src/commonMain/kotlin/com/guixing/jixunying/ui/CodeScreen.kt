@@ -1382,6 +1382,7 @@ private fun CodeComposer(ctl: AppController, conv: Conversation, running: Boolea
     var text by remember(conv.id) { mutableStateOf(TextFieldValue("")) }
     val pending = remember(conv.id) { mutableStateListOf<PendingFile>() }
     var uploading by remember(conv.id) { mutableStateOf(0) }
+    val slashAll = rememberSlashCommands(ctl, conv.id)
 
     fun add(files: List<PickedFile>) {
         // 2026-10-17 用户：「把所有限制全部删掉，随意加任何文件」。照 Claude Code：电脑上的文件、文件夹只把路径交给 AI，
@@ -1432,6 +1433,10 @@ private fun CodeComposer(ctl: AppController, conv: Conversation, running: Boolea
         // 原路径只在电脑上自己用时才有意义（手机遥控电脑时手机上的路径电脑上没有）
         val paths = if (platform.isDesktop && !ctl.remoteMode) pending.filter { it.att != null || it.local }.mapNotNull { it.path.ifBlank { null } }.distinct() else emptyList()
         if (text.text.isBlank() && ids.isEmpty() && paths.isEmpty()) return
+        // 「/名字 后面的字」没从列表里选、直接发的：也照命令展开
+        Regex("^/(\\S+)\\s*([\\s\\S]*)$").find(text.text.trim())?.let { m ->
+            slashAll.firstOrNull { it.name.equals(m.groupValues[1], ignoreCase = true) }?.let { text = TextFieldValue(expandSlash(it, m.groupValues[2])) }
+        }
         // 手机上：等批准、做完时要弹通知，趁现在（应用在前台）问一下通知权限
         if (!platform.isDesktop) platform.askNotifyPermission()
         ctl.run(Command.CodeSend(conv.id, text.text, ids, paths))
@@ -1441,9 +1446,14 @@ private fun CodeComposer(ctl: AppController, conv: Conversation, running: Boolea
     // 打「@」补全文件名（2026-10-18）
     val fileQuery = atQuery(text)
     val fileHits = rememberFileSuggestions(ctl, conv.id, fileQuery)
+    // 开头打「/」补全斜杠命令（2026-10-18）：选中就展开成命令的话，可以改了再发（清单在上面 send 前面取）
+    val slashQ = slashQuery(text)
+    val slashHits = if (slashQ == null) emptyList() else slashAll.filter { it.name.startsWith(slashQ, ignoreCase = true) || slashQ in it.name }
+    fun pickSlash(item: SlashItem) { val t = expandSlash(item, ""); text = TextFieldValue(t, TextRange(t.length)) }
     Column(Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 14.dp, top = 4.dp), horizontalAlignment = Alignment.CenterHorizontally) {
         Column(Modifier.widthIn(max = 860.dp).fillMaxWidth()) {
             if (fileQuery != null) FileSuggestList(fileHits) { text = insertAt(text, it) }
+            if (slashQ != null) SlashList(slashHits) { pickSlash(it) }
             Surface(shape = RoundedCornerShape(22.dp), color = MaterialTheme.colorScheme.surface, border = BorderStroke(1.dp, Ext.c.border), shadowElevation = 3.dp) {
                 Column(Modifier.padding(start = 14.dp, end = 10.dp, top = 10.dp, bottom = 8.dp)) {
                     PendingStrip(ctl, pending)
@@ -1460,7 +1470,8 @@ private fun CodeComposer(ctl: AppController, conv: Conversation, running: Boolea
                             modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).onPreviewKeyEvent { e ->
                                 if (platform.isDesktop && e.type == KeyEventType.KeyDown && (e.key == Key.Enter || e.key == Key.NumPadEnter) && !e.isShiftPressed) {
                                     // 正在补全文件名：回车选第一个
-                                    if (fileQuery != null && fileHits.isNotEmpty()) text = insertAt(text, fileHits.first()) else send()
+                                    if (slashQ != null && slashHits.isNotEmpty()) pickSlash(slashHits.first())
+                                    else if (fileQuery != null && fileHits.isNotEmpty()) text = insertAt(text, fileHits.first()) else send()
                                     true
                                 } else if (platform.isDesktop && e.type == KeyEventType.KeyDown && e.key == Key.V && (e.isCtrlPressed || e.isMetaPressed) && platform.clipboardHasFiles()) {
                                     // 剪贴板里是截图或复制的文件：当附件放进来；是文字就照常粘贴

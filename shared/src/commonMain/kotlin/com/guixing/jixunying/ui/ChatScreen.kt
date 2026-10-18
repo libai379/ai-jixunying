@@ -1096,6 +1096,11 @@ private fun Composer(ctl: AppController, state: AppState, conv: Conversation, ru
 
     Column(Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 14.dp, top = 4.dp), horizontalAlignment = Alignment.CenterHorizontally) {
         Column(Modifier.widthIn(max = 860.dp).fillMaxWidth()) {
+            // 开头打「/」补全斜杠命令（2026-10-18，和 Code 栏一样）
+            val slashAll = rememberSlashCommands(ctl, conv.id)
+            val slashQ = slashQuery(text)
+            val slashHits = if (slashQ == null) emptyList() else slashAll.filter { it.name.startsWith(slashQ, ignoreCase = true) || slashQ in it.name }
+            if (slashQ != null) SlashList(slashHits) { val t = expandSlash(it, ""); text = TextFieldValue(t, TextRange(t.length)) }
             // 打「@」时拖进来的文件夹里的文件也列出来（2026-10-18，和 Code 栏一样）
             val fileQuery = if (conv.grantedPaths.isNotEmpty()) atQuery(text) else null
             val fileHits = rememberFileSuggestions(ctl, conv.id, fileQuery)
@@ -1146,7 +1151,8 @@ private fun Composer(ctl: AppController, state: AppState, conv: Conversation, ru
                             cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
                             modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).onPreviewKeyEvent { e ->
                                 if (platform.isDesktop && e.type == KeyEventType.KeyDown && (e.key == Key.Enter || e.key == Key.NumPadEnter) && !e.isShiftPressed) {
-                                    if (fileQuery != null && fileHits.isNotEmpty() && suggestions.isEmpty()) text = insertAt(text, fileHits.first())
+                                    if (slashQ != null && slashHits.isNotEmpty()) { val t = expandSlash(slashHits.first(), ""); text = TextFieldValue(t, TextRange(t.length)) }
+                                    else if (fileQuery != null && fileHits.isNotEmpty() && suggestions.isEmpty()) text = insertAt(text, fileHits.first())
                                     else if (suggestions.isNotEmpty()) insertMention(suggestions.first().first) else send()
                                     true
                                 } else if (platform.isDesktop && e.type == KeyEventType.KeyDown && e.key == Key.V && (e.isCtrlPressed || e.isMetaPressed) && platform.clipboardHasFiles()) {

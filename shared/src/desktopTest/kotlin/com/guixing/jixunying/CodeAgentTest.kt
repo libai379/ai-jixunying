@@ -587,6 +587,25 @@ class CodeAgentTest {
         assertEquals("看看 @src/LoginPage.kt ", com.guixing.jixunying.ui.insertAt(v, "src/LoginPage.kt").text)
     }
 
+    /** 2026-10-18 斜杠命令：内置 /审查、设置里自己写的、项目 .claude/commands 里的（读 description）；$ARGUMENTS 展开。 */
+    @Test
+    fun slashCommandsListAndExpand() = runBlocking {
+        File(project, ".claude/commands/git").mkdirs()
+        File(project, ".claude/commands/fix-issue.md").writeText("---\ndescription: 修一个 issue\n---\n修好 issue \$ARGUMENTS，再跑测试。")
+        File(project, ".claude/commands/git/sync.md").writeText("拉最新的代码并合并。")
+        val e = engine()
+        e.call(Command.SaveSettings(e.state.settings.copy(personal = e.state.settings.personal.copy(
+            commands = listOf(com.guixing.jixunying.model.SlashCommand("周报", "写周报", "整理成周报"))))))
+        val conv = codeConv(e)
+        val list = Json.parseToJsonElement(e.call(Command.SlashList(conv)).data).jsonArray.map { it.jsonObject }
+        val names = list.map { it["name"]!!.jsonPrimitive.content }
+        assertTrue(listOf("审查", "review", "周报", "fix-issue", "git:sync").all { it in names }, names.toString())
+        assertEquals("修一个 issue", list.first { it["name"]!!.jsonPrimitive.content == "fix-issue" }["description"]!!.jsonPrimitive.content)
+        val fix = com.guixing.jixunying.ui.SlashItem("fix-issue", "", "修好 issue \$ARGUMENTS，再跑测试。", "项目")
+        assertEquals("修好 issue #12，再跑测试。", com.guixing.jixunying.ui.expandSlash(fix, "#12"))
+        assertTrue("只看不改" in com.guixing.jixunying.engine.Slash.REVIEW.text)
+    }
+
     /** 2026-10-18 子代理：自己一份上下文（不再给 spawn_agent），步子记在同一条回答上，结果交回主 AI。 */
     @Test
     fun subAgentRunsAndReports() = runBlocking {

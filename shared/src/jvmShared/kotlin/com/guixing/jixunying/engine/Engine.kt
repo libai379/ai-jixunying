@@ -925,6 +925,17 @@ class Engine(
             val r = runner.run(cmd, dir, state.settings.code.shell, state.settings.code.commandTimeoutSec, 30_000)
             reply(dir, r.output + if (r.timedOut) "\n（超时了，已经停掉；开起来不结束的命令末尾加 & 放后台）" else "", r.exitCode)
         }
+        is Command.SlashList -> {
+            val conv = state.conversation(c.convId)
+            val project = conv?.code?.folder?.let { withContext(Dispatchers.IO) { Slash.fromProject(File(it)) } }.orEmpty()
+            val mine = state.settings.personal.commands
+            val all = Slash.BUILTIN.map { it to "内置" } + mine.map { it to "我的" } + project.map { it to "项目" }
+            CommandResult(data = buildJsonArray {
+                all.distinctBy { it.first.name }.forEach { (s, src) ->
+                    add(buildJsonObject { put("name", s.name); put("description", s.description); put("text", s.text); put("source", src) })
+                }
+            }.toString())
+        }
         is Command.FileSuggest -> {
             val conv = state.conversation(c.convId) ?: return CommandResult(false, "对话不存在")
             val roots = conv.code?.let { listOf(File(it.folder)) } ?: conv.grantedPaths.map { File(it) }.filter { it.isDirectory }

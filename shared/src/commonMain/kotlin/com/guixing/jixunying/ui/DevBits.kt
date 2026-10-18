@@ -175,3 +175,57 @@ fun FileSuggestList(files: List<String>, onPick: (String) -> Unit) {
         }
     }
 }
+
+/** 一条斜杠命令（界面用）。 */
+class SlashItem(val name: String, val description: String, val text: String, val source: String)
+
+/** 输入框开头正在打的「/xxx」（还没打空格），返回 xxx；不是就 null。 */
+fun slashQuery(v: androidx.compose.ui.text.input.TextFieldValue): String? {
+    val t = v.text
+    if (!t.startsWith("/") || t.contains('\n')) return null
+    val word = t.drop(1).substringBefore(' ')
+    return if (t.length == word.length + 1) word else null
+}
+
+/** 取这个对话能用的斜杠命令（打开输入框时取一次）。 */
+@Composable
+fun rememberSlashCommands(ctl: AppController, convId: String): List<SlashItem> {
+    var list by remember(convId) { mutableStateOf(emptyList<SlashItem>()) }
+    LaunchedEffect(convId) {
+        val r = ctl.backend.call(Command.SlashList(convId))
+        list = runCatching {
+            (kotlinx.serialization.json.Json.parseToJsonElement(r.data) as kotlinx.serialization.json.JsonArray).map { e ->
+                val o = e as kotlinx.serialization.json.JsonObject
+                fun f(k: String) = (o[k] as? kotlinx.serialization.json.JsonPrimitive)?.content.orEmpty()
+                SlashItem(f("name"), f("description"), f("text"), f("source"))
+            }
+        }.getOrDefault(emptyList())
+    }
+    return list
+}
+
+/** 展开一条斜杠命令：「/名字 后面的字」→ 命令的话（$ARGUMENTS 换成后面的字）。 */
+fun expandSlash(item: SlashItem, args: String): String =
+    if ("\$ARGUMENTS" in item.text) item.text.replace("\$ARGUMENTS", args.trim()).trim()
+    else item.text.trim() + if (args.isBlank()) "" else "\n\n" + args.trim()
+
+/** 「/」补全列表。 */
+@Composable
+fun SlashList(items: List<SlashItem>, onPick: (SlashItem) -> Unit) {
+    if (items.isEmpty()) return
+    androidx.compose.material3.Surface(shape = RoundedCornerShape(12.dp), border = androidx.compose.foundation.BorderStroke(1.dp, Ext.c.border),
+        shadowElevation = 6.dp, modifier = Modifier.padding(bottom = 6.dp).widthIn(max = 560.dp)) {
+        Column(Modifier.padding(4.dp).heightIn(max = 280.dp).verticalScroll(rememberScrollState())) {
+            items.forEach { c ->
+                Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).clickable { onPick(c) }.padding(horizontal = 8.dp, vertical = 5.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    Text("/" + c.name, style = MaterialTheme.typography.bodyMedium, maxLines = 1)
+                    Spacer(Modifier.width(8.dp))
+                    Text(c.description, style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f))
+                    Text(c.source, style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
+                }
+            }
+        }
+    }
+}

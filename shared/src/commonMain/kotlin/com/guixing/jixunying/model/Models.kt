@@ -255,7 +255,13 @@ data class Settings(
 data class PersonalSettings(
     val instructions: String = "",
     val codeInstructions: String = "",
+    /** 自己写的斜杠命令（2026-10-18，开发补齐第 12 样）：输入框打「/名字」展开成这段话，里面的 $ARGUMENTS 换成命令后面跟的字。两栏都能用。 */
+    val commands: List<SlashCommand> = emptyList(),
 )
+
+/** 一个斜杠命令：名字（不带 /）、一句说明、展开成的话。 */
+@Serializable
+data class SlashCommand(val name: String, val description: String = "", val text: String = "")
 
 /**
  * 设置 → Word / Excel：AI 做文件时怎么排版（用户 10-08：「做精细，人性化智能化，后台多做开关我可以主动调试」）。

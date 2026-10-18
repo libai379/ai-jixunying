@@ -63,6 +63,11 @@ sealed interface Command {
      * data 是 JSON 数组（最多 20 个）：Code 会话给相对路径，对话给完整路径。
      */
     @Serializable data class FileSuggest(val convId: String, val query: String) : Command
+    /**
+     * 斜杠命令清单（2026-10-18，开发补齐第 12、13 样）：内置的（/审查）+ 设置里自己写的 + Code 会话项目里 .claude/commands 底下的 .md。
+     * data 是 JSON 数组：[{"name","description","text","source"}]。
+     */
+    @Serializable data class SlashList(val convId: String) : Command
     /** 后台命令（2026-10-18）：看输出（data 是最后一截输出）。 */
     @Serializable data class BgOutput(val convId: String, val id: String) : Command
     /** 后台命令：停掉。手机发来的拒绝（PhoneGate 不拦也行，停掉只会更安全——放行）。 */

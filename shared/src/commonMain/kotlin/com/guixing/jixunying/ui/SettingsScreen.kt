@@ -713,6 +713,38 @@ private fun ProfilePage(ctl: AppController, state: AppState) {
         AutoSaveHint(if (instructions != personal.instructions || codeInstructions != personal.codeInstructions) "正在保存…" else "已保存")
     }
     Spacer(Modifier.height(12.dp))
+    // 自己写的斜杠命令（2026-10-18，开发补齐第 12 样）：输入框开头打「/名字」展开成这段话；两栏都能用
+    SectionCard {
+        FieldLabel("我的斜杠命令", "输入框开头打「/」就能选；内容里写 \$ARGUMENTS 的地方换成命令后面跟的字。项目里的 .claude/commands 文件夹里的 .md 也会自动出现")
+        personal.commands.forEach { c ->
+            Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("/" + c.name + if (c.description.isNotBlank()) "　" + c.description else "", style = MaterialTheme.typography.bodyMedium)
+                    Text(c.text.take(80), style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, maxLines = 1)
+                }
+                TextButton({ ctl.updateSettings { it.copy(personal = it.personal.copy(commands = it.personal.commands - c)) } }) {
+                    Text("删掉", color = MaterialTheme.colorScheme.error)
+                }
+            }
+        }
+        var cName by remember { mutableStateOf("") }
+        var cDesc by remember { mutableStateOf("") }
+        var cText by remember { mutableStateOf("") }
+        Spacer(Modifier.height(6.dp))
+        AppTextField(cName, { cName = it.replace(" ", "").removePrefix("/") }, placeholder = "命令名，比如 周报")
+        Spacer(Modifier.height(4.dp))
+        AppTextField(cDesc, { cDesc = it }, placeholder = "一句说明（可以不写）")
+        Spacer(Modifier.height(4.dp))
+        AppTextField(cText, { cText = it }, singleLine = false, minLines = 3, placeholder = "展开成什么，比如：把这周改过的代码整理成周报，重点写 \$ARGUMENTS")
+        TextButton({
+            if (cName.isNotBlank() && cText.isNotBlank()) {
+                val n = com.guixing.jixunying.model.SlashCommand(cName.trim(), cDesc.trim(), cText.trim())
+                ctl.updateSettings { it.copy(personal = it.personal.copy(commands = it.personal.commands.filter { x -> x.name != n.name } + n)) }
+                cName = ""; cDesc = ""; cText = ""
+            }
+        }, enabled = cName.isNotBlank() && cText.isNotBlank()) { Text("加上这个命令") }
+    }
+    Spacer(Modifier.height(12.dp))
     SectionCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
             MemberAvatar(null, 52.dp, emoji = state.profile.avatar, color = 0xFF4F5BEB)
