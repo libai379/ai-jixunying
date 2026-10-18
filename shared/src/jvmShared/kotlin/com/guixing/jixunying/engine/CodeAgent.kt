@@ -117,6 +117,7 @@ class CodeAgent(private val host: CodeHost) {
         run.job = host.launch(run.convId) {
             try {
                 withContext(if (phoneTasks.remove(task.id)) PhoneTask() else kotlin.coroutines.EmptyCoroutineContext) { loop(run.convId, task) }
+                host.compactLater(run.convId)
             } finally {
                 val next = synchronized(run) { run.queued.removeFirstOrNull() }
                 if (next == null) synchronized(run) { run.running = false } else start(run, next)
@@ -254,9 +255,12 @@ class CodeAgent(private val host: CodeHost) {
     private fun history(convId: String, task: Message, excludeId: String, vision: Boolean): List<JsonObject> {
         val all = host.messagesOf(convId)
         val end = all.indexOfFirst { it.id == task.id }.let { if (it < 0) all.size else it + 1 }
+        // 记录员压过的部分换成摘要放在最前面，只发摘要之后的原文（2026-10-18）
+        val (summary, upTo) = host.summaryOf(convId)
         val usable = all.subList(0, end).filter {
             it.id != excludeId && it.role != Role.SYSTEM && it.status != MsgStatus.STREAMING &&
-                it.status != MsgStatus.ERROR && (it.content.isNotBlank() || it.attachments.isNotEmpty())
+                it.status != MsgStatus.ERROR && (it.content.isNotBlank() || it.attachments.isNotEmpty()) &&
+                (summary.isBlank() || it.createdAt > upTo || it.id == task.id)
         }
         val picked = ArrayDeque<Message>()
         var used = 0
@@ -268,6 +272,7 @@ class CodeAgent(private val host: CodeHost) {
         }
         data class Part(val role: String, val text: String, val images: List<String>)
         val parts = mutableListOf<Part>()
+        if (summary.isNotBlank()) parts += Part("user", "【前情摘要】这个会话更早的部分已经压成下面的摘要：\n\n$summary", emptyList())
         if (picked.size < usable.size) parts += Part("user", "（更早的记录太长，已省略）", emptyList())
         for (m in picked) {
             val role = if (m.role == Role.USER) "user" else "assistant"
@@ -1083,6 +1088,10 @@ interface CodeHost {
         ToolStep("search", query, ok = false, note = "这台设备不能联网搜索") to emptyList()
     /** 打开一个网页，返回正文文字；打不开抛异常。 */
     suspend fun fetchUrl(url: String): String = throw IllegalStateException("这台设备不能读网页")
+    /** 长会话压缩（2026-10-18，开发补齐第 6 样）：记录员写的前情摘要和它管到哪个时间；没有就是（""，0）。 */
+    fun summaryOf(convId: String): Pair<String, Long> = "" to 0L
+    /** 一次任务做完以后，在后台看要不要压缩（和对话栏同一套 compactIfLong）。 */
+    fun compactLater(convId: String) {}
     /** 后台命令（2026-10-18）：开起来返回编号（开不了 null）；看输出；停掉。 */
     fun startBackground(convId: String, command: String, dir: File): String? = null
     fun backgroundOutput(id: String): String? = null

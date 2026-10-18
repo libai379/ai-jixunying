@@ -104,6 +104,8 @@ class CodeAgentTest {
                             write("data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n")
                         }
                         when {
+                            // 2026-10-18 记录员压缩长会话
+                            "你是聊天记录员" in system -> say("SUMMARY_MARK 前情：用户先让改了 greeting，又问了好几件事，都做完了。")
                             // 2026-10-17「自动」档的检查员：动作里有 ALLOW_ME 就放行，否则拦下
                             "你是安全检查员" in system -> say(if ("ALLOW_ME" in system) "{\"allow\": true, \"reason\": \"在请求范围内\"}" else "{\"allow\": false, \"reason\": \"超出请求范围\"}")
                             !system.startsWith("你在帮用户改一个项目里的代码") -> say("（这不是 Code 会话，不该走到这里）")
@@ -520,6 +522,25 @@ class CodeAgentTest {
         // 检查员的回答解析
         assertEquals(true to "好", com.guixing.jixunying.engine.AutoJudge.parse("<think>x</think>{\"allow\": true, \"reason\": \"好\"}"))
         assertNull(com.guixing.jixunying.engine.AutoJudge.parse("我觉得可以"))
+    }
+
+    /** 2026-10-18 长会话压缩：太长了让记录员压成摘要，之后的任务开头带着摘要、不再发压掉的原文。 */
+    @Test
+    fun longSessionGetsCompacted() = runBlocking {
+        val e = engine()
+        e.call(Command.SaveSettings(e.state.settings.copy(memory = e.state.settings.memory.copy(
+            recorderProviderId = "p1", recorderModelId = "code-model", compressAt = 300))))
+        val conv = codeConv(e)
+        repeat(6) { i ->
+            val n = sendTask(e, conv, "第 $i 件事：" + "很长的说明".repeat(20))
+            awaitStatus(e, conv, MsgStatus.DONE, minAi = n)
+        }
+        await(20_000) { e.state.conversation(conv)!!.summarized > 0 }
+        val n = sendTask(e, conv, "最后一件")
+        awaitStatus(e, conv, MsgStatus.DONE, minAi = n)
+        val sent = requests.last { "你在帮用户改" in it["messages"].toString() }["messages"].toString()
+        assertTrue("SUMMARY_MARK" in sent, "带着摘要")
+        assertFalse("第 0 件事" in sent, "压掉的原文不再发")
     }
 
     /** 2026-10-18 「@」补全文件名：名字开头对上的排前面，node_modules 不翻；@ 的位置和插入。 */

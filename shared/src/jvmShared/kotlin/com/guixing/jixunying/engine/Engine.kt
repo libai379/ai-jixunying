@@ -214,6 +214,8 @@ class Engine(
         override suspend fun webSearch(query: String) = runSearch(query, mutableListOf())
         override suspend fun autoCheck(convId: String, request: String, action: String) = autoVerdict(convId, request, action)
         override fun startBackground(convId: String, command: String, dir: File) = this@Engine.startBackground(convId, command, dir)
+        override fun summaryOf(convId: String) = storage.loadMemo(convId).let { it.summary to it.upToTime }
+        override fun compactLater(convId: String) { scope.launch { runCatching { compactIfLong(convId) } } }
         override fun backgroundOutput(id: String) = codeRunner?.backgroundOutput(id)
         override fun stopBackground(convId: String, id: String) { codeRunner?.stopBackground(id); markBg(convId, id) { it.copy(running = false) } }
         override suspend fun fetchUrl(url: String): String = runCatching { search.fetch(url, false) }.getOrElse { search.fetch(url, true) }
