@@ -534,6 +534,35 @@ class Engine(
         com.guixing.jixunying.engine.code.GitHub(it, state.settings.code.shell, state.settings.proxy, state.settings.code.ghPath)
     }
 
+    /**
+     * 外部 Claude Code 装没装、登没登录（2026-10-18）：跑它自己的 --version 和 auth status（只看它报的结果，不碰凭据文件）。
+     * 返回（能不能用，给人看的几行字）。
+     */
+    private suspend fun claudeStatus(exe: File): Pair<Boolean, String> = withContext(Dispatchers.IO) {
+        val cc = com.guixing.jixunying.engine.code.ClaudeCli
+        fun run(vararg args: String): String? = runCatching {
+            val p = ProcessBuilder(cc.launcher(exe) + args).directory(File(System.getProperty("user.home"))).redirectErrorStream(true)
+                .also { pb -> pb.environment().clear(); pb.environment().putAll(cc.env(System.getenv(), state.settings.proxy)) }.start()
+            p.outputStream.close()
+            val out = p.inputStream.bufferedReader(Charsets.UTF_8).readText()
+            if (!p.waitFor(60, java.util.concurrent.TimeUnit.SECONDS)) { p.destroyForcibly(); null } else out.trim()
+        }.getOrNull()
+        val version = run("--version")?.lineSequence()?.firstOrNull { it.isNotBlank() }
+            ?: return@withContext false to "找到了 ${exe.absolutePath}，但运行不起来"
+        val auth = run("auth", "status")?.let { t -> runCatching { kotlinx.serialization.json.Json.parseToJsonElement(t.substring(t.indexOf('{'))).jsonObject }.getOrNull() }
+        val loggedIn = auth?.get("loggedIn")?.toString() == "true"
+        val how = when (auth?.str("authMethod")) {
+            "claude.ai" -> "Claude 订阅" + auth.str("subscriptionType")?.takeIf { it.isNotBlank() }?.let { "（$it）" }.orEmpty()
+            null, "" -> ""
+            else -> auth.str("authMethod").orEmpty()
+        }
+        val lines = listOf(
+            "Claude Code：$version（${exe.absolutePath}）",
+            if (loggedIn) "已登录" + if (how.isNotEmpty()) "，用的是 $how" else "" else "还没登录：点「打开 Claude Code 登录」",
+        )
+        loggedIn to lines.joinToString("\n")
+    }
+
     private fun codeBackup(convId: String): com.guixing.jixunying.engine.code.CodeBackup =
         com.guixing.jixunying.engine.code.CodeBackup(File(File(storage.root, "code"), convId))
 
@@ -818,9 +847,12 @@ class Engine(
             if (!folder.exists()) return CommandResult(false, "文件夹不存在：$folderPath")
             if (!folder.isDirectory) return CommandResult(false, "这不是文件夹：$folderPath")
             val pick = if (c.providerId.isNotBlank()) c.providerId to c.modelId else
-                (last?.let { l -> state.provider(l.providerId)?.takeIf { p -> p.enabled && p.models.any { it.id == l.modelId && it.tools } }?.let { l.providerId to l.modelId } }
-                    ?: state.providers.filter { it.enabled }.firstNotNullOfOrNull { p -> p.models.firstOrNull { it.tools }?.let { p.id to it.id } })
-                    ?: return CommandResult(false, "还没有能调用工具的模型：先到 设置 → 模型服务 加一个")
+                (last?.takeIf { it.isClaudeCode }?.let { it.providerId to it.modelId }
+                    ?: last?.let { l -> state.provider(l.providerId)?.takeIf { p -> p.enabled && p.models.any { it.id == l.modelId && it.tools } }?.let { l.providerId to l.modelId } }
+                    ?: state.providers.filter { it.enabled }.firstNotNullOfOrNull { p -> p.models.firstOrNull { it.tools }?.let { p.id to it.id } }
+                    // 一个模型都没加、但电脑上装了 Claude Code：先用它
+                    ?: com.guixing.jixunying.engine.code.ClaudeCli.findExe(state.settings.code.claudePath)?.let { CodeSpec.CLAUDE_CODE to "" })
+                    ?: return CommandResult(false, "还没有能调用工具的模型：先到 设置 → 模型服务 加一个，或者装好 Claude Code")
             // 独立副本（2026-10-18）：git worktree add 到 <仓库>/.claude/worktrees/<编号>，新分支 jxy/<编号>
             var wtOf = ""
             var wtBranch = ""
@@ -843,18 +875,22 @@ class Engine(
                     if (ex.parentFile.isDirectory && ".claude/worktrees/" !in (if (ex.isFile) ex.readText() else "")) ex.appendText("\n.claude/worktrees/\n")
                 }
             }
-            val provider = state.provider(pick.first) ?: return CommandResult(false, "服务商不存在（可能被删了）：${pick.first}")
-            val model = provider.models.firstOrNull { it.id == pick.second }
-                ?: return CommandResult(false, "「${provider.name}」里没有模型 ${pick.second}")
-            // 只有支持调用工具的模型才能进 Code 栏（docs/Code栏设计说明.md 第 2 节）
-            if (!model.tools) return CommandResult(false, "「${model.id}」不能调用工具，干不了 Code 栏的活；到 设置 → 模型服务 换一个支持工具的模型")
+            // 外部 Claude Code（2026-10-18）：不用服务商，modelId 是给它的 --model
+            val claude = pick.first == CodeSpec.CLAUDE_CODE
+            if (!claude) {
+                val provider = state.provider(pick.first) ?: return CommandResult(false, "服务商不存在（可能被删了）：${pick.first}")
+                val model = provider.models.firstOrNull { it.id == pick.second }
+                    ?: return CommandResult(false, "「${provider.name}」里没有模型 ${pick.second}")
+                // 只有支持调用工具的模型才能进 Code 栏（docs/Code栏设计说明.md 第 2 节）
+                if (!model.tools) return CommandResult(false, "「${model.id}」不能调用工具，干不了 Code 栏的活；到 设置 → 模型服务 换一个支持工具的模型")
+            }
             val conv = Conversation(
                 id = newId(),
                 // 标题先叫「新对话」：第一条任务发出去就换成任务的开头（和聊天一样）；文件夹在侧栏和顶栏另外显示
                 title = "新对话",
                 memberIds = emptyList(),
                 createdAt = now(), updatedAt = now(),
-                code = CodeSpec(folder = workFolder.absolutePath, providerId = provider.id, modelId = model.id, worktreeOf = wtOf, worktreeBranch = wtBranch,
+                code = CodeSpec(folder = workFolder.absolutePath, providerId = pick.first, modelId = pick.second, worktreeOf = wtOf, worktreeBranch = wtBranch,
                     // 电脑上点「+」直接开的（没给文件夹）默认「自动」：照 Claude Code，auto 是新会话的默认档
                     mode = if (c.folder.isBlank() && !c.fromPhone) CodeMode.ACCEPT_EDITS else c.mode,
                     autoMode = c.folder.isBlank() && !c.fromPhone,
@@ -874,7 +910,9 @@ class Engine(
                 if (!f.isDirectory) return CommandResult(false, "不是文件夹或者不存在：${c.folder}")
                 next = next.copy(folder = f.absolutePath)
             }
-            if (c.providerId.isNotBlank()) {
+            if (c.providerId == CodeSpec.CLAUDE_CODE) {
+                next = next.copy(providerId = CodeSpec.CLAUDE_CODE, modelId = c.modelId.trim())
+            } else if (c.providerId.isNotBlank()) {
                 val p = state.provider(c.providerId) ?: return CommandResult(false, "服务商不存在：${c.providerId}")
                 val m = p.models.firstOrNull { it.id == c.modelId } ?: return CommandResult(false, "「${p.name}」里没有模型 ${c.modelId}")
                 if (!m.tools) return CommandResult(false, "「${m.id}」不能调用工具，干不了 Code 栏的活")
@@ -1045,6 +1083,28 @@ class Engine(
             val gh = gitHub() ?: return CommandResult(false, "这台设备不能跑命令")
             if (gh.openLoginWindow(File(System.getProperty("user.home")))) CommandResult(message = "开了一个登录窗口：按提示在浏览器里点同意，登好了回来点「重新检查」")
             else CommandResult(false, "开不了登录窗口")
+        }
+        is Command.ClaudeStatus -> {
+            if (codeRunner == null) return CommandResult(false, "这台设备不能跑 Claude Code")
+            val exe = com.guixing.jixunying.engine.code.ClaudeCli.findExe(state.settings.code.claudePath)
+                ?: return CommandResult(false, "没找到 Claude Code：装好以后在这里点「重新检查」；装在别处的，在下面填 claude.exe 的位置")
+            val (ok, text) = claudeStatus(exe)
+            CommandResult(ok, text, data = text)
+        }
+        is Command.ClaudeLogin -> {
+            if (codeRunner == null) return CommandResult(false, "这台设备不能跑 Claude Code")
+            val exe = com.guixing.jixunying.engine.code.ClaudeCli.findExe(state.settings.code.claudePath)
+                ?: return CommandResult(false, "没找到 Claude Code，先装好它")
+            // 开一个看得见的终端窗口运行它：登录在它自己的界面里完成（我们不碰账号和凭据）
+            val ok = runCatching {
+                // 没登录的话它一打开就会让你登录（登录过了再登用它里面的 /login）；Java 会给带空格的参数自己加引号
+                ProcessBuilder(listOf("cmd.exe", "/c", "start", "Claude Code", "cmd.exe", "/k", exe.absolutePath))
+                    .directory(File(System.getProperty("user.home"))).also { pb ->
+                        pb.environment().clear(); pb.environment().putAll(com.guixing.jixunying.engine.code.ClaudeCli.env(System.getenv(), state.settings.proxy))
+                    }.start()
+            }.isSuccess
+            if (ok) CommandResult(message = "开了一个 Claude Code 窗口：在里面按提示登录你的账号，登好了关掉它，回来点「重新检查」")
+            else CommandResult(false, "开不了 Claude Code 窗口")
         }
         is Command.CodeGit -> {
             val spec = state.conversation(c.convId)?.code ?: return CommandResult(false, "这不是 Code 会话")

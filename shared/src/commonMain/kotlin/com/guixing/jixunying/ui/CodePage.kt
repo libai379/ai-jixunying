@@ -119,6 +119,38 @@ fun CodePage(ctl: AppController, state: AppState) {
         }
     }
     Spacer(Modifier.height(12.dp))
+    // 2026-10-18 外部 Claude Code：用户自己装、自己登录的官方 Claude Code，走用户自己的订阅（engine/code/ClaudeCli）
+    if (editable) {
+        SectionCard {
+            Text("Claude Code（用你的 Claude 订阅）", style = MaterialTheme.typography.titleSmall)
+            Text("在 Code 会话的「工作区 → 模型」里选 Claude Code，这个会话就交给你电脑上的 Claude Code 去做：它读文件、改文件、跑命令，" +
+                "每一步照样显示在会话里，要改文件、跑命令时照这个会话的权限档问你，改过的照样能看差异、撤销。" +
+                "登录在 Claude Code 自己的窗口里完成，本程序不碰你的账号和凭据。",
+                style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle, modifier = Modifier.padding(top = 2.dp))
+            Spacer(Modifier.height(8.dp))
+            var ccStatus by remember { mutableStateOf<String?>(null) }
+            var ccOk by remember { mutableStateOf(false) }
+            var ccCheck by remember { mutableStateOf(0) }
+            LaunchedEffect(ccCheck, c.claudePath) {
+                ccStatus = null
+                val r = ctl.backend.call(Command.ClaudeStatus)
+                ccOk = r.ok
+                ccStatus = r.data.ifBlank { r.message }
+            }
+            Text(ccStatus ?: "正在检查…", style = MaterialTheme.typography.bodyMedium,
+                color = if (ccStatus != null && !ccOk) Ext.c.warning else MaterialTheme.colorScheme.onSurface)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                TextButton({ ccCheck++ }) { Text("重新检查") }
+                if (!ccOk) TextButton({ ctl.run(Command.ClaudeLogin) }) { Text("打开 Claude Code 登录") }
+                TextButton({ platform.openUrl("https://code.claude.com/docs") }) { Text("怎么装") }
+            }
+            var cp by remember { mutableStateOf(c.claudePath) }
+            FieldLabel("claude.exe 的位置", "空着就自己找（PATH 里、官方安装器默认装的 用户文件夹\\.local\\bin）")
+            AppTextField(cp, { cp = it }, placeholder = "比如 C:\\Users\\你\\.local\\bin\\claude.exe")
+            AutoSave(cp, c.claudePath) { v -> set { it.copy(claudePath = v.trim()) } }
+        }
+        Spacer(Modifier.height(12.dp))
+    }
     // 2026-10-18 连 GitHub：开发完在会话上面点「上传」，提交、推送、开 PR、建仓库（engine/code/GitHub）
     if (editable) {
         SectionCard {

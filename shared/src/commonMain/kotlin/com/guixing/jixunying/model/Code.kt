@@ -67,7 +67,23 @@ data class CodeSpec(
      */
     val worktreeOf: String = "",
     val worktreeBranch: String = "",
-)
+    /**
+     * 外部 Claude Code 的会话编号（2026-10-18）：providerId 是 CLAUDE_CODE 时，下一条任务用 --resume 接着这个会话说，
+     * 它自己记得前面做过什么。换回自己的模型时留着，换回来还能接上。
+     */
+    val externalSession: String = "",
+) {
+    /** 这个会话交给外部 Claude Code（用户自己装、自己登录的官方 claude，走用户自己的订阅）。 */
+    val isClaudeCode: Boolean get() = providerId == CLAUDE_CODE
+
+    companion object {
+        /** providerId 填这个 = 用外部 Claude Code；modelId 是给它的 --model（空 = 它自己的默认，或者 opus / sonnet / haiku）。 */
+        const val CLAUDE_CODE = "claude-code"
+        /** 界面上给选的几个（它认这些别名，指向各自最新的模型）。 */
+        val CLAUDE_MODELS = listOf("" to "默认", "opus" to "Opus", "sonnet" to "Sonnet", "haiku" to "Haiku")
+        fun claudeModelLabel(id: String) = CLAUDE_MODELS.firstOrNull { it.first == id }?.second ?: id
+    }
+}
 
 /**
  * 一次工具调用改了一个文件（docs/Code栏设计说明.md 第 1、11 节，2026-10-12）。
@@ -136,6 +152,8 @@ data class CodeSettings(
      */
     val hookAfterEdit: String = "",
     val hookAfterTask: String = "",
+    /** claude.exe 的位置（2026-10-18，外部 Claude Code）；空 = 自己找（PATH、官方安装器的默认位置、npm）。 */
+    val claudePath: String = "",
 )
 
 @Serializable

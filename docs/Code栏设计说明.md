@@ -31,7 +31,7 @@
 - 用户自己加服务商和 Key，我们不预设、不代付、不转卖。
 - 支持两种接口：Anthropic 风格的消息接口，和 OpenAI 风格的聊天接口（国内大部分服务商用后一种）。本仓库已有的 LlmClient 和服务商预设能复用的就复用，缺的补。
 - 只有支持「调用工具」的模型才能进 Code 栏的模型列表；不支持的灰掉并说明原因。
-- 不做任何形式的「Claude 账号登录」，不读取、不保存、不转发用户的 Claude 订阅登录凭据。Anthropic 官方明确不允许第三方产品这样做（原文摘录在 D:\AI\docs\anthropic-claude-code-legal-20261012.md，这一份可以读，里面没有别人的代码）。用户想用订阅，以后由「外部 Claude Code」的方式解决，第一期不做，也不要给它留任何登录入口。
+- 不做任何形式的「Claude 账号登录」，不读取、不保存、不转发用户的 Claude 订阅登录凭据。Anthropic 官方明确不允许第三方产品这样做（原文摘录在 D:\AI\docs\anthropic-claude-code-legal-20261012.md，这一份可以读，里面没有别人的代码）。用户想用订阅，以后由「外部 Claude Code」的方式解决，第一期不做，也不要给它留任何登录入口。（2026-10-18 做了，见第 15 节：设置里的「打开 Claude Code 登录」只是开一个 Claude Code 自己的窗口，登录在它的界面里完成，本程序照样不碰凭据。）
 
 ## 3 编码循环（程序怎么驱动模型）
 
@@ -218,4 +218,17 @@
     - MCP：设置里加 MCP 服务器（命令 + 参数，stdio），会话开始时连上，它的工具直接给 AI 用（权限照跑命令）；
     - 钩子：设置里「改完文件后跑」「任务做完后跑」两种命令（比如格式化、跑测试）。
 13. 代码审查：内置斜杠命令 /审查（/review）——把这次未提交的改动（git diff）交给 AI 审，只看不改，按严重程度列问题。
+
+## 15 外部 Claude Code（2026-10-18 用户：「这个 code 能不能接入终端，比如 Claude Code 终端，跟各种 AI 一起，claude 可以用订阅了」「先做外部 Claude Code」）
+
+这是「多 AI 协作开发」的第一步：先让一个 Code 会话能交给用户电脑上的 Claude Code 去做；下一步是多角色派活（主控拆活、开发 / 审查 / 测试各用一个脑子），再接 Codex、Gemini。
+
+1. 用法：Code 会话「工作区 → 模型」里选「Claude Code · 默认 / Opus / Sonnet / Haiku」（CodeSpec.providerId = claude-code，modelId 是给它的 --model 别名，空 = 它自己的默认）。一个模型都没加、但装了 Claude Code 的，新建 Code 会话直接用它。设置 → Code 栏「Claude Code（用你的 Claude 订阅）」：检查装没装、登没登录（跑它自己的 --version 和 auth status），没登录点「打开 Claude Code 登录」开一个它自己的终端窗口去登；claude.exe 不在默认位置的可以填路径。
+2. 订阅的规矩（Anthropic 官方页面，原文摘录 D:\AI\docs\anthropic-claude-code-legal-20261012.md）：只许用户自己登录未改动的 Claude Code，我们只启动它；本程序不做 Claude 登录、不读不存它的凭据。将来发行营收前要问 Anthropic 销售「从我们的程序里启动它」算不算要签商业条款（未确认）。
+3. 怎么跑（engine/code/ClaudeCli.kt，本机 Claude Code 2.1.302 实测的协议）：每条任务起一个进程 claude -p --input-format stream-json --output-format stream-json --verbose --permission-prompt-tool stdio --disallowedTools AskUserQuestion --permission-mode manual|plan [--model] [--resume 会话编号] [--add-dir 加进工作区的文件夹] [--append-system-prompt-file 自定义指令]。任务、附件（文档文字、图片）走标准输入，不放在命令行里（经 cmd.exe 会被引号弄坏）。环境变量去掉 CLAUDECODE、CLAUDE_CODE_SESSION_ID 这类（CCB 踩过：漏进去它以为自己是子会话），没设代理就带上设置里的代理。
+4. 权限：除了计划档交给它自己的 plan，一律让它跑 manual——要改文件、跑它认为不只读的命令、读工作区外面的都来问（control_request can_use_tool）。我们按这个会话的档答，和自己的循环同一套：shouldAsk、命令规则（危险的永远问、「同样开头不再问」）、自动档的检查员、全部放开；要问用户的照样停在等批准的卡片上。改文件放行之前先 CodeBackup 存原样，它改完算差异挂上 FileChange——回答里照样看差异、拒绝、撤销整条、回到这里。手机发起的任务读工作区外面照样要问（它来问时我们停下等）。它的计划（ExitPlanMode）显示成「计划」一步，回它「不要动手」。
+5. 显示：它的文字流进回答正文、思考进推理过程；读文件、查找、它自己判断只读直接跑的命令（比如 Get-Content）在结果回来时补记一步；子代理（Task）马上记一步；它的 TodoWrite 画成待办卡片；订阅额度到上限时记一步写清几点恢复。
+6. 会话：它的 session_id 存在 CodeSpec.externalSession，下一条任务 --resume 接着说（它自己记得前面做过什么）；接不上（它那边清掉了）就开新的，把这个会话前面的对话（最多 2 万字）带过去。点停止 = 杀掉它连同它开的子进程。任务钩子没过时往它的标准输入再发一条，让它改一轮（只一轮）。
+7. 和自己的循环不一样的地方：它判断为只读的命令（Get-Content、git status 之类）在手动档也不问——这是它自己的规则，我们收不到请求。它用的是它自己的工具和系统提示词，我们的预览、后台命令、MCP 设置不给它（它有自己的一套）。
+8. 测试：ClaudeCodeTest 用 Python 写的假 claude（照真协议）走一遍手动 / 接受编辑 / 拒绝 / 计划 / 接不上会话 / 没登录 / 停止，还有从真输出摘的几行解析；LiveClaudeCodeTest（设 JXY_LIVE_CLAUDE=1）用本机真的 Claude Code（haiku）改一个文件：读 → 改（等批准）→ 跑命令确认 → 撤销，10-18 通过。
 

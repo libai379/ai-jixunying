@@ -207,6 +207,10 @@ class ShotsTest {
                     extraPaths = listOf("G:\\资料\\接口文档"), allowedCommands = listOf("git status", "web:docs.python.org"))),
             Conversation("c12", "跑测试", emptyList(), createdAt = now - 150_000, updatedAt = now - 4_000,
                 code = com.guixing.jixunying.model.CodeSpec(File(root, "我的项目").absolutePath, "pd", "deepseek-flash")),
+            // 2026-10-18 外部 Claude Code：交给用户自己的 Claude Code（订阅）做，改文件在等批准
+            Conversation("c15", "交给 Claude Code", emptyList(), createdAt = now - 120_000, updatedAt = now - 3_000,
+                code = com.guixing.jixunying.model.CodeSpec(File(root, "我的项目").absolutePath, com.guixing.jixunying.model.CodeSpec.CLAUDE_CODE, "opus",
+                    externalSession = "s-1")),
         )
         val st = Storage(root)
         st.saveState(AppState(
@@ -442,6 +446,15 @@ class ShotsTest {
                 tools = listOf(ToolStep("todo", "待办", id = "s120", output = "[x] 找到测试命令\n[>] 跑测试\n[ ] 看失败的用例"),
                     ToolStep("run", "python -m pytest -q", id = "s121", approval = "waiting", prefix = "python -m pytest"))),
         ))
+        st.saveMessages("c15", listOf(
+            Message("u15", "c15", Role.USER, USER_ID, "把首页标题改成「欢迎」", createdAt = now - 20_000),
+            Message("r15", "c15", Role.AI, "tool:code", "先看了首页文件，标题在第 3 行。", status = MsgStatus.STREAMING,
+                createdAt = now - 10_000, modelLabel = "Claude Code（Opus）",
+                tools = listOf(ToolStep("read", "src/index.html", id = "s150", output = "<h1>Hello</h1>"),
+                    ToolStep("run", "git status", id = "s151", output = "On branch main"),
+                    ToolStep("edit", "src/index.html", id = "s152", approval = "waiting", note = "改这个文件",
+                        output = "--- a/src/index.html\n+++ b/src/index.html\n@@ -3,1 +3,1 @@\n-<h1>Hello</h1>\n+<h1>欢迎</h1>"))),
+        ))
         // 备份攒过头（1 GB 以上，设置 → Code 栏 顶上要提醒）：写一个稀疏文件占位，不真占盘
         java.io.RandomAccessFile(File(root, "code/c8/big.orig"), "rw").use { it.setLength(1_100_000_000L) }
         val e = Engine(Storage(root))
@@ -554,6 +567,9 @@ class ShotsTest {
         shoot("phone-toast", 824, 1784, 2f, hub, phone, "conv:c14#toast")
         shoot("desktop-code-remember-cmd", 1280, 820, 1f, hub, desktop, "code:c12")
         shoot("desktop-code-workspace", 1280, 820, 1f, hub, desktop, "code:c11#path")
+        shoot("desktop-code-claude", 1280, 820, 1f, hub, desktop, "code:c15")
+        shoot("desktop-code-claude-workspace", 1280, 900, 1f, hub, desktop, "code:c15#path")
+        shoot("desktop-settings-code-tall", 1280, 1900, 1f, hub, desktop, "settings:CODE")
         shoot("desktop-code-diff", 1280, 820, 1f, hub, desktop, "code:c8#diff")
         shoot("desktop-code-new", 1280, 820, 1f, hub, desktop, "newcode")
         // 窗口矮（用户 10-14 截图：「建好」被挤到窗口外）：按钮要一直在对话框底部看得见

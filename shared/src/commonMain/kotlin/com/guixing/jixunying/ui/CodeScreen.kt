@@ -203,7 +203,8 @@ private fun CodeTopBar(ctl: AppController, state: AppState, conv: Conversation, 
     var showPath by remember(conv.id) { mutableStateOf(false) }
     // 开发截图用：-Djxy.start=code:会话编号#path 直接把这个弹窗打开
     LaunchedEffect(Unit) { if (ctl.debugDialog == "path") showPath = true }
-    val subtitle = (if (wide) spec.folder else folderName(spec.folder)) + (provider?.let { " · ${it.name}" } ?: "") + " · ${spec.modelId}"
+    val subtitle = (if (wide) spec.folder else folderName(spec.folder)) +
+        if (spec.isClaudeCode) " · Claude Code（${CodeSpec.claudeModelLabel(spec.modelId)}）" else (provider?.let { " · ${it.name}" } ?: "") + " · ${spec.modelId}"
     Row(Modifier.fillMaxWidth().height(60.dp).padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
         if (!wide) IconButton(onClick = openDrawer) { Icon(Icons.Rounded.Menu, "菜单") }
         Column(Modifier.weight(1f).padding(start = 6.dp)) {
@@ -554,6 +555,23 @@ private fun WorkspaceDialog(ctl: AppController, conv: Conversation, spec: CodeSp
             }
             Spacer(Modifier.height(12.dp))
             FieldLabel("模型", "只列能调用工具的")
+            // 外部 Claude Code（2026-10-18）：用你自己装、自己登录的 Claude Code，走你的 Claude 订阅
+            Text("Claude Code（用你的 Claude 订阅；先在 设置 → Code 栏 检查装好、登录了）", style = MaterialTheme.typography.labelMedium,
+                color = Ext.c.subtle, modifier = Modifier.padding(start = 8.dp, top = 2.dp, bottom = 2.dp))
+            CodeSpec.CLAUDE_MODELS.forEach { (id, label) ->
+                val on = spec.isClaudeCode && spec.modelId == id
+                Row(
+                    Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).background(if (on) Ext.c.sidebarSelected else Color.Transparent)
+                        .clickable(enabled = canEdit && !on) { ctl.run(Command.CodeSetProject(conv.id, providerId = CodeSpec.CLAUDE_CODE, modelId = id), okText = "换成 Claude Code（$label）") }
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    RadioButton(on, null, enabled = canEdit)
+                    Text("Claude Code · $label", style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+            }
+            Text("自己加的模型", style = MaterialTheme.typography.labelMedium,
+                color = Ext.c.subtle, modifier = Modifier.padding(start = 8.dp, top = 6.dp, bottom = 2.dp))
             val st by ctl.backend.store.state.collectAsState()
             val options = st.providers.filter { it.enabled }.flatMap { p -> p.models.filter { it.tools }.map { p to it } }
             options.forEach { (p, m) ->
@@ -924,6 +942,7 @@ private fun codeStepLine(t: ToolStep): Pair<ImageVector, String> {
         "agent" -> "子代理「${t.input}」"
         "search" -> "搜了「${t.input}」"
         "fetch" -> "打开了 ${t.input.take(80)}"
+        "plan" -> "写好了计划（点开看）"
         else -> "${t.kind} ${t.input}"
     }
     val tail = when {
@@ -944,6 +963,7 @@ private fun codeStepLine(t: ToolStep): Pair<ImageVector, String> {
         "grep", "find", "search" -> Icons.Rounded.Search to (head + tail)
         "write" -> Icons.Rounded.Add to (head + tail)
         "edit" -> Icons.Rounded.Edit to (head + tail)
+        "plan" -> Icons.Rounded.Description to (head + tail)
         else -> Icons.Rounded.Computer to (head + tail)
     }
 }

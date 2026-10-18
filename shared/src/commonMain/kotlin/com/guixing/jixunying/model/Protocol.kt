@@ -78,6 +78,10 @@ sealed interface Command {
     @Serializable data object GitHubStatus : Command
     /** 开一个窗口登录 GitHub（gh auth login --web），用户在浏览器里点同意。只能在电脑上。 */
     @Serializable data object GitHubLogin : Command
+    /** 外部 Claude Code（2026-10-18）：装没装、什么版本、登没登录（只读它自己 claude auth status 的结果，不碰凭据）。 */
+    @Serializable data object ClaudeStatus : Command
+    /** 开一个终端窗口运行 claude，让用户在它自己的界面里登录（/login）。只能在电脑上。 */
+    @Serializable data object ClaudeLogin : Command
     /** Code 栏：换权限档（只影响之后的步骤，已经跑完的不变）。fromPhone 同上。 */
     @Serializable data class CodeSetMode(val convId: String, val mode: CodeMode, val fromPhone: Boolean = false,
         /** 2026-10-17：「全部放开」（CodeSpec.openAll）。手机发来 true 的一律拒（PhoneGate）。 */

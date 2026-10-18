@@ -5,6 +5,8 @@ import com.guixing.jixunying.engine.code.CodeCommands
 import com.guixing.jixunying.engine.code.CodeGuard
 import com.guixing.jixunying.engine.code.CodeRunner
 import com.guixing.jixunying.engine.code.CodeRunnerRules
+import com.guixing.jixunying.engine.code.ClaudeCli
+import com.guixing.jixunying.engine.code.ClaudeProcess
 import com.guixing.jixunying.model.AppState
 import com.guixing.jixunying.model.CodeMode
 import com.guixing.jixunying.model.CodeSettings
@@ -131,6 +133,8 @@ class CodeAgent(private val host: CodeHost) {
     private suspend fun loop(convId: String, task: Message) {
         val spec = host.state.conversation(convId)?.code ?: return
         currentTask[convId] = task.content
+        // 2026-10-18：交给外部 Claude Code（用户自己的订阅）
+        if (spec.isClaudeCode) return loopClaude(convId, task, spec)
         val provider = host.state.provider(spec.providerId)
         // 回复也用一条普通消息：和聊天一样流式推给界面（工具步骤挂在 tools 上）
         val msg = Message(
@@ -928,6 +932,361 @@ class CodeAgent(private val host: CodeHost) {
         }
     }
 
+    // ———————————————— 外部 Claude Code（2026-10-18） ————————————————
+
+    /**
+     * Claude Code 的一个工具调用对应我们的哪一步。改文件的记下改之前的样子（做完算差异、挂上能撤销的改动）；
+     * closed = 这一步我们已经定了结果（用户拒绝了、计划档的计划），它回来的结果不再覆盖。
+     */
+    private class ExtStep(val stepId: String, val file: File? = null, val rel: String = "", val before: String = "",
+                          val created: Boolean = false, val closed: Boolean = false)
+
+    private class ClaudeRound(val error: String? = null, val stale: Boolean = false, val usage: Usage = Usage())
+
+    /**
+     * 这条任务交给用户自己装、自己登录的 Claude Code（engine/code/ClaudeCli，走用户自己的订阅）：它自己读文件、改文件、跑命令，
+     * 我们把它的每一步画成和自己的循环一样的步骤；它要改文件、跑命令时来问，我们按这个会话的权限档答（要问用户的照样停下来等），
+     * 改之前照样备份，回答里照样能看差异、撤销。下一条任务用 --resume 接着同一个 Claude Code 会话（它自己记得前面的事）。
+     */
+    private suspend fun loopClaude(convId: String, task: Message, spec: CodeSpec) {
+        val settings = host.state.settings
+        val msg = Message(
+            host.newId(), convId, Role.AI, CODE_ID, status = MsgStatus.STREAMING, createdAt = host.now(),
+            modelLabel = "Claude Code" + spec.modelId.takeIf { it.isNotBlank() }?.let { "（${CodeSpec.claudeModelLabel(it)}）" }.orEmpty(),
+        )
+        host.addMessage(msg)
+        val exe = ClaudeCli.findExe(settings.code.claudePath)
+        if (exe == null) {
+            host.updateMessage(convId, msg.id) { it.copy(status = MsgStatus.ERROR, error = "没找到 Claude Code。先装好它（https://code.claude.com/docs ），" +
+                "在终端里运行一次 claude 登录你自己的账号；装在别处的，到 设置 → Code 栏 填 claude.exe 的位置") }
+            return
+        }
+        val backup = host.backupOf(convId)
+        // 自定义指令写进临时文件给它（--append-system-prompt-file），不放在命令行里
+        val custom = listOf(settings.personal.instructions.trim(), settings.personal.codeInstructions.trim()).filter { it.isNotEmpty() }
+        val instr = if (custom.isEmpty()) null else withContext(Dispatchers.IO) {
+            File.createTempFile("jxy-claude-", ".md").apply { writeText("用户的自定义指令：\n\n" + custom.joinToString("\n\n"), Charsets.UTF_8) }
+        }
+        try {
+            var r = claudeRound(convId, msg.id, task, spec, exe, spec.externalSession, instr, backup)
+            var usage = r.usage
+            if (r.stale) {
+                // 接不上以前的会话（Claude Code 那边清掉了）：开个新的，前面的对话带过去
+                host.updateCode(convId) { it.copy(externalSession = "") }
+                r = claudeRound(convId, msg.id, task, spec, exe, "", instr, backup)
+                usage = Usage(usage.prompt + r.usage.prompt, usage.completion + r.usage.completion, usage.cached + r.usage.cached, usage.millis + r.usage.millis)
+            }
+            val err = r.error
+            host.updateMessage(convId, msg.id) {
+                if (err != null) it.copy(status = MsgStatus.ERROR, error = err, usage = usage)
+                else it.copy(content = it.content.trim(), status = MsgStatus.DONE, usage = usage)
+            }
+        } catch (e: CancellationException) {
+            withContext(NonCancellable) { host.updateMessage(convId, msg.id) { it.copy(status = MsgStatus.STOPPED) } }
+            throw e
+        } catch (e: Throwable) {
+            host.updateMessage(convId, msg.id) { it.copy(status = MsgStatus.ERROR, error = host.friendlyError(e)) }
+        } finally {
+            instr?.delete()
+        }
+    }
+
+    /** 开一个 claude 进程把这条任务做完（含任务钩子没过时多改的一轮）。 */
+    private suspend fun claudeRound(convId: String, msgId: String, task: Message, spec: CodeSpec, exe: File, resume: String,
+                                    instr: File?, backup: CodeBackup): ClaudeRound {
+        val settings = host.state.settings
+        val cur = host.state.conversation(convId)?.code ?: spec
+        val cmd = ClaudeCli.launcher(exe) + ClaudeCli.args(cur.modelId, cur.mode == CodeMode.PLAN, resume,
+            cur.extraPaths.filter { File(it).isDirectory }, instr)
+        val proc = withContext(Dispatchers.IO) {
+            runCatching { ClaudeProcess(cmd, File(cur.folder), ClaudeCli.env(System.getenv(), settings.proxy)) }
+        }.getOrElse { return ClaudeRound("启动不了 Claude Code（${exe.absolutePath}）：${it.message}") }
+        val uses = HashMap<String, ClaudeCli.ToolUse>()
+        val steps = HashMap<String, ExtStep>()
+        var wrote = false
+        var hookRan = false
+        var usage = Usage()
+        try {
+            val (text, images) = claudeTaskText(convId, task, resume.isBlank())
+            proc.send(ClaudeCli.initRequest())
+            proc.send(ClaudeCli.userMessage(text, images))
+            for (line in proc.lines) {
+                for (ev in ClaudeCli.parse(line)) when (ev) {
+                    is ClaudeCli.Init -> if (ev.sessionId.isNotBlank()) host.updateCode(convId) { it.copy(externalSession = ev.sessionId) }
+                    is ClaudeCli.Text -> if (!ev.sub) {
+                        host.appendDelta(convId, msgId, (if (wrote) "\n\n" else "") + ev.text, "")
+                        wrote = true
+                    }
+                    is ClaudeCli.Thinking -> host.appendDelta(convId, msgId, "", ev.text)
+                    is ClaudeCli.ToolUse -> claudeToolUse(convId, msgId, ev, uses, steps)
+                    is ClaudeCli.Permission -> proc.send(claudePermission(convId, msgId, ev, steps, backup))
+                    is ClaudeCli.ToolResult -> claudeToolResult(convId, msgId, ev, uses, steps)
+                    is ClaudeCli.Limit -> if (ev.status.isNotBlank() && ev.status != "allowed" && ev.status != "allowed_warning") {
+                        val at = if (ev.resetsAt > 0) java.time.Instant.ofEpochSecond(ev.resetsAt).atZone(java.time.ZoneId.systemDefault())
+                            .format(java.time.format.DateTimeFormatter.ofPattern("M月d日 HH:mm")) else ""
+                        addStep(convId, msgId, ToolStep("run", "Claude 订阅额度", id = host.newId(), ok = false,
+                            note = "用到上限了" + if (at.isNotEmpty()) "，$at 恢复" else ""))
+                    }
+                    is ClaudeCli.Done -> {
+                        usage = Usage(usage.prompt + ev.usage.prompt, usage.completion + ev.usage.completion, usage.cached + ev.usage.cached, usage.millis + ev.usage.millis)
+                        if (ev.isError) {
+                            val stale = resume.isNotBlank() && Regex("(?i)no conversation found|session.{0,40}not found").containsMatchIn(ev.text)
+                            return ClaudeRound(claudeError(ev.text), stale, usage)
+                        }
+                        // 任务做完后的钩子：没过就再交给它改一轮（只一轮），和自己的循环一样
+                        val hook = host.state.settings.code.hookAfterTask.trim()
+                        val again = if (hook.isEmpty() || hookRan) false else {
+                            hookRan = true
+                            "报错了" in runHook(convId, msgId, hook, "任务做完后的钩子", File(cur.folder)).also { out ->
+                                if ("报错了" in out) proc.send(ClaudeCli.userMessage("（程序自动跑了用户设的检查，没过，改好它：）$out"))
+                            }
+                        }
+                        if (!again) {
+                            if (!wrote && ev.text.isNotBlank()) host.appendDelta(convId, msgId, ev.text, "")
+                            proc.closeInput()
+                            withContext(Dispatchers.IO) { proc.waitExit(5_000) }
+                            return ClaudeRound(usage = usage)
+                        }
+                    }
+                }
+            }
+            // 输出完了却没有做完的消息：它自己退出了（没登录、参数不认、崩了）
+            val err = proc.stderrTail()
+            return ClaudeRound(claudeError(err.ifBlank { "Claude Code 没做完就退出了（退出码 ${proc.exitCode() ?: "?"}）" }), usage = usage)
+        } finally {
+            withContext(NonCancellable + Dispatchers.IO) { proc.close() }
+        }
+    }
+
+    /** 给 Claude Code 的这条任务：正文 + 附件（文档抽出的文字、图片）；新开的会话把前面的对话带上。 */
+    private fun claudeTaskText(convId: String, task: Message, fresh: Boolean): Pair<String, List<String>> {
+        val (more, images) = host.attachmentParts(task, latest = true, vision = true)
+        val body = task.content + more
+        if (!fresh) return body to images
+        val earlier = host.messagesOf(convId).takeWhile { it.id != task.id }
+            .filter { it.content.isNotBlank() && (it.role == Role.USER || it.role == Role.AI) }
+        if (earlier.isEmpty()) return body to images
+        val picked = ArrayDeque<String>()
+        var used = 0
+        for (m in earlier.asReversed()) {
+            val line = (if (m.role == Role.USER) "用户：" else "AI：") + m.content.replace(THINK, "").trim().take(4000)
+            if (used + line.length > CLAUDE_HISTORY) break
+            picked.addFirst(line)
+            used += line.length
+        }
+        return ("（这个会话前面的对话，接着做：）\n" + picked.joinToString("\n\n") + "\n\n（这次的任务：）\n" + body) to images
+    }
+
+    private fun claudeError(text: String): String {
+        val t = text.trim()
+        return when {
+            Regex("(?i)not logged in|/login|please log ?in|invalid api key|authentication|oauth").containsMatchIn(t) ->
+                "Claude Code 还没登录，或者登录过期了：到 设置 → Code 栏 点「打开 Claude Code 登录」，在弹出的窗口里登录好再发一次。\n（它说：${t.take(300)}）"
+            Regex("(?i)usage limit|rate limit|limit reached|out of (extra )?usage").containsMatchIn(t) ->
+                "Claude 订阅的额度用完了，等恢复了再发；或者在「工作区」里先换成别的模型。\n（它说：${t.take(300)}）"
+            t.isEmpty() -> "Claude Code 出错了，没说原因"
+            else -> "Claude Code 报错：${t.take(800)}"
+        }
+    }
+
+    /** 它开始用一个工具：待办清单直接画卡片；子代理马上记一步（会跑很久）；别的等它来问、或者等结果回来再记。 */
+    private suspend fun claudeToolUse(convId: String, msgId: String, ev: ClaudeCli.ToolUse,
+                                      uses: MutableMap<String, ClaudeCli.ToolUse>, steps: MutableMap<String, ExtStep>) {
+        uses[ev.id] = ev
+        when (ev.name) {
+            "TodoWrite" -> {
+                val lines = Todos.normalize(ClaudeCli.todos(ev.input))
+                if (lines.isNotEmpty()) host.updateMessage(convId, msgId) { m ->
+                    m.copy(tools = m.tools.filter { it.kind != "todo" } + ToolStep("todo", "待办", id = host.newId(), output = lines, ok = true))
+                }
+                steps[ev.id] = ExtStep("", closed = true)
+            }
+            "Task", "Agent" -> {
+                val stepId = host.newId()
+                addStep(convId, msgId, ToolStep("agent", ev.input.str("description").orEmpty().ifBlank { "子任务" }, id = stepId, ok = true,
+                    output = uiText(ev.input.str("prompt").orEmpty()), note = "在做"))
+                steps[ev.id] = ExtStep(stepId)
+            }
+        }
+    }
+
+    /** 它用完一个工具：补上结果；改文件的算出差异、挂上能撤销的改动。 */
+    private suspend fun claudeToolResult(convId: String, msgId: String, ev: ClaudeCli.ToolResult,
+                                         uses: MutableMap<String, ClaudeCli.ToolUse>, steps: MutableMap<String, ExtStep>) {
+        val use = uses.remove(ev.id)
+        val ext = steps.remove(ev.id)
+        if (ext != null && ext.closed) return
+        if (ext == null) {
+            // 没来问就做了的（读文件、查找、只读的命令），或者它自己拦下的：补记一步
+            val u = use ?: return
+            val guard = guardOf(convId)
+            addStep(convId, msgId, ToolStep(claudeKind(u.name), claudeInput(u, guard), id = host.newId(), ok = !ev.isError,
+                output = uiText(ev.text), note = if (ev.isError) "没成功" else if (u.sub) "子代理做的" else ""))
+            return
+        }
+        val file = ext.file
+        if (file == null) {
+            setStep(convId, msgId, ext.stepId) {
+                it.copy(ok = !ev.isError, output = uiText(ev.text),
+                    note = when {
+                        it.kind == "agent" -> if (ev.isError) "没做成" else "做完了"
+                        ev.isError -> "没成功"
+                        else -> it.note
+                    })
+            }
+            return
+        }
+        if (ev.isError) {
+            setStep(convId, msgId, ext.stepId) { it.copy(ok = false, note = "没改成：${ev.text.take(200)}") }
+            return
+        }
+        val now = withContext(Dispatchers.IO) { runCatching { if (file.isFile) file.readText() else "" }.getOrDefault("") }
+        val diff = CodeDiff.make(ext.rel, ext.before, now)
+        val change = FileChange(ext.stepId, ext.rel, diff.added, diff.removed, created = ext.created)
+        setStep(convId, msgId, ext.stepId) { it.copy(ok = true, output = uiText(diff.text), change = change) }
+        afterEditHook(convId, msgId, file)
+    }
+
+    /**
+     * 它来问能不能做一步（它是 manual 档：要改文件、跑不只读的命令都会来问；读工作区外面的也会问）。
+     * 照这个会话的权限档答：和自己的循环同一套 shouldAsk / 命令规则 / 检查员 / waitApproval。返回回给它的那一行。
+     */
+    private suspend fun claudePermission(convId: String, msgId: String, ev: ClaudeCli.Permission,
+                                         steps: MutableMap<String, ExtStep>, backup: CodeBackup): String {
+        val cur = host.state.conversation(convId)?.code ?: return ClaudeCli.deny(ev.requestId, "会话已经不在了")
+        val guard = runCatching { CodeGuard(File(cur.folder), cur.extraPaths) }.getOrNull() ?: return ClaudeCli.deny(ev.requestId, "项目文件夹不对")
+        val input = ev.input
+        val name = ev.toolName
+        val stepId = host.newId()
+        fun allow() = ClaudeCli.allow(ev.requestId, input)
+        fun deny(why: String) = ClaudeCli.deny(ev.requestId, why)
+        when (name) {
+            "Write", "Edit", "MultiEdit", "NotebookEdit" -> {
+                val raw = input.str("file_path") ?: input.str("notebook_path") ?: ""
+                val file = guard.resolve(raw) ?: return deny(outside(raw))
+                if (file.isDirectory) return deny("「$raw」是目录")
+                val rel = guard.relative(file)
+                val existed = file.isFile
+                val before = if (!existed) "" else withContext(Dispatchers.IO) { runCatching { file.readText() }.getOrNull() }
+                    ?: return deny("读不了原来的 $rel（可能没有权限）")
+                val after = claudeAfter(name, before, input)
+                val diff = CodeDiff.make(rel, before, after ?: before)
+                val kind = if (name == "Write") "write" else "edit"
+                val out = !guard.inScope(file)
+                val step = ToolStep(kind, rel, id = stepId, output = uiText(if (after != null) diff.text else input.toString()), ok = true,
+                    note = (if (kind == "write") (if (existed) "重写这个文件" else "新建这个文件") else "改这个文件") + if (out) "（在工作区外面）" else "",
+                    scopeDir = if (out) guard.folderToAdd(file) else "")
+                val verb = if (kind == "write") "写" else "改"
+                if (shouldAsk(convId, out, needsApproval(cur.mode, kind), step, "${verb}文件 $rel\n${diff.text.take(3000)}")) {
+                    if (!waitApproval(convId, msgId, step)) { steps[ev.toolUseId] = ExtStep(stepId, closed = true); return deny(refused("$verb $rel")) }
+                } else addStep(convId, msgId, step)
+                val created = withContext(Dispatchers.IO) { backup.save(stepId, file) }
+                steps[ev.toolUseId] = ExtStep(stepId, file, rel, before, created)
+                return allow()
+            }
+            "Bash", "PowerShell" -> {
+                val command = input.str("command").orEmpty()
+                val by = CodeCommands.allowedBy(command, cur.allowedCommands)
+                val step = ToolStep("run", command, id = stepId, ok = true,
+                    note = if (by != null) "「$by」开头的命令这个会话里不再问" else "",
+                    prefix = if (by == null) CodeCommands.prefixOf(command).orEmpty() else "")
+                val ask = when {
+                    CodeCommands.dangerous(command) && by == null -> true
+                    openAll(convId) -> false
+                    by != null -> false
+                    autoOn(convId) -> host.autoCheck(convId, currentTask[convId].orEmpty(), "跑命令：$command").also { why ->
+                        if (why != null) autoNote[stepId] = "自动检查拦下：$why"
+                    } != null
+                    else -> needsApproval(cur.mode, "run")
+                }
+                if (ask) {
+                    if (!waitApproval(convId, msgId, step)) { steps[ev.toolUseId] = ExtStep(stepId, closed = true); return deny(refused("跑这条命令")) }
+                } else addStep(convId, msgId, step)
+                steps[ev.toolUseId] = ExtStep(stepId)
+                return allow()
+            }
+            "Read", "Glob", "Grep", "LS", "NotebookRead" -> {
+                // 它只在读工作区外面时来问：电脑上发起的不问（2026-10-17「比 Claude 更开放」），手机发起的停下来问
+                if (kotlin.coroutines.coroutineContext[PhoneTask] == null) return allow()
+                val raw = input.str("file_path") ?: input.str("path") ?: input.str("pattern") ?: ""
+                val file = guard.resolve(raw)
+                val step = ToolStep(claudeKind(name), file?.let { guard.relative(it) } ?: raw, id = stepId, ok = true,
+                    note = "读工作区外面的东西", scopeDir = file?.let { guard.folderToAdd(it) }.orEmpty())
+                if (!waitApproval(convId, msgId, step)) { steps[ev.toolUseId] = ExtStep(stepId, closed = true); return deny(refused("读 $raw")) }
+                steps[ev.toolUseId] = ExtStep(stepId)
+                return allow()
+            }
+            "WebFetch", "WebSearch" -> return allow()
+            "ExitPlanMode" -> {
+                // 计划档：计划给用户看，不动手；用户把档切走再说「照计划做」
+                addStep(convId, msgId, ToolStep("plan", "计划", id = stepId, ok = true, output = uiText(input.str("plan").orEmpty()),
+                    note = "要动手：把上面的权限档从「计划」换掉，再说一句「照计划做」"))
+                steps[ev.toolUseId] = ExtStep(stepId, closed = true)
+                return deny("计划已经显示给用户了。现在还是计划档，不要动手：这一轮到此结束，等用户换了权限档再做。")
+            }
+            else -> {
+                // 别的工具（它的 MCP、技能……）：和调外部工具一样——全部放开不问，自动档给检查员看，其余问
+                val step = ToolStep("run", "$name ${input.toString().take(200)}", id = stepId, ok = true, note = "Claude Code 要用 $name")
+                val ask = when {
+                    openAll(convId) -> false
+                    autoOn(convId) -> host.autoCheck(convId, currentTask[convId].orEmpty(), "用工具 $name，参数：${input.toString().take(1500)}")
+                        .also { why -> if (why != null) autoNote[stepId] = "自动检查拦下：$why" } != null
+                    else -> true
+                }
+                if (ask) {
+                    if (!waitApproval(convId, msgId, step)) { steps[ev.toolUseId] = ExtStep(stepId, closed = true); return deny(refused("用 $name")) }
+                } else addStep(convId, msgId, step)
+                steps[ev.toolUseId] = ExtStep(stepId)
+                return allow()
+            }
+        }
+    }
+
+    /** 它要改成什么样（给用户看差异用）；算不出来（找不到要换的那段、笔记本）返回 null，界面上就显示它给的参数。 */
+    private fun claudeAfter(name: String, before: String, input: JsonObject): String? {
+        fun one(text: String, o: JsonObject): String? {
+            val old = o.str("old_string") ?: return null
+            val new = o.str("new_string") ?: return null
+            if (old.isEmpty() || !text.contains(old)) return null
+            return if (o.str("replace_all") == "true") text.replace(old, new) else text.replaceFirst(old, new)
+        }
+        return when (name) {
+            "Write" -> input.str("content")
+            "Edit" -> one(before, input)
+            "MultiEdit" -> (input["edits"] as? JsonArray)?.fold(before as String?) { acc, e -> acc?.let { a -> (e as? JsonObject)?.let { one(a, it) } } }
+            else -> null
+        }
+    }
+
+    private fun claudeKind(name: String) = when (name) {
+        "Read", "NotebookRead" -> "read"
+        "Write" -> "write"
+        "Edit", "MultiEdit", "NotebookEdit" -> "edit"
+        "Glob" -> "find"
+        "Grep" -> "grep"
+        "LS" -> "list"
+        "WebFetch" -> "fetch"
+        "WebSearch" -> "search"
+        "Task", "Agent" -> "agent"
+        else -> "run"
+    }
+
+    /** 一步的一行摘要：路径换成相对项目的，命令原样。 */
+    private fun claudeInput(u: ClaudeCli.ToolUse, guard: CodeGuard?): String {
+        val i = u.input
+        fun path(k: String) = i.str(k)?.let { raw -> guard?.resolve(raw)?.let { guard.relative(it) } ?: raw }
+        return when (u.name) {
+            "Read", "Write", "Edit", "MultiEdit" -> path("file_path")
+            "NotebookRead", "NotebookEdit" -> path("notebook_path")
+            "Bash", "PowerShell" -> i.str("command")
+            "Glob", "Grep" -> i.str("pattern")
+            "LS" -> path("path")
+            "WebFetch" -> i.str("url")
+            "WebSearch" -> i.str("query")
+            else -> null
+        } ?: "${u.name} ${i.toString().take(200)}"
+    }
+
     // ———————————————— 批准 ————————————————
 
     /** 「自动」档：这个会话开着自动、不是计划档。 */
@@ -1190,6 +1549,8 @@ class CodeAgent(private val host: CodeHost) {
         private const val WORK_BUDGET = 150_000
         /** 省略时最近几步原样留着。 */
         private const val KEEP_TAIL = 10
+        /** 新开 Claude Code 会话时带过去的前面对话最多多少字。 */
+        private const val CLAUDE_HISTORY = 20_000
         // 手机发来的指令怎么拦：见 engine/code/PhoneGate（安全核心）
     }
 }
