@@ -41,6 +41,13 @@ data class CodeSpec(
      * 「接受编辑」只有电脑上选过，手机才能切过去（engine/code/PhoneGate）。null = 旧版建的会话或手机建的、电脑还没选过。
      */
     val pcMode: CodeMode? = null,
+    /**
+     * 加进工作区的文件夹或文件（2026-10-17，相当于 Claude Code 的 /add-dir）：和项目文件夹一样，读不问、改按权限档。
+     * 批准一步时选「允许，并把这个文件夹加进来」，或者在会话上面「工作区」里加。手机上加不了（engine/code/PhoneGate）。
+     */
+    val extraPaths: List<String> = emptyList(),
+    /** 这个会话里「同样开头不再问」的命令开头（2026-10-17，engine/code/CodeCommands 判断）。手机上加不了。 */
+    val allowedCommands: List<String> = emptyList(),
 )
 
 /**

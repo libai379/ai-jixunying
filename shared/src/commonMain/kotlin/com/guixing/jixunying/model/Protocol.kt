@@ -43,8 +43,17 @@ sealed interface Command {
     @Serializable data class CodeSend(val convId: String, val text: String) : Command
     /** Code 栏：停下这个会话正在跑的循环（模型请求和正在跑的命令都停），消息状态变 STOPPED。 */
     @Serializable data class CodeStop(val convId: String) : Command
-    /** Code 栏：批准或拒绝一步（写文件 / 改文件 / 跑命令）。针对具体某一步，没有超时自动放行。 */
-    @Serializable data class CodeDecide(val convId: String, val stepId: String, val allow: Boolean) : Command
+    /**
+     * Code 栏：批准或拒绝一步（读写工作区外的文件 / 写文件 / 改文件 / 跑命令）。针对具体某一步，没有超时自动放行。
+     * remember（2026-10-17）："" 只这一次；"dir" 允许并把这一步的文件夹（ToolStep.scopeDir）加进工作区；
+     * "command" 允许并且同样开头（ToolStep.prefix）的命令这个会话里不再问。手机发来的一律当 ""（PhoneGate）。
+     */
+    @Serializable data class CodeDecide(val convId: String, val stepId: String, val allow: Boolean, val remember: String = "") : Command
+    /**
+     * Code 栏：改这个会话的工作区（加进来的文件夹 / 文件）和「不再问」的命令开头（2026-10-17）。整份替换。
+     * 只能在电脑上改，手机发来的拒绝（PhoneGate）。
+     */
+    @Serializable data class CodeSetAccess(val convId: String, val extraPaths: List<String>, val allowedCommands: List<String>) : Command
     /** Code 栏：某一处改动的统一差异（unified diff）。结果 data 是差异文本。 */
     @Serializable data class CodeDiff(val convId: String, val changeId: String) : Command
     /** Code 栏：接受或拒绝一处改动；拒绝 = 把文件恢复成改之前的样子（原来没有的文件就删掉）。 */

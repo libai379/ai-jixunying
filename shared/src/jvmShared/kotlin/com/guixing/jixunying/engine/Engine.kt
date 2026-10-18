@@ -207,7 +207,14 @@ class Engine(
         override fun launch(convId: String, block: suspend () -> Unit) = launchFor(convId) { block() }
         override fun cancel(convId: String) = stop(convId)
         override fun friendlyError(e: Throwable, p: ProviderConfig?) = this@Engine.friendlyError(e, p)
+        override fun updateCode(convId: String, transform: (CodeSpec) -> CodeSpec) = updateCodeSpec(convId, transform)
     })
+
+    private fun updateCodeSpec(convId: String, transform: (CodeSpec) -> CodeSpec) {
+        updateState { s ->
+            s.copy(conversations = s.conversations.map { c -> if (c.id == convId && c.code != null) c.copy(code = transform(c.code)) else c })
+        }
+    }
 
     /** 上一个配对密钥：手机补发的配对请求可能还用旧的，留 3 分钟。 */
     @Volatile private var previousSecret: Pair<String, Long>? = null
@@ -703,7 +710,16 @@ class Engine(
         }
         is Command.CodeStop -> { codeAgent.stop(c.convId); CommandResult() }
         is Command.CodeDecide -> {
-            if (!codeAgent.decide(c.convId, c.stepId, c.allow)) return CommandResult(false, "这一步已经不在等你了")
+            if (!codeAgent.decide(c.convId, c.stepId, c.allow, c.remember)) return CommandResult(false, "这一步已经不在等你了")
+            CommandResult()
+        }
+        is Command.CodeSetAccess -> {
+            val conv = state.conversation(c.convId) ?: return CommandResult(false, "对话不存在")
+            if (conv.code == null) return CommandResult(false, "这不是 Code 会话")
+            val paths = c.extraPaths.map { it.trim() }.filter { it.isNotEmpty() }.distinctBy { it.trimEnd('\\', '/').lowercase() }
+            paths.firstOrNull { !File(it).exists() }?.let { return CommandResult(false, "这个路径不存在：$it") }
+            if (paths.any { it.startsWith("\\\\") || it.startsWith("//") }) return CommandResult(false, "网络路径不能加进工作区；先映射成盘符再加")
+            updateCodeSpec(conv.id) { it.copy(extraPaths = paths, allowedCommands = c.allowedCommands.map { p -> p.trim() }.filter { p -> p.isNotEmpty() }.distinct()) }
             CommandResult()
         }
         is Command.CodeDiff -> codeAgent.diff(c.convId, c.changeId)

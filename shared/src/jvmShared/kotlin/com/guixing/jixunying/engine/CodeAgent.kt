@@ -1,6 +1,7 @@
 package com.guixing.jixunying.engine
 
 import com.guixing.jixunying.engine.code.CodeBackup
+import com.guixing.jixunying.engine.code.CodeCommands
 import com.guixing.jixunying.engine.code.CodeGuard
 import com.guixing.jixunying.engine.code.CodeRunner
 import com.guixing.jixunying.engine.code.CodeRunnerRules
@@ -42,9 +43,11 @@ import java.util.concurrent.ConcurrentHashMap
  * 组装会话历史 + 工具说明 → 模型带工具回答 → 结果回给模型 → 重复，直到模型不再调工具、用户点停止、或者到了最大步数。
  *
  * 安全都在程序里卡（不靠提示词）：
- * - 路径一律先过 CodeGuard.resolve，越界就不碰文件，把「在项目文件夹外面」当工具结果回给模型；
+ * - 路径一律先过 CodeGuard.resolve（不合法的直接拒）；2026-10-17 起照 Claude Code 分工作区里外：
+ *   工作区（项目文件夹 + 加进来的）里读不问，外面的读、写每次都先问（哪一档都问，「接受编辑」也只放行工作区里的改动）；
  * - 改文件之前先 CodeBackup.save 存原样（备份目录 <数据目录>/code/<对话 id>/）；
  * - 权限档：手动 = 改文件、跑命令都先等批准；接受编辑 = 只有跑命令等；计划 = 工具里根本不给写文件的工具，跑命令要批准；
+ * - 命令：批准时可以选「同样开头这个会话里不再问」（engine/code/CodeCommands：拼起来的、危险的永远要问）；
  * - 等批准时消息状态保持 STREAMING、这一步 ToolStep.approval = "waiting"，界面显示要写的内容 / 差异 / 命令；
  *   拒绝 = 不执行，把「用户拒绝了」当工具结果回给模型；点停止时等批准的按拒绝处理（绝不超时自动放行）。
  *
@@ -59,8 +62,8 @@ class CodeAgent(private val host: CodeHost) {
         var running = false
     }
 
-    /** 一步正在等用户批准。 */
-    private class Waiting(val convId: String, val done: CompletableDeferred<Boolean>)
+    /** 一步正在等用户批准。done 的结果：允不允许 + remember（"" / "dir" / "command"，见 Command.CodeDecide）。 */
+    private class Waiting(val convId: String, val done: CompletableDeferred<Pair<Boolean, String>>)
 
     private val runs = ConcurrentHashMap<String, Run>()
     private val waitings = ConcurrentHashMap<String, Waiting>()
@@ -83,17 +86,17 @@ class CodeAgent(private val host: CodeHost) {
      * 模型请求和正在跑的命令由 CodeRunner 在协程被取消时杀干净），排队的也一起丢掉。
      */
     fun stop(convId: String) {
-        waitings.entries.filter { it.value.convId == convId }.forEach { it.value.done.complete(false) }
+        waitings.entries.filter { it.value.convId == convId }.forEach { it.value.done.complete(false to "") }
         val run = runs[convId] ?: return
         synchronized(run) { run.queued.clear() }
         host.cancel(convId)
     }
 
     /** 用户点了允许 / 拒绝某一步。找不到（已经不在等了）返回 false。 */
-    fun decide(convId: String, stepId: String, allow: Boolean): Boolean {
+    fun decide(convId: String, stepId: String, allow: Boolean, remember: String = ""): Boolean {
         val w = waitings[stepId] ?: return false
         if (w.convId != convId) return false
-        w.done.complete(allow)
+        w.done.complete(allow to (if (allow) remember else ""))
         return true
     }
 
@@ -125,7 +128,6 @@ class CodeAgent(private val host: CodeHost) {
             return
         }
         val p = provider!!
-        val guard = CodeGuard(File(spec.folder))
         val backup = host.backupOf(convId)
         var usage = Usage()
         try {
@@ -150,7 +152,10 @@ class CodeAgent(private val host: CodeHost) {
                 for (tc in r.toolCalls) {
                     if (steps >= settings.maxSteps) { full = true; break }
                     steps++
-                    working += toolMsg(tc.id, step(convId, msg.id, tc, mode, spec, guard, backup))
+                    // 工作区每一步重新取：上一步刚批准「把这个文件夹加进来」，这一步就算工作区里了
+                    val cur = host.state.conversation(convId)?.code ?: spec
+                    val guard = CodeGuard(File(cur.folder), cur.extraPaths)
+                    working += toolMsg(tc.id, step(convId, msg.id, tc, mode, cur, guard, backup))
                 }
                 if (full) { reachedMax = true; break }
                 trimWorking(working)
@@ -170,7 +175,9 @@ class CodeAgent(private val host: CodeHost) {
         put("role", "system")
         put("content", buildString {
             append("你在帮用户改一个项目里的代码。\n")
-            append("项目文件夹：").append(spec.folder).append("（工具里的 path 都写相对它的路径，比如 src/main.kt）\n")
+            append("项目文件夹：").append(spec.folder).append("（工具里的 path 可以写相对它的路径，比如 src/main.kt，也可以写完整路径，比如 G:\\资料\\说明.md）\n")
+            if (spec.extraPaths.isNotEmpty()) append("另外加进工作区的：").append(spec.extraPaths.joinToString("；")).append('\n')
+            append("工作区（项目文件夹和上面加进来的）里面读文件不用问；工作区外面的文件也能读能改，程序会先问用户一声。\n")
             append("当前外壳：").append(shellLabel(code.shell)).append("；命令的工作目录就是项目文件夹；单条命令最多跑 ")
             append(code.commandTimeoutSec).append(" 秒，超时会把进程连同它的子进程杀掉。\n")
             append("系统是 Windows，文件按 UTF-8 读写。\n")
@@ -276,7 +283,7 @@ class CodeAgent(private val host: CodeHost) {
                 }
             }
         })
-        val path = text("相对项目文件夹的路径，比如 src/main.kt")
+        val path = text("相对项目文件夹的路径（比如 src/main.kt），或者完整路径")
         fn("read_file", "读一个文件的文字内容，可以只读一段。",
             buildJsonObject {
                 put("path", path)
@@ -325,12 +332,33 @@ class CodeAgent(private val host: CodeHost) {
         }
     }
 
+    /**
+     * 读的东西在工作区外面：先停下来问用户（2026-10-17，照 Claude Code：工作区外的读要批准）。
+     * 返回 null = 在工作区里、不用问；返回 ToolStep = 问过、允许了（这一步已经记在消息上，读完用 setStep 填结果）；
+     * 拒绝了抛 Refused，调用的地方把它的说明回给模型。
+     */
+    private suspend fun askOutside(convId: String, msgId: String, kind: String, file: File, guard: CodeGuard, note: String): ToolStep? {
+        if (guard.inScope(file)) return null
+        val step = ToolStep(kind, guard.relative(file), id = host.newId(), ok = true, note = note, scopeDir = guard.folderToAdd(file))
+        if (!waitApproval(convId, msgId, step)) throw Refused(refused("${note}：${guard.relative(file)}"))
+        return step
+    }
+
+    private class Refused(val text: String) : Exception(text)
+
+    /** 读类的一步做完了：问过的那一步填上结果，没问过的新记一步。 */
+    private suspend fun record(convId: String, msgId: String, asked: ToolStep?, step: ToolStep) {
+        if (asked == null) addStep(convId, msgId, step)
+        else setStep(convId, msgId, asked.id) { it.copy(input = step.input, output = step.output, ok = step.ok) }
+    }
+
     private suspend fun readFile(convId: String, msgId: String, args: JsonObject, guard: CodeGuard): String {
         val raw = args.str("path").orEmpty()
         if (raw.isBlank()) return "参数错误：缺少 path"
         val file = guard.resolve(raw) ?: return outside(raw)
         val rel = guard.relative(file)
         if (!file.isFile) return "没有这个文件：$rel（要看目录用 list_dir）"
+        val asked = try { askOutside(convId, msgId, "read", file, guard, "读工作区外面的文件") } catch (r: Refused) { return r.text }
         if (file.length() > MAX_FILE_BYTES) return "$rel 太大（${file.length()} 字节），读不下；可以用 grep 找位置。"
         val strict = runCatching { readUtf8(file) }.getOrNull()
         val text = strict ?: runCatching { file.readText() }.getOrNull() ?: return "读不了 $rel（可能没有权限，或者不是文本）"
@@ -342,7 +370,7 @@ class CodeAgent(private val host: CodeHost) {
         val (shown, cut) = CodeRunnerRules.clip(body, RESULT_LIMIT)
         val out = encodingNote + "$rel 第 $from～$to 行（共 ${lines.size} 行）：\n$shown" +
             if (cut) "\n（上面被截断了；可以指定 start_line / end_line 只读一段）" else ""
-        addStep(convId, msgId, ToolStep("read", rel, id = host.newId(), output = shown, ok = true))
+        record(convId, msgId, asked, ToolStep("read", rel, id = host.newId(), output = shown, ok = true))
         return out
     }
 
@@ -351,13 +379,15 @@ class CodeAgent(private val host: CodeHost) {
         val dir = guard.resolve(raw) ?: return outside(raw)
         val rel = guard.relative(dir).ifBlank { "." }
         if (!dir.isDirectory) return "不是目录：$rel"
+        val asked = try { askOutside(convId, msgId, "list", dir, guard, "列工作区外面的目录") } catch (r: Refused) { return r.text }
         val all = runCatching { dir.listFiles()?.sortedBy { it.name } }.getOrNull() ?: return "读不了这个目录：$rel"
-        // 目录联接 / 符号链接指到项目外面的：照列名字，但标出来（读不了，CodeGuard 按真实路径判断）
+        // 在工作区里列的时候，目录联接 / 符号链接指到工作区外面的：照列名字，但标出来（要读会先问用户，CodeGuard 按真实路径判断）
+        val inside = asked == null
         val shown = all.take(LIST_MAX).joinToString("\n") {
-            (if (it.isDirectory) it.name + "/" else it.name) + if (guard.resolve(it.absolutePath) == null) "（指到项目外面，读不了）" else ""
+            (if (it.isDirectory) it.name + "/" else it.name) + if (inside && !guard.inScope(it)) "（指到工作区外面，读的时候会先问用户）" else ""
         }
         val note = if (all.size > LIST_MAX) "（还有 ${all.size - LIST_MAX} 个没列出来）" else ""
-        addStep(convId, msgId, ToolStep("list", rel, id = host.newId(), output = shown, ok = true))
+        record(convId, msgId, asked, ToolStep("list", rel, id = host.newId(), output = shown, ok = true))
         return "$rel 里 ${all.size} 项：\n" + shown.ifBlank { "（空目录）" } + (if (note.isNotEmpty()) "\n$note" else "")
     }
 
@@ -367,6 +397,11 @@ class CodeAgent(private val host: CodeHost) {
         val raw = args.str("path").orEmpty().ifBlank { "." }
         val start = guard.resolve(raw) ?: return outside(raw)
         val rel = guard.relative(start).ifBlank { "." }
+        if (!start.exists()) return "没有这个路径：$rel"
+        val asked = try { askOutside(convId, msgId, "grep", start, guard, "在工作区外面查找") } catch (r: Refused) { return r.text }
+        // 找的范围：在工作区里就是整个工作区（指到外面的联接跳过）；问过用户的外面目录，只在那个目录自己底下找
+        val fence = if (asked == null) guard else CodeGuard(if (start.isDirectory) start else start.parentFile ?: start)
+        fun allowed(f: File) = if (asked == null) fence.inScope(f) else fence.resolveInProject(f.absolutePath) != null
         val re = runCatching { Regex(pattern, RegexOption.IGNORE_CASE) }.getOrNull()
         // 每行最多看 2000 字：写坏了的正则在超长行上会卡很久（Kotlin 的正则停不下来）
         fun hit(line: String) = line.take(2000).let { l -> re?.containsMatchIn(l) ?: l.contains(pattern, ignoreCase = true) }
@@ -376,8 +411,8 @@ class CodeAgent(private val host: CodeHost) {
         while (queue.isNotEmpty() && hits.size < GREP_MAX && scanned < GREP_FILES) {
             val f = queue.removeFirst()
             // 主会话审查时补的（10-12）：遍历到的每个目录、文件都要过 CodeGuard（按真实路径判断），
-            // 不然项目里一个指到外面的目录联接，就能让 grep 读到项目外的文件
-            if (guard.resolve(f.absolutePath) == null) continue
+            // 不然一个指到外面的目录联接，就能让 grep 不问用户就读到工作区外的文件
+            if (!allowed(f)) continue
             if (f.isDirectory) {
                 f.listFiles()?.sortedBy { it.name }?.filter { it.name != ".git" && it.name != "node_modules" }?.forEach { queue.add(it) }
             } else if (f.isFile && f.length() <= GREP_FILE_BYTES && f.extension.lowercase() !in GREP_SKIP_EXT) {
@@ -392,7 +427,7 @@ class CodeAgent(private val host: CodeHost) {
             }
         }
         val output = hits.joinToString("\n")
-        addStep(convId, msgId, ToolStep("grep", "$pattern · $rel", id = host.newId(), output = output, ok = hits.isNotEmpty()))
+        record(convId, msgId, asked, ToolStep("grep", "$pattern · $rel", id = host.newId(), output = output, ok = hits.isNotEmpty()))
         return if (hits.isEmpty()) "在 $rel 里没找到「$pattern」（扫了 $scanned 个文件）。"
         else "$rel 里找到 ${hits.size} 处（扫了 $scanned 个文件）：\n$output" +
             if (hits.size >= GREP_MAX) "\n（只列了前 $GREP_MAX 条，写具体一点再找）" else ""
@@ -416,10 +451,12 @@ class CodeAgent(private val host: CodeHost) {
         val before = if (existed) runCatching { file.readText() }.getOrNull() ?: return "读不了原来的 $rel（可能没有权限）" else ""
         val diff = CodeDiff.make(rel, before, content)
         val stepId = host.newId()
+        val out = !guard.inScope(file)
         val step = ToolStep("write", rel, id = stepId, output = uiText(diff.text), ok = true,
-            note = if (existed) "重写这个文件" else "新建这个文件")
+            note = (if (existed) "重写这个文件" else "新建这个文件") + if (out) "（在工作区外面）" else "",
+            scopeDir = if (out) guard.folderToAdd(file) else "")
         // 不用批准（接受编辑档）也要先把这一步记到消息上，不然改了文件却没有改动记录，没法审阅、撤销（主会话审查 10-12 补）
-        if (needsApproval(mode, "write")) { if (!waitApproval(convId, msgId, step)) return refused("写 $rel") } else addStep(convId, msgId, step)
+        if (out || needsApproval(mode, "write")) { if (!waitApproval(convId, msgId, step)) return refused("写 $rel") } else addStep(convId, msgId, step)
         val created = backup.save(stepId, file)
         val err = runCatching { file.parentFile?.mkdirs(); file.writeText(content, Charsets.UTF_8) }.exceptionOrNull()
         if (err != null) {
@@ -451,9 +488,11 @@ class CodeAgent(private val host: CodeHost) {
         val after = before.replaceFirst(oldText, newText)
         val diff = CodeDiff.make(rel, before, after)
         val stepId = host.newId()
-        val step = ToolStep("edit", rel, id = stepId, output = uiText(diff.text), ok = true, note = "替换 $rel 里的一段")
-        // 同 writeFile：不用批准也要先记上这一步
-        if (needsApproval(mode, "edit")) { if (!waitApproval(convId, msgId, step)) return refused("改 $rel") } else addStep(convId, msgId, step)
+        val out = !guard.inScope(file)
+        val step = ToolStep("edit", rel, id = stepId, output = uiText(diff.text), ok = true,
+            note = "替换 $rel 里的一段" + if (out) "（在工作区外面）" else "", scopeDir = if (out) guard.folderToAdd(file) else "")
+        // 同 writeFile：不用批准也要先记上这一步；工作区外面的改动哪一档都要问
+        if (out || needsApproval(mode, "edit")) { if (!waitApproval(convId, msgId, step)) return refused("改 $rel") } else addStep(convId, msgId, step)
         val created = backup.save(stepId, file)
         val err = runCatching { file.writeText(after, Charsets.UTF_8) }.exceptionOrNull()
         if (err != null) {
@@ -471,8 +510,12 @@ class CodeAgent(private val host: CodeHost) {
         val runner: CodeRunner = host.runner ?: return "这台设备不能跑命令。"
         val code = host.state.settings.code
         val stepId = host.newId()
-        val step = ToolStep("run", command, id = stepId, ok = true)
-        if (needsApproval(host.state.conversation(convId)?.code?.mode ?: spec.mode, "run")) {
+        // 这个会话里批准过「同样开头不再问」的，直接跑（拼起来的、危险的 CodeCommands 永远不放行）
+        val by = CodeCommands.allowedBy(command, spec.allowedCommands)
+        val step = ToolStep("run", command, id = stepId, ok = true,
+            note = if (by != null) "「$by」开头的命令这个会话里不再问" else "",
+            prefix = if (by == null) CodeCommands.prefixOf(command).orEmpty() else "")
+        if (by == null && needsApproval(host.state.conversation(convId)?.code?.mode ?: spec.mode, "run")) {
             if (!waitApproval(convId, msgId, step)) return refused("跑这条命令")
         } else addStep(convId, msgId, step)
         val r = runner.run(command, File(spec.folder), code.shell, code.commandTimeoutSec, RESULT_LIMIT)
@@ -503,10 +546,10 @@ class CodeAgent(private val host: CodeHost) {
      * 每一步只等它自己那一次 CodeDecide，不超时、不自动放行；点停止时按拒绝处理。
      */
     private suspend fun waitApproval(convId: String, msgId: String, step: ToolStep): Boolean {
-        val done = CompletableDeferred<Boolean>()
+        val done = CompletableDeferred<Pair<Boolean, String>>()
         waitings[step.id] = Waiting(convId, done)
         addStep(convId, msgId, step.copy(approval = "waiting"))
-        val allow = try {
+        val (allow, remember) = try {
             done.await()
         } catch (e: CancellationException) {
             withContext(NonCancellable) {
@@ -516,8 +559,21 @@ class CodeAgent(private val host: CodeHost) {
         } finally {
             waitings.remove(step.id)
         }
+        // 允许时顺便放宽（只对这一步给出的那一项）：把文件夹加进工作区 / 同样开头的命令不再问
+        val widened = when {
+            !allow -> ""
+            remember == "dir" && step.scopeDir.isNotBlank() -> {
+                host.updateCode(convId) { s -> if (s.extraPaths.any { it.equals(step.scopeDir, ignoreCase = true) }) s else s.copy(extraPaths = s.extraPaths + step.scopeDir) }
+                "（已把 ${step.scopeDir} 加进工作区）"
+            }
+            remember == "command" && step.prefix.isNotBlank() -> {
+                host.updateCode(convId) { s -> if (step.prefix in s.allowedCommands) s else s.copy(allowedCommands = s.allowedCommands + step.prefix) }
+                "（「${step.prefix}」开头的命令这个会话里不再问）"
+            }
+            else -> ""
+        }
         setStep(convId, msgId, step.id) {
-            it.copy(approval = if (allow) "allowed" else "denied", ok = allow, note = if (allow) it.note else "用户拒绝了这一步")
+            it.copy(approval = if (allow) "allowed" else "denied", ok = allow, note = if (allow) it.note + widened else "用户拒绝了这一步")
         }
         return allow
     }
@@ -611,7 +667,7 @@ class CodeAgent(private val host: CodeHost) {
 
     private fun guardOf(convId: String): CodeGuard? {
         val spec = host.state.conversation(convId)?.code ?: return null
-        return runCatching { CodeGuard(File(spec.folder)) }.getOrNull()
+        return runCatching { CodeGuard(File(spec.folder), spec.extraPaths) }.getOrNull()
     }
 
     // ———————————————— 零碎 ————————————————
@@ -627,7 +683,7 @@ class CodeAgent(private val host: CodeHost) {
     /** 界面里给这一步看的内容（要写的内容 / 差异），太长了截一下。 */
     private fun uiText(text: String) = CodeRunnerRules.clip(text, UI_TEXT_LIMIT).first
 
-    private fun outside(raw: String) = "路径在项目文件夹外面或不合法：$raw。工具里的 path 要写这个项目里的路径。"
+    private fun outside(raw: String) = "路径不合法：$raw（网络路径 \\\\服务器\\共享、设备名 CON / NUL、带「:数据流」的都不行）。"
 
     /** 严格按 UTF-8 解码；不是合法的 UTF-8（GBK 之类的老文件）返回 null。读不了（没权限）抛异常。 */
     private fun readUtf8(file: File): String? {
@@ -701,4 +757,6 @@ interface CodeHost {
     fun launch(convId: String, block: suspend () -> Unit): Job
     fun cancel(convId: String)
     fun friendlyError(e: Throwable, p: ProviderConfig? = null): String
+    /** 改这个会话的 CodeSpec（批准时顺便把文件夹加进工作区、记下不再问的命令开头）。 */
+    fun updateCode(convId: String, transform: (CodeSpec) -> CodeSpec)
 }

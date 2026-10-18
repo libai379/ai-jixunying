@@ -47,6 +47,7 @@ import androidx.compose.material.icons.rounded.Psychology
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material3.Button
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
@@ -66,6 +67,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -212,21 +215,87 @@ private fun CodeTopBar(ctl: AppController, state: AppState, conv: Conversation, 
             }
             Spacer(Modifier.width(10.dp))
         }
+        // 工作区：项目文件夹 + 加进来的文件夹，还有「不再问」的命令（2026-10-17）
+        val extra = spec.extraPaths.size + spec.allowedCommands.size
+        Row(
+            Modifier.clip(RoundedCornerShape(50)).border(1.dp, Ext.c.border, RoundedCornerShape(50))
+                .clickable { showPath = true }.padding(horizontal = 9.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(Icons.Rounded.FolderOpen, "工作区", Modifier.size(15.dp), tint = MaterialTheme.colorScheme.primary)
+            if (wide) {
+                Spacer(Modifier.width(4.dp))
+                Text(if (extra > 0) "工作区 +$extra" else "工作区", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+        Spacer(Modifier.width(8.dp))
         CodeModePicker(spec.mode, CodeUi.modesFor(access, spec), enabled = access.canAct) { m ->
             ctl.run(Command.CodeSetMode(conv.id, m), okText = "权限档换成「${m.label}」")
         }
     }
     HorizontalDivider(color = Ext.c.border)
-    if (showPath) {
-        val clipboard = LocalClipboardManager.current
-        AppDialog("项目文件夹", { showPath = false }, width = 520.dp, actions = {
-            TextButton({ clipboard.setText(AnnotatedString(spec.folder)); ctl.toast("已复制路径") }) { Text("复制路径") }
-            Button({ showPath = false }) { Text("知道了") }
-        }) {
-            Text("AI 只在这个文件夹里读代码、改文件、跑命令，别的地方碰不到。",
+    if (showPath) WorkspaceDialog(ctl, conv, spec) { showPath = false }
+}
+
+/**
+ * 工作区（2026-10-17，照 Claude Code 的 /add-dir 和「不再问」）：
+ * 项目文件夹 + 加进来的文件夹（AI 读不用问，改按权限档），以及这个会话里「同样开头不再问」的命令。
+ * 只能在电脑上改（手机上只看，PhoneGate 也会拒）。
+ */
+@Composable
+private fun WorkspaceDialog(ctl: AppController, conv: Conversation, spec: CodeSpec, onClose: () -> Unit) {
+    val clipboard = LocalClipboardManager.current
+    val platform = LocalPlatform.current
+    val scope = rememberCoroutineScope()
+    val canEdit = platform.isDesktop && !ctl.remoteMode
+    fun save(paths: List<String>, cmds: List<String>) = ctl.run(Command.CodeSetAccess(conv.id, paths, cmds), quiet = true) { r ->
+        if (!r.ok) ctl.toast(r.message.ifBlank { "没改成" })
+    }
+    AppDialog("工作区", onClose, width = 560.dp, actions = {
+        TextButton({ clipboard.setText(AnnotatedString(spec.folder)); ctl.toast("已复制路径") }) { Text("复制项目路径") }
+        Button(onClose) { Text("好了") }
+    }) {
+        Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState())) {
+            Text("工作区里的文件 AI 读的时候不用问你，改的时候看权限档。工作区外面的文件（比如 G 盘别的地方）也能读能改，" +
+                "但每次都会先停下来问你；批准时可以顺便把那个文件夹加进来。",
                 style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
-            Spacer(Modifier.height(8.dp))
+            Spacer(Modifier.height(10.dp))
+            FieldLabel("项目文件夹", "命令在这里跑")
             SelectionContainer { Text(spec.folder, style = MaterialTheme.typography.bodyMedium) }
+            Spacer(Modifier.height(12.dp))
+            FieldLabel("加进来的文件夹", if (spec.extraPaths.isEmpty()) "还没有" else null)
+            spec.extraPaths.forEach { p ->
+                Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Rounded.FolderOpen, null, Modifier.size(15.dp), tint = Ext.c.subtle)
+                    Spacer(Modifier.width(6.dp))
+                    Text(p, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f), maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    if (canEdit) TextButton({ save(spec.extraPaths - p, spec.allowedCommands) }) { Text("移出", color = MaterialTheme.colorScheme.error) }
+                }
+            }
+            if (canEdit) TextButton({
+                scope.launch {
+                    val f = platform.pickFolder("把一个文件夹加进工作区") ?: return@launch
+                    if (f.trimEnd('\\', '/').equals(spec.folder.trimEnd('\\', '/'), ignoreCase = true) ||
+                        spec.extraPaths.any { it.equals(f, ignoreCase = true) }) { ctl.toast("已经在工作区里了"); return@launch }
+                    save(spec.extraPaths + f, spec.allowedCommands)
+                }
+            }) {
+                Icon(Icons.Rounded.Add, null, Modifier.size(16.dp))
+                Spacer(Modifier.width(4.dp))
+                Text("加一个文件夹")
+            }
+            Spacer(Modifier.height(12.dp))
+            FieldLabel("不再问的命令", if (spec.allowedCommands.isEmpty()) "还没有；批准命令时选「…开头的不再问」就会记在这里" else "以这些开头的命令直接跑；拼起来的和危险的命令照样每次都问")
+            spec.allowedCommands.forEach { c ->
+                Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text(c, style = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace), modifier = Modifier.weight(1f))
+                    if (canEdit) TextButton({ save(spec.extraPaths, spec.allowedCommands - c) }) { Text("删掉", color = MaterialTheme.colorScheme.error) }
+                }
+            }
+            if (!canEdit) {
+                Spacer(Modifier.height(8.dp))
+                Text("工作区和「不再问」只能在电脑上改。", style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
+            }
         }
     }
 }
@@ -302,7 +371,7 @@ private fun CodeMessageList(ctl: AppController, state: AppState, conv: Conversat
         item(key = "top") {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Spacer(Modifier.height(16.dp))
-                Text("这个会话只在这个项目文件夹里读写：${conv.code?.folder.orEmpty()}",
+                Text("项目文件夹：${conv.code?.folder.orEmpty()}（工作区外面的文件也能读写，会先问你）",
                     style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
                 Spacer(Modifier.height(24.dp))
             }
@@ -388,6 +457,7 @@ private fun CodeThinking() {
 }
 
 /** 一步工具：一行摘要，点开看输入和输出；等批准的那一步默认展开，带「允许」「拒绝」。 */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun CodeToolStep(ctl: AppController, msg: Message, t: ToolStep, canAct: Boolean) {
     // 这台设备上动不了（手机本机、或者电脑上没开「允许手机用 Code 栏」）时只能看
@@ -416,6 +486,12 @@ private fun CodeToolStep(ctl: AppController, msg: Message, t: ToolStep, canAct: 
         AnimatedVisibility(expanded) {
             Column(Modifier.fillMaxWidth().padding(start = 8.dp, top = 6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 when {
+                    // 工作区外面的读 / 列目录 / 查找：等批准时写清是哪个路径
+                    waiting && (t.kind == "read" || t.kind == "list" || t.kind == "grep") -> {
+                        Text(if (readonly) "读工作区外面的东西，在等你批准：" else "${t.note.ifBlank { "读工作区外面的东西" }}：",
+                            style = MaterialTheme.typography.labelMedium, color = Ext.c.warning)
+                        MonoBox(t.input)
+                    }
                     // 要跑的命令：等批准的时候也要看得见
                     t.kind == "run" -> {
                         if (waiting) Text(if (readonly) "这条命令在等你批准：" else "要跑这条命令：", style = MaterialTheme.typography.labelMedium, color = Ext.c.warning)
@@ -434,11 +510,22 @@ private fun CodeToolStep(ctl: AppController, msg: Message, t: ToolStep, canAct: 
                     waiting -> if (readonly) {
                         Text("要批准就打开电脑上的这个会话。", style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
                     } else {
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        // 「顺便放宽」的两个选项只在电脑上给（手机上点了也会被当成只允许这一次，见 PhoneGate）
+                        val canWiden = LocalPlatform.current.isDesktop && !ctl.remoteMode
+                        if (t.kind == "write" || t.kind == "edit") if (t.scopeDir.isNotBlank()) Text("这个文件在工作区外面。", style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                             Button(
                                 onClick = { ctl.run(Command.CodeDecide(msg.convId, t.id, true)) },
                                 contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 16.dp, vertical = 6.dp),
-                            ) { Text("允许") }
+                            ) { Text(if (canWiden && (t.scopeDir.isNotBlank() || t.prefix.isNotBlank())) "只允许这一次" else "允许") }
+                            if (canWiden && t.scopeDir.isNotBlank()) OutlinedButton(
+                                onClick = { ctl.run(Command.CodeDecide(msg.convId, t.id, true, "dir")) },
+                                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 14.dp, vertical = 6.dp),
+                            ) { Text("允许，并把 ${folderName(t.scopeDir)} 加进工作区", maxLines = 1, overflow = TextOverflow.Ellipsis) }
+                            if (canWiden && t.prefix.isNotBlank()) OutlinedButton(
+                                onClick = { ctl.run(Command.CodeDecide(msg.convId, t.id, true, "command")) },
+                                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 14.dp, vertical = 6.dp),
+                            ) { Text("允许，「${t.prefix.take(30)}」开头的这个会话里不再问", maxLines = 1, overflow = TextOverflow.Ellipsis) }
                             Box(
                                 Modifier.clip(RoundedCornerShape(50)).border(1.dp, MaterialTheme.colorScheme.error, RoundedCornerShape(50))
                                     .clickable { ctl.run(Command.CodeDecide(msg.convId, t.id, false)) }
@@ -904,7 +991,7 @@ private fun CodeComposer(ctl: AppController, conv: Conversation, running: Boolea
                 }
             }
             Text(
-                "所有文件读写都在这个项目文件夹里，改过的都能撤销。" + when {
+                "工作区外面的文件也能读写，会先问你；改过的都能撤销。" + when {
                     ctl.remoteMode -> "这个会话在电脑上跑。"
                     platform.isDesktop -> "命令在这台电脑上跑。"
                     else -> ""
@@ -942,7 +1029,7 @@ fun CodeEmptyScreen(ctl: AppController, wide: Boolean, openDrawer: () -> Unit) {
                 } else {
                     Text("让 AI 对着一个项目文件夹写代码", style = MaterialTheme.typography.titleMedium)
                     Spacer(Modifier.height(8.dp))
-                    Text("选一个项目文件夹，它就能读代码、改文件、跑命令；它做的每一步都写在对话里给你看，" +
+                    Text("选一个项目文件夹，它就能读代码、改文件、跑命令，也能读写别的地方的文件（先问你）；它做的每一步都写在对话里给你看，" +
                         "改文件、跑命令要不要先问你，由权限档说了算，随时能换。每个会话一个文件夹，互不影响。",
                         style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Spacer(Modifier.height(16.dp))
@@ -1021,7 +1108,7 @@ fun NewCodeDialog(ctl: AppController) {
                     style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 return@Column
             }
-            FieldLabel("项目文件夹", "这个会话只在这个文件夹里读写")
+            FieldLabel("项目文件夹", "命令在这里跑；别的文件夹之后能加进工作区")
             if (platform.isDesktop) {
                 // 电脑上照旧：弹系统的文件夹选择器
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {

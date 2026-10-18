@@ -125,7 +125,7 @@ class CodeAgentTest {
                             "越界" in task -> when {
                                 toolResults.isEmpty() -> callTool("write_file", mapOf("path" to "../evil.txt", "content" to "不该被写出来"))
                                 toolResults.size == 1 -> callTool("read_file", mapOf("path" to "C:\\Windows\\win.ini"))
-                                else -> say("知道了，只在项目文件夹里干活。")
+                                else -> say("知道了。")
                             }
                             // 跑一个很久的命令（等会要测「停下」）
                             "长命令" in task -> if (toolResults.isEmpty())
@@ -151,6 +151,14 @@ class CodeAgentTest {
                                 1 -> callTool("edit_file", mapOf("path" to "a.txt", "old_text" to "hello world", "new_text" to "hey world"))
                                 else -> say("改了两次。")
                             }
+                            // 2026-10-17：读工作区外面的一个文件（路径跟在任务后面）
+                            task.startsWith("读外面的文件 ") -> if (toolResults.isEmpty())
+                                callTool("read_file", mapOf("path" to task.removePrefix("读外面的文件 ").trim()))
+                            else say("读完了。")
+                            // 2026-10-17：跑任务后面跟的那条命令
+                            task.startsWith("跑命令 ") -> if (toolResults.isEmpty())
+                                callTool("run_command", mapOf("command" to task.removePrefix("跑命令 ").trim()))
+                            else say("跑完了。")
                             // 一直在读，不停下来（测走满最多步数）
                             "一直读" in task -> callTool("read_file", mapOf("path" to "a.txt"))
                             // 慢一点再回答（测同一个会话里第二条排队）
@@ -325,19 +333,85 @@ class CodeAgentTest {
         assertTrue("用户拒绝了" in lastToolTexts(), "模型要收到「用户拒绝了」")
     }
 
+    /**
+     * 2026-10-17 用户改了规矩：工作区外面的文件也能读写，但每次都先问（照 Claude Code）。
+     * 「接受编辑」档也要问（它只放行工作区里的改动）；拒绝了文件不动；允许了照常读。
+     */
     @Test
-    fun pathOutsideProjectIsRefused() = runBlocking {
+    fun pathOutsideProjectAsksFirst() = runBlocking {
         val e = engine()
-        val conv = codeConv(e)
+        val conv = codeConv(e, CodeMode.ACCEPT_EDITS)
         e.call(Command.CodeSend(conv, "越界测试"))
+
+        val write = awaitWaiting(e, conv, "write")
+        assertTrue(write.scopeDir.isNotBlank(), "工作区外的写要给出「加进工作区」的文件夹")
+        assertTrue(e.call(Command.CodeDecide(conv, write.id, false)).ok)
+        val read = awaitWaiting(e, conv, "read")
+        assertTrue("win.ini" in read.input, read.input)
+        assertTrue(e.call(Command.CodeDecide(conv, read.id, true)).ok)
         awaitStatus(e, conv, MsgStatus.DONE)
 
-        assertFalse(File(dir, "evil.txt").exists(), "项目文件夹外面不能建文件")
-        assertTrue("外面" in lastToolTexts(), "越界要当面告诉模型")
-        assertTrue("win.ini" in lastToolTexts(), "绝对路径也走同一条检查")
-        // 越界在程序里就挡下了，文件没动，连一步都不留（没执行就不算走过一步）
-        val ai = assertNotNull(aiOf(e, conv))
-        assertTrue(ai.tools.isEmpty(), "越界不执行，消息里不留步骤")
+        assertFalse(File(dir, "evil.txt").exists(), "拒绝了就不能建出文件")
+        assertTrue("用户拒绝了" in lastToolTexts(), "拒绝要告诉模型")
+        assertTrue("fonts" in lastToolTexts().lowercase(), "允许了就真读到 win.ini：" + lastToolTexts().take(500))
+        // 只允许这一次：工作区没变
+        assertTrue(e.state.conversation(conv)!!.code!!.extraPaths.isEmpty())
+    }
+
+    /** 批准时选「允许，并把这个文件夹加进工作区」：之后同一个文件夹里的读不再问；手机发来的同样选项只当这一次。 */
+    @Test
+    fun allowAndAddFolderWidensWorkspace() = runBlocking {
+        val outsideDir = File(dir, "other").apply { mkdirs(); File(this, "x.txt").writeText("OTHER_CONTENT\n") }
+        val e = engine()
+        val conv = codeConv(e)
+        val path = File(outsideDir, "x.txt").absolutePath
+        // 手机来的「加进工作区」被 PhoneGate 改成只这一次
+        val gate = com.guixing.jixunying.engine.code.PhoneGate
+        assertNotNull(gate.check(Command.CodeDecide(conv, "s1", true, "dir"), e.state).refusal, "开关没开：手机一律拒")
+        val on = e.state.copy(settings = e.state.settings.copy(code = e.state.settings.code.copy(allowPhone = true)))
+        val viaPhone = gate.check(Command.CodeDecide(conv, "s1", true, "dir"), on)
+        assertNull(viaPhone.refusal)
+        assertEquals("", (viaPhone.command as Command.CodeDecide).remember, "开关开着：批准放行，但「加进工作区」只当这一次")
+        assertNotNull(gate.check(Command.CodeSetAccess(conv, listOf(path), emptyList()), on).refusal, "手机不能改工作区")
+
+        e.call(Command.CodeSend(conv, "读外面的文件 $path"))
+        val ask = awaitWaiting(e, conv, "read")
+        assertEquals(outsideDir.absolutePath.lowercase(), ask.scopeDir.lowercase())
+        assertTrue(e.call(Command.CodeDecide(conv, ask.id, true, "dir")).ok)
+        awaitStatus(e, conv, MsgStatus.DONE)
+        assertTrue("OTHER_CONTENT" in lastToolTexts())
+        assertEquals(listOf(outsideDir.absolutePath.lowercase()), e.state.conversation(conv)!!.code!!.extraPaths.map { it.lowercase() })
+
+        // 第二次读同一个文件夹：不再问，直接读到
+        val n = sendTask(e, conv, "读外面的文件 $path")
+        awaitStatus(e, conv, MsgStatus.DONE, minAi = n)
+        assertTrue(aiOf(e, conv)!!.tools.none { it.approval.isNotEmpty() }, "加进工作区以后不该再问")
+    }
+
+    /** 批准命令时选「同样开头不再问」：同样开头的直接跑；拼起来的命令照样问。 */
+    @Test
+    fun rememberedCommandPrefixRunsWithoutAsking() = runBlocking {
+        val e = engine()
+        val conv = codeConv(e)
+        e.call(Command.CodeSend(conv, "跑命令 Write-Output 第一次"))
+        val ask = awaitWaiting(e, conv, "run")
+        assertEquals("Write-Output", ask.prefix)
+        assertTrue(e.call(Command.CodeDecide(conv, ask.id, true, "command")).ok)
+        awaitStatus(e, conv, MsgStatus.DONE)
+        assertEquals(listOf("Write-Output"), e.state.conversation(conv)!!.code!!.allowedCommands)
+
+        val n = sendTask(e, conv, "跑命令 Write-Output 第二次")
+        awaitStatus(e, conv, MsgStatus.DONE, minAi = n)
+        val step = aiOf(e, conv)!!.tools.single { it.kind == "run" }
+        assertEquals("", step.approval, "同样开头的不再问")
+        assertTrue("第二次" in step.output, step.output)
+
+        // 拼起来的：照样要问
+        sendTask(e, conv, "跑命令 Write-Output a; Remove-Item x")
+        val again = awaitWaiting(e, conv, "run")
+        assertEquals("", again.prefix, "拼起来的命令不给「不再问」")
+        e.call(Command.CodeStop(conv))
+        Unit
     }
 
     @Test

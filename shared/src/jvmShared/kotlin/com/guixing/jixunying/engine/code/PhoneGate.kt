@@ -24,6 +24,8 @@ import java.io.File
  * - 撤销整条回答的全部改动：不许（一次动一大片，留给电脑上做）。一个文件一个文件地接受 / 拒绝可以。
  * - 发任务、停止、批准或拒绝某一步：放行。批准只针对具体一步（CodeDecide 带 stepId），等批准没有超时，
  *   手机掉线就一直等，绝不自动放行（CodeAgent 里本来就是这样）。
+ *   2026-10-17：批准时的「顺便把文件夹加进工作区」「同样开头不再问」手机上一律当成只允许这一次；
+ *   直接改工作区和「不再问」清单（CodeSetAccess）不许。
  * - 指令里的 fromPhone 一律改成 true，手机自己填的不算。
  */
 object PhoneGate {
@@ -53,6 +55,9 @@ object PhoneGate {
                 Verdict(c.copy(fromPhone = true))
             }
             is Command.CodeRevertTask -> refuse(c, "「撤销这次的全部改动」只能在电脑上做；手机上可以一个文件一个文件地拒绝")
+            // 2026-10-17：手机不能把工作区放大、不能让命令「不再问」——这两样都比「批准这一步」宽
+            is Command.CodeSetAccess -> refuse(c, "工作区和「不再问」的命令只能在电脑上改")
+            is Command.CodeDecide -> Verdict(c.copy(remember = ""))
             else -> Verdict(c)
         }
     }
@@ -70,7 +75,8 @@ object PhoneGate {
     }
 
     private fun isCodeWrite(c: Command) = c is Command.CodeCreate || c is Command.CodeSend || c is Command.CodeStop ||
-        c is Command.CodeDecide || c is Command.CodeSetMode || c is Command.CodeReview || c is Command.CodeRevertTask
+        c is Command.CodeDecide || c is Command.CodeSetMode || c is Command.CodeReview || c is Command.CodeRevertTask ||
+        c is Command.CodeSetAccess
 
     private fun refuse(c: Command, why: String) = Verdict(c, CommandResult(false, why))
 }

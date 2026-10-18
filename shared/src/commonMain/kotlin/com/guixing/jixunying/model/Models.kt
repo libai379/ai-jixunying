@@ -391,6 +391,13 @@ data class ToolStep(
     val approval: String = "",
     /** 这一步改了文件才有；没改文件是 null。 */
     val change: FileChange? = null,
+    /**
+     * 下面两个是 2026-10-17 加的（等批准的那一步，界面据此多给一个选项）：
+     * scopeDir = 这一步碰的是工作区外面，允许时可以顺便把这个文件夹加进工作区；
+     * prefix = 这条命令能记成「同样开头这个会话里不再问」，记的就是这个开头（拼起来的、危险的命令是空的）。
+     */
+    val scopeDir: String = "",
+    val prefix: String = "",
 )
 
 @Serializable

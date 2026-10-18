@@ -162,3 +162,21 @@
 - 手机上：第一期电脑端能用就行；手机上看到的 Code 会话先只读（第二期再做手机下令）。
 
 测试：照 EngineTest 用假模型服务器；ShotsTest 加 Code 栏的几个场景（会话列表、等批准、差异查看器、新建对话框）。
+## 12 照 Claude Code 补齐（2026-10-17 用户要求，推翻第 4 节第 1 条「范围」）
+
+用户原话：「电脑 code 限制那么死，我怎么用来做开发，你是 Claude Code，你的 agent 是什么样子，你可以加进去，这才符合开发用的场景，而不是限制某个文件夹」「code 栏，你看看他们所有的 code 最基本的操作吧，都加上」「也可以学 WorkBuddy，在个性化里面自定义指令」。
+起因：用户给 Code 栏 G 盘别处的路径，AI 读不到（CodeGuard 一律拒绝项目文件夹外面）；Code 栏也不能传图片、拖文件。
+
+对照的官方原文（2026-10-17 读）：
+- 权限：https://code.claude.com/docs/en/permissions —— 读文件、Grep「No, within the working directory and additional directories」不用批准；工作区外面的要批准；改文件要批准；Bash 要批准，「Yes, and don't ask again」对命令是按仓库和命令永久记住；`--add-dir` / `/add-dir` 加的目录「follow the same permission rules as the original working directory」；网络路径（\server\share）不能当工作目录，「looking one up can contact the host it names」。
+- 接受编辑档只放行工作区里的写：同一页「the write isn't auto-approved in acceptEdits mode」（指向工作区外面时）。
+- 工具：https://code.claude.com/docs/en/tools-reference —— Read 能读图片（「returned as visual content that Claude can see」）、PDF、notebook；还有 Glob、Grep、Edit、Write、Bash、WebFetch、WebSearch、TodoWrite / Task 等。
+- 项目说明文件：https://code.claude.com/docs/en/memory —— 项目的 ./CLAUDE.md 或 ./.claude/CLAUDE.md、本人的 ./CLAUDE.local.md，没有 CLAUDE.md 时读 AGENTS.md；每次开会话都读进去。
+- WorkBuddy：设置中心 → 个性化 → 自定义指令（腾讯云开发者社区多篇教程，例如 https://cloud.tencent.com/developer/article/2754715 ；官方文档 https://www.workbuddy.ai/docs/workbuddy/From-Beginner-to-Expert-Guide/Function-Description/Setting 只写了语言、字号、显示模式，没写个性化页，未确认）；个性化页还有回复风格、称呼与身份（同上，第三方教程，未确认）。
+
+做法（安全仍然全在程序里，不靠提示词）：
+1. 工作区 = 项目文件夹 + 会话里加进来的文件夹（CodeSpec.extraPaths）。工作区里读不问；工作区外面的读、列目录、查找、写、改每次都先问，哪一档都问（接受编辑档也只放行工作区里的改动）。批准时可选「只这一次」或「允许，并把这个文件夹加进工作区」。网络路径、设备名、数据流照旧直接拒绝（engine/code/CodeGuard）。
+2. 命令：批准时可选「同样开头这个会话里不再问」（CodeSpec.allowedCommands）。拼起来的命令（; & | ` > < $( 换行）和危险命令（递归删除、格式化、改注册表、改系统环境变量、iex、强推、硬重置……）永远要问、不给这个选项（engine/code/CodeCommands）。比 Claude Code 保守：记在会话上，不是整个仓库永久。
+3. 会话上面加「工作区」按钮：看项目文件夹、加进来的文件夹（能加、能移出）、不再问的命令（能删）。
+4. 手机：批准时的两个「顺便放宽」一律当成只这一次；改工作区（CodeSetAccess）直接拒（engine/code/PhoneGate）。手机只能批准具体一步这条不变。
+5. 仍然不做「完全不问」（绕过权限）档：第 1 节的决定没被推翻，用户要的话再加。
