@@ -983,6 +983,8 @@ private fun ChangesDialog(ctl: AppController, conv: Conversation, messageId: Str
     var reload by remember(messageId) { mutableStateOf(0) }
     var confirmReject by remember(messageId) { mutableStateOf("") }
     var confirmRevert by remember(messageId) { mutableStateOf(false) }
+    // 逐行评论（2026-10-18，开发补齐第 7 样）：点差异里的一行写评论，攒几条后「按评论再改」
+    val comments = remember(messageId) { androidx.compose.runtime.mutableStateListOf<DiffComment>() }
     // 看选中那个文件改了什么（拒绝 / 撤销之后文件变了，重新取一遍）
     LaunchedEffect(picked, reload) {
         if (picked.isBlank()) return@LaunchedEffect
@@ -1026,7 +1028,12 @@ private fun ChangesDialog(ctl: AppController, conv: Conversation, messageId: Str
                             .clickable { confirmRevert = true }.padding(horizontal = 14.dp, vertical = 8.dp),
                     ) { Text("全部撤销", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.error) }
                 }
-                Button(onClick = onClose) { Text("知道了") }
+                if (comments.isNotEmpty() && access.canAct) Button({
+                    ctl.run(Command.CodeSend(conv.id, DiffComment.task(comments)))
+                    comments.clear()
+                    onClose()
+                }) { Text("按 ${comments.size} 条评论再改") }
+                else Button(onClick = onClose) { Text("知道了") }
             }
         }) {
             Column(Modifier.fillMaxWidth()) {
@@ -1053,7 +1060,7 @@ private fun ChangesDialog(ctl: AppController, conv: Conversation, messageId: Str
                         }
                         Box(Modifier.width(1.dp).fillMaxSize().background(Ext.c.border))
                         Box(Modifier.weight(1f).fillMaxSize().padding(start = 12.dp)) {
-                            DiffPane(diffs[picked], diffErr[picked], current)
+                            DiffPane(diffs[picked], diffErr[picked], current, if (access.canAct) comments else null)
                         }
                     }
                 } else {
@@ -1074,7 +1081,7 @@ private fun ChangesDialog(ctl: AppController, conv: Conversation, messageId: Str
                         Spacer(Modifier.height(8.dp))
                         if (current != null && !readonly) ChangeRowActions(current, readonly, onReject = { confirmReject = current.id }) { review(current.id, true) }
                         Spacer(Modifier.height(8.dp))
-                        Box(Modifier.fillMaxWidth().height(320.dp)) { DiffPane(diffs[picked], diffErr[picked], current) }
+                        Box(Modifier.fillMaxWidth().height(320.dp)) { DiffPane(diffs[picked], diffErr[picked], current, if (access.canAct) comments else null) }
                     }
                 }
             }
@@ -1148,8 +1155,34 @@ private fun reviewLabel(c: FileChange) = when (c.review) {
     else -> ""
 }
 
+/** 差异里一行的评论（2026-10-18）：哪个文件、改后第几行、那一行的字、评论。 */
+internal class DiffComment(val path: String, val line: Int, val code: String, val note: String) {
+    companion object {
+        /** 攒下的评论变成一条任务。 */
+        fun task(list: List<DiffComment>) = buildString {
+            appendLine("按下面这些评论再改一版（评论写在你刚才改过的地方）：")
+            list.forEach { c ->
+                append("- ").append(c.path).append(if (c.line > 0) " 第 ${c.line} 行" else "")
+                append("「").append(c.code.trim().take(120)).append("」：").appendLine(c.note.trim())
+            }
+        }
+
+        /** 统一差异里第 idx 行在改后文件里是第几行（按 @@ 行数着算；删掉的行算它前面那一行）。 */
+        fun newLineOf(lines: List<String>, idx: Int): Int {
+            var n = 0
+            for (i in 0..idx.coerceAtMost(lines.lastIndex)) {
+                val l = lines[i]
+                if (l.startsWith("@@")) { n = Regex("\\+(\\d+)").find(l)?.groupValues?.get(1)?.toIntOrNull()?.minus(1) ?: n; continue }
+                if (l.startsWith("+++") || l.startsWith("---")) continue
+                if (!l.startsWith("-")) n++
+            }
+            return n
+        }
+    }
+}
+
 @Composable
-private fun DiffPane(text: String?, error: String?, c: FileChange?) {
+private fun DiffPane(text: String?, error: String?, c: FileChange?, comments: androidx.compose.runtime.snapshots.SnapshotStateList<DiffComment>? = null) {
     if (c == null) { Text("没有改动了", style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle); return }
     if (error != null) { Warn(error); return }
     if (text == null) {
@@ -1163,21 +1196,41 @@ private fun DiffPane(text: String?, error: String?, c: FileChange?) {
     Column(Modifier.fillMaxSize()) {
         Text(c.path + (if (c.created) "（新文件）" else ""), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Spacer(Modifier.height(6.dp))
+        var target by remember(text) { mutableStateOf(-1) }
+        var note by remember(text) { mutableStateOf("") }
+        val lines = remember(text) { text.lines() }
         Box(Modifier.fillMaxWidth().weight(1f).clip(RoundedCornerShape(10.dp)).background(Ext.c.codeBg).padding(8.dp)) {
             Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).horizontalScroll(rememberScrollState())) {
-                DiffLines(text)
+                DiffLines(text, onLine = if (comments != null) ({ i -> target = i; note = "" }) else null,
+                    marked = comments?.filter { it.path == c.path }?.map { it.code }?.toSet().orEmpty(), selected = target)
             }
+        }
+        if (comments != null) {
+            if (target >= 0) {
+                val line = lines.getOrElse(target) { "" }
+                Spacer(Modifier.height(6.dp))
+                Text("给这一行写评论：${line.take(80)}", style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(Modifier.weight(1f)) { AppTextField(note, { note = it }, placeholder = "比如：这里要判断空值") }
+                    TextButton({
+                        if (note.isNotBlank()) comments += DiffComment(c.path, DiffComment.newLineOf(lines, target), line.drop(1), note)
+                        target = -1; note = ""
+                    }) { Text("加评论") }
+                }
+            } else Text(if (comments.isEmpty()) "点差异里的一行可以写评论，攒几条后点「按评论再改」。" else "已写 ${comments.size} 条评论。",
+                style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, modifier = Modifier.padding(top = 6.dp))
         }
     }
 }
 
 /** 统一差异：+ 绿、− 红、@@ 是位置行，可以选中复制。 */
 @Composable
-internal fun DiffLines(text: String) {
+internal fun DiffLines(text: String, onLine: ((Int) -> Unit)? = null, marked: Set<String> = emptySet(), selected: Int = -1) {
     val lines = remember(text) { text.lines() }
-    SelectionContainer {
+    // 能写评论时每行可以点（点了就不好再拖选复制，所以只在差异查看器里开）
+    val body: @Composable () -> Unit = {
         Column {
-            lines.forEach { line ->
+            lines.forEachIndexed { idx, line ->
                 val bg = when {
                     line.startsWith("@@") -> MaterialTheme.colorScheme.primary.copy(alpha = 0.10f)
                     line.startsWith("+++") || line.startsWith("---") -> Color.Transparent
@@ -1192,11 +1245,16 @@ internal fun DiffLines(text: String) {
                     line.startsWith("-") -> MaterialTheme.colorScheme.error
                     else -> MaterialTheme.colorScheme.onSurfaceVariant
                 }
-                Text(line.ifEmpty { " " }, fontFamily = FontFamily.Monospace, fontSize = 12.sp, lineHeight = 17.sp, color = fg,
-                    softWrap = false, modifier = Modifier.fillMaxWidth().background(bg).padding(horizontal = 4.dp))
+                val commented = line.length > 1 && line.drop(1) in marked
+                Text((if (commented) "💬 " else "") + line.ifEmpty { " " }, fontFamily = FontFamily.Monospace, fontSize = 12.sp, lineHeight = 17.sp, color = fg,
+                    softWrap = false, modifier = Modifier.fillMaxWidth()
+                        .background(if (idx == selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.18f) else bg)
+                        .let { m -> if (onLine != null && !line.startsWith("@@") && !line.startsWith("+++") && !line.startsWith("---")) m.clickable { onLine(idx) } else m }
+                        .padding(horizontal = 4.dp))
             }
         }
     }
+    if (onLine == null) SelectionContainer { body() } else body()
 }
 
 /** 等宽显示的一块内容（命令、命令输出、读到的文件、列目录、查找结果），太长的只给开头。 */
