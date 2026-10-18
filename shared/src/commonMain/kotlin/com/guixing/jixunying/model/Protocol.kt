@@ -45,7 +45,9 @@ sealed interface Command {
     /** Code 栏：换权限档（只影响之后的步骤，已经跑完的不变）。fromPhone 同上。 */
     @Serializable data class CodeSetMode(val convId: String, val mode: CodeMode, val fromPhone: Boolean = false,
         /** 2026-10-17：「全部放开」（CodeSpec.openAll）。手机发来 true 的一律拒（PhoneGate）。 */
-        val openAll: Boolean = false) : Command
+        val openAll: Boolean = false,
+        /** 2026-10-17：「自动」（CodeSpec.autoMode）。手机发来 true 的一律拒。 */
+        val auto: Boolean = false) : Command
     /** Code 栏：发一条任务，开始跑编码循环（同一个会话已经在跑就排队，前一个跑完接着跑）。 */
     @Serializable data class CodeSend(
         val convId: String,

@@ -212,6 +212,7 @@ class Engine(
         override fun friendlyError(e: Throwable, p: ProviderConfig?) = this@Engine.friendlyError(e, p)
         override fun updateCode(convId: String, transform: (CodeSpec) -> CodeSpec) = updateCodeSpec(convId, transform)
         override suspend fun webSearch(query: String) = runSearch(query, mutableListOf())
+        override suspend fun autoCheck(convId: String, request: String, action: String) = autoVerdict(convId, request, action)
         override suspend fun fetchUrl(url: String): String = runCatching { search.fetch(url, false) }.getOrElse { search.fetch(url, true) }
         override fun attachmentParts(m: Message, latest: Boolean, vision: Boolean): Pair<String, List<String>> {
             val sb = StringBuilder()
@@ -665,6 +666,8 @@ class Engine(
                 title = c.title.ifBlank { "新对话" },
                 memberIds = c.memberIds.filter { state.member(it) != null },
                 createdAt = now(), updatedAt = now(),
+                // 2026-10-17：电脑上新对话默认「自动」（动手先让检查员看，拦下的再问你），和 Code 栏一样
+                fileAuto = !isPhone,
             )
             convs[conv.id] = mutableListOf()
             updateState { it.copy(conversations = listOf(conv) + it.conversations) }
@@ -717,7 +720,10 @@ class Engine(
                 title = "新对话",
                 memberIds = emptyList(),
                 createdAt = now(), updatedAt = now(),
-                code = CodeSpec(folder = folder.absolutePath, providerId = provider.id, modelId = model.id, mode = c.mode,
+                code = CodeSpec(folder = folder.absolutePath, providerId = provider.id, modelId = model.id,
+                    // 电脑上点「+」直接开的（没给文件夹）默认「自动」：照 Claude Code，auto 是新会话的默认档
+                    mode = if (c.folder.isBlank() && !c.fromPhone) CodeMode.ACCEPT_EDITS else c.mode,
+                    autoMode = c.folder.isBlank() && !c.fromPhone,
                     fromPhone = c.fromPhone, pcMode = if (c.fromPhone) null else c.mode),
             )
             convs[conv.id] = mutableListOf()
@@ -759,7 +765,8 @@ class Engine(
             val conv = state.conversation(c.convId) ?: return CommandResult(false, "对话不存在")
             val spec = conv.code ?: return CommandResult(false, "这不是 Code 会话")
             // 电脑上选的档记下来：手机能切到哪档以它为准（PhoneGate）
-            val next = spec.copy(mode = c.mode, pcMode = if (c.fromPhone) spec.pcMode else c.mode, openAll = c.openAll && c.mode != CodeMode.PLAN)
+            val next = spec.copy(mode = c.mode, pcMode = if (c.fromPhone) spec.pcMode else c.mode, openAll = c.openAll && c.mode != CodeMode.PLAN,
+                autoMode = c.auto && !c.openAll && c.mode != CodeMode.PLAN)
             if (next == spec) return CommandResult()
             updateState { s ->
                 s.copy(conversations = s.conversations.map { if (it.id == conv.id) it.copy(code = next, updatedAt = now()) else it })
@@ -1078,9 +1085,15 @@ class Engine(
             updateMessage(convId, msgId) { it.copy(tools = it.tools + step) }
             return null
         }
+        var asked = step
+        if (conv?.fileAuto == true) {
+            val why = autoVerdict(convId, lastUserText(convId, null), "$note：${f.absolutePath}\n改动：\n${diff.take(3000)}")
+            if (why == null) { updateMessage(convId, msgId) { it.copy(tools = it.tools + step.copy(note = "$note（自动检查放行）")) }; return null }
+            asked = step.copy(note = "$note（自动检查拦下：$why）")
+        }
         val done = CompletableDeferred<Pair<Boolean, String>>()
         chatWaitings[stepId] = convId to done
-        updateMessage(convId, msgId) { it.copy(tools = it.tools + step.copy(approval = "waiting")) }
+        updateMessage(convId, msgId) { it.copy(tools = it.tools + asked.copy(approval = "waiting")) }
         val (allow, remember) = try {
             done.await()
         } catch (e: CancellationException) {
@@ -1095,6 +1108,25 @@ class Engine(
                 note = if (!allow) "你拒绝了，没有改" else if (remember == "dir") "$note（${step.scopeDir} 这个对话里以后不再问）" else note)
         }) }
         return if (allow) null else "用户拒绝了改 ${f.path}。不要原样再试，可以换个做法或者问用户。"
+    }
+
+    /**
+     * 「自动」档的检查（engine/AutoJudge）：用裁判模型（没有就用记录员）看一眼要做的动作。
+     * 返回 null = 放行；返回文字 = 拦下的理由（调不通、看不懂也按拦下算，交给用户决定，绝不悄悄放行）。
+     */
+    private suspend fun autoVerdict(convId: String, request: String, action: String): String? {
+        val (p, model) = JudgePick.pick(state) ?: Recorder.pick(state) ?: return "没有能用的检查模型（设置 → 记忆 里的裁判 / 记录员）"
+        return try {
+            val r = withContext(UsageTag(UsageKinds.OTHER, convId = convId)) {
+                llm.chat(p, model, listOf(userMsg(AutoJudge.prompt(request, action))), null, null) { _, _ -> }
+            }
+            val v = AutoJudge.parse(r.content) ?: return "检查员的回答看不懂"
+            if (v.first) null else v.second.ifBlank { "检查员觉得要先问你" }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            "检查员调不通：${friendlyError(e, p).take(80)}"
+        }
     }
 
     /** 拖进来的 / 选了「不再问」的文件夹里（不含「我的文档」——那是只读的收录范围）。 */
@@ -1153,9 +1185,17 @@ class Engine(
             updateMessage(convId, msgId) { it.copy(tools = it.tools + step) }
             return null
         }
+        // 自动：先让检查员看；放行就直接做，拦下的带着理由问用户（危险命令不经检查员，直接问）
+        var note = step.note
+        if (conv?.fileAuto == true && !dangerous) {
+            val why = autoVerdict(convId, lastUserText(convId, null), "${step.note}：${step.input}")
+            if (why == null) { updateMessage(convId, msgId) { it.copy(tools = it.tools + step.copy(note = step.note + "（自动检查放行）")) }; return null }
+            note = step.note + "（自动检查拦下：$why）"
+        }
+        val stepQ = step.copy(note = note)
         val done = CompletableDeferred<Pair<Boolean, String>>()
         chatWaitings[step.id] = convId to done
-        updateMessage(convId, msgId) { it.copy(tools = it.tools + step.copy(approval = "waiting")) }
+        updateMessage(convId, msgId) { it.copy(tools = it.tools + stepQ.copy(approval = "waiting")) }
         val (allow, remember) = try {
             done.await()
         } catch (e: CancellationException) {

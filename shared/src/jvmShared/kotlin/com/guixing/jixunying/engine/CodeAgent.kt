@@ -72,6 +72,9 @@ class CodeAgent(private val host: CodeHost) {
     /** 手机发起的任务（消息编号）：这些任务里读工作区外的文件照旧要问（2026-10-17，电脑上发起的读不问）。 */
     private val phoneTasks = ConcurrentHashMap.newKeySet<String>()
 
+    /** 每个会话正在做的那条任务的文字（「自动」档给检查员看用户这次要什么）。 */
+    private val currentTask = ConcurrentHashMap<String, String>()
+
     /** 这一轮是手机发起的（放在协程上下文里，往下的工具都看得到）。 */
     private class PhoneTask : kotlin.coroutines.AbstractCoroutineContextElement(PhoneTask) {
         companion object Key : kotlin.coroutines.CoroutineContext.Key<PhoneTask>
@@ -125,6 +128,7 @@ class CodeAgent(private val host: CodeHost) {
 
     private suspend fun loop(convId: String, task: Message) {
         val spec = host.state.conversation(convId)?.code ?: return
+        currentTask[convId] = task.content
         val provider = host.state.provider(spec.providerId)
         // 回复也用一条普通消息：和聊天一样流式推给界面（工具步骤挂在 tools 上）
         val msg = Message(
@@ -653,7 +657,7 @@ class CodeAgent(private val host: CodeHost) {
             note = (if (existed) "重写这个文件" else "新建这个文件") + if (out) "（在工作区外面）" else "",
             scopeDir = if (out) guard.folderToAdd(file) else "")
         // 不用批准（接受编辑档）也要先把这一步记到消息上，不然改了文件却没有改动记录，没法审阅、撤销（主会话审查 10-12 补）
-        if (!openAll(convId) && (out || needsApproval(mode, "write"))) { if (!waitApproval(convId, msgId, step)) return refused("写 $rel") } else addStep(convId, msgId, step)
+        if (shouldAsk(convId, out, needsApproval(mode, "write"), step, "写文件 $rel（${if (existed) "重写" else "新建"}）\n${diff.text.take(3000)}")) { if (!waitApproval(convId, msgId, step)) return refused("写 $rel") } else addStep(convId, msgId, step)
         val created = backup.save(stepId, file)
         val err = runCatching { file.parentFile?.mkdirs(); file.writeText(content, Charsets.UTF_8) }.exceptionOrNull()
         if (err != null) {
@@ -689,7 +693,7 @@ class CodeAgent(private val host: CodeHost) {
         val step = ToolStep("edit", rel, id = stepId, output = uiText(diff.text), ok = true,
             note = "替换 $rel 里的一段" + if (out) "（在工作区外面）" else "", scopeDir = if (out) guard.folderToAdd(file) else "")
         // 同 writeFile：不用批准也要先记上这一步；工作区外面的改动哪一档都要问
-        if (!openAll(convId) && (out || needsApproval(mode, "edit"))) { if (!waitApproval(convId, msgId, step)) return refused("改 $rel") } else addStep(convId, msgId, step)
+        if (shouldAsk(convId, out, needsApproval(mode, "edit"), step, "改文件 $rel\n${diff.text.take(3000)}")) { if (!waitApproval(convId, msgId, step)) return refused("改 $rel") } else addStep(convId, msgId, step)
         val created = backup.save(stepId, file)
         val err = runCatching { file.writeText(after, Charsets.UTF_8) }.exceptionOrNull()
         if (err != null) {
@@ -713,7 +717,15 @@ class CodeAgent(private val host: CodeHost) {
             note = if (by != null) "「$by」开头的命令这个会话里不再问" else "",
             prefix = if (by == null) CodeCommands.prefixOf(command).orEmpty() else "")
         // 全部放开：不问；只有危险命令（递归删除、格式化、改注册表……）照样问一次
-        val ask = if (openAll(convId)) CodeCommands.dangerous(command) else by == null && needsApproval(host.state.conversation(convId)?.code?.mode ?: spec.mode, "run")
+        val ask = when {
+            CodeCommands.dangerous(command) && by == null -> true
+            openAll(convId) -> false
+            by != null -> false
+            autoOn(convId) -> host.autoCheck(convId, currentTask[convId].orEmpty(), "跑命令：$command").also { why ->
+                if (why != null) autoNote[stepId] = "自动检查拦下：$why"
+            } != null
+            else -> needsApproval(host.state.conversation(convId)?.code?.mode ?: spec.mode, "run")
+        }
         if (ask) {
             if (!waitApproval(convId, msgId, step)) return refused("跑这条命令")
         } else addStep(convId, msgId, step)
@@ -734,6 +746,26 @@ class CodeAgent(private val host: CodeHost) {
 
     // ———————————————— 批准 ————————————————
 
+    /** 「自动」档：这个会话开着自动、不是计划档。 */
+    private fun autoOn(convId: String): Boolean = host.state.conversation(convId)?.code?.let { it.autoMode && it.mode != CodeMode.PLAN } == true
+
+    /** 检查员拦下的理由，挂在等批准的那一步上给用户看（步骤编号 → 说明）。 */
+    private val autoNote = ConcurrentHashMap<String, String>()
+
+    /**
+     * 写 / 改文件要不要先问（2026-10-17）：全部放开不问；自动档——工作区里的直接做，外面的先给检查员看，拦下的问；
+     * 其余照旧（外面的问、手动档问）。
+     */
+    private suspend fun shouldAsk(convId: String, outside: Boolean, modeAsks: Boolean, step: ToolStep, action: String): Boolean = when {
+        openAll(convId) -> false
+        autoOn(convId) -> if (!outside) false else {
+            val why = host.autoCheck(convId, currentTask[convId].orEmpty(), action)
+            if (why != null) autoNote[step.id] = "自动检查拦下：$why"
+            why != null
+        }
+        else -> outside || modeAsks
+    }
+
     /** 这个会话开了「全部放开」（2026-10-17）：改文件、跑命令都不问（危险命令除外），改之前照样备份。计划档不算。 */
     private fun openAll(convId: String): Boolean = host.state.conversation(convId)?.code?.let { it.openAll && it.mode != CodeMode.PLAN } == true
 
@@ -750,7 +782,14 @@ class CodeAgent(private val host: CodeHost) {
     private suspend fun waitApproval(convId: String, msgId: String, step: ToolStep): Boolean {
         val done = CompletableDeferred<Pair<Boolean, String>>()
         waitings[step.id] = Waiting(convId, done)
-        addStep(convId, msgId, step.copy(approval = "waiting"))
+        // 自动档里检查员拦下的：把理由接在说明后面给用户看
+        val why = autoNote.remove(step.id)
+        val note = when {
+            why == null -> step.note
+            step.note.isBlank() -> why
+            else -> step.note + "（$why）"
+        }
+        addStep(convId, msgId, step.copy(approval = "waiting", note = note))
         val (allow, remember) = try {
             done.await()
         } catch (e: CancellationException) {
@@ -981,4 +1020,6 @@ interface CodeHost {
         ToolStep("search", query, ok = false, note = "这台设备不能联网搜索") to emptyList()
     /** 打开一个网页，返回正文文字；打不开抛异常。 */
     suspend fun fetchUrl(url: String): String = throw IllegalStateException("这台设备不能读网页")
+    /** 「自动」档的检查（engine/AutoJudge）：返回 null = 放行，文字 = 拦下的理由（要问用户）。 */
+    suspend fun autoCheck(convId: String, request: String, action: String): String? = "这台设备没有检查员"
 }

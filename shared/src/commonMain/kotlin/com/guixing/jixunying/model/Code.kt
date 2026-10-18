@@ -54,6 +54,11 @@ data class CodeSpec(
      * 只能在电脑上打开（PhoneGate）。
      */
     val openAll: Boolean = false,
+    /**
+     * 自动（2026-10-17，照 Claude Code 的 auto mode）：读、改工作区里的直接做，其余的先让检查员（裁判模型，engine/AutoJudge）看，
+     * 检查员拦下的再问用户。和 openAll 一样不做成 CodeMode 新值（旧手机读不坏）；界面上是「接受编辑 + 这个开关」。只能在电脑上打开。
+     */
+    val autoMode: Boolean = false,
 )
 
 /**

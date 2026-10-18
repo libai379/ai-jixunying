@@ -50,7 +50,7 @@ object PhoneGate {
             // （手机不能放宽；旧版手机不认识这几个字段，发回来是默认值，不保留会把电脑上的冲掉）
             is Command.UpdateConversation -> {
                 val cur = s.conversation(c.conversation.id) ?: return Verdict(c)
-                return Verdict(c.copy(conversation = c.conversation.copy(fileOpen = cur.fileOpen, grantedPaths = cur.grantedPaths, code = cur.code)))
+                return Verdict(c.copy(conversation = c.conversation.copy(fileOpen = cur.fileOpen, fileAuto = cur.fileAuto, grantedPaths = cur.grantedPaths, code = cur.code)))
             }
             else -> Unit
         }
@@ -65,6 +65,7 @@ object PhoneGate {
             is Command.CodeSetMode -> {
                 val spec = s.conversation(c.convId)?.code ?: return Verdict(c.copy(fromPhone = true)) // 不存在的会话交给引擎报错
                 if (c.openAll) return refuse(c, "「全部放开」只能在电脑上打开")
+                if (c.auto) return refuse(c, "「自动」只能在电脑上打开")
                 if (c.mode == CodeMode.ACCEPT_EDITS && !CodePhone.mayAcceptEdits(spec)) {
                     return refuse(c, "「接受编辑」要在电脑上给这个会话打开，手机上只能换「手动」或「计划」")
                 }

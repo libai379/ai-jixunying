@@ -1193,9 +1193,28 @@ private fun Composer(ctl: AppController, state: AppState, conv: Conversation, ru
                             // 这个对话里 AI 直接改、不用问的文件夹（拖进来的、选了「不再问」的），和 Code 栏的「工作区」一样能加能移出
                             ToggleChip(if (conv.grantedPaths.isEmpty()) "文件夹" else "文件夹 ${conv.grantedPaths.size}", Icons.Rounded.FolderOpen, conv.grantedPaths.isNotEmpty()) { showFolders = true }
                             Spacer(Modifier.width(6.dp))
-                            ToggleChip(if (conv.fileOpen) "全部放开" else "动手先问我", Icons.Rounded.Edit, conv.fileOpen) {
-                                ctl.run(Command.UpdateConversation(conv.copy(fileOpen = !conv.fileOpen)),
-                                    okText = if (conv.fileOpen) "动手先问我" else "全部放开")
+                            // 动手（改别处的文件、删、跑命令）问不问：照 Claude 的权限菜单做成一个小菜单
+                            Box {
+                                var menu by remember { mutableStateOf(false) }
+                                val label = when { conv.fileOpen -> "全部放开"; conv.fileAuto -> "自动"; else -> "动手先问我" }
+                                ToggleChip(label, Icons.Rounded.Edit, conv.fileOpen || conv.fileAuto) { menu = true }
+                                androidx.compose.material3.DropdownMenu(menu, { menu = false }) {
+                                    listOf(
+                                        Triple("自动", "检查员看过没问题的直接做，拿不准的再问你", conv.copy(fileAuto = true, fileOpen = false)),
+                                        Triple("动手先问我", "改别处的文件、删东西、跑命令之前都问你（拖进来的文件夹里照样直接改）", conv.copy(fileAuto = false, fileOpen = false)),
+                                        Triple("全部放开", "都不问；只有危险命令问一次，改之前照样备份能撤销", conv.copy(fileAuto = false, fileOpen = true)),
+                                    ).forEach { (name, desc, next) ->
+                                        androidx.compose.material3.DropdownMenuItem(
+                                            text = {
+                                                Column {
+                                                    Text(name + if (name == label) "  ✓" else "", style = MaterialTheme.typography.bodyMedium)
+                                                    Text(desc, style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
+                                                }
+                                            },
+                                            onClick = { menu = false; if (name != label) ctl.run(Command.UpdateConversation(next), okText = name) },
+                                        )
+                                    }
+                                }
                             }
                         }
                         Spacer(Modifier.weight(1f))

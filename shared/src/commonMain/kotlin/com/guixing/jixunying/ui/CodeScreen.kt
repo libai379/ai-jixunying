@@ -251,13 +251,19 @@ private fun CodeTopBar(ctl: AppController, state: AppState, conv: Conversation, 
             }
         }
         Spacer(Modifier.width(8.dp))
-        // 2026-10-17「全部放开」：电脑上才有（手机上打不开，PhoneGate 也会拒）；界面上排在「接受编辑」后面
+        // 2026-10-17「自动」「全部放开」：电脑上才有（手机上打不开，PhoneGate 也会拒）。顺序照 Claude 的菜单：自动、手动、接受编辑、全部放开、计划
         val canOpen = LocalPlatform.current.isDesktop && !ctl.remoteMode
-        val options = CodeUi.modesFor(access, spec).flatMap { m ->
-            if (m == CodeMode.ACCEPT_EDITS && canOpen) listOf(m to false, m to true) else listOf(m to false)
-        } + (if (spec.openAll && !canOpen) listOf(CodeMode.ACCEPT_EDITS to true) else emptyList())
-        CodeModePicker(spec.mode to (spec.openAll && spec.mode != CodeMode.PLAN), options.distinct(), enabled = access.canAct) { (m, open) ->
-            ctl.run(Command.CodeSetMode(conv.id, m, openAll = open), okText = "权限档换成「${if (open) "全部放开" else m.label}」")
+        val base = CodeUi.modesFor(access, spec).map { ModeOpt(it) }
+        val options = buildList {
+            if (canOpen || spec.autoMode) add(ModeOpt(CodeMode.ACCEPT_EDITS, auto = true))
+            base.filter { it.mode == CodeMode.MANUAL }.forEach { add(it) }
+            base.filter { it.mode == CodeMode.ACCEPT_EDITS }.forEach { add(it) }
+            if (canOpen || spec.openAll) add(ModeOpt(CodeMode.ACCEPT_EDITS, open = true))
+            base.filter { it.mode == CodeMode.PLAN }.forEach { add(it) }
+        }
+        val current = ModeOpt(spec.mode, open = spec.openAll && spec.mode != CodeMode.PLAN, auto = spec.autoMode && spec.mode != CodeMode.PLAN && !spec.openAll)
+        CodeModePicker(current, options, enabled = access.canAct) { o ->
+            ctl.run(Command.CodeSetMode(conv.id, o.mode, openAll = o.open, auto = o.auto), okText = "权限档换成「${o.label}」")
         }
     }
     HorizontalDivider(color = Ext.c.border)
@@ -372,8 +378,13 @@ private fun PhoneMadeMark() {
  * 权限档切换：点一下就生效，不用再去设置里改。
  * modes 是这台设备上能选的档（手机上只有手动、计划，见 CodeUi.modesFor）。
  */
+/** 权限档的一个选项：「自动」「全部放开」是「接受编辑 + 开关」（不做成 CodeMode 新值，旧手机读不坏）。 */
+private data class ModeOpt(val mode: CodeMode, val open: Boolean = false, val auto: Boolean = false) {
+    val label: String get() = if (auto) "自动" else if (open) "全部放开" else mode.label
+}
+
 @Composable
-private fun CodeModePicker(mode: Pair<CodeMode, Boolean>, modes: List<Pair<CodeMode, Boolean>>, enabled: Boolean, onPick: (Pair<CodeMode, Boolean>) -> Unit) {
+private fun CodeModePicker(mode: ModeOpt, modes: List<ModeOpt>, enabled: Boolean, onPick: (ModeOpt) -> Unit) {
     Row(
         Modifier.clip(RoundedCornerShape(50)).border(1.dp, Ext.c.border, RoundedCornerShape(50)).padding(2.dp),
     ) {
@@ -385,8 +396,8 @@ private fun CodeModePicker(mode: Pair<CodeMode, Boolean>, modes: List<Pair<CodeM
                     .clickable(enabled = enabled) { if (!on) onPick(m) }
                     .padding(horizontal = 10.dp, vertical = 5.dp),
             ) {
-                Text(if (m.second) "全部放开" else m.first.label, style = MaterialTheme.typography.labelMedium,
-                    color = if (on) (if (m.second) Ext.c.warning else MaterialTheme.colorScheme.primary) else Ext.c.subtle)
+                Text(m.label, style = MaterialTheme.typography.labelMedium,
+                    color = if (on) (if (m.open) Ext.c.warning else MaterialTheme.colorScheme.primary) else Ext.c.subtle)
             }
         }
     }
@@ -571,6 +582,8 @@ private fun CodeToolStep(ctl: AppController, msg: Message, t: ToolStep, canAct: 
                     waiting -> if (readonly) {
                         Text("要批准就打开电脑上的这个会话。", style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
                     } else {
+                        if ("自动检查" in t.note) Text(t.note.substringAfter("（").removeSuffix("）").ifBlank { t.note },
+                            style = MaterialTheme.typography.bodySmall, color = Ext.c.warning)
                         // 「顺便放宽」的两个选项只在电脑上给（手机上点了也会被当成只允许这一次，见 PhoneGate）
                         val canWiden = LocalPlatform.current.isDesktop && !ctl.remoteMode
                         if (t.kind == "write" || t.kind == "edit") if (t.scopeDir.isNotBlank()) Text("这个文件在工作区外面。", style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)

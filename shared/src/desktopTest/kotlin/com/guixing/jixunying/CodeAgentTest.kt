@@ -104,6 +104,8 @@ class CodeAgentTest {
                             write("data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n")
                         }
                         when {
+                            // 2026-10-17「自动」档的检查员：动作里有 ALLOW_ME 就放行，否则拦下
+                            "你是安全检查员" in system -> say(if ("ALLOW_ME" in system) "{\"allow\": true, \"reason\": \"在请求范围内\"}" else "{\"allow\": false, \"reason\": \"超出请求范围\"}")
                             !system.startsWith("你在帮用户改一个项目里的代码") -> say("（这不是 Code 会话，不该走到这里）")
                             // 读 → 改 → 看结果说话（允许就说改完了，拒绝就说不改了）
                             "所有 greeting" in task -> when {
@@ -472,6 +474,33 @@ class CodeAgentTest {
         val on = e.state.copy(settings = e.state.settings.copy(code = e.state.settings.code.copy(allowPhone = true)))
         assertNotNull(com.guixing.jixunying.engine.code.PhoneGate.check(Command.CodeSetProject(first, folder = "C:\\"), on).refusal)
         Unit
+    }
+
+    /** 2026-10-17「自动」档：工作区里的改动直接做；外面的、跑命令先给检查员看，放行就做，拦下的带着理由问用户。 */
+    @Test
+    fun autoModeUsesChecker() = runBlocking {
+        val e = engine()
+        e.call(Command.SaveSettings(e.state.settings.copy(memory = e.state.settings.memory.copy(judgeProviderId = "p1", judgeModelId = "code-model"))))
+        val conv = codeConv(e)
+        assertTrue(e.call(Command.CodeSetMode(conv, CodeMode.ACCEPT_EDITS, auto = true)).ok)
+        assertTrue(e.state.conversation(conv)!!.code!!.autoMode)
+        // 外面的写：检查员放行（路径里有 ALLOW_ME）→ 不问
+        val ok = File(dir, "ALLOW_ME/z.txt").apply { parentFile.mkdirs() }
+        e.call(Command.CodeSend(conv, "写外面的文件 ${ok.absolutePath}"))
+        awaitStatus(e, conv, MsgStatus.DONE)
+        assertEquals("WRITTEN\n", ok.readText())
+        assertTrue(aiOf(e, conv)!!.tools.none { it.approval.isNotEmpty() })
+        // 跑命令：检查员拦下 → 问用户，说明里带理由
+        sendTask(e, conv, "跑命令 Write-Output hi")
+        val ask = awaitWaiting(e, conv, "run")
+        assertTrue("自动检查拦下" in ask.note && "超出请求范围" in ask.note, ask.note)
+        e.call(Command.CodeStop(conv))
+        // 手机打不开自动
+        val on = e.state.copy(settings = e.state.settings.copy(code = e.state.settings.code.copy(allowPhone = true)))
+        assertNotNull(com.guixing.jixunying.engine.code.PhoneGate.check(Command.CodeSetMode(conv, CodeMode.ACCEPT_EDITS, auto = true), on).refusal)
+        // 检查员的回答解析
+        assertEquals(true to "好", com.guixing.jixunying.engine.AutoJudge.parse("<think>x</think>{\"allow\": true, \"reason\": \"好\"}"))
+        assertNull(com.guixing.jixunying.engine.AutoJudge.parse("我觉得可以"))
     }
 
     /** 2026-10-17：fetch_url 不问（和对话栏统一，读网页不改本机任何东西）。 */

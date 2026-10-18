@@ -355,6 +355,8 @@ data class Conversation(
      * 关着时：拖进来的 / 选了「不再问」的文件夹里直接改，别处的先问。只能在电脑上打开（PhoneGate）。
      */
     val fileOpen: Boolean = false,
+    /** 对话页「自动」（2026-10-17）：动手（改别处的文件、删、跑命令）先让检查员看，拦下的再问用户。和 fileOpen 二选一。 */
+    val fileAuto: Boolean = false,
 ) {
     val isGroup: Boolean get() = memberIds.size > 1
 
