@@ -606,6 +606,20 @@ class CodeAgentTest {
         assertTrue("只看不改" in com.guixing.jixunying.engine.Slash.REVIEW.text)
     }
 
+    /** 2026-10-18 技能：项目 .claude/skills/<名字>/SKILL.md 的名字和说明列进系统说明，正文不放（要用时自己读）。 */
+    @Test
+    fun projectSkillsListedInPrompt() = runBlocking {
+        File(project, ".claude/skills/release").mkdirs()
+        File(project, ".claude/skills/release/SKILL.md").writeText("---\nname: 发版\ndescription: 按团队规矩发一个新版本\n---\nSKILL_BODY_SECRET 第一步……")
+        val e = engine()
+        val conv = codeConv(e)
+        e.call(Command.CodeSend(conv, "你好"))
+        awaitStatus(e, conv, MsgStatus.DONE)
+        val system = requests.last()["messages"]!!.jsonArray.first().jsonObject["content"].toString()
+        assertTrue("发版" in system && "按团队规矩发一个新版本" in system && "SKILL.md" in system, system.takeLast(400))
+        assertFalse("SKILL_BODY_SECRET" in system, "正文不放进去")
+    }
+
     /** 2026-10-18 子代理：自己一份上下文（不再给 spawn_agent），步子记在同一条回答上，结果交回主 AI。 */
     @Test
     fun subAgentRunsAndReports() = runBlocking {

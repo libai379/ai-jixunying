@@ -37,3 +37,29 @@ object Slash {
         if ("\$ARGUMENTS" in cmd.text) cmd.text.replace("\$ARGUMENTS", args.trim()).trim()
         else (cmd.text.trim() + if (args.isBlank()) "" else "\n\n" + args.trim())
 }
+
+/**
+ * 技能（2026-10-18，开发补齐第 12 样；Claude Code 的 skills：项目 .claude/skills/<名字>/SKILL.md，开头 --- 包起来的 name、description）。
+ * 会话开始时只把「名字 + 一句说明 + 说明书在哪」列给 AI，要用时它自己读说明书（省 token，和 Claude Code 一样按需加载）。
+ */
+object Skills {
+    class Skill(val name: String, val description: String, val path: String)
+
+    fun fromProject(folder: File): List<Skill> {
+        val dir = File(folder, ".claude/skills")
+        if (!dir.isDirectory) return emptyList()
+        return dir.listFiles().orEmpty().filter { it.isDirectory }.sortedBy { it.name }.mapNotNull { d ->
+            val f = File(d, "SKILL.md").takeIf { it.isFile } ?: return@mapNotNull null
+            val raw = runCatching { f.readText() }.getOrNull() ?: return@mapNotNull null
+            val front = if (raw.startsWith("---")) raw.substring(3, raw.indexOf("\n---", 3).takeIf { it > 0 } ?: 3) else ""
+            fun field(k: String) = Regex("(?m)^$k:\\s*(.+)$").find(front)?.groupValues?.get(1)?.trim()?.trim('"')
+            Skill(field("name") ?: d.name, (field("description") ?: raw.lineSequence().firstOrNull { it.isNotBlank() && !it.startsWith("---") }.orEmpty()).take(300), f.absolutePath)
+        }.take(50)
+    }
+
+    /** 系统说明里的那一段；没有技能返回空字符串。 */
+    fun prompt(list: List<Skill>): String = if (list.isEmpty()) "" else buildString {
+        append("\n\n【项目里的技能】（碰到用得上的，先用 read_file 读它的说明书，再照着做）\n")
+        list.forEach { append("- ").append(it.name).append("：").append(it.description).append("（说明书：").append(it.path).append("）\n") }
+    }
+}

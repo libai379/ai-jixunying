@@ -292,6 +292,8 @@ class CodeAgent(private val host: CodeHost) {
             notes.forEach { (name, text) ->
                 append("\n\n【项目说明：").append(name).append("】（项目文件夹里的说明文件，照着做）\n").append(text)
             }
+            // 技能（2026-10-18）：只列名字和说明，要用时自己读
+            append(Skills.prompt(runCatching { Skills.fromProject(File(spec.folder)) }.getOrDefault(emptyList())))
         })
     }
 
