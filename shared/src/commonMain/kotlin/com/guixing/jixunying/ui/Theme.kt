@@ -138,12 +138,29 @@ private val AppShapes = Shapes(
     extraLarge = RoundedCornerShape(28.dp),
 )
 
+/**
+ * 整个应用用的字体（2026-10-18，用户：「整个 app 字体渲染的不对，感觉粗细不一样」）。
+ * 不指定字体时，电脑上中文是一个字一个字去系统里找字体补的：先拿到的是日文字体，日文字体里没有「许、话、问」这类简体字，
+ * 又换别的字体补上，同一个词里粗细就不一样（截图放大看「只允许这一次」，「许」明显比两边细）。
+ * 电脑上由 DesktopPlatform 设成 Windows 自带的微软雅黑，所有字都出自同一套；为空就照旧用系统默认（手机）。
+ */
+var uiFontFamily: androidx.compose.ui.text.font.FontFamily? = null
+
+private fun Typography.withFamily(f: androidx.compose.ui.text.font.FontFamily) = Typography(
+    displayLarge = displayLarge.copy(fontFamily = f), displayMedium = displayMedium.copy(fontFamily = f), displaySmall = displaySmall.copy(fontFamily = f),
+    headlineLarge = headlineLarge.copy(fontFamily = f), headlineMedium = headlineMedium.copy(fontFamily = f), headlineSmall = headlineSmall.copy(fontFamily = f),
+    titleLarge = titleLarge.copy(fontFamily = f), titleMedium = titleMedium.copy(fontFamily = f), titleSmall = titleSmall.copy(fontFamily = f),
+    bodyLarge = bodyLarge.copy(fontFamily = f), bodyMedium = bodyMedium.copy(fontFamily = f), bodySmall = bodySmall.copy(fontFamily = f),
+    labelLarge = labelLarge.copy(fontFamily = f), labelMedium = labelMedium.copy(fontFamily = f), labelSmall = labelSmall.copy(fontFamily = f),
+)
+
 @Composable
 fun AppTheme(darkMode: Int, content: @Composable () -> Unit) {
     val dark = when (darkMode) { 1 -> false; 2 -> true; else -> isSystemInDarkTheme() }
     val scheme: ColorScheme = if (dark) DarkScheme else LightScheme
+    val typography = androidx.compose.runtime.remember { uiFontFamily?.let { AppTypography.withFamily(it) } ?: AppTypography }
     androidx.compose.runtime.CompositionLocalProvider(LocalExtra provides if (dark) DarkExtra else LightExtra) {
-        MaterialTheme(colorScheme = scheme, typography = AppTypography, shapes = AppShapes) {
+        MaterialTheme(colorScheme = scheme, typography = typography, shapes = AppShapes) {
             // 没写颜色的文字和图标默认跟着主题走：以前默认是黑色，深色模式下侧栏、标题、成员名都看不见
             androidx.compose.runtime.CompositionLocalProvider(androidx.compose.material3.LocalContentColor provides scheme.onBackground, content = content)
         }

@@ -23,6 +23,23 @@ import java.nio.file.Files
 /** fileLog：诊断日志写不写进数据目录（测试里关掉，2026-10-17 测试把日志写进了用户真的数据目录）。 */
 class DesktopPlatform(private val fileLog: Boolean = true, private val window: () -> Frame?) : Platform {
     override val isDesktop = true
+
+    // SystemFont 标着「实验性」：按字体名找系统字体，桌面上目前只有这个办法不打包字体文件就用上微软雅黑
+    @OptIn(androidx.compose.ui.text.ExperimentalTextApi::class)
+    private fun setUiFont() {
+        // 全应用统一用微软雅黑（Windows 自带：msyh.ttc 常规、msyhbd.ttc 粗体），免得中文一个字一个字找字体、粗细不一（见 ui/Theme.kt 的 uiFontFamily）
+        if (com.guixing.jixunying.ui.uiFontFamily == null && File(System.getenv("WINDIR") ?: "C:\\Windows", "Fonts/msyh.ttc").exists()) {
+            com.guixing.jixunying.ui.uiFontFamily = androidx.compose.ui.text.font.FontFamily(
+                androidx.compose.ui.text.platform.SystemFont("Microsoft YaHei UI", androidx.compose.ui.text.font.FontWeight.Normal),
+                androidx.compose.ui.text.platform.SystemFont("Microsoft YaHei UI", androidx.compose.ui.text.font.FontWeight.Medium),
+                androidx.compose.ui.text.platform.SystemFont("Microsoft YaHei UI", androidx.compose.ui.text.font.FontWeight.SemiBold),
+                androidx.compose.ui.text.platform.SystemFont("Microsoft YaHei UI", androidx.compose.ui.text.font.FontWeight.Bold),
+            )
+        }
+    }
+
+    init { setUiFont() }
+
     override val deviceName: String = runCatching { java.net.InetAddress.getLocalHost().hostName }.getOrDefault("电脑")
 
     override suspend fun pickFiles(imagesOnly: Boolean): List<PickedFile> = withContext(Dispatchers.Swing) {
