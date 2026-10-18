@@ -10,6 +10,8 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.clickable
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalDrawerSheet
@@ -310,7 +312,35 @@ fun App(hub: Hub, platform: Platform, debugStart: String? = null) {
                 }
                 Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
                     MainLayout(ctl)
-                    SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).safeDrawingPadding().padding(bottom = 80.dp))
+                    // 开发截图用：-Djxy.start=…#toast 打开就弹一条提示，看它挡不挡东西
+                    LaunchedEffect(Unit) { if (ctl.debugDialog == "toast") snackbar.showSnackbar("改文件先问我", duration = SnackbarDuration.Indefinite) }
+                    // 提示条（2026-10-17 用户截图：「很挡视野」）：以前在底下、又宽又大，正好压住输入框；
+                    // 改成顶上居中的小胶囊，窄、字小，几秒自己消失；带按钮的（比如「去设置」）照样能点
+                    // 电脑上顶栏中间是空的，放那儿；手机顶栏放满了标题和按钮，放到顶栏下面
+                    val toastTop = if (LocalPlatform.current.isDesktop) 10.dp else 66.dp
+                    SnackbarHost(snackbar, Modifier.align(Alignment.TopCenter).safeDrawingPadding().padding(top = toastTop, start = 16.dp, end = 16.dp)) { data ->
+                        androidx.compose.material3.Surface(
+                            shape = androidx.compose.foundation.shape.RoundedCornerShape(50),
+                            color = MaterialTheme.colorScheme.inverseSurface.copy(alpha = 0.92f),
+                            shadowElevation = 4.dp,
+                            modifier = Modifier.widthIn(max = 460.dp),
+                        ) {
+                            androidx.compose.foundation.layout.Row(
+                                Modifier.padding(horizontal = 14.dp, vertical = 7.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                androidx.compose.material3.Text(data.visuals.message, style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.inverseOnSurface, maxLines = 3,
+                                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+                                data.visuals.actionLabel?.let { label ->
+                                    androidx.compose.foundation.layout.Spacer(Modifier.width(10.dp))
+                                    androidx.compose.material3.Text(label, style = MaterialTheme.typography.labelMedium,
+                                        color = MaterialTheme.colorScheme.inversePrimary,
+                                        modifier = Modifier.clickable { data.performAction() })
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }

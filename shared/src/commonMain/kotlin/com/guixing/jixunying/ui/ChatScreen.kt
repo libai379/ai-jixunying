@@ -1166,7 +1166,7 @@ private fun Composer(ctl: AppController, state: AppState, conv: Conversation, ru
                             Spacer(Modifier.width(6.dp))
                             ToggleChip(if (conv.fileOpen) "改文件全部放开" else "改文件先问我", Icons.Rounded.Edit, conv.fileOpen) {
                                 ctl.run(Command.UpdateConversation(conv.copy(fileOpen = !conv.fileOpen)),
-                                    okText = if (conv.fileOpen) "改文件之前会先问你（拖进来的文件夹里照样直接改）" else "改文件全部放开：AI 新建、修改文件都不问，改之前照样备份、能撤销")
+                                    okText = if (conv.fileOpen) "改文件先问我" else "改文件全部放开")
                             }
                         }
                         Spacer(Modifier.weight(1f))

@@ -549,6 +549,8 @@ class ShotsTest {
         shoot("desktop-code-tall", 1280, 1300, 1f, hub, desktop, "code:c8")
         shoot("desktop-code-outside", 1280, 820, 1f, hub, desktop, "code:c11")
         shoot("desktop-chat-cowork", 1280, 900, 1f, hub, desktop, "conv:c14")
+        shoot("desktop-toast", 1280, 820, 1f, hub, desktop, "conv:c14#toast")
+        shoot("phone-toast", 824, 1784, 2f, hub, phone, "conv:c14#toast")
         shoot("desktop-code-remember-cmd", 1280, 820, 1f, hub, desktop, "code:c12")
         shoot("desktop-code-workspace", 1280, 820, 1f, hub, desktop, "code:c11#path")
         shoot("desktop-code-diff", 1280, 820, 1f, hub, desktop, "code:c8#diff")
