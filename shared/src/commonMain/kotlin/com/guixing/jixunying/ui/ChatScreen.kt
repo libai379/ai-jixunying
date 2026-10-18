@@ -347,10 +347,12 @@ private fun AiMessage(ctl: AppController, state: AppState, m: Message,
             }
             Spacer(Modifier.height(6.dp))
             m.tools.filter { it.approval == "waiting" }.forEach { ReadApprovalCard(ctl, m, it, member?.name ?: "AI") }
-            ToolStepsView(m.tools.filter { it.approval != "waiting" && it.change == null && it.kind != "write" && it.kind != "edit" }, streaming = m.status == MsgStatus.STREAMING)
+            ToolStepsView(m.tools.filter { it.approval != "waiting" && it.change == null && it.kind !in setOf("write", "edit", "delete", "run") }, streaming = m.status == MsgStatus.STREAMING)
+            // 跑过的命令：一行，点开看输出
+            m.tools.filter { it.kind == "run" && it.approval != "waiting" }.forEach { RunStepView(it) }
             // 改过的文件单独列出来（能看差异、能撤销）；拒绝了 / 没改成的写一句
             m.tools.filter { it.change != null }.forEach { ChangedFileView(ctl, m, it) }
-            m.tools.filter { (it.kind == "write" || it.kind == "edit") && it.change == null && it.approval != "waiting" && it.note.isNotBlank() }.forEach {
+            m.tools.filter { (it.kind == "write" || it.kind == "edit" || it.kind == "delete") && it.change == null && it.approval != "waiting" && it.note.isNotBlank() }.forEach {
                 Text("${it.input.substringAfterLast('\\').substringAfterLast('/')}：${it.note}", style = MaterialTheme.typography.bodySmall,
                     color = Ext.c.warning, modifier = Modifier.padding(bottom = 4.dp))
             }
@@ -387,7 +389,7 @@ private fun ReadApprovalCard(ctl: AppController, m: Message, t: ToolStep, who: S
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         Text("$who 要${t.note.ifBlank { "改这个文件" }}：", style = MaterialTheme.typography.labelMedium, color = Ext.c.warning)
-        SelectionContainer { Text(t.input, style = MaterialTheme.typography.bodyMedium) }
+        SelectionContainer { Text(t.input, style = if (t.kind == "run") MaterialTheme.typography.bodyMedium.copy(fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace) else MaterialTheme.typography.bodyMedium) }
         if (t.output.isNotBlank()) ScrollPane { DiffLines(t.output) }
         androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Button(onClick = { ctl.run(Command.ChatDecide(m.convId, t.id, true)) },
@@ -440,6 +442,32 @@ private fun ChatFoldersDialog(ctl: AppController, conv: Conversation, onClose: (
     }
 }
 
+/** AI 在对话里跑过的一条命令：一行摘要（退出码），点开看输出。 */
+@Composable
+private fun RunStepView(t: ToolStep) {
+    var open by remember(t.id) { mutableStateOf(false) }
+    Column(Modifier.padding(bottom = 6.dp)) {
+        Row(
+            Modifier.clip(RoundedCornerShape(8.dp)).background(MaterialTheme.colorScheme.surfaceVariant)
+                .clickable { open = !open }.padding(horizontal = 10.dp, vertical = 5.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(Icons.Rounded.Edit, null, Modifier.size(14.dp), tint = if (t.ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error)
+            Spacer(Modifier.width(6.dp))
+            Text("跑了「${t.input.take(60)}」" + if (t.approval == "denied") " · 没有做" else if (t.note.isNotBlank()) " · ${t.note.take(40)}" else "",
+                style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 460.dp))
+            Icon(if (open) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore, null, Modifier.size(16.dp), tint = Ext.c.subtle)
+        }
+        AnimatedVisibility(open && t.output.isNotBlank()) {
+            SelectionContainer {
+                Text(t.output.take(6000), style = MaterialTheme.typography.bodySmall.copy(fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace),
+                    modifier = Modifier.padding(start = 8.dp, top = 6.dp).clip(RoundedCornerShape(8.dp)).background(MaterialTheme.colorScheme.surfaceVariant).padding(8.dp))
+            }
+        }
+    }
+}
+
 /** AI 在对话里改过的一个文件：一行摘要，点开看差异，能「撤销」（恢复成改之前的样子）。 */
 @Composable
 private fun ChangedFileView(ctl: AppController, m: Message, t: ToolStep) {
@@ -454,8 +482,8 @@ private fun ChangedFileView(ctl: AppController, m: Message, t: ToolStep) {
         ) {
             Icon(Icons.Rounded.Description, null, Modifier.size(14.dp), tint = if (undone) Ext.c.subtle else MaterialTheme.colorScheme.primary)
             Spacer(Modifier.width(6.dp))
-            Text((if (ch.created) "新建了 " else "改了 ") + ch.path.substringAfterLast('\\').substringAfterLast('/') +
-                "（+${ch.added} −${ch.removed}）" + if (undone) " · 已撤销" else "",
+            Text((if (t.kind == "delete") "删掉了 " else if (ch.created) "新建了 " else "改了 ") + ch.path.substringAfterLast('\\').substringAfterLast('/') +
+                (if (t.kind == "delete") (if (ch.removed > 1) "（${ch.removed} 个文件）" else "") else "（+${ch.added} −${ch.removed}）") + if (undone) " · 已恢复" else "",
                 style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 460.dp))
             Icon(if (open) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore, null, Modifier.size(16.dp), tint = Ext.c.subtle)
@@ -465,7 +493,7 @@ private fun ChangedFileView(ctl: AppController, m: Message, t: ToolStep) {
                 SelectionContainer { Text(ch.path, style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle) }
                 if (t.output.isNotBlank()) ScrollPane { DiffLines(t.output) }
                 if (!undone && LocalPlatform.current.isDesktop && !ctl.remoteMode) TextButton({ ctl.run(Command.ChatRevert(m.convId, ch.id)) }) {
-                    Text(if (ch.created) "撤销（删掉这个新建的文件）" else "撤销（恢复成改之前的样子）", color = MaterialTheme.colorScheme.error)
+                    Text(if (t.kind == "delete") "恢复（放回去）" else if (ch.created) "撤销（删掉这个新建的文件）" else "撤销（恢复成改之前的样子）", color = MaterialTheme.colorScheme.error)
                 }
             }
         }
@@ -534,6 +562,7 @@ private fun ToolStepView(t: ToolStep) {
         "history" -> Icons.Rounded.History to (if (t.ok) "翻了以前的聊天「${t.input.take(24)}」" else "以前的聊天里没找到「${t.input.take(24)}」")
         "doc" -> Icons.Rounded.FolderOpen to (if (t.ok) t.input.take(60) else "${t.input.take(50)}（没找到）")
         "file" -> Icons.Rounded.Description to (if (t.ok) "做了文件《${t.input.take(50)}》" else "文件没做成：${t.input.take(40)}")
+        "run" -> Icons.Rounded.Edit to ("跑了「${t.input.take(50)}」" + if (t.note.isNotBlank()) " · ${t.note.take(30)}" else "")
         else -> Icons.Rounded.Brush to (if (t.ok) "画图：${t.input.take(40)}" else "画图失败")
     }
     Column(Modifier.padding(bottom = 6.dp)) {
@@ -1164,9 +1193,9 @@ private fun Composer(ctl: AppController, state: AppState, conv: Conversation, ru
                             // 这个对话里 AI 直接改、不用问的文件夹（拖进来的、选了「不再问」的），和 Code 栏的「工作区」一样能加能移出
                             ToggleChip(if (conv.grantedPaths.isEmpty()) "文件夹" else "文件夹 ${conv.grantedPaths.size}", Icons.Rounded.FolderOpen, conv.grantedPaths.isNotEmpty()) { showFolders = true }
                             Spacer(Modifier.width(6.dp))
-                            ToggleChip(if (conv.fileOpen) "改文件全部放开" else "改文件先问我", Icons.Rounded.Edit, conv.fileOpen) {
+                            ToggleChip(if (conv.fileOpen) "全部放开" else "动手先问我", Icons.Rounded.Edit, conv.fileOpen) {
                                 ctl.run(Command.UpdateConversation(conv.copy(fileOpen = !conv.fileOpen)),
-                                    okText = if (conv.fileOpen) "改文件先问我" else "改文件全部放开")
+                                    okText = if (conv.fileOpen) "动手先问我" else "全部放开")
                             }
                         }
                         Spacer(Modifier.weight(1f))

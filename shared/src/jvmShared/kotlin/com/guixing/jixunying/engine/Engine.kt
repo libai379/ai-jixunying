@@ -1139,12 +1139,106 @@ class Engine(
         return "${if (edit) "改好了" else if (created) "新建好了" else "重写好了"}：${f.absolutePath}（+${diff.added} −${diff.removed}）。用户能在回答里一键撤销。"
     }
 
-    /** 撤销对话页 AI 改的一处文件：按备份恢复，原来没有的删掉。 */
+    /**
+     * 对话页要动手（跑命令、删东西）之前看要不要问（2026-10-17）：微信、手机发起的一律不许；
+     * 开了「全部放开」不问（危险命令照样问）；删东西在拖进来 / 不再问的文件夹里不问；其余的停下来问。返回 null = 可以做。
+     */
+    private suspend fun askToAct(convId: String, msgId: String, step: ToolStep, skipIfGranted: File?, dangerous: Boolean): String? {
+        val conv = state.conversation(convId)
+        val what = if (step.kind == "run") "跑命令" else "删电脑上的东西"
+        if (conv?.channel?.startsWith("weixin:") == true) return "这是微信里发来的，不能$what。如实告诉用户：要做就在电脑上的 AI集训营 里说。"
+        if (kotlin.coroutines.coroutineContext[PhoneTurn] != null) return "这一轮是手机上发起的，不能$what。如实告诉用户：要做就在电脑上说。"
+        val free = !dangerous && (conv?.fileOpen == true || (skipIfGranted != null && grantedForWrite(convId, skipIfGranted)))
+        if (free) {
+            updateMessage(convId, msgId) { it.copy(tools = it.tools + step) }
+            return null
+        }
+        val done = CompletableDeferred<Pair<Boolean, String>>()
+        chatWaitings[step.id] = convId to done
+        updateMessage(convId, msgId) { it.copy(tools = it.tools + step.copy(approval = "waiting")) }
+        val (allow, remember) = try {
+            done.await()
+        } catch (e: CancellationException) {
+            withContext(NonCancellable) { updateMessage(convId, msgId) { m -> m.copy(tools = m.tools.map { if (it.id == step.id) it.copy(approval = "denied", ok = false, note = "停下来时没有做") else it }) } }
+            throw e
+        } finally {
+            chatWaitings.remove(step.id)
+        }
+        if (allow && remember == "dir" && step.scopeDir.isNotBlank()) grantPaths(convId, listOf(step.scopeDir))
+        updateMessage(convId, msgId) { m -> m.copy(tools = m.tools.map {
+            if (it.id != step.id) it else it.copy(approval = if (allow) "allowed" else "denied", ok = allow, note = if (allow) it.note else "你拒绝了，没有做")
+        }) }
+        return if (allow) null else "用户拒绝了这一步（${step.input.take(80)}），没有做。不要原样再试，可以换个做法或者问用户。"
+    }
+
+    /** 对话页跑命令（和 Code 栏同一个执行器、同一套外壳和超时设置）。 */
+    private suspend fun chatRun(convId: String, msgId: String, args: JsonObject): String {
+        val command = args.str("command").orEmpty().ifBlank { return "参数错误：缺少 command" }
+        val runner = codeRunner ?: return "这台设备不能跑命令。"
+        val cwd = args.str("cwd")?.trim()?.removeSurrounding("\"")?.takeIf { it.isNotBlank() }?.let { File(it) }
+            ?: state.conversation(convId)?.grantedPaths?.map { File(it) }?.firstOrNull { it.isDirectory }
+            ?: File(System.getProperty("user.home"))
+        if (!cwd.isDirectory) return "没有这个文件夹：${cwd.path}"
+        val stepId = newId()
+        val danger = com.guixing.jixunying.engine.code.CodeCommands.dangerous(command)
+        val step = ToolStep("run", command, id = stepId, ok = true, note = "跑这条命令（在 ${cwd.absolutePath}）", scopeDir = "")
+        askToAct(convId, msgId, step, null, danger)?.let { return it }
+        val code = state.settings.code
+        val r = runner.run(command, cwd, code.shell, code.commandTimeoutSec, 12_000)
+        val (shown, _) = com.guixing.jixunying.engine.code.CodeRunnerRules.clip(r.output, 12_000)
+        val status = when {
+            r.timedOut -> "超时了（${code.commandTimeoutSec} 秒），进程连同子进程都杀掉了"
+            r.exitCode == 0 -> "跑完了（退出码 0）"
+            else -> "退出码 ${r.exitCode}"
+        }
+        updateMessage(convId, msgId) { m -> m.copy(tools = m.tools.map { if (it.id == stepId) it.copy(ok = r.exitCode == 0, output = shown.take(20_000), note = status) else it }) }
+        return "命令：$command\n在：${cwd.absolutePath}\n$status\n$shown"
+    }
+
+    /** 对话页删文件 / 文件夹：先整个备份（文件夹复制一份到 <数据目录>/code/<对话>/<编号>.dir），回答里能一键恢复。 */
+    private suspend fun chatDelete(convId: String, msgId: String, args: JsonObject): String {
+        val path = args.str("path").orEmpty().trim().removeSurrounding("\"").ifBlank { return "参数错误：缺少 path" }
+        val f = File(path)
+        if (!f.isAbsolute) return "path 要写完整路径：$path"
+        if (!f.exists()) return "没有这个文件或文件夹：$path"
+        if (f.path.startsWith("\\\\") || f.toPath().nameCount <= 1) return "这个路径不能删：$path"
+        val stepId = newId()
+        val isDir = f.isDirectory
+        val count = if (isDir) withContext(Dispatchers.IO) { f.walkTopDown().count { it.isFile } } else 1
+        val step = ToolStep("delete", f.absolutePath, id = stepId, ok = true, note = if (isDir) "删掉这个文件夹（里面 $count 个文件）" else "删掉这个文件",
+            scopeDir = (f.absoluteFile.parentFile ?: f).absolutePath)
+        askToAct(convId, msgId, step, f, dangerous = false)?.let { return it }
+        val err = withContext(Dispatchers.IO) {
+            runCatching {
+                if (isDir) {
+                    val bak = File(File(File(storage.root, "code"), convId), "$stepId.dir")
+                    f.copyRecursively(bak, overwrite = true)
+                    check(f.deleteRecursively()) { "有的文件删不掉（可能被别的程序占着）" }
+                } else {
+                    codeBackup(convId).save(stepId, f)
+                    check(f.delete()) { "删不掉（可能被别的程序占着）" }
+                }
+            }.exceptionOrNull()
+        }
+        if (err != null) {
+            updateMessage(convId, msgId) { m -> m.copy(tools = m.tools.map { if (it.id == stepId) it.copy(ok = false, note = "没删成：${err.message}") else it }) }
+            return "删不了 ${f.absolutePath}：${err.message}"
+        }
+        val change = com.guixing.jixunying.model.FileChange(stepId, f.absolutePath, 0, count)
+        updateMessage(convId, msgId) { m -> m.copy(tools = m.tools.map { if (it.id == stepId) it.copy(change = change) else it }) }
+        return "删掉了：${f.absolutePath}${if (isDir) "（$count 个文件）" else ""}。删之前备份过，用户能一键恢复。"
+    }
+
+    /** 撤销对话页 AI 改的一处文件：按备份恢复，原来没有的删掉；删掉的文件 / 文件夹放回去。 */
     private suspend fun chatRevert(convId: String, changeId: String): CommandResult {
         val msg = snapshot(convId).firstOrNull { m -> m.tools.any { it.change?.id == changeId } } ?: return CommandResult(false, "找不到这处改动")
         val ch = msg.tools.first { it.change?.id == changeId }.change!!
         if (ch.review == "rejected") return CommandResult(message = "已经撤销过了")
-        val ok = withContext(Dispatchers.IO) { codeBackup(convId).restore(changeId, File(ch.path)) }
+        val dirBak = File(File(File(storage.root, "code"), convId), "$changeId.dir")
+        val ok = withContext(Dispatchers.IO) {
+            if (dirBak.isDirectory) runCatching { dirBak.copyRecursively(File(ch.path), overwrite = true) }.isSuccess
+            else codeBackup(convId).restore(changeId, File(ch.path))
+        }
         if (!ok) return CommandResult(false, "这处改动的备份不在了，没法恢复")
         updateMessage(convId, msg.id) { m -> m.copy(tools = m.tools.map { if (it.change?.id == changeId) it.copy(change = it.change.copy(review = "rejected")) else it }) }
         return CommandResult(message = if (ch.created) "撤销了：${File(ch.path).name} 是新建的，已经删掉" else "撤销了：${File(ch.path).name} 恢复成改之前的样子")
@@ -2320,6 +2414,14 @@ class Engine(
                     put("path", prop("文件的完整路径"))
                     put("content", prop("文件的全部内容"))
                 }, listOf("path", "content"))
+            // 2026-10-17 用户截图：对话栏 AI 说「没有执行代码的工具」「没有删除文件」——Cowork 能跑代码，我们要比它更开放
+            fn("run_command", "在电脑上跑一条命令（PowerShell；node、python、git 这些装了就能用），返回退出码和输出。用来跑代码、跑测试、处理文件。",
+                buildJsonObject {
+                    put("command", prop("要跑的命令"))
+                    put("cwd", prop("可选，在哪个文件夹里跑（完整路径）；不写就是这个对话的第一个文件夹，没有就是用户文件夹"))
+                }, listOf("command"))
+            fn("delete_file", "删掉电脑上的一个文件或文件夹。删之前程序会整个备份，用户能一键恢复。",
+                buildJsonObject { put("path", prop("要删的文件或文件夹的完整路径")) }, listOf("path"))
             fn("edit_file", "把电脑上一个已有文本文件里的一段文字换成另一段。old_text 在文件里必须正好出现一次。改之前程序会备份，用户能一键撤销。",
                 buildJsonObject {
                     put("path", prop("文件的完整路径"))
@@ -3046,6 +3148,8 @@ class Engine(
             }
             "find_files" -> chatFind(convId, msgId, args)
             "search_in_files" -> chatGrep(convId, msgId, args)
+            "run_command" -> chatRun(convId, msgId, args)
+            "delete_file" -> chatDelete(convId, msgId, args)
             "write_file" -> chatWrite(convId, msgId, args, edit = false)
             "edit_file" -> chatWrite(convId, msgId, args, edit = true)
             "list_folder" -> {

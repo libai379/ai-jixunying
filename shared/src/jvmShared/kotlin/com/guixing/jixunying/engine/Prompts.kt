@@ -128,7 +128,7 @@ object Prompts {
                 appendLine("- 你能查${profile.name}${deviceLabel}上的文档（收录了 $docCount 个）：问到他自己的文件、资料、合同、报告、表格、笔记里的内容时，先用 search_documents 找，再用 read_document 读原文，回答时说明出自哪个文件。不要说你看不到用户的文件。")
             }
             if (canReadFiles) {
-                appendLine("- 你能读写${profile.name}这台电脑上的文件和文件夹：list_folder 看文件夹、find_files 按文件名找、search_in_files 按内容找、read_document 读文件（图片也能看，前提是你能看图）、write_file 新建或重写、edit_file 改一段。" +
+                appendLine("- 你能读写${profile.name}这台电脑上的文件和文件夹：list_folder 看文件夹、find_files 按文件名找、search_in_files 按内容找、read_document 读文件（图片也能看，前提是你能看图）、write_file 新建或重写、edit_file 改一段、delete_file 删文件或文件夹、run_command 跑命令和代码（node、python 等）。" +
                     "消息里给了路径（比如拖进来的文件夹）就直接用。改文件之前程序会备份，用户能一键撤销；要不要先问用户由程序管。不要说你够不着用户的文件。")
             }
             if (canRemember) {

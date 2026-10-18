@@ -81,6 +81,8 @@ class ChatFilesTest {
                         when {
                             !hasTools -> say("[]")
                             "写文件" in task && results.isEmpty() && target != null -> callArgs("write_file", mapOf("path" to target, "content" to "NEW_CONTENT\n"))
+                            "跑命令" in task && results.isEmpty() && target != null -> callArgs("run_command", mapOf("command" to target))
+                            "删掉" in task && results.isEmpty() && target != null -> callArgs("delete_file", mapOf("path" to target))
                             "找文件" in task && results.isEmpty() -> callArgs("find_files", mapOf("pattern" to "*.md", "path" to outside.absolutePath))
                             "看文件夹" in task && results.isEmpty() && folder != null -> call("list_folder", folder)
                             "读别处" in task && results.isEmpty() -> call("read_document", File(outside, "说明.md").absolutePath)
@@ -98,6 +100,7 @@ class ChatFilesTest {
 
     private suspend fun setup(): Pair<Engine, String> {
         val e = Engine(Storage(File(dir, "data")))
+        e.codeRunner = com.guixing.jixunying.engine.code.CodeShell()
         e.call(Command.SaveProvider(ProviderConfig("p1", "custom", "假服务商", "http://127.0.0.1:$port/v1", "sk-test", listOf(ModelInfo("m")))))
         e.call(Command.SaveMember(Member("a1", "阿测", providerId = "p1", modelId = "m")))
         val conv = e.call(Command.CreateConversation(listOf("a1"))).data
@@ -166,6 +169,46 @@ class ChatFilesTest {
         val cur = e.state.conversation(conv)!!
         val viaPhone = com.guixing.jixunying.engine.code.PhoneGate.check(Command.UpdateConversation(cur.copy(fileOpen = false, grantedPaths = emptyList(), title = "改个名")), e.state).command as Command.UpdateConversation
         assertTrue(viaPhone.conversation.fileOpen && viaPhone.conversation.grantedPaths.isNotEmpty() && viaPhone.conversation.title == "改个名")
+    }
+
+    /** 2026-10-17 对话栏也能跑命令：默认先问；全部放开不问；手机发起的不能跑。 */
+    @Test
+    fun runCommandAsksThenOpen() = runBlocking {
+        val (e, conv) = setup()
+        e.call(Command.SendMessage(conv, "跑命令 目标：Write-Output RUN_OK_1"))
+        await { ai(e, conv)?.tools?.any { it.approval == "waiting" } == true }
+        val ask = ai(e, conv)!!.tools.first { it.approval == "waiting" }
+        assertEquals("run", ask.kind)
+        assertTrue(e.call(Command.ChatDecide(conv, ask.id, true)).ok)
+        await { ai(e, conv)?.status == MsgStatus.DONE }
+        assertTrue("RUN_OK_1" in lastTools())
+        e.call(Command.UpdateConversation(e.state.conversation(conv)!!.copy(fileOpen = true)))
+        val before = e.store.messages.value[conv].orEmpty().size
+        e.call(Command.SendMessage(conv, "跑命令 目标：Write-Output RUN_OK_2"))
+        await { e.store.messages.value[conv].orEmpty().size > before + 1 && ai(e, conv)?.status == MsgStatus.DONE }
+        assertTrue(ai(e, conv)!!.tools.none { it.approval.isNotEmpty() }, "全部放开不问")
+        assertTrue("RUN_OK_2" in lastTools())
+        // 手机发起的不能跑
+        val viaPhone = com.guixing.jixunying.engine.code.PhoneGate.check(Command.SendMessage(conv, "跑命令 目标：Write-Output RUN_OK_3"), e.state).command
+        val b2 = e.store.messages.value[conv].orEmpty().size
+        e.call(viaPhone)
+        await { e.store.messages.value[conv].orEmpty().size > b2 + 1 && ai(e, conv)?.status == MsgStatus.DONE }
+        assertTrue("手机上发起" in lastTools() && "RUN_OK_3\\n" !in lastTools().substringAfterLast("tool_call_id"))
+    }
+
+    /** 2026-10-17 对话栏能删文件夹：拖进来的文件夹里不问；删之前整个备份，一键放回去。 */
+    @Test
+    fun deleteFolderAndRestore() = runBlocking {
+        val (e, conv) = setup()
+        val box = File(dir, "拖进来的盒子").apply { mkdirs() }
+        val sub = File(box, "要删的").apply { mkdirs(); File(this, "a.txt").writeText("A"); File(this, "b/c.txt").apply { parentFile.mkdirs(); writeText("C") } }
+        e.call(Command.SendMessage(conv, "删掉 目标：${sub.absolutePath}", paths = listOf(box.absolutePath)))
+        await { ai(e, conv)?.status == MsgStatus.DONE }
+        assertTrue(!sub.exists(), "拖进来的文件夹里直接删")
+        val ch = ai(e, conv)!!.tools.mapNotNull { it.change }.single()
+        assertEquals(2, ch.removed)
+        assertTrue(e.call(Command.ChatRevert(conv, ch.id)).ok)
+        assertEquals("C", File(sub, "b/c.txt").readText(), "放回去了")
     }
 
     /** 手机发起的这一轮不许改电脑上的文件。 */
