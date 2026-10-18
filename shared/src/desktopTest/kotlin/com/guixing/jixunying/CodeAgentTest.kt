@@ -155,6 +155,10 @@ class CodeAgentTest {
                             task.startsWith("读外面的文件 ") -> if (toolResults.isEmpty())
                                 callTool("read_file", mapOf("path" to task.removePrefix("读外面的文件 ").trim()))
                             else say("读完了。")
+                            // 2026-10-17：读项目里的一张图片
+                            "看看图" in task -> if (toolResults.isEmpty())
+                                callTool("read_file", mapOf("path" to "pic.png"))
+                            else say("看完了。")
                             // 2026-10-17：跑任务后面跟的那条命令
                             task.startsWith("跑命令 ") -> if (toolResults.isEmpty())
                                 callTool("run_command", mapOf("command" to task.removePrefix("跑命令 ").trim()))
@@ -386,6 +390,51 @@ class CodeAgentTest {
         val n = sendTask(e, conv, "读外面的文件 $path")
         awaitStatus(e, conv, MsgStatus.DONE, minAi = n)
         assertTrue(aiOf(e, conv)!!.tools.none { it.approval.isNotEmpty() }, "加进工作区以后不该再问")
+    }
+
+    private fun writePng(f: File) {
+        val img = java.awt.image.BufferedImage(8, 8, java.awt.image.BufferedImage.TYPE_INT_RGB)
+        javax.imageio.ImageIO.write(img, "png", f)
+    }
+
+    /** 2026-10-17：附件——图片发给能看图的模型；拖进来的文件原路径写进任务、加进工作区。 */
+    @Test
+    fun attachmentsReachTheModel() = runBlocking {
+        val e = engine()
+        e.call(Command.SaveProvider(e.state.provider("p1")!!.copy(models = listOf(ModelInfo("code-model", vision = true)))))
+        val conv = codeConv(e)
+        val png = File(dir, "shot.png").also { writePng(it) }
+        val att = e.upload(png.name, "image/png", png.readBytes())!!
+        val doc = File(dir, "notes.md").apply { writeText("DOC_BODY_123\n") }
+        val docAtt = e.upload(doc.name, "text/markdown", doc.readBytes())!!
+        assertTrue(e.call(Command.CodeSend(conv, "看这张截图", listOf(att.id, docAtt.id), listOf(doc.absolutePath))).ok)
+        awaitStatus(e, conv, MsgStatus.DONE)
+        val sent = requests.last()["messages"].toString()
+        assertTrue("image_url" in sent && "data:image" in sent, "图片要发给能看图的模型")
+        assertTrue("DOC_BODY_123" in sent, "文档的文字要一起发")
+        assertTrue(doc.absolutePath.replace("\\", "\\\\") in sent, "原路径写进任务里")
+        assertTrue(e.state.conversation(conv)!!.code!!.extraPaths.any { it.equals(doc.absolutePath, ignoreCase = true) }, "拖进来的文件加进工作区")
+        // 手机发来的路径被清掉
+        val on = e.state.copy(settings = e.state.settings.copy(code = e.state.settings.code.copy(allowPhone = true)))
+        val viaPhone = com.guixing.jixunying.engine.code.PhoneGate.check(Command.CodeSend(conv, "x", paths = listOf("C:\\x")), on).command as Command.CodeSend
+        assertTrue(viaPhone.paths.isEmpty())
+    }
+
+    /** 2026-10-17：read_file 读到图片——能看图的模型在下一条消息里收到图片；看不了图的告诉它看不了。 */
+    @Test
+    fun readFileShowsImagesToVisionModels() = runBlocking {
+        writePng(File(project, "pic.png"))
+        val e = engine()
+        val conv = codeConv(e)
+        e.call(Command.CodeSend(conv, "看看图"))
+        awaitStatus(e, conv, MsgStatus.DONE)
+        assertTrue("看不了图片" in lastToolTexts(), lastToolTexts().take(400))
+
+        e.call(Command.SaveProvider(e.state.provider("p1")!!.copy(models = listOf(ModelInfo("code-model", vision = true)))))
+        val n = sendTask(e, conv, "再看看图")
+        awaitStatus(e, conv, MsgStatus.DONE, minAi = n)
+        val sent = requests.last()["messages"].toString()
+        assertTrue("read_file 读到的图片" in sent && "data:image" in sent, sent.takeLast(400))
     }
 
     /** 批准命令时选「同样开头不再问」：同样开头的直接跑；拼起来的命令照样问。 */

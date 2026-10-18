@@ -58,6 +58,7 @@ object PhoneGate {
             // 2026-10-17：手机不能把工作区放大、不能让命令「不再问」——这两样都比「批准这一步」宽
             is Command.CodeSetAccess -> refuse(c, "工作区和「不再问」的命令只能在电脑上改")
             is Command.CodeDecide -> Verdict(c.copy(remember = ""))
+            is Command.CodeSend -> Verdict(c.copy(paths = emptyList()))
             else -> Verdict(c)
         }
     }

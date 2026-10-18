@@ -598,7 +598,7 @@ object ImageCache {
 }
 
 @Composable
-private fun AttachmentStrip(ctl: AppController, atts: List<Attachment>, alignEnd: Boolean, large: Boolean = false) {
+internal fun AttachmentStrip(ctl: AppController, atts: List<Attachment>, alignEnd: Boolean, large: Boolean = false) {
     var preview by remember { mutableStateOf<Attachment?>(null) }
     Column(horizontalAlignment = if (alignEnd) Alignment.End else Alignment.Start, verticalArrangement = Arrangement.spacedBy(6.dp)) {
         val images = atts.filter { it.kind != AttachmentKind.DOCUMENT }
@@ -668,7 +668,7 @@ private fun MadeFileChip(ctl: AppController, a: Attachment) {
 }
 
 @Composable
-private fun DocChip(a: Attachment, onRemove: (() -> Unit)? = null) {
+internal fun DocChip(a: Attachment, onRemove: (() -> Unit)? = null) {
     Row(
         Modifier.clip(RoundedCornerShape(10.dp)).background(MaterialTheme.colorScheme.surface).border(1.dp, Ext.c.border, RoundedCornerShape(10.dp))
             .padding(start = 8.dp, end = if (onRemove != null) 2.dp else 10.dp, top = 6.dp, bottom = 6.dp),
@@ -732,7 +732,39 @@ private fun ImagePreview(ctl: AppController, a: Attachment, onClose: () -> Unit)
 
 // ———————————————— 输入框 ————————————————
 
-private class PendingFile(val name: String, var att: Attachment? = null, var failed: Boolean = false)
+/** 输入框里待发的附件（上传中 / 传好了 / 失败了）。path 是电脑上的原路径（Code 栏用，2026-10-17）。 */
+internal class PendingFile(val name: String, var att: Attachment? = null, var failed: Boolean = false, val path: String = "")
+
+/** 输入框上面那一排待发的附件：图片显示缩略图，文档显示名字，都能点叉去掉（聊天和 Code 栏共用）。 */
+@Composable
+internal fun PendingStrip(ctl: AppController, pending: androidx.compose.runtime.snapshots.SnapshotStateList<PendingFile>) {
+    if (pending.isNotEmpty()) {
+        Row(Modifier.horizontalScroll(rememberScrollState()).padding(bottom = 8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            pending.forEach { p ->
+                val att = p.att
+                if (att == null) {
+                    Row(
+                        Modifier.clip(RoundedCornerShape(10.dp)).border(1.dp, Ext.c.border, RoundedCornerShape(10.dp)).padding(10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        if (p.failed) Icon(Icons.Rounded.ErrorOutline, null, Modifier.size(14.dp), tint = MaterialTheme.colorScheme.error)
+                        else CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
+                        Spacer(Modifier.width(6.dp))
+                        Text(p.name, style = MaterialTheme.typography.bodySmall, maxLines = 1)
+                        if (p.failed) IconButton(onClick = { pending.remove(p) }, Modifier.size(22.dp)) { Icon(Icons.Rounded.Close, null, Modifier.size(12.dp)) }
+                    }
+                } else if (att.kind == AttachmentKind.IMAGE) {
+                    val img = rememberImage(ctl, att.id)
+                    Box(Modifier.size(58.dp).clip(RoundedCornerShape(10.dp)).background(MaterialTheme.colorScheme.surfaceVariant)) {
+                        if (img != null) androidx.compose.foundation.Image(img, att.name, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                        Box(Modifier.align(Alignment.TopEnd).padding(3.dp).size(18.dp).clip(CircleShape).background(Color.Black.copy(alpha = 0.55f)).clickable { pending.remove(p) },
+                            contentAlignment = Alignment.Center) { Icon(Icons.Rounded.Close, "移除", Modifier.size(11.dp), tint = Color.White) }
+                    }
+                } else DocChip(att) { pending.remove(p) }
+            }
+        }
+    }
+}
 
 @Composable
 private fun Composer(ctl: AppController, state: AppState, conv: Conversation, running: Boolean) {
@@ -928,32 +960,7 @@ private fun Composer(ctl: AppController, state: AppState, conv: Conversation, ru
                 shadowElevation = 3.dp,
             ) {
                 Column(Modifier.padding(start = 14.dp, end = 10.dp, top = 10.dp, bottom = 8.dp)) {
-                    if (pending.isNotEmpty()) {
-                        Row(Modifier.horizontalScroll(rememberScrollState()).padding(bottom = 8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            pending.forEach { p ->
-                                val att = p.att
-                                if (att == null) {
-                                    Row(
-                                        Modifier.clip(RoundedCornerShape(10.dp)).border(1.dp, Ext.c.border, RoundedCornerShape(10.dp)).padding(10.dp),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                    ) {
-                                        if (p.failed) Icon(Icons.Rounded.ErrorOutline, null, Modifier.size(14.dp), tint = MaterialTheme.colorScheme.error)
-                                        else CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
-                                        Spacer(Modifier.width(6.dp))
-                                        Text(p.name, style = MaterialTheme.typography.bodySmall, maxLines = 1)
-                                        if (p.failed) IconButton(onClick = { pending.remove(p) }, Modifier.size(22.dp)) { Icon(Icons.Rounded.Close, null, Modifier.size(12.dp)) }
-                                    }
-                                } else if (att.kind == AttachmentKind.IMAGE) {
-                                    val img = rememberImage(ctl, att.id)
-                                    Box(Modifier.size(58.dp).clip(RoundedCornerShape(10.dp)).background(MaterialTheme.colorScheme.surfaceVariant)) {
-                                        if (img != null) androidx.compose.foundation.Image(img, att.name, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
-                                        Box(Modifier.align(Alignment.TopEnd).padding(3.dp).size(18.dp).clip(CircleShape).background(Color.Black.copy(alpha = 0.55f)).clickable { pending.remove(p) },
-                                            contentAlignment = Alignment.Center) { Icon(Icons.Rounded.Close, "移除", Modifier.size(11.dp), tint = Color.White) }
-                                    }
-                                } else DocChip(att) { pending.remove(p) }
-                            }
-                        }
-                    }
+                    PendingStrip(ctl, pending)
                     Box(Modifier.fillMaxWidth().heightIn(min = 26.dp, max = 200.dp)) {
                         if (text.text.isEmpty()) Text(
                             when {
@@ -1061,7 +1068,7 @@ private fun Composer(ctl: AppController, state: AppState, conv: Conversation, ru
 }
 
 @Composable
-private fun ComposerIcon(icon: androidx.compose.ui.graphics.vector.ImageVector, desc: String, onClick: () -> Unit) {
+internal fun ComposerIcon(icon: androidx.compose.ui.graphics.vector.ImageVector, desc: String, onClick: () -> Unit) {
     Box(Modifier.size(32.dp).clip(CircleShape).clickable(onClick = onClick), contentAlignment = Alignment.Center) {
         Icon(icon, desc, Modifier.size(19.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
     }

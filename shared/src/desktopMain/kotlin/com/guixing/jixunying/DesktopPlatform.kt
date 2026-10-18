@@ -31,7 +31,7 @@ class DesktopPlatform(private val window: () -> Frame?) : Platform {
         dialog.files.orEmpty().toList()
     }.let { files ->
         withContext(Dispatchers.IO) {
-            files.filter { it.isFile }.map { f -> PickedFile(f.name, mimeOf(f), f.readBytes()) }
+            files.filter { it.isFile }.map { f -> PickedFile(f.name, mimeOf(f), f.readBytes(), f.absolutePath) }
         }
     }
 
@@ -40,7 +40,7 @@ class DesktopPlatform(private val window: () -> Frame?) : Platform {
     /** 读拖进来 / 粘贴进来的文件：文件夹跳过，单个超过 50MB 的跳过（上传也传不了那么大）。 */
     private fun readFiles(list: List<*>): List<PickedFile> = list.filterIsInstance<File>()
         .filter { it.isFile && it.length() <= 50L * 1024 * 1024 }
-        .map { f -> PickedFile(f.name, mimeOf(f), f.readBytes()) }
+        .map { f -> PickedFile(f.name, mimeOf(f), f.readBytes(), f.absolutePath) }
 
     private fun stamp() = java.time.LocalDateTime.now().format(java.time.format.DateTimeFormatter.ofPattern("MMdd_HHmmss"))
 

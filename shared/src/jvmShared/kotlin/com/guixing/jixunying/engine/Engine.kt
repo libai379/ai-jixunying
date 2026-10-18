@@ -208,6 +208,30 @@ class Engine(
         override fun cancel(convId: String) = stop(convId)
         override fun friendlyError(e: Throwable, p: ProviderConfig?) = this@Engine.friendlyError(e, p)
         override fun updateCode(convId: String, transform: (CodeSpec) -> CodeSpec) = updateCodeSpec(convId, transform)
+        override fun attachmentParts(m: Message, latest: Boolean, vision: Boolean): Pair<String, List<String>> {
+            val sb = StringBuilder()
+            val imgs = mutableListOf<String>()
+            for (a in m.attachments) when (a.kind) {
+                AttachmentKind.DOCUMENT -> {
+                    val text = storage.fileText(a.id)
+                    val limit = if (latest) 80_000 else 4_000
+                    sb.append("\n\n[附件：").append(a.name).append("]")
+                    if (text == null) sb.append("（读不出文字：").append(a.note).append("）")
+                    else {
+                        sb.append("\n```\n").append(text.take(limit))
+                        if (text.length > limit) sb.append("\n…（共 ${text.length} 字，后面省略）")
+                        sb.append("\n```")
+                    }
+                }
+                AttachmentKind.IMAGE, AttachmentKind.GENERATED_IMAGE -> {
+                    // 只把最新一条任务里的图片发过去（以前的图片每轮都发太费 token），别的写个名字
+                    val url = if (vision && latest) imageDataUrl(a) else null
+                    if (url != null) imgs += url
+                    else sb.append("\n[图片：").append(a.name).append(if (vision) "（以前发过的）]" else "，这个模型看不了图片]")
+                }
+            }
+            return sb.toString() to imgs
+        }
     })
 
     private fun updateCodeSpec(convId: String, transform: (CodeSpec) -> CodeSpec) {
@@ -700,10 +724,18 @@ class Engine(
             val conv = state.conversation(c.convId) ?: return CommandResult(false, "对话不存在")
             if (conv.code == null) return CommandResult(false, "这不是 Code 会话")
             if (codeRunner == null) return CommandResult(false, "这台设备不能跑 Code 栏（第一期只在电脑上用）")
-            if (c.text.isBlank()) return CommandResult(false, "空消息")
-            val userMsg = Message(newId(), conv.id, Role.USER, USER_ID, c.text.trim(), createdAt = now())
+            if (c.text.isBlank() && c.attachmentIds.isEmpty() && c.paths.isEmpty()) return CommandResult(false, "空消息")
+            val atts = c.attachmentIds.mapNotNull { storage.fileMeta(it) }
+            // 电脑上拖进来的文件：原路径写进任务里给模型看，并加进工作区（用户自己给的，读不用再问）
+            val paths = c.paths.map { it.trim() }.filter { it.isNotEmpty() && File(it).exists() && !it.startsWith("\\\\") }.distinct()
+            if (paths.isNotEmpty()) updateCodeSpec(conv.id) { s ->
+                s.copy(extraPaths = s.extraPaths + paths.filter { p -> s.extraPaths.none { it.equals(p, ignoreCase = true) } })
+            }
+            val text = c.text.trim() + if (paths.isEmpty()) "" else
+                (if (c.text.isBlank()) "" else "\n\n") + "附上的文件（在这台电脑上）：\n" + paths.joinToString("\n") { "- $it" }
+            val userMsg = Message(newId(), conv.id, Role.USER, USER_ID, text, attachments = atts, createdAt = now())
             addMessage(userMsg)
-            touchConversation(conv.id, c.text)
+            touchConversation(conv.id, c.text.ifBlank { atts.firstOrNull()?.name ?: paths.firstOrNull()?.let { File(it).name }.orEmpty() })
             // 循环本身在 CodeAgent 里；同一个会话已经在跑就排队，前一个跑完接着跑
             codeAgent.submit(conv.id, userMsg)
             CommandResult()

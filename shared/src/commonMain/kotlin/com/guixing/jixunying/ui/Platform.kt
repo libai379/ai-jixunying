@@ -3,7 +3,8 @@ package com.guixing.jixunying.ui
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.ImageBitmap
 
-class PickedFile(val name: String, val mime: String, val bytes: ByteArray)
+/** path：电脑上这个文件原来的完整路径（选的、拖进来的、复制的文件才有；截图、手机上是空的）。Code 栏要把它告诉模型。 */
+class PickedFile(val name: String, val mime: String, val bytes: ByteArray, val path: String = "")
 
 /**
  * 用户没给麦克风权限时 startRecording 返回的这句话。

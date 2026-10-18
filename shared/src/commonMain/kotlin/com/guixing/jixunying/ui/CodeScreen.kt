@@ -59,6 +59,11 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.input.key.isMetaPressed
+import androidx.compose.ui.input.key.isCtrlPressed
+import androidx.compose.material.icons.rounded.Image
+import androidx.compose.material.icons.rounded.AttachFile
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -138,12 +143,28 @@ fun CodeScreen(ctl: AppController, convId: String, wide: Boolean, openDrawer: ()
     }
     val running = messages.lastOrNull()?.status == MsgStatus.STREAMING
 
-    Column(Modifier.fillMaxSize()) {
-        CodeTopBar(ctl, state, conv, spec, wide, openDrawer, running, access)
-        Box(Modifier.weight(1f).fillMaxWidth()) {
-            CodeMessageList(ctl, state, conv, messages, access.canAct) { diffMessage = it }
+    // 2026-10-17：电脑上把文件拖进 Code 会话，放进输入框（和聊天一样；能动手时才收）
+    val platform = LocalPlatform.current
+    var dragging by remember { mutableStateOf(false) }
+    Box(platform.fileDropTarget(Modifier.fillMaxSize(), onHover = { dragging = it && access.canAct }) { files ->
+        if (!access.canAct) return@fileDropTarget
+        if (files.isEmpty()) ctl.toast("没读到文件（文件夹和 50MB 以上的文件放不进来；文件夹可以在「工作区」里加）")
+        else ctl.composerInbox = convId to Incoming(files = files)
+    }) {
+        Column(Modifier.fillMaxSize()) {
+            CodeTopBar(ctl, state, conv, spec, wide, openDrawer, running, access)
+            Box(Modifier.weight(1f).fillMaxWidth()) {
+                CodeMessageList(ctl, state, conv, messages, access.canAct) { diffMessage = it }
+            }
+            if (access.canAct) CodeComposer(ctl, conv, running) else CodeBottomNote(access)
         }
-        if (access.canAct) CodeComposer(ctl, conv, running) else CodeBottomNote(access)
+        if (dragging) Box(
+            Modifier.fillMaxSize().padding(12.dp).clip(RoundedCornerShape(16.dp)).background(MaterialTheme.colorScheme.primary.copy(alpha = 0.08f))
+                .border(2.dp, MaterialTheme.colorScheme.primary, RoundedCornerShape(16.dp)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text("松开鼠标，把文件放进输入框", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.primary)
+        }
     }
     if (diffMessage.isNotBlank()) ChangesDialog(ctl, conv, diffMessage, access) { diffMessage = "" }
 }
@@ -403,7 +424,11 @@ private fun CodeStartHint(conv: Conversation) {
 private fun CodeUserMessage(ctl: AppController, m: Message) {
     val clipboard = LocalClipboardManager.current
     Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.End) {
-        Surface(shape = RoundedCornerShape(18.dp, 4.dp, 18.dp, 18.dp), color = Ext.c.userBubble, modifier = Modifier.widthIn(max = 620.dp)) {
+        if (m.attachments.isNotEmpty()) {
+            AttachmentStrip(ctl, m.attachments, alignEnd = true)
+            Spacer(Modifier.height(6.dp))
+        }
+        if (m.content.isNotBlank()) Surface(shape = RoundedCornerShape(18.dp, 4.dp, 18.dp, 18.dp), color = Ext.c.userBubble, modifier = Modifier.widthIn(max = 620.dp)) {
             SelectionContainer { MarkdownText(m.content, Modifier.padding(horizontal = 14.dp, vertical = 10.dp), color = Ext.c.onUserBubble) }
         }
         Row(Modifier.padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -938,25 +963,64 @@ private fun SmallCodeAction(icon: ImageVector, desc: String, onClick: () -> Unit
 
 // ———————————————— 输入框 ————————————————
 
-/** 下面的输入框：发一条任务。上一条还在做的时候照样能发，会排在后面。 */
+/**
+ * 下面的输入框：发一条任务。上一条还在做的时候照样能发，会排在后面。
+ * 2026-10-17：和聊天一样能带附件——回形针、图片按钮、拖进来、Ctrl+V 粘贴截图或复制的文件。
+ * 图片发给能看图的模型；文档抽出文字一起发；电脑上的文件还把原路径告诉模型（并加进工作区，读不用再问）。
+ */
 @Composable
 private fun CodeComposer(ctl: AppController, conv: Conversation, running: Boolean) {
     val platform = LocalPlatform.current
+    val scope = rememberCoroutineScope()
     var text by remember(conv.id) { mutableStateOf(TextFieldValue("")) }
+    val pending = remember(conv.id) { mutableStateListOf<PendingFile>() }
+    var uploading by remember(conv.id) { mutableStateOf(0) }
+
+    fun add(files: List<PickedFile>) {
+        files.forEach { f ->
+            val p = PendingFile(f.name, path = f.path)
+            pending.add(p)
+            uploading++
+            scope.launch {
+                val att = ctl.backend.upload(f.name, f.mime, f.bytes)
+                val idx = pending.indexOf(p)
+                if (idx >= 0) pending[idx] = PendingFile(f.name, att, att == null, f.path)
+                uploading--
+                if (att == null) ctl.toast("「${f.name}」上传失败")
+            }
+        }
+    }
+    fun pick(imagesOnly: Boolean) { scope.launch { add(platform.pickFiles(imagesOnly)) } }
+    // 拖进来、粘贴进来的（CodeScreen 收到后放进 composerInbox）
+    val inbox = ctl.composerInbox
+    LaunchedEffect(inbox, conv.id) {
+        val (cid, inc) = inbox ?: return@LaunchedEffect
+        if (cid != conv.id) return@LaunchedEffect
+        ctl.composerInbox = null
+        inc.attachments.forEach { pending.add(PendingFile(it.name, it)) }
+        add(inc.files)
+    }
+
     fun send() {
-        if (text.text.isBlank()) return
+        if (uploading > 0) return
+        val ids = pending.mapNotNull { it.att?.id }
+        // 原路径只在电脑上自己用时才有意义（手机遥控电脑时手机上的路径电脑上没有）
+        val paths = if (platform.isDesktop && !ctl.remoteMode) pending.filter { it.att != null }.mapNotNull { it.path.ifBlank { null } } else emptyList()
+        if (text.text.isBlank() && ids.isEmpty()) return
         // 手机上：等批准、做完时要弹通知，趁现在（应用在前台）问一下通知权限
         if (!platform.isDesktop) platform.askNotifyPermission()
-        ctl.run(Command.CodeSend(conv.id, text.text))
+        ctl.run(Command.CodeSend(conv.id, text.text, ids, paths))
         text = TextFieldValue("")
+        pending.clear()
     }
     Column(Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 14.dp, top = 4.dp), horizontalAlignment = Alignment.CenterHorizontally) {
         Column(Modifier.widthIn(max = 860.dp).fillMaxWidth()) {
             Surface(shape = RoundedCornerShape(22.dp), color = MaterialTheme.colorScheme.surface, border = BorderStroke(1.dp, Ext.c.border), shadowElevation = 3.dp) {
                 Column(Modifier.padding(start = 14.dp, end = 10.dp, top = 10.dp, bottom = 8.dp)) {
+                    PendingStrip(ctl, pending)
                     Box(Modifier.fillMaxWidth().heightIn(min = 26.dp, max = 200.dp)) {
                         if (text.text.isEmpty()) Text(
-                            if (platform.isDesktop) "说一句要它做什么…  Enter 发送，Shift+Enter 换行" else "说一句要它做什么…",
+                            if (platform.isDesktop) "说一句要它做什么，可以拖文件、Ctrl+V 贴截图…  Enter 发送，Shift+Enter 换行" else "说一句要它做什么…",
                             style = MaterialTheme.typography.bodyLarge, color = Ext.c.subtle, maxLines = 1, overflow = TextOverflow.Ellipsis,
                         )
                         BasicTextField(
@@ -967,17 +1031,27 @@ private fun CodeComposer(ctl: AppController, conv: Conversation, running: Boolea
                             modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).onPreviewKeyEvent { e ->
                                 if (platform.isDesktop && e.type == KeyEventType.KeyDown && (e.key == Key.Enter || e.key == Key.NumPadEnter) && !e.isShiftPressed) {
                                     send(); true
+                                } else if (platform.isDesktop && e.type == KeyEventType.KeyDown && e.key == Key.V && (e.isCtrlPressed || e.isMetaPressed) && platform.clipboardHasFiles()) {
+                                    // 剪贴板里是截图或复制的文件：当附件放进来；是文字就照常粘贴
+                                    scope.launch {
+                                        val files = platform.clipboardFiles()
+                                        if (files.isEmpty()) ctl.toast("剪贴板里的东西读不出来") else add(files)
+                                    }
+                                    true
                                 } else false
                             },
                         )
                     }
                     Spacer(Modifier.height(8.dp))
                     Row(verticalAlignment = Alignment.CenterVertically) {
+                        ComposerIcon(Icons.Rounded.AttachFile, if (platform.isDesktop) "附件（代码、图片、PDF、Word、Excel…；也可以把文件拖进来，或者 Ctrl+V 粘贴截图）" else "附件") { pick(false) }
+                        ComposerIcon(Icons.Rounded.Image, "图片") { pick(true) }
+                        Spacer(Modifier.width(6.dp))
                         if (running) {
                             Text("上一条还在做，这条会排在后面", style = MaterialTheme.typography.labelSmall, color = Ext.c.warning)
                         }
                         Spacer(Modifier.weight(1f))
-                        val canSend = text.text.isNotBlank()
+                        val canSend = (text.text.isNotBlank() || pending.any { it.att != null }) && uploading == 0
                         Box(
                             Modifier.size(36.dp).clip(CircleShape)
                                 .background(if (canSend) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceContainerHighest)

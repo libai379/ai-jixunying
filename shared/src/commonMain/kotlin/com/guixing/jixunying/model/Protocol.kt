@@ -40,7 +40,17 @@ sealed interface Command {
     /** Code 栏：换权限档（只影响之后的步骤，已经跑完的不变）。fromPhone 同上。 */
     @Serializable data class CodeSetMode(val convId: String, val mode: CodeMode, val fromPhone: Boolean = false) : Command
     /** Code 栏：发一条任务，开始跑编码循环（同一个会话已经在跑就排队，前一个跑完接着跑）。 */
-    @Serializable data class CodeSend(val convId: String, val text: String) : Command
+    @Serializable data class CodeSend(
+        val convId: String,
+        val text: String,
+        /** 2026-10-17：附件（先 UploadFile 传上来的）。图片发给能看图的模型，文档抽出文字一起发。 */
+        val attachmentIds: List<String> = emptyList(),
+        /**
+         * 2026-10-17：电脑上拖进来 / 选的文件在电脑上的原路径。写进这条任务里给模型看，并加进工作区（读不用再问）。
+         * 手机发来的一律清空（手机上的路径电脑上没有，也不许手机放大工作区，PhoneGate）。
+         */
+        val paths: List<String> = emptyList(),
+    ) : Command
     /** Code 栏：停下这个会话正在跑的循环（模型请求和正在跑的命令都停），消息状态变 STOPPED。 */
     @Serializable data class CodeStop(val convId: String) : Command
     /**

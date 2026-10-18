@@ -132,8 +132,10 @@ class CodeAgent(private val host: CodeHost) {
         var usage = Usage()
         try {
             val working = mutableListOf<JsonObject>()
+            // 模型能不能看图（设置 → 模型服务 里的「能看图」）：能看就把用户发的图片、read_file 读到的图片发过去
+            val vision = p.models.firstOrNull { it.id == spec.modelId }?.vision == true
             working += systemMsg(spec, host.state.settings.code)
-            working += history(convId, task, msg.id)
+            working += history(convId, task, msg.id, vision)
             var steps = 0
             var reachedMax = false
             while (true) {
@@ -149,13 +151,19 @@ class CodeAgent(private val host: CodeHost) {
                 if (r.toolCalls.isEmpty()) break
                 working += assistantMsg(r, p)
                 var full = false
+                // 这一轮 read_file 读到的图片：工具结果里放不了图片（多数接口只认文字），等这一轮的工具结果都回完，
+                // 再补一条 user 消息把图片带上
+                val seen = mutableListOf<Pair<String, String>>()
                 for (tc in r.toolCalls) {
                     if (steps >= settings.maxSteps) { full = true; break }
                     steps++
                     // 工作区每一步重新取：上一步刚批准「把这个文件夹加进来」，这一步就算工作区里了
                     val cur = host.state.conversation(convId)?.code ?: spec
                     val guard = CodeGuard(File(cur.folder), cur.extraPaths)
-                    working += toolMsg(tc.id, step(convId, msg.id, tc, mode, cur, guard, backup))
+                    working += toolMsg(tc.id, step(convId, msg.id, tc, mode, cur, guard, backup, if (vision) seen else null))
+                }
+                if (seen.isNotEmpty()) {
+                    working += contentMsg("user", "（这是刚才 read_file 读到的图片：" + seen.joinToString("、") { it.first } + "）", seen.map { it.second })
                 }
                 if (full) { reachedMax = true; break }
                 trimWorking(working)
@@ -193,38 +201,56 @@ class CodeAgent(private val host: CodeHost) {
         else -> shell.trim()
     }
 
-    /** 会话历史：用户的话当 user，自己的话当 assistant；太长就从最早的开始丢，并在开头说明。 */
-    private fun history(convId: String, task: Message, excludeId: String): List<JsonObject> {
+    /**
+     * 会话历史：用户的话当 user，自己的话当 assistant；太长就从最早的开始丢，并在开头说明。
+     * 2026-10-17：用户消息带的附件也发过去（文档的文字、最新一条任务里的图片，见 CodeHost.attachmentParts）。
+     */
+    private fun history(convId: String, task: Message, excludeId: String, vision: Boolean): List<JsonObject> {
         val all = host.messagesOf(convId)
         val end = all.indexOfFirst { it.id == task.id }.let { if (it < 0) all.size else it + 1 }
         val usable = all.subList(0, end).filter {
             it.id != excludeId && it.role != Role.SYSTEM && it.status != MsgStatus.STREAMING &&
-                it.status != MsgStatus.ERROR && it.content.isNotBlank()
+                it.status != MsgStatus.ERROR && (it.content.isNotBlank() || it.attachments.isNotEmpty())
         }
         val picked = ArrayDeque<Message>()
         var used = 0
         for (m in usable.asReversed()) {
-            val cost = m.content.length + 200
+            val cost = m.content.length + m.attachments.sumOf { minOf(it.textChars, 4000) } + 200
             if (used + cost > HISTORY_BUDGET && picked.isNotEmpty()) break
             used += cost
             picked.addFirst(m)
         }
-        val parts = mutableListOf<JsonObject>()
-        if (picked.size < usable.size) parts += buildJsonObject { put("role", "user"); put("content", "（更早的记录太长，已省略）") }
+        data class Part(val role: String, val text: String, val images: List<String>)
+        val parts = mutableListOf<Part>()
+        if (picked.size < usable.size) parts += Part("user", "（更早的记录太长，已省略）", emptyList())
         for (m in picked) {
             val role = if (m.role == Role.USER) "user" else "assistant"
             // 以前回答里的 <think>…</think>（MiniMax 写在正文里）不再发回去，白占 token（10-12 真模型测试看到的；聊天那边也这么做）
-            val text = if (role == "assistant") m.content.replace(THINK, "").trim() else m.content
-            if (text.isBlank()) continue
+            var text = if (role == "assistant") m.content.replace(THINK, "").trim() else m.content
+            var images = emptyList<String>()
+            if (role == "user" && m.attachments.isNotEmpty()) {
+                val (more, imgs) = host.attachmentParts(m, latest = m.id == task.id, vision = vision)
+                text = (text + more).trim()
+                images = imgs
+            }
+            if (text.isBlank() && images.isEmpty()) continue
             // 有的接口不允许连着两条同一个角色，合并一下
-            val last = parts.lastOrNull()?.str("role")
-            if (last == role && parts.isNotEmpty()) {
-                val prev = parts.removeAt(parts.size - 1)
-                parts += buildJsonObject { put("role", role); put("content", prev.str("content").orEmpty() + "\n\n" + text) }
-            } else parts += buildJsonObject { put("role", role); put("content", text) }
+            val last = parts.lastOrNull()
+            if (last != null && last.role == role) parts[parts.size - 1] = Part(role, last.text + "\n\n" + text, last.images + images)
+            else parts += Part(role, text, images)
         }
-        while (parts.firstOrNull()?.str("role") == "assistant") parts.removeAt(0)
-        return parts
+        while (parts.firstOrNull()?.role == "assistant") parts.removeAt(0)
+        return parts.map { p -> contentMsg(p.role, p.text.ifBlank { "（看图）" }, p.images) }
+    }
+
+    /** 一条 user / assistant 消息；带图片时 content 是「文字 + 图片」的数组（OpenAI 风格，聊天那边也这么发）。 */
+    private fun contentMsg(role: String, text: String, images: List<String>): JsonObject = buildJsonObject {
+        put("role", role)
+        if (images.isEmpty()) put("content", text)
+        else putJsonArray("content") {
+            add(buildJsonObject { put("type", "text"); put("text", text) })
+            images.forEach { url -> add(buildJsonObject { put("type", "image_url"); putJsonObject("image_url") { put("url", url) } }) }
+        }
     }
 
     private fun assistantMsg(r: ChatResult, p: ProviderConfig): JsonObject = buildJsonObject {
@@ -284,7 +310,7 @@ class CodeAgent(private val host: CodeHost) {
             }
         })
         val path = text("相对项目文件夹的路径（比如 src/main.kt），或者完整路径")
-        fn("read_file", "读一个文件的文字内容，可以只读一段。",
+        fn("read_file", "读一个文件，可以只读一段。图片（png、jpg…）会直接给你看；PDF、Word、Excel、PPT 会抽出文字。",
             buildJsonObject {
                 put("path", path)
                 put("start_line", prop("integer", "可选，从第几行开始读（从 1 数）"))
@@ -316,10 +342,10 @@ class CodeAgent(private val host: CodeHost) {
 
     /** 走一步工具：先按权限档看要不要等批准，再执行，把这一步记到消息上，返回给模型的工具结果。 */
     private suspend fun step(convId: String, msgId: String, tc: ToolCall, mode: CodeMode, spec: CodeSpec,
-                             guard: CodeGuard, backup: CodeBackup): String {
+                             guard: CodeGuard, backup: CodeBackup, seen: MutableList<Pair<String, String>>?): String {
         val args = runCatching { Json.parseToJsonElement(tc.arguments.ifBlank { "{}" }).jsonObject }.getOrNull() ?: JsonObject(emptyMap())
         return when (tc.name) {
-            "read_file" -> readFile(convId, msgId, args, guard)
+            "read_file" -> readFile(convId, msgId, args, guard, seen)
             "list_dir" -> listDir(convId, msgId, args, guard)
             "grep" -> grep(convId, msgId, args, guard)
             // 计划档不给这两个工具；模型硬要调，也在这里拒掉，文件不动
@@ -352,13 +378,43 @@ class CodeAgent(private val host: CodeHost) {
         else setStep(convId, msgId, asked.id) { it.copy(input = step.input, output = step.output, ok = step.ok) }
     }
 
-    private suspend fun readFile(convId: String, msgId: String, args: JsonObject, guard: CodeGuard): String {
+    /**
+     * 读文件。2026-10-17 照 Claude Code 的 Read：图片给能看图的模型看（seen 不为 null 就是能看），
+     * PDF、Word、Excel、PPT 抽出文字（DocExtract，和聊天里的附件同一套）。
+     */
+    private suspend fun readFile(convId: String, msgId: String, args: JsonObject, guard: CodeGuard, seen: MutableList<Pair<String, String>>? = null): String {
         val raw = args.str("path").orEmpty()
         if (raw.isBlank()) return "参数错误：缺少 path"
         val file = guard.resolve(raw) ?: return outside(raw)
         val rel = guard.relative(file)
         if (!file.isFile) return "没有这个文件：$rel（要看目录用 list_dir）"
         val asked = try { askOutside(convId, msgId, "read", file, guard, "读工作区外面的文件") } catch (r: Refused) { return r.text }
+        val ext = file.extension.lowercase()
+        if (ext in IMAGE_EXT) {
+            if (file.length() > MAX_IMAGE_BYTES) return "$rel 是图片，但太大了（${file.length()} 字节）"
+            if (seen == null) {
+                record(convId, msgId, asked, ToolStep("read", rel, id = host.newId(), output = "（图片，这个模型看不了）", ok = false))
+                return "$rel 是图片（${file.length()} 字节）。这个模型看不了图片；要看图得在 设置 → 模型服务 里换一个能看图的模型。"
+            }
+            val bytes = withContext(Dispatchers.IO) { file.readBytes() }
+            val shrunk = runCatching { shrinkImageToJpeg(bytes, 1600, 1_500_000) }.getOrNull()
+            val url = if (shrunk != null) "data:image/jpeg;base64," + java.util.Base64.getEncoder().encodeToString(shrunk)
+                else "data:${DocExtract.imageMime(file.name, "")};base64," + java.util.Base64.getEncoder().encodeToString(bytes)
+            seen += rel to url
+            record(convId, msgId, asked, ToolStep("read", rel, id = host.newId(), output = "（图片，已发给模型看）", ok = true))
+            return "$rel 是图片，已经附在下一条消息里给你看。"
+        }
+        if (ext in DOC_EXT) {
+            if (file.length() > MAX_DOC_BYTES) return "$rel 太大（${file.length()} 字节），读不下"
+            val (text, note) = withContext(Dispatchers.IO) { DocExtract.extract(file.name, file.readBytes()) }
+            if (text == null) {
+                record(convId, msgId, asked, ToolStep("read", rel, id = host.newId(), output = note, ok = false))
+                return "$rel 读不出文字：$note"
+            }
+            val (shown, cut) = CodeRunnerRules.clip(text, RESULT_LIMIT * 2)
+            record(convId, msgId, asked, ToolStep("read", rel, id = host.newId(), output = shown.take(UI_TEXT_LIMIT), ok = true))
+            return "$rel 抽出的文字（共 ${text.length} 字）：\n$shown" + if (cut) "\n（中间被截断了）" else ""
+        }
         if (file.length() > MAX_FILE_BYTES) return "$rel 太大（${file.length()} 字节），读不下；可以用 grep 找位置。"
         val strict = runCatching { readUtf8(file) }.getOrNull()
         val text = strict ?: runCatching { file.readText() }.getOrNull() ?: return "读不了 $rel（可能没有权限，或者不是文本）"
@@ -721,6 +777,11 @@ class CodeAgent(private val host: CodeHost) {
         private const val UI_TEXT_LIMIT = 20_000
         /** 单个文件多大就不读了。 */
         private const val MAX_FILE_BYTES = 4L * 1024 * 1024
+        /** read_file 读图片、文档的上限（图片会先压小再发）。 */
+        private const val MAX_IMAGE_BYTES = 30L * 1024 * 1024
+        private const val MAX_DOC_BYTES = 50L * 1024 * 1024
+        private val IMAGE_EXT = setOf("png", "jpg", "jpeg", "webp", "gif", "bmp")
+        private val DOC_EXT = setOf("pdf", "docx", "xlsx", "pptx", "doc", "xls", "ppt")
         private const val LIST_MAX = 200
         private const val GREP_MAX = 60
         private const val GREP_FILES = 2000
@@ -759,4 +820,9 @@ interface CodeHost {
     fun friendlyError(e: Throwable, p: ProviderConfig? = null): String
     /** 改这个会话的 CodeSpec（批准时顺便把文件夹加进工作区、记下不再问的命令开头）。 */
     fun updateCode(convId: String, transform: (CodeSpec) -> CodeSpec)
+    /**
+     * 一条用户消息的附件怎么发给模型（2026-10-17）：返回（接在正文后面的文字，图片 data URL）。
+     * 文档抽出的文字接在后面（最新一条给得多、以前的只给开头）；图片只有最新一条、模型能看图时才发。
+     */
+    fun attachmentParts(m: Message, latest: Boolean, vision: Boolean): Pair<String, List<String>> = "" to emptyList()
 }
