@@ -391,8 +391,16 @@ class CodeAgent(private val host: CodeHost) {
                     put("new_text", text("换成什么（删掉这一段就填空字符串）"))
                 }, listOf("path", "old_text", "new_text"))
         }
-        fn("run_command", "在项目文件夹里跑一条命令（工作目录就是项目文件夹），返回退出码和输出。",
-            buildJsonObject { put("command", text("要跑的命令")) }, listOf("command"))
+        fn("run_command", "在项目文件夹里跑一条命令（工作目录就是项目文件夹），返回退出码和输出。" +
+            "开发服务器、监听文件这种开起来不会结束的命令，把 background 设成 true：开起来马上返回编号，之后用 read_output 看输出、stop_process 停掉。",
+            buildJsonObject {
+                put("command", text("要跑的命令"))
+                put("background", prop("boolean", "可选，true = 在后台跑（不等它结束）"))
+            }, listOf("command"))
+        fn("read_output", "看一个后台命令到现在的输出（最后一截），以及它还在不在跑。",
+            buildJsonObject { put("id", text("run_command 后台跑时给的编号")) }, listOf("id"))
+        fn("stop_process", "停掉一个后台命令（连同它开出的子进程）。",
+            buildJsonObject { put("id", text("后台命令的编号")) }, listOf("id"))
     }
 
     /** 走一步工具：先按权限档看要不要等批准，再执行，把这一步记到消息上，返回给模型的工具结果。 */
@@ -406,6 +414,19 @@ class CodeAgent(private val host: CodeHost) {
             "find_files" -> findFiles(convId, msgId, args, guard)
             "web_search" -> webSearch(convId, msgId, args)
             "fetch_url" -> fetchUrl(convId, msgId, args, spec)
+            "read_output" -> {
+                val id = args.str("id").orEmpty().trim()
+                val out = host.backgroundOutput(id) ?: return "没有这个后台命令：$id"
+                val alive = host.state.conversation(convId)?.background?.firstOrNull { it.id == id }?.running == true
+                addStep(convId, msgId, ToolStep("read", "后台命令 $id 的输出", id = host.newId(), output = out.takeLast(UI_TEXT_LIMIT), ok = true))
+                (if (alive) "（还在跑）\n" else "（已经结束了）\n") + out.takeLast(RESULT_LIMIT)
+            }
+            "stop_process" -> {
+                val id = args.str("id").orEmpty().trim()
+                host.stopBackground(convId, id)
+                addStep(convId, msgId, ToolStep("run", "停掉后台命令 $id", id = host.newId(), ok = true))
+                "停掉了 $id"
+            }
             // 计划档不给这两个工具；模型硬要调，也在这里拒掉，文件不动
             "write_file" -> if (mode == CodeMode.PLAN) planRefusal(convId, msgId, "write", args.str("path").orEmpty())
                 else writeFile(convId, msgId, args, mode, guard, backup)
@@ -729,6 +750,12 @@ class CodeAgent(private val host: CodeHost) {
         if (ask) {
             if (!waitApproval(convId, msgId, step)) return refused("跑这条命令")
         } else addStep(convId, msgId, step)
+        // 后台跑（2026-10-18）：开起来就返回编号
+        if (args.str("background")?.trim()?.lowercase() == "true") {
+            val id = host.startBackground(convId, command, File(spec.folder))
+            setStep(convId, msgId, stepId) { it.copy(ok = id != null, note = if (id != null) "在后台跑，编号 $id" else "后台开不起来") }
+            return if (id == null) "后台开不起来。" else "已经在后台开起来了，编号 $id。用 read_output 看输出（开发服务器的网址一般在里面），用 stop_process 停掉。"
+        }
         val r = runner.run(command, File(spec.folder), code.shell, code.commandTimeoutSec, RESULT_LIMIT)
         val (shown, cut) = CodeRunnerRules.clip(r.output, RESULT_LIMIT)
         val state = when {
@@ -1020,6 +1047,10 @@ interface CodeHost {
         ToolStep("search", query, ok = false, note = "这台设备不能联网搜索") to emptyList()
     /** 打开一个网页，返回正文文字；打不开抛异常。 */
     suspend fun fetchUrl(url: String): String = throw IllegalStateException("这台设备不能读网页")
+    /** 后台命令（2026-10-18）：开起来返回编号（开不了 null）；看输出；停掉。 */
+    fun startBackground(convId: String, command: String, dir: File): String? = null
+    fun backgroundOutput(id: String): String? = null
+    fun stopBackground(convId: String, id: String) {}
     /** 「自动」档的检查（engine/AutoJudge）：返回 null = 放行，文字 = 拦下的理由（要问用户）。 */
     suspend fun autoCheck(convId: String, request: String, action: String): String? = "这台设备没有检查员"
 }

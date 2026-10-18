@@ -49,6 +49,10 @@ sealed interface Command {
      * 结果 data 是命令的输出。只有 "repo" 手机上能用（PhoneGate）。
      */
     @Serializable data class CodeGit(val convId: String, val op: String, val message: String = "", val name: String = "", val private: Boolean = true) : Command
+    /** 后台命令（2026-10-18）：看输出（data 是最后一截输出）。 */
+    @Serializable data class BgOutput(val convId: String, val id: String) : Command
+    /** 后台命令：停掉。手机发来的拒绝（PhoneGate 不拦也行，停掉只会更安全——放行）。 */
+    @Serializable data class BgStop(val convId: String, val id: String) : Command
     /** GitHub 连没连上：git、gh 装没装、登没登录。data 是给人看的几行字；ok = 都好了。 */
     @Serializable data object GitHubStatus : Command
     /** 开一个窗口登录 GitHub（gh auth login --web），用户在浏览器里点同意。只能在电脑上。 */

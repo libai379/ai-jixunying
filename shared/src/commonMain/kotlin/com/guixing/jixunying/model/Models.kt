@@ -357,12 +357,25 @@ data class Conversation(
     val fileOpen: Boolean = false,
     /** 对话页「自动」（2026-10-17）：动手（改别处的文件、删、跑命令）先让检查员看，拦下的再问用户。和 fileOpen 二选一。 */
     val fileAuto: Boolean = false,
+    /** 这个对话 / 会话开着的后台命令（2026-10-18，npm run dev 这种）。程序重开时清空（进程已经没了）。 */
+    val background: List<BackgroundProc> = emptyList(),
 ) {
     val isGroup: Boolean get() = memberIds.size > 1
 
     /** Code 栏会话（侧栏「Code」那一边列的）。 */
     val isCode: Boolean get() = code != null
 }
+
+/** 一个后台命令（2026-10-18）：编号、命令、在哪儿跑、还在不在跑、输出里出现的网址（开发服务器的地址，预览用）。 */
+@Serializable
+data class BackgroundProc(
+    val id: String,
+    val command: String,
+    val cwd: String,
+    val startedAt: Long,
+    val running: Boolean = true,
+    val url: String = "",
+)
 
 @Serializable
 enum class Role { USER, AI, SYSTEM }

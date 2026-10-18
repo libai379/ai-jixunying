@@ -176,6 +176,15 @@ class CodeAgentTest {
                             task.startsWith("读网页 ") -> if (toolResults.isEmpty())
                                 callTool("fetch_url", mapOf("url" to task.removePrefix("读网页 ").trim()))
                             else say("读完了。")
+                            // 2026-10-18：后台跑一条命令，再看一次输出
+                            task.startsWith("后台跑 ") -> when (toolResults.size) {
+                                0 -> callTool("run_command", mapOf("command" to task.removePrefix("后台跑 ").trim(), "background" to "true"))
+                                1 -> {
+                                    Thread.sleep(2500)
+                                    callTool("read_output", mapOf("id" to Regex("编号 (\\S+?)。").find(toolResults[0])!!.groupValues[1]))
+                                }
+                                else -> say("开好了。")
+                            }
                             // 2026-10-17：跑任务后面跟的那条命令
                             task.startsWith("跑命令 ") -> if (toolResults.isEmpty())
                                 callTool("run_command", mapOf("command" to task.removePrefix("跑命令 ").trim()))
@@ -501,6 +510,23 @@ class CodeAgentTest {
         // 检查员的回答解析
         assertEquals(true to "好", com.guixing.jixunying.engine.AutoJudge.parse("<think>x</think>{\"allow\": true, \"reason\": \"好\"}"))
         assertNull(com.guixing.jixunying.engine.AutoJudge.parse("我觉得可以"))
+    }
+
+    /** 2026-10-18 后台命令：开起来马上返回编号；认出输出里的本机网址；read_output 看得到；停得掉。 */
+    @Test
+    fun backgroundCommandRunsAndStops() = runBlocking {
+        val e = engine()
+        val conv = codeConv(e)
+        e.call(Command.CodeSetMode(conv, CodeMode.ACCEPT_EDITS, openAll = true))
+        e.call(Command.CodeSend(conv, "后台跑 Write-Output 'Local: http://localhost:5173/'; Start-Sleep 60"))
+        awaitStatus(e, conv, MsgStatus.DONE, timeoutMs = 60_000)
+        assertTrue("localhost:5173" in lastToolTexts(), lastToolTexts().takeLast(400))
+        val p = e.state.conversation(conv)!!.background.single()
+        assertTrue(p.running)
+        await(15_000) { e.state.conversation(conv)!!.background.single().url.isNotBlank() }
+        assertEquals("http://localhost:5173", e.state.conversation(conv)!!.background.single().url)
+        assertTrue(e.call(Command.BgStop(conv, p.id)).ok)
+        assertTrue(!e.state.conversation(conv)!!.background.single().running)
     }
 
     /** 2026-10-17：fetch_url 不问（和对话栏统一，读网页不改本机任何东西）。 */

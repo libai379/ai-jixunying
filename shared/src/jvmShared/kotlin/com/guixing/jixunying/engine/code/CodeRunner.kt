@@ -13,6 +13,20 @@ interface CodeRunner {
      * @param maxChars 输出最多留多少字（超了留开头三分之二、结尾三分之一）
      */
     suspend fun run(command: String, dir: File, shell: String = "powershell", timeoutSec: Int = 300, maxChars: Int = 30_000): CodeRunResult
+
+    /**
+     * 后台命令（2026-10-18，开发一套补齐第 1 样）：npm run dev 这种开起来就不结束的，开了马上返回，用 id 认它。
+     * 环境变量、外壳和 run 一样；输出只留最后一截（够看报错和网址）。不支持的设备返回 false。
+     */
+    fun startBackground(id: String, command: String, dir: File, shell: String = "powershell"): Boolean = false
+    /** 这个后台命令到现在的输出（最后 maxChars 字）；没有这个编号返回 null。 */
+    fun backgroundOutput(id: String, maxChars: Int = 12_000): String? = null
+    /** 还在跑吗。 */
+    fun backgroundAlive(id: String): Boolean = false
+    /** 停掉（连同子孙进程）。没有这个编号返回 false。 */
+    fun stopBackground(id: String): Boolean = false
+    /** 全部停掉（退出程序时）。 */
+    fun stopAllBackground() {}
 }
 
 class CodeRunResult(

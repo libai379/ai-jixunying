@@ -58,6 +58,60 @@ class CodeShell(private val envSource: () -> Map<String, String> = System::geten
             }
         }
 
+    // ———————— 后台命令（2026-10-18）：开了就返回；输出攒在内存里只留最后 256KB ————————
+
+    private class Bg(val process: Process, val charset: java.nio.charset.Charset) {
+        val out = StringBuilder()
+    }
+
+    private val bgs = java.util.concurrent.ConcurrentHashMap<String, Bg>()
+
+    override fun startBackground(id: String, command: String, dir: File, shell: String): Boolean = runCatching {
+        val pb = ProcessBuilder(commandLine(shell, command)).directory(dir).redirectErrorStream(true)
+        val env = pb.environment()
+        val source = envSource()
+        env.clear()
+        source.forEach { (k, v) -> if (CodeRunnerRules.allowedEnv(k)) env[k] = v }
+        val p = pb.start()
+        runCatching { p.outputStream.close() }
+        val bg = Bg(p, charsetOf(shell))
+        bgs[id] = bg
+        Thread {
+            runCatching {
+                p.inputStream.bufferedReader(bg.charset).use { r ->
+                    val buf = CharArray(4096)
+                    while (true) {
+                        val n = r.read(buf)
+                        if (n < 0) break
+                        synchronized(bg.out) {
+                            bg.out.append(buf, 0, n)
+                            if (bg.out.length > BG_KEEP) bg.out.delete(0, bg.out.length - BG_KEEP)
+                        }
+                    }
+                }
+            }
+        }.apply { isDaemon = true; start() }
+        true
+    }.getOrDefault(false)
+
+    override fun backgroundOutput(id: String, maxChars: Int): String? {
+        val bg = bgs[id] ?: return null
+        val s = synchronized(bg.out) { bg.out.toString() }
+        return if (s.length <= maxChars) s else "……（前面省略）\n" + s.takeLast(maxChars)
+    }
+
+    override fun backgroundAlive(id: String): Boolean = bgs[id]?.process?.isAlive == true
+
+    override fun stopBackground(id: String): Boolean {
+        val bg = bgs[id] ?: return false
+        killTree(bg.process)
+        return true
+    }
+
+    override fun stopAllBackground() {
+        bgs.values.forEach { runCatching { killTree(it.process) } }
+    }
+
     private fun commandLine(shell: String, command: String): List<String> = when (shell.trim().lowercase()) {
         // Windows 自带的 PowerShell 5.1 读没有 BOM 的文件默认按系统编码（中文 Windows 是 GBK），
         // 我们写的 UTF-8 文件用 Get-Content 一看全是乱码（10-12 真模型测试里 MiniMax、小米都踩了，以为文件坏了）。
@@ -90,5 +144,7 @@ class CodeShell(private val envSource: () -> Map<String, String> = System::geten
 
     private companion object {
         const val MAX_BYTES = 4 * 1024 * 1024
+        /** 后台命令的输出最多留多少字（只留最后这么多）。 */
+        const val BG_KEEP = 256 * 1024
     }
 }

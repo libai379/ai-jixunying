@@ -158,6 +158,7 @@ fun CodeScreen(ctl: AppController, convId: String, wide: Boolean, openDrawer: ()
             Box(Modifier.weight(1f).fillMaxWidth()) {
                 CodeMessageList(ctl, state, conv, messages, access.canAct) { diffMessage = it }
             }
+            BackgroundBar(ctl, conv)
             if (access.canAct) CodeComposer(ctl, conv, running) else CodeBottomNote(access)
         }
         if (dragging) Box(

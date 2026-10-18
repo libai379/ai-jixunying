@@ -151,6 +151,7 @@ fun ChatScreen(ctl: AppController, convId: String, wide: Boolean, openDrawer: ()
             Box(Modifier.weight(1f).fillMaxWidth()) {
                 MessageList(ctl, state, conv, messages, topics) { stanceDialog = it }
             }
+            BackgroundBar(ctl, conv)
             Composer(ctl, state, conv, running = messages.any { it.status == MsgStatus.STREAMING })
         }
         if (dragging) Box(

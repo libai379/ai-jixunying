@@ -213,6 +213,9 @@ class Engine(
         override fun updateCode(convId: String, transform: (CodeSpec) -> CodeSpec) = updateCodeSpec(convId, transform)
         override suspend fun webSearch(query: String) = runSearch(query, mutableListOf())
         override suspend fun autoCheck(convId: String, request: String, action: String) = autoVerdict(convId, request, action)
+        override fun startBackground(convId: String, command: String, dir: File) = this@Engine.startBackground(convId, command, dir)
+        override fun backgroundOutput(id: String) = codeRunner?.backgroundOutput(id)
+        override fun stopBackground(convId: String, id: String) { codeRunner?.stopBackground(id); markBg(convId, id) { it.copy(running = false) } }
         override suspend fun fetchUrl(url: String): String = runCatching { search.fetch(url, false) }.getOrElse { search.fetch(url, true) }
         override fun attachmentParts(m: Message, latest: Boolean, vision: Boolean): Pair<String, List<String>> {
             val sb = StringBuilder()
@@ -255,6 +258,8 @@ class Engine(
         if (s.pairingSecret.isEmpty()) s = s.copy(pairingSecret = newSecret())
         // 手机上一般没有本地 HTTP 代理（用的是 VPN 类软件），默认直连
         if (isPhone && storage.loadState() == null) s = s.copy(settings = s.settings.copy(proxy = ""))
+        // 后台命令随上次程序退出都没了：清空列表（2026-10-18）
+        if (s.conversations.any { it.background.isNotEmpty() }) s = s.copy(conversations = s.conversations.map { it.copy(background = emptyList()) })
         // 这一版认得的设置版本（新版界面拿到状态再改、再发回来，带的就是它）
         if (s.settings.schema < Settings.SCHEMA) s = s.copy(settings = s.settings.copy(schema = Settings.SCHEMA))
         // 以前重复导入留下的同一个服务商 / 同一位成员，启动时合并掉
@@ -428,6 +433,45 @@ class Engine(
      * Code 会话改文件之前存的原样（docs/Code栏设计说明.md 第 5 节）：<数据目录>/code/<对话 id>/。
      * 会话自己存在 conversations（和普通对话一样），备份另放一处；删会话时用这里的 deleteAll 一起删掉。
      */
+    // ———————————————— 后台命令（2026-10-18，开发一套补齐第 1 样） ————————————————
+
+    /** 开一个后台命令，记到这个对话上；返回编号，开不了返回 null。 */
+    fun startBackground(convId: String, command: String, dir: File): String? {
+        val runner = codeRunner ?: return null
+        val id = "bg" + newId().take(8)
+        if (!runner.startBackground(id, command, dir, state.settings.code.shell)) return null
+        val p = com.guixing.jixunying.model.BackgroundProc(id, command, dir.absolutePath, now())
+        updateState { s -> s.copy(conversations = s.conversations.map { if (it.id == convId) it.copy(background = it.background + p) else it }) }
+        ensureBgWatch()
+        return id
+    }
+
+    private fun markBg(convId: String, id: String, f: (com.guixing.jixunying.model.BackgroundProc) -> com.guixing.jixunying.model.BackgroundProc) {
+        updateState { s -> s.copy(conversations = s.conversations.map { c ->
+            if (c.id != convId) c else c.copy(background = c.background.map { if (it.id == id) f(it) else it })
+        }) }
+    }
+
+    @Volatile private var bgWatch: Job? = null
+
+    /** 每 2 秒看一眼后台命令：结束了标出来；输出里出现本机网址（开发服务器）就记下来，预览用。 */
+    private fun ensureBgWatch() {
+        if (bgWatch?.isActive == true) return
+        bgWatch = scope.launch {
+            while (true) {
+                kotlinx.coroutines.delay(2000)
+                val runner = codeRunner ?: break
+                val live = state.conversations.flatMap { c -> c.background.filter { it.running }.map { c.id to it } }
+                if (live.isEmpty()) continue
+                for ((cid, p) in live) {
+                    val alive = runner.backgroundAlive(p.id)
+                    val url = if (p.url.isNotBlank()) p.url else LOCAL_URL.find(runner.backgroundOutput(p.id, 20_000).orEmpty())?.value?.trimEnd('/', '.', ',') ?: ""
+                    if (!alive || url != p.url) markBg(cid, p.id) { it.copy(running = alive, url = url) }
+                }
+            }
+        }
+    }
+
     /** 连 GitHub 用的（只有能跑命令的设备有）：外壳、代理、gh 位置都照设置。 */
     private fun gitHub(): com.guixing.jixunying.engine.code.GitHub? = codeRunner?.let {
         com.guixing.jixunying.engine.code.GitHub(it, state.settings.code.shell, state.settings.proxy, state.settings.code.ghPath)
@@ -691,6 +735,8 @@ class Engine(
             // Code 会话的改动备份（<数据目录>/code/<对话 id>/）跟着会话一起删，别留在盘上白占地方
             // 2026-10-17 起对话页改文件也有备份（同一个地方），一起删
             codeBackup(c.id).deleteAll()
+            // 它开着的后台命令一起停掉
+            state.conversation(c.id)?.background?.forEach { codeRunner?.stopBackground(it.id) }
             if (synchronized(stanceBook) { stanceBook.removeAll { it.convId == c.id } }) storage.saveStances(synchronized(stanceBook) { stanceBook.toList() })
             updateState { s -> s.copy(conversations = s.conversations.filterNot { it.id == c.id }) }
             emit(Event.ConversationRemoved(c.id))
@@ -817,6 +863,15 @@ class Engine(
         is Command.CodeRevertTask -> codeAgent.revertTask(c.convId, c.messageId)
         // 只读：备份占了多少（手机发来也放行，见 engine/code/PhoneGate）
         is Command.CodeBackupSize -> CommandResult(data = codeBackupSize().toString())
+        is Command.BgOutput -> {
+            val out = codeRunner?.backgroundOutput(c.id) ?: return CommandResult(false, "这个后台命令已经不在了")
+            CommandResult(data = out)
+        }
+        is Command.BgStop -> {
+            codeRunner?.stopBackground(c.id)
+            markBg(c.convId, c.id) { it.copy(running = false) }
+            CommandResult(message = "停掉了")
+        }
         is Command.GitHubStatus -> {
             val gh = gitHub() ?: return CommandResult(false, "这台设备不能跑命令")
             val (ok, text) = gh.status(File(System.getProperty("user.home")))
@@ -1264,6 +1319,11 @@ class Engine(
         val step = ToolStep("run", command, id = stepId, ok = true, note = "跑这条命令（在 ${cwd.absolutePath}）", scopeDir = "")
         askToAct(convId, msgId, step, null, danger)?.let { return it }
         val code = state.settings.code
+        if (args.str("background")?.trim()?.lowercase() == "true") {
+            val id = startBackground(convId, command, cwd)
+            updateMessage(convId, msgId) { m -> m.copy(tools = m.tools.map { if (it.id == stepId) it.copy(ok = id != null, note = if (id != null) "在后台跑，编号 $id" else "后台开不起来") else it }) }
+            return if (id == null) "后台开不起来。" else "已经在后台开起来了，编号 $id。用 read_output 看输出，用 stop_process 停掉。"
+        }
         val r = runner.run(command, cwd, code.shell, code.commandTimeoutSec, 12_000)
         val (shown, _) = com.guixing.jixunying.engine.code.CodeRunnerRules.clip(r.output, 12_000)
         val status = when {
@@ -2495,11 +2555,16 @@ class Engine(
                     put("content", prop("文件的全部内容"))
                 }, listOf("path", "content"))
             // 2026-10-17 用户截图：对话栏 AI 说「没有执行代码的工具」「没有删除文件」——Cowork 能跑代码，我们要比它更开放
-            fn("run_command", "在电脑上跑一条命令（PowerShell；node、python、git 这些装了就能用），返回退出码和输出。用来跑代码、跑测试、处理文件。",
+            fn("run_command", "在电脑上跑一条命令（PowerShell；node、python、git 这些装了就能用），返回退出码和输出。用来跑代码、跑测试、处理文件。" +
+                "开起来不会结束的（开发服务器之类）把 background 设成 true，之后用 read_output 看输出、stop_process 停掉。",
                 buildJsonObject {
                     put("command", prop("要跑的命令"))
                     put("cwd", prop("可选，在哪个文件夹里跑（完整路径）；不写就是这个对话的第一个文件夹，没有就是用户文件夹"))
+                    put("background", prop("可选，true = 在后台跑"))
                 }, listOf("command"))
+            fn("read_output", "看一个后台命令到现在的输出（最后一截），以及它还在不在跑。",
+                buildJsonObject { put("id", prop("后台命令的编号")) }, listOf("id"))
+            fn("stop_process", "停掉一个后台命令。", buildJsonObject { put("id", prop("后台命令的编号")) }, listOf("id"))
             fn("delete_file", "删掉电脑上的一个文件或文件夹。删之前程序会整个备份，用户能一键恢复。",
                 buildJsonObject { put("path", prop("要删的文件或文件夹的完整路径")) }, listOf("path"))
             fn("edit_file", "把电脑上一个已有文本文件里的一段文字换成另一段。old_text 在文件里必须正好出现一次。改之前程序会备份，用户能一键撤销。",
@@ -3103,6 +3168,8 @@ class Engine(
     }
 
     private companion object {
+        /** 后台命令输出里的本机网址（开发服务器）。 */
+        val LOCAL_URL = Regex("https?://(localhost|127\\.0\\.0\\.1|0\\.0\\.0\\.0|\\[::1\\])(:\\d+)?[^\\s'\"<>]*")
         /** 没按意思搜时工具步骤里写的一句。 */
         const val LITERAL_ONLY = "这次只按字面搜"
         /** 倒数排名融合的 k（RRF 论文里的常用取值）。 */
@@ -3229,6 +3296,18 @@ class Engine(
             "find_files" -> chatFind(convId, msgId, args)
             "search_in_files" -> chatGrep(convId, msgId, args)
             "run_command" -> chatRun(convId, msgId, args)
+            "read_output" -> {
+                val id = args.str("id").orEmpty().trim()
+                val out = codeRunner?.backgroundOutput(id) ?: return "没有这个后台命令：$id"
+                val alive = state.conversation(convId)?.background?.firstOrNull { it.id == id }?.running == true
+                (if (alive) "（还在跑）\n" else "（已经结束了）\n") + out.takeLast(12_000)
+            }
+            "stop_process" -> {
+                val id = args.str("id").orEmpty().trim()
+                codeRunner?.stopBackground(id)
+                markBg(convId, id) { it.copy(running = false) }
+                "停掉了 $id"
+            }
             "delete_file" -> chatDelete(convId, msgId, args)
             "write_file" -> chatWrite(convId, msgId, args, edit = false)
             "edit_file" -> chatWrite(convId, msgId, args, edit = true)
