@@ -40,7 +40,7 @@ fun main() {
         val state = rememberWindowState(size = DpSize(1280.dp, 820.dp))
         Window(
             // 退出时把 AI 开的后台命令（开发服务器之类）全停掉，别留在电脑上
-            onCloseRequest = { relay.stop(); weixin.stop(); engine.codeRunner?.stopAllBackground(); exitApplication() },
+            onCloseRequest = { relay.stop(); weixin.stop(); engine.codeRunner?.stopAllBackground(); engine.closeMcp(); exitApplication() },
             title = "AI集训营",
             // 窗口和任务栏图标：用户 2026-10-12 给的那张（和安装包、安卓、App 里左上角同一张）
             icon = platform.brandIcon?.let { androidx.compose.ui.graphics.painter.BitmapPainter(it) },

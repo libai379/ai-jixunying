@@ -127,7 +127,12 @@ data class CodeSettings(
     val allowPhone: Boolean = false,
     /** GitHub 命令行 gh.exe 的位置（2026-10-18）；空 = 靠 PATH 找。 */
     val ghPath: String = "",
+    /** MCP 服务器（2026-10-18，开发补齐第 12 样）：名字 + 启动命令（stdio）。两栏的 AI 都能用它们的工具。只在电脑上配（PhoneGate 保留电脑上的 code 设置）。 */
+    val mcpServers: List<McpServerConfig> = emptyList(),
 )
+
+@Serializable
+data class McpServerConfig(val name: String, val command: String, val enabled: Boolean = true)
 
 /**
  * 手机遥控电脑时 Code 栏能做什么（docs/Code栏设计说明.md 第 6 节，2026-10-13）。

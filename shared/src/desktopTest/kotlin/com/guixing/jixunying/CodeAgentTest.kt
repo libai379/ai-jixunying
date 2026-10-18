@@ -185,6 +185,10 @@ class CodeAgentTest {
                             "派子代理" in task -> if (toolResults.isEmpty())
                                 callTool("spawn_agent", mapOf("task" to "查一下 a.txt 里写了什么", "name" to "查文件"))
                             else say("汇总好了。")
+                            // 2026-10-18 MCP：调外部工具 echo
+                            "用外部工具" in task -> if (toolResults.isEmpty())
+                                callTool("mcp__fake__echo", mapOf("text" to "MCP_HI"))
+                            else say("调完了。")
                             // 2026-10-18：列两次待办
                             "列待办" in task -> when (toolResults.size) {
                                 0 -> callTool("update_todos", mapOf("items" to "[>] 读代码\n[ ] 改代码\n[ ] 跑测试"))
@@ -604,6 +608,32 @@ class CodeAgentTest {
         val fix = com.guixing.jixunying.ui.SlashItem("fix-issue", "", "修好 issue \$ARGUMENTS，再跑测试。", "项目")
         assertEquals("修好 issue #12，再跑测试。", com.guixing.jixunying.ui.expandSlash(fix, "#12"))
         assertTrue("只看不改" in com.guixing.jixunying.engine.Slash.REVIEW.text)
+    }
+
+    /** 2026-10-18 MCP：设置里配的服务器开起来，工具给模型（mcp__服务器__工具），全部放开下直接调、结果回给模型。 */
+    @Test
+    fun mcpToolsReachTheModel() = runBlocking {
+        if (!runCatching { ProcessBuilder("cmd.exe", "/c", "python", "--version").start().waitFor() == 0 }.getOrDefault(false)) { println("没有 python，跳过"); return@runBlocking }
+        val script = File(dir, "fake_mcp.py").apply { writeText(
+            "import sys, json\n" +
+            "for line in sys.stdin:\n" +
+            "    m = json.loads(line)\n" +
+            "    if 'id' not in m: continue\n" +
+            "    meth = m.get('method')\n" +
+            "    if meth == 'initialize': r = {'protocolVersion': '2025-06-18', 'capabilities': {'tools': {}}, 'serverInfo': {'name': 'fake', 'version': '1'}}\n" +
+            "    elif meth == 'tools/list': r = {'tools': [{'name': 'echo', 'description': 'echo back', 'inputSchema': {'type': 'object', 'properties': {'text': {'type': 'string'}}}}]}\n" +
+            "    else: r = {'content': [{'type': 'text', 'text': 'ECHO:' + m['params']['arguments']['text']}]}\n" +
+            "    sys.stdout.write(json.dumps({'jsonrpc': '2.0', 'id': m['id'], 'result': r}) + '\\n'); sys.stdout.flush()\n") }
+        val e = engine()
+        e.call(Command.SaveSettings(e.state.settings.copy(code = e.state.settings.code.copy(
+            mcpServers = listOf(com.guixing.jixunying.model.McpServerConfig("fake", "python -u \"${script.absolutePath}\""))))))
+        val conv = codeConv(e)
+        e.call(Command.CodeSetMode(conv, CodeMode.ACCEPT_EDITS, openAll = true))
+        e.call(Command.CodeSend(conv, "用外部工具"))
+        awaitStatus(e, conv, MsgStatus.DONE, timeoutMs = 60_000)
+        assertTrue(toolNames(requests.first { "用外部工具" in it["messages"].toString() }).contains("mcp__fake__echo"))
+        assertTrue("ECHO:MCP_HI" in lastToolTexts(), lastToolTexts().takeLast(300))
+        e.closeMcp()
     }
 
     /** 2026-10-18 技能：项目 .claude/skills/<名字>/SKILL.md 的名字和说明列进系统说明，正文不放（要用时自己读）。 */

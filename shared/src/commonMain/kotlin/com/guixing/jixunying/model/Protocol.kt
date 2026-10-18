@@ -68,6 +68,8 @@ sealed interface Command {
      * data 是 JSON 数组：[{"name","description","text","source"}]。
      */
     @Serializable data class SlashList(val convId: String) : Command
+    /** 试着连一个 MCP 服务器（2026-10-18）：data 是它的工具名，一行一个；连不上 ok = false。只能在电脑上。 */
+    @Serializable data class McpTest(val command: String) : Command
     /** 后台命令（2026-10-18）：看输出（data 是最后一截输出）。 */
     @Serializable data class BgOutput(val convId: String, val id: String) : Command
     /** 后台命令：停掉。手机发来的拒绝（PhoneGate 不拦也行，停掉只会更安全——放行）。 */

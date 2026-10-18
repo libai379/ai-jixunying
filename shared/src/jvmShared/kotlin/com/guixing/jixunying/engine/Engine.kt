@@ -213,6 +213,11 @@ class Engine(
         override fun updateCode(convId: String, transform: (CodeSpec) -> CodeSpec) = updateCodeSpec(convId, transform)
         override suspend fun webSearch(query: String) = runSearch(query, mutableListOf())
         override suspend fun autoCheck(convId: String, request: String, action: String) = autoVerdict(convId, request, action)
+        override suspend fun mcpToolDefs() = mcpTools().map { (n, _, t) -> Triple(n, "（外部工具 ${t.name}）" + t.description, t.inputSchema) }
+        override suspend fun mcpCall(name: String, args: JsonObject): String {
+            val (_, c, t) = mcpTools().firstOrNull { it.first == name } ?: return "没有这个外部工具：$name"
+            return runCatching { c.call(t.name, args) }.getOrElse { "外部工具出错：${it.message?.take(300)}" }
+        }
         override fun startBackground(convId: String, command: String, dir: File) = this@Engine.startBackground(convId, command, dir)
         override fun summaryOf(convId: String) = storage.loadMemo(convId).let { it.summary to it.upToTime }
         override fun removeMessages(convId: String, ids: List<String>) {
@@ -479,6 +484,50 @@ class Engine(
             }
         }
     }
+
+    // ———————————————— MCP（2026-10-18，开发补齐第 12 样） ————————————————
+
+    private val mcpClients = ConcurrentHashMap<String, com.guixing.jixunying.engine.code.McpClient>()
+    private val mcpLock = kotlinx.coroutines.sync.Mutex()
+
+    /** 给 AI 的 MCP 工具名：mcp__服务器__工具（只留英文数字下划线减号，最长 64）。 */
+    private fun mcpName(server: String, tool: String): String {
+        fun clean(s: String) = s.replace(Regex("[^A-Za-z0-9_-]"), "_").ifBlank { "x" + s.hashCode().toUInt().toString(16) }
+        return "mcp__${clean(server)}__${clean(tool)}".take(64)
+    }
+
+    /**
+     * 设置里开着的 MCP 服务器都连上（已经连着、命令没变的不重连），返回（给 AI 的名字, 服务器, 工具）。
+     * 连不上的跳过，记一条后台提示。只在电脑上（能跑命令的设备）。
+     */
+    internal suspend fun mcpTools(): List<Triple<String, com.guixing.jixunying.engine.code.McpClient, com.guixing.jixunying.engine.code.McpClient.Tool>> {
+        if (codeRunner == null) return emptyList()
+        val wanted = state.settings.code.mcpServers.filter { it.enabled && it.command.isNotBlank() }
+        mcpLock.withLock {
+            // 设置里删掉的、命令改了的：关掉
+            mcpClients.entries.toList().forEach { (k, c) ->
+                if (wanted.none { it.name + "\u0000" + it.command == k } || !c.alive) { c.close(); mcpClients.remove(k) }
+            }
+            for (w in wanted) {
+                val key = w.name + "\u0000" + w.command
+                if (mcpClients.containsKey(key)) continue
+                val c = com.guixing.jixunying.engine.code.McpClient(w.name, w.command, File(System.getProperty("user.home")))
+                try {
+                    c.start()
+                    mcpClients[key] = c
+                } catch (e: CancellationException) {
+                    c.close(); throw e
+                } catch (e: Throwable) {
+                    c.close()
+                    emit(Event.Notice("MCP 服务器「${w.name}」连不上：${e.message?.take(200)}", error = true))
+                }
+            }
+        }
+        return mcpClients.values.flatMap { c -> c.tools.map { t -> Triple(mcpName(c.name, t.name), c, t) } }
+    }
+
+    /** 关掉全部 MCP 服务器（退出程序时）。 */
+    fun closeMcp() { mcpClients.values.forEach { it.close() }; mcpClients.clear() }
 
     /** 连 GitHub 用的（只有能跑命令的设备有）：外壳、代理、gh 位置都照设置。 */
     private fun gitHub(): com.guixing.jixunying.engine.code.GitHub? = codeRunner?.let {
@@ -963,6 +1012,20 @@ class Engine(
                 out.sortedWith(compareBy({ it.first }, { it.second.length })).take(20).map { it.second }
             }
             CommandResult(data = kotlinx.serialization.json.JsonArray(hits.map { kotlinx.serialization.json.JsonPrimitive(it) }).toString())
+        }
+        is Command.McpTest -> {
+            if (codeRunner == null) return CommandResult(false, "这台设备不能跑 MCP")
+            val c = com.guixing.jixunying.engine.code.McpClient("测试", c.command, File(System.getProperty("user.home")))
+            try {
+                c.start()
+                CommandResult(message = "连上了：${c.tools.size} 个工具", data = c.tools.joinToString("\n") { it.name + "　" + it.description.take(60) })
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                CommandResult(false, "连不上：${e.message?.take(200)}" + c.stderrTail().takeIf { it.isNotBlank() }?.let { "\n$it" }.orEmpty())
+            } finally {
+                c.close()
+            }
         }
         is Command.BgOutput -> {
             val out = codeRunner?.backgroundOutput(c.id) ?: return CommandResult(false, "这个后台命令已经不在了")
@@ -2494,7 +2557,13 @@ class Engine(
                 }
             }
 
-            val tools = if (useTools) toolDefs(fnSearch, fetch = wantSearch, draw = hasImageModel, native = native, memory = memOn, docs = docsOn, office = officeOn, files = filesOn) else null
+            // MCP 外部工具（2026-10-18）：电脑上对话栏也能用，和 Code 栏同一套
+            val mcp = if (useTools && filesOn) runCatching { mcpTools() }.getOrDefault(emptyList()) else emptyList()
+            val tools = if (useTools) JsonArray(toolDefs(fnSearch, fetch = wantSearch, draw = hasImageModel, native = native, memory = memOn, docs = docsOn, office = officeOn, files = filesOn) +
+                mcp.map { (n, _, t) -> buildJsonObject {
+                    put("type", "function")
+                    putJsonObject("function") { put("name", n); put("description", ("（外部工具 ${t.name}）" + t.description).take(1000)); put("parameters", t.inputSchema) }
+                } }) else null
             val extra = if (native == NativeSearch.QWEN) buildJsonObject {
                 put("enable_search", true)
                 putJsonObject("search_options") {
@@ -3483,7 +3552,14 @@ class Engine(
                     }
                 }
             }
-            else -> "没有这个工具：${tc.name}"
+            else -> if (tc.name.startsWith("mcp__")) {
+                val (_, client, tool) = mcpTools().firstOrNull { it.first == tc.name } ?: return "没有这个外部工具：${tc.name}"
+                val step = ToolStep("run", "外部工具 ${tool.name} ${args.toString().take(200)}", id = newId(), ok = true, note = "调用外部工具（MCP）")
+                askToAct(convId, msgId, step, null, dangerous = false)?.let { return it }
+                val out = runCatching { client.call(tool.name, args) }.getOrElse { "外部工具出错：${it.message?.take(300)}" }
+                updateMessage(convId, msgId) { m -> m.copy(tools = m.tools.map { if (it.id == step.id) it.copy(output = out.take(20_000), note = "外部工具（MCP）返回了") else it }) }
+                out.take(12_000)
+            } else "没有这个工具：${tc.name}"
         }
     }
 

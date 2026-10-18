@@ -1,6 +1,7 @@
 package com.guixing.jixunying.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -146,6 +147,45 @@ fun CodePage(ctl: AppController, state: AppState) {
             FieldLabel("gh.exe 的位置", "空着就自己找（PATH 里有就行）；找不到时填完整路径")
             AppTextField(gh, { gh = it }, placeholder = "比如 C:\\Program Files\\GitHub CLI\\gh.exe")
             AutoSave(gh, c.ghPath) { v -> set { it.copy(ghPath = v.trim()) } }
+        }
+        Spacer(Modifier.height(12.dp))
+    }
+    // MCP 外部工具（2026-10-18，开发补齐第 12 样）
+    if (editable) {
+        SectionCard {
+            Text("外部工具（MCP）", style = MaterialTheme.typography.titleSmall)
+            Text("接上 MCP 服务器，它带的工具两栏的 AI 都能用（比如读写某个数据库、操作浏览器、查公司内部系统）。" +
+                "用起来和跑命令一样：手动档先问你，自动档给检查员看，全部放开不问。手机、微信发起的不能用。",
+                style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle, modifier = Modifier.padding(top = 2.dp))
+            Spacer(Modifier.height(8.dp))
+            c.mcpServers.forEach { m ->
+                Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text(m.name, style = MaterialTheme.typography.bodyMedium)
+                        Text(m.command, style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, maxLines = 1)
+                    }
+                    androidx.compose.material3.Switch(m.enabled, { v -> set { s -> s.copy(mcpServers = s.mcpServers.map { if (it == m) it.copy(enabled = v) else it }) } })
+                    TextButton({ set { s -> s.copy(mcpServers = s.mcpServers - m) } }) { Text("删掉", color = MaterialTheme.colorScheme.error) }
+                }
+            }
+            var mName by remember { mutableStateOf("") }
+            var mCmd by remember { mutableStateOf("") }
+            var testMsg by remember { mutableStateOf("") }
+            Spacer(Modifier.height(6.dp))
+            AppTextField(mName, { mName = it }, placeholder = "名字，比如 文件系统")
+            Spacer(Modifier.height(4.dp))
+            AppTextField(mCmd, { mCmd = it }, placeholder = "启动命令，比如 npx -y @modelcontextprotocol/server-filesystem G:\\资料")
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                TextButton({
+                    testMsg = "正在连…"
+                    ctl.run(Command.McpTest(mCmd.trim()), quiet = true) { r -> testMsg = (if (r.ok) "✓ " else "✗ ") + r.message + if (r.data.isNotBlank()) "\n" + r.data else "" }
+                }, enabled = mCmd.isNotBlank()) { Text("测试连接") }
+                TextButton({
+                    set { s -> s.copy(mcpServers = s.mcpServers.filter { it.name != mName.trim() } + com.guixing.jixunying.model.McpServerConfig(mName.trim(), mCmd.trim())) }
+                    mName = ""; mCmd = ""; testMsg = ""
+                }, enabled = mName.isNotBlank() && mCmd.isNotBlank()) { Text("加上") }
+            }
+            if (testMsg.isNotBlank()) Text(testMsg.take(2000), style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
         }
         Spacer(Modifier.height(12.dp))
     }

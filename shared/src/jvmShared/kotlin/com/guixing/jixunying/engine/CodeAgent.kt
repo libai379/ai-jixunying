@@ -161,8 +161,9 @@ class CodeAgent(private val host: CodeHost) {
             while (true) {
                 val mode = host.state.conversation(convId)?.code?.mode ?: spec.mode
                 val settings = host.state.settings.code
+                val mcp = runCatching { host.mcpToolDefs() }.getOrDefault(emptyList())
                 val r = withContext(UsageTag(UsageKinds.CODE, convId = convId)) {
-                    host.llmClient.chat(p, spec.modelId, working, null, toolsFor(mode), null, {}, null) { c, rs ->
+                    host.llmClient.chat(p, spec.modelId, working, null, toolsFor(mode, mcp = mcp), null, {}, null) { c, rs ->
                         host.appendDelta(convId, msg.id, c, rs)
                     }
                 }
@@ -402,7 +403,14 @@ class CodeAgent(private val host: CodeHost) {
 
     // ———————————————— 工具 ————————————————
 
-    private fun toolsFor(mode: CodeMode, sub: Boolean = false): JsonArray = buildJsonArray {
+    private fun toolsFor(mode: CodeMode, sub: Boolean = false, mcp: List<Triple<String, String, JsonObject>> = emptyList()): JsonArray = buildJsonArray {
+        // MCP 外部工具（2026-10-18）：原样给模型（名字、说明、参数格式）
+        mcp.forEach { (n, d, schema) ->
+            add(buildJsonObject {
+                put("type", "function")
+                putJsonObject("function") { put("name", n); put("description", d.take(1000)); put("parameters", schema) }
+            })
+        }
         fun prop(type: String, desc: String) = buildJsonObject { put("type", type); put("description", desc) }
         fun text(desc: String) = prop("string", desc)
         fun fn(name: String, desc: String, props: JsonObject, required: List<String>) = add(buildJsonObject {
@@ -517,8 +525,24 @@ class CodeAgent(private val host: CodeHost) {
             "edit_file" -> if (mode == CodeMode.PLAN) planRefusal(convId, msgId, "edit", args.str("path").orEmpty())
                 else editFile(convId, msgId, args, mode, guard, backup)
             "run_command" -> runCommand(convId, msgId, args, spec)
-            else -> "没有这个工具：${tc.name}"
+            else -> if (tc.name.startsWith("mcp__")) mcpTool(convId, msgId, tc.name, args, spec) else "没有这个工具：${tc.name}"
         }
+    }
+
+    /** 调 MCP 外部工具（2026-10-18）：和跑命令一样的规矩——全部放开不问，自动档给检查员看，其余要批准；手机发起的也要批准。 */
+    private suspend fun mcpTool(convId: String, msgId: String, name: String, args: JsonObject, spec: CodeSpec): String {
+        val stepId = host.newId()
+        val step = ToolStep("run", "外部工具 $name ${args.toString().take(200)}", id = stepId, ok = true, note = "调用外部工具（MCP）")
+        val ask = when {
+            openAll(convId) -> false
+            autoOn(convId) -> host.autoCheck(convId, currentTask[convId].orEmpty(), "调用外部工具（MCP）$name，参数：${args.toString().take(1500)}")
+                .also { why -> if (why != null) autoNote[stepId] = "自动检查拦下：$why" } != null
+            else -> true
+        }
+        if (ask) { if (!waitApproval(convId, msgId, step)) return refused("调用 $name") } else addStep(convId, msgId, step)
+        val out = host.mcpCall(name, args)
+        setStep(convId, msgId, stepId) { it.copy(output = out.take(UI_TEXT_LIMIT), note = "外部工具（MCP）返回了") }
+        return CodeRunnerRules.clip(out, RESULT_LIMIT).first
     }
 
     /**
@@ -1172,6 +1196,9 @@ interface CodeHost {
         ToolStep("search", query, ok = false, note = "这台设备不能联网搜索") to emptyList()
     /** 打开一个网页，返回正文文字；打不开抛异常。 */
     suspend fun fetchUrl(url: String): String = throw IllegalStateException("这台设备不能读网页")
+    /** MCP（2026-10-18）：外部工具清单（给 AI 的名字, 说明, 参数格式）；调一个。 */
+    suspend fun mcpToolDefs(): List<Triple<String, String, JsonObject>> = emptyList()
+    suspend fun mcpCall(name: String, args: JsonObject): String = "这台设备没有外部工具"
     /** 删掉这些消息（「回到这里」用）。 */
     fun removeMessages(convId: String, ids: List<String>) {}
     /** 长会话压缩（2026-10-18，开发补齐第 6 样）：记录员写的前情摘要和它管到哪个时间；没有就是（""，0）。 */
