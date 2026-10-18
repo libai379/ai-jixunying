@@ -537,6 +537,11 @@ private fun WorkspaceDialog(ctl: AppController, conv: Conversation, spec: CodeSp
                 "选「全部放开」就都不问；批准时可以顺便把那个文件夹加进来。",
                 style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
             Spacer(Modifier.height(10.dp))
+            if (spec.worktreeOf.isNotBlank()) {
+                Text("这是独立副本：从 ${spec.worktreeOf} 复制出来，在分支 ${spec.worktreeBranch} 上改，不影响原来的文件夹。删掉这个会话会清掉副本（分支留着）。",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
+                Spacer(Modifier.height(8.dp))
+            }
             FieldLabel("项目文件夹", "命令在这里跑")
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 SelectionContainer(Modifier.weight(1f)) { Text(spec.folder, style = MaterialTheme.typography.bodyMedium) }
@@ -593,6 +598,15 @@ private fun WorkspaceDialog(ctl: AppController, conv: Conversation, spec: CodeSp
                         style = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace), modifier = Modifier.weight(1f))
                     if (canEdit) TextButton({ save(spec.extraPaths, spec.allowedCommands - c) }) { Text("删掉", color = MaterialTheme.colorScheme.error) }
                 }
+            }
+            if (canEdit) {
+                Spacer(Modifier.height(12.dp))
+                FieldLabel("独立副本", "几个会话同时改同一个项目时，各用一份互不干扰（要是 Git 仓库）")
+                TextButton({
+                    ctl.run(Command.CodeCreate(spec.worktreeOf.ifBlank { spec.folder }, spec.providerId, spec.modelId, CodeMode.ACCEPT_EDITS, worktree = true), quiet = true) { r ->
+                        if (r.ok) { onClose(); ctl.openConversation(r.data) } else ctl.toast(r.message.ifBlank { "开不了独立副本" })
+                    }
+                }) { Text("用独立副本开一个新会话") }
             }
             if (!canEdit) {
                 Spacer(Modifier.height(8.dp))

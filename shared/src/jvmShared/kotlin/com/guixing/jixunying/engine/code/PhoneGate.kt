@@ -64,6 +64,7 @@ object PhoneGate {
         return when (c) {
             is Command.CodeCreate -> {
                 if (c.mode !in CodePhone.createModes) return refuse(c, "手机上新建只能选「手动」或「计划」；要「接受编辑」请在电脑上切")
+                if (c.worktree) return refuse(c, "独立副本只能在电脑上开")
                 val folder = knownFolder(c.folder, s) ?: return refuse(c, "手机上只能用电脑上已经建过 Code 会话的项目文件夹")
                 Verdict(c.copy(folder = folder, fromPhone = true))
             }

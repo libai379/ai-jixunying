@@ -61,6 +61,12 @@ data class CodeSpec(
     val autoMode: Boolean = false,
     /** 这个会话开过的 PR 网址（2026-10-18）：不为空时会话顶上显示检查状态。 */
     val prUrl: String = "",
+    /**
+     * 独立副本（2026-10-18，开发补齐第 10 样；Claude 的 worktree）：不为空 = 这个会话的 folder 是从这个仓库 git worktree 出来的副本，
+     * 在自己的分支（worktreeBranch）上改；删会话时把副本清掉（分支留着）。
+     */
+    val worktreeOf: String = "",
+    val worktreeBranch: String = "",
 )
 
 /**

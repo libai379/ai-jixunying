@@ -61,4 +61,31 @@ class GitHubTest {
         assertNotNull(com.guixing.jixunying.engine.code.PhoneGate.check(Command.CodeGit(conv, "push"), on).refusal)
         assertEquals(null, com.guixing.jixunying.engine.code.PhoneGate.check(Command.CodeGit(conv, "repo"), on).refusal)
     }
+
+    /** 2026-10-18 独立副本：git worktree 到 .claude/worktrees/，新分支；主仓库 status 干净；删会话清掉副本、分支留着。 */
+    @Test
+    fun worktreeSessionIsIsolated() = runBlocking {
+        val proj = File(tmp, "wt").apply { mkdirs() }
+        git(proj, "init", "-b", "main")
+        git(proj, "config", "user.email", "t@t")
+        git(proj, "config", "user.name", "t")
+        File(proj, "a.txt").writeText("v1\n")
+        git(proj, "add", "-A"); git(proj, "commit", "-m", "init")
+        val e = Engine(Storage(File(tmp, "data2")))
+        e.codeRunner = com.guixing.jixunying.engine.code.CodeShell()
+        e.call(Command.SaveProvider(ProviderConfig("p1", "custom", "假", "http://127.0.0.1:9/v1", "sk", listOf(ModelInfo("m")))))
+        val r = e.call(Command.CodeCreate(proj.absolutePath, "p1", "m", CodeMode.MANUAL, worktree = true))
+        assertTrue(r.ok, r.message)
+        val spec = e.state.conversation(r.data)!!.code!!
+        val wt = File(spec.folder)
+        assertTrue(wt.absolutePath.replace('\\', '/').contains(".claude/worktrees/"), wt.absolutePath)
+        assertEquals("v1", File(wt, "a.txt").readText().trim(), "副本里是仓库的内容（这台电脑 git 会把换行转成 CRLF）")
+        assertTrue(spec.worktreeBranch.startsWith("jxy/"))
+        File(wt, "a.txt").writeText("v2\n")
+        assertEquals("v1", File(proj, "a.txt").readText().trim(), "改副本不影响原来的")
+        assertEquals("", git(proj, "status", "--porcelain").trim(), "主仓库看不到副本")
+        e.call(Command.DeleteConversation(r.data))
+        assertTrue(!wt.exists(), "删会话清掉副本")
+        assertTrue(spec.worktreeBranch in git(proj, "branch"), "分支留着")
+    }
 }

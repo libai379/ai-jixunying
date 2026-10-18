@@ -745,6 +745,10 @@ class Engine(
             codeBackup(c.id).deleteAll()
             // 它开着的后台命令一起停掉
             state.conversation(c.id)?.background?.forEach { codeRunner?.stopBackground(it.id) }
+            // 独立副本：清掉副本（分支留着，可能已经推上去了）
+            state.conversation(c.id)?.code?.takeIf { it.worktreeOf.isNotBlank() }?.let { sp ->
+                gitHub()?.run("git worktree remove --force \"${sp.folder}\"", File(sp.worktreeOf), 120)
+            }
             if (synchronized(stanceBook) { stanceBook.removeAll { it.convId == c.id } }) storage.saveStances(synchronized(stanceBook) { stanceBook.toList() })
             updateState { s -> s.copy(conversations = s.conversations.filterNot { it.id == c.id }) }
             emit(Event.ConversationRemoved(c.id))
@@ -768,6 +772,28 @@ class Engine(
                 (last?.let { l -> state.provider(l.providerId)?.takeIf { p -> p.enabled && p.models.any { it.id == l.modelId && it.tools } }?.let { l.providerId to l.modelId } }
                     ?: state.providers.filter { it.enabled }.firstNotNullOfOrNull { p -> p.models.firstOrNull { it.tools }?.let { p.id to it.id } })
                     ?: return CommandResult(false, "还没有能调用工具的模型：先到 设置 → 模型服务 加一个")
+            // 独立副本（2026-10-18）：git worktree add 到 <仓库>/.claude/worktrees/<编号>，新分支 jxy/<编号>
+            var wtOf = ""
+            var wtBranch = ""
+            var workFolder = folder
+            if (c.worktree) {
+                val gh = gitHub() ?: return CommandResult(false, "这台设备不能跑命令")
+                val top = gh.run("git rev-parse --show-toplevel", folder, 30)
+                if (!top.ok) return CommandResult(false, "这个文件夹不是 Git 仓库，开不了独立副本：${top.text.take(200)}")
+                val root = File(top.text.trim().lines().last().trim())
+                val tag = newId().take(8)
+                val wt = File(root, ".claude/worktrees/$tag")
+                wtBranch = "jxy/$tag"
+                val add = gh.run("git worktree add \"${wt.absolutePath}\" -b $wtBranch", root, 120)
+                if (!add.ok) return CommandResult(false, "开不了独立副本：${add.text.take(300)}")
+                wtOf = root.absolutePath
+                workFolder = wt
+                // 副本放在仓库里面：让主仓库的 git status 别把它们当成没提交的文件
+                runCatching {
+                    val ex = File(root, ".git/info/exclude")
+                    if (ex.parentFile.isDirectory && ".claude/worktrees/" !in (if (ex.isFile) ex.readText() else "")) ex.appendText("\n.claude/worktrees/\n")
+                }
+            }
             val provider = state.provider(pick.first) ?: return CommandResult(false, "服务商不存在（可能被删了）：${pick.first}")
             val model = provider.models.firstOrNull { it.id == pick.second }
                 ?: return CommandResult(false, "「${provider.name}」里没有模型 ${pick.second}")
@@ -779,7 +805,7 @@ class Engine(
                 title = "新对话",
                 memberIds = emptyList(),
                 createdAt = now(), updatedAt = now(),
-                code = CodeSpec(folder = folder.absolutePath, providerId = provider.id, modelId = model.id,
+                code = CodeSpec(folder = workFolder.absolutePath, providerId = provider.id, modelId = model.id, worktreeOf = wtOf, worktreeBranch = wtBranch,
                     // 电脑上点「+」直接开的（没给文件夹）默认「自动」：照 Claude Code，auto 是新会话的默认档
                     mode = if (c.folder.isBlank() && !c.fromPhone) CodeMode.ACCEPT_EDITS else c.mode,
                     autoMode = c.folder.isBlank() && !c.fromPhone,
