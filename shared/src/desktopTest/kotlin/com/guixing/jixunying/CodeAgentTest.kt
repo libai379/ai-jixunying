@@ -178,6 +178,13 @@ class CodeAgentTest {
                             task.startsWith("读网页 ") -> if (toolResults.isEmpty())
                                 callTool("fetch_url", mapOf("url" to task.removePrefix("读网页 ").trim()))
                             else say("读完了。")
+                            // 2026-10-18 子代理：派出来的帮手读一下 a.txt 交回结果；主 AI 派它、拿到结果收尾
+                            "派出来的帮手" in task -> if (toolResults.isEmpty())
+                                callTool("read_file", mapOf("path" to "a.txt"))
+                            else say("SUB_RESULT a.txt 里写的是 greeting world")
+                            "派子代理" in task -> if (toolResults.isEmpty())
+                                callTool("spawn_agent", mapOf("task" to "查一下 a.txt 里写了什么", "name" to "查文件"))
+                            else say("汇总好了。")
                             // 2026-10-18：列两次待办
                             "列待办" in task -> when (toolResults.size) {
                                 0 -> callTool("update_todos", mapOf("items" to "[>] 读代码\n[ ] 改代码\n[ ] 跑测试"))
@@ -578,6 +585,23 @@ class CodeAgentTest {
         assertEquals("log", com.guixing.jixunying.ui.atQuery(v))
         assertEquals(null, com.guixing.jixunying.ui.atQuery(androidx.compose.ui.text.input.TextFieldValue("a@b", androidx.compose.ui.text.TextRange(3))), "邮箱里的 @ 不算")
         assertEquals("看看 @src/LoginPage.kt ", com.guixing.jixunying.ui.insertAt(v, "src/LoginPage.kt").text)
+    }
+
+    /** 2026-10-18 子代理：自己一份上下文（不再给 spawn_agent），步子记在同一条回答上，结果交回主 AI。 */
+    @Test
+    fun subAgentRunsAndReports() = runBlocking {
+        val e = engine()
+        val conv = codeConv(e)
+        e.call(Command.CodeSend(conv, "派子代理"))
+        awaitStatus(e, conv, MsgStatus.DONE)
+        val ai = aiOf(e, conv)!!
+        assertEquals("汇总好了。", ai.content)
+        val agent = ai.tools.single { it.kind == "agent" }
+        assertTrue("SUB_RESULT" in agent.output, agent.output)
+        assertTrue(ai.tools.any { it.kind == "read" && it.input == "a.txt" }, "子代理的步子也记在这条回答上")
+        val subReq = requests.first { "派出来的帮手" in it["messages"].toString() }
+        assertTrue(toolNames(subReq).none { it == "spawn_agent" }, "子代理里不再派子代理")
+        assertTrue("SUB_RESULT" in lastToolTexts(), "结果交回主 AI")
     }
 
     /** 2026-10-18 待办清单：认 [x] / [>] / [ ] 和 Markdown 写法；一条回答里只留最新的一张。 */

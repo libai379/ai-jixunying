@@ -22,6 +22,7 @@ import com.guixing.jixunying.model.Usage
 import com.guixing.jixunying.model.UsageKinds
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
@@ -173,9 +174,16 @@ class CodeAgent(private val host: CodeHost) {
                 // 这一轮 read_file 读到的图片：工具结果里放不了图片（多数接口只认文字），等这一轮的工具结果都回完，
                 // 再补一条 user 消息把图片带上
                 val seen = mutableListOf<Pair<String, String>>()
+                // 子代理（2026-10-18）：这一轮派的几个一起跑，结果按顺序接回去
+                val subs = r.toolCalls.filter { it.name == "spawn_agent" }
+                val subResults = if (subs.isEmpty()) emptyMap() else kotlinx.coroutines.coroutineScope {
+                    subs.associate { tc -> tc.id to async { subAgent(convId, msg.id, tc, p, spec, backup, vision) } }
+                        .mapValues { it.value.await() }
+                }
                 for (tc in r.toolCalls) {
                     if (steps >= settings.maxSteps) { full = true; break }
                     steps++
+                    subResults[tc.id]?.let { working += toolMsg(tc.id, it); continue }
                     // 工作区每一步重新取：上一步刚批准「把这个文件夹加进来」，这一步就算工作区里了
                     val cur = host.state.conversation(convId)?.code ?: spec
                     val guard = CodeGuard(File(cur.folder), cur.extraPaths)
@@ -195,6 +203,51 @@ class CodeAgent(private val host: CodeHost) {
         } catch (e: Throwable) {
             host.updateMessage(convId, msg.id) { it.copy(status = MsgStatus.ERROR, error = host.friendlyError(e, p)) }
         }
+    }
+
+    /**
+     * 子代理（2026-10-18，开发补齐第 11 样；Claude Code 的 Agent 工具）：一个新的上下文，同样的工具（不能再派子代理）和权限，
+     * 步子都记在同一条回答上（界面上看得见它在干什么、要批准的照样弹）；最多走 maxSteps 的一半；返回它最后说的话。
+     */
+    private suspend fun subAgent(convId: String, msgId: String, tc: ToolCall, p: ProviderConfig, spec: CodeSpec, backup: CodeBackup, vision: Boolean): String {
+        val args = runCatching { Json.parseToJsonElement(tc.arguments.ifBlank { "{}" }).jsonObject }.getOrNull() ?: JsonObject(emptyMap())
+        val task = args.str("task").orEmpty().ifBlank { return "参数错误：缺少 task" }
+        val name = args.str("name").orEmpty().ifBlank { task.take(12) }
+        val stepId = host.newId()
+        addStep(convId, msgId, ToolStep("agent", name, id = stepId, ok = true, note = "子代理开始干活", output = task))
+        val working = mutableListOf<JsonObject>()
+        working += systemMsg(spec, host.state.settings.code, host.state.settings.personal, emptyList())
+        working += buildJsonObject { put("role", "user"); put("content", "你是主 AI 派出来的帮手，专心做下面这件事，做完用几句话交回结果（发现了什么、改了什么、还有什么没做）：\n\n$task") }
+        val limit = maxOf(5, host.state.settings.code.maxSteps / 2)
+        var steps = 0
+        var last = ""
+        try {
+            while (true) {
+                val mode = host.state.conversation(convId)?.code?.mode ?: spec.mode
+                val r = withContext(UsageTag(UsageKinds.CODE, convId = convId)) {
+                    host.llmClient.chat(p, spec.modelId, working, null, toolsFor(mode, sub = true), null, {}, null) { _, _ -> }
+                }
+                last = r.content.replace(THINK, "").trim()
+                if (r.toolCalls.isEmpty()) break
+                working += assistantMsg(r, p)
+                val seen = mutableListOf<Pair<String, String>>()
+                for (t in r.toolCalls) {
+                    if (steps >= limit) break
+                    steps++
+                    val cur = host.state.conversation(convId)?.code ?: spec
+                    working += toolMsg(t.id, step(convId, msgId, t, mode, cur, CodeGuard(File(cur.folder), cur.extraPaths), backup, if (vision) seen else null))
+                }
+                if (seen.isNotEmpty()) working += contentMsg("user", "（这是刚才读到的图片）", seen.map { it.second })
+                if (steps >= limit) { last = (last + "\n（子代理走到了 $limit 步上限，停下了）").trim(); break }
+                trimWorking(working)
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            last = "子代理出错了：${host.friendlyError(e, p)}"
+        }
+        setStep(convId, msgId, stepId) { it.copy(note = "子代理做完了（$steps 步）", output = "任务：$task\n\n结果：\n${last.ifBlank { "（没说什么）" }}".take(UI_TEXT_LIMIT)) }
+        return "子代理「$name」做完了（$steps 步）。它交回的结果：\n${last.ifBlank { "（没说什么）" }}"
     }
 
     /**
@@ -230,7 +283,7 @@ class CodeAgent(private val host: CodeHost) {
             append("用户消息里「@路径」是点名给你的文件，先读它。\n")
             append("可以用的工具：read_file（读文件，可指定行范围；图片、PDF、Word、Excel 也能读）、list_dir（列目录）、grep（按内容查找）、find_files（按文件名找）")
             if (spec.mode != CodeMode.PLAN) append("、write_file（新建或整个重写）、edit_file（局部替换）")
-            append("、run_command（跑一条命令，返回退出码和输出）、web_search（联网搜索）、fetch_url（读网页）。")
+            append("、run_command（跑一条命令，返回退出码和输出，能放后台）、web_search（联网搜索）、fetch_url（读网页）、preview（给网页截图看）、update_todos（待办清单）、spawn_agent（派子代理）。")
             // 用户自己写的（设置 → 个性化）和项目里的说明文件：照着做
             val custom = listOf(personal.instructions.trim(), personal.codeInstructions.trim()).filter { it.isNotEmpty() }
             if (custom.isNotEmpty()) {
@@ -347,7 +400,7 @@ class CodeAgent(private val host: CodeHost) {
 
     // ———————————————— 工具 ————————————————
 
-    private fun toolsFor(mode: CodeMode): JsonArray = buildJsonArray {
+    private fun toolsFor(mode: CodeMode, sub: Boolean = false): JsonArray = buildJsonArray {
         fun prop(type: String, desc: String) = buildJsonObject { put("type", type); put("description", desc) }
         fun text(desc: String) = prop("string", desc)
         fun fn(name: String, desc: String, props: JsonObject, required: List<String>) = add(buildJsonObject {
@@ -405,6 +458,13 @@ class CodeAgent(private val host: CodeHost) {
             }, listOf("command"))
         fn("read_output", "看一个后台命令到现在的输出（最后一截），以及它还在不在跑。",
             buildJsonObject { put("id", text("run_command 后台跑时给的编号")) }, listOf("id"))
+        // 2026-10-18 开发补齐第 11 样：子代理（子代理里不再派）
+        if (!sub) fn("spawn_agent", "把一块独立的活交给一个新的 AI 去做（它有自己的一份上下文，用同样的工具、同样的权限），做完把结果交回给你。" +
+            "适合：查清楚某件事（哪些地方用到了 X）、各自独立的几块改动。一轮里同时派几个会并行跑。写清楚要它做什么、做完交回什么。",
+            buildJsonObject {
+                put("task", text("交给它的活，写清楚目标和要交回什么"))
+                put("name", text("可选，给它起个短名字，比如「查登录」"))
+            }, listOf("task"))
         // 2026-10-18 开发补齐第 4 样：待办清单
         fn("update_todos", Todos.DESC, buildJsonObject { put("items", text("整张清单，一行一项，开头 [x] / [>] / [ ]")) }, listOf("items"))
         // 2026-10-18 开发补齐第 3 样：改完自己看页面
