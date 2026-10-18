@@ -399,6 +399,8 @@ class CodeAgent(private val host: CodeHost) {
             }, listOf("command"))
         fn("read_output", "看一个后台命令到现在的输出（最后一截），以及它还在不在跑。",
             buildJsonObject { put("id", text("run_command 后台跑时给的编号")) }, listOf("id"))
+        // 2026-10-18 开发补齐第 4 样：待办清单
+        fn("update_todos", Todos.DESC, buildJsonObject { put("items", text("整张清单，一行一项，开头 [x] / [>] / [ ]")) }, listOf("items"))
         // 2026-10-18 开发补齐第 3 样：改完自己看页面
         fn("preview", "打开一个网页（比如后台开的开发服务器 http://localhost:5173）截一张图给你看，用来检查改完的页面对不对。看不了图的话给你网页上的文字。",
             buildJsonObject {
@@ -421,6 +423,13 @@ class CodeAgent(private val host: CodeHost) {
             "web_search" -> webSearch(convId, msgId, args)
             "fetch_url" -> fetchUrl(convId, msgId, args, spec)
             "preview" -> previewTool(convId, msgId, args, seen)
+            "update_todos" -> {
+                val lines = Todos.normalize(args.str("items").orEmpty())
+                if (lines.isEmpty()) return "清单是空的：一行一项，开头写 [x] / [>] / [ ]"
+                // 一条回答里只留最新的一张
+                host.updateMessage(convId, msgId) { m -> m.copy(tools = m.tools.filter { it.kind != "todo" } + ToolStep("todo", "待办", id = host.newId(), output = lines, ok = true)) }
+                Todos.reply(lines)
+            }
             "read_output" -> {
                 val id = args.str("id").orEmpty().trim()
                 val out = host.backgroundOutput(id) ?: return "没有这个后台命令：$id"

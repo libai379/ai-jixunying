@@ -439,7 +439,8 @@ class ShotsTest {
             Message("u12", "c12", Role.USER, USER_ID, "跑一下测试", createdAt = now - 20_000),
             Message("r12", "c12", Role.AI, "tool:code", "", status = MsgStatus.STREAMING,
                 createdAt = now - 10_000, modelLabel = "deepseek-flash（DeepSeek 4.1 Flash）",
-                tools = listOf(ToolStep("run", "python -m pytest -q", id = "s121", approval = "waiting", prefix = "python -m pytest"))),
+                tools = listOf(ToolStep("todo", "待办", id = "s120", output = "[x] 找到测试命令\n[>] 跑测试\n[ ] 看失败的用例"),
+                    ToolStep("run", "python -m pytest -q", id = "s121", approval = "waiting", prefix = "python -m pytest"))),
         ))
         // 备份攒过头（1 GB 以上，设置 → Code 栏 顶上要提醒）：写一个稀疏文件占位，不真占盘
         java.io.RandomAccessFile(File(root, "code/c8/big.orig"), "rw").use { it.setLength(1_100_000_000L) }

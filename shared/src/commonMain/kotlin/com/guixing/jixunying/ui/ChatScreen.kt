@@ -347,8 +347,9 @@ private fun AiMessage(ctl: AppController, state: AppState, m: Message,
                 StanceChip(t, e) { onStance(t.id) }
             }
             Spacer(Modifier.height(6.dp))
+            m.tools.lastOrNull { it.kind == "todo" }?.let { TodoCard(it.output) }
             m.tools.filter { it.approval == "waiting" }.forEach { ReadApprovalCard(ctl, m, it, member?.name ?: "AI") }
-            ToolStepsView(m.tools.filter { it.approval != "waiting" && it.change == null && it.kind !in setOf("write", "edit", "delete", "run") }, streaming = m.status == MsgStatus.STREAMING)
+            ToolStepsView(m.tools.filter { it.approval != "waiting" && it.change == null && it.kind !in setOf("write", "edit", "delete", "run", "todo") }, streaming = m.status == MsgStatus.STREAMING)
             // 跑过的命令：一行，点开看输出
             m.tools.filter { it.kind == "run" && it.approval != "waiting" }.forEach { RunStepView(it) }
             // 改过的文件单独列出来（能看差异、能撤销）；拒绝了 / 没改成的写一句

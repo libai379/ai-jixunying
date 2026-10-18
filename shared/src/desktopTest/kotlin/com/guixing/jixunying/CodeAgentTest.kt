@@ -176,6 +176,12 @@ class CodeAgentTest {
                             task.startsWith("读网页 ") -> if (toolResults.isEmpty())
                                 callTool("fetch_url", mapOf("url" to task.removePrefix("读网页 ").trim()))
                             else say("读完了。")
+                            // 2026-10-18：列两次待办
+                            "列待办" in task -> when (toolResults.size) {
+                                0 -> callTool("update_todos", mapOf("items" to "[>] 读代码\n[ ] 改代码\n[ ] 跑测试"))
+                                1 -> callTool("update_todos", mapOf("items" to "- [x] 读代码\n- [>] 改代码\n- [ ] 跑测试"))
+                                else -> say("好了。")
+                            }
                             // 2026-10-18：预览一个网址
                             task.startsWith("预览 ") -> if (toolResults.isEmpty())
                                 callTool("preview", mapOf("url" to task.removePrefix("预览 ").trim()))
@@ -514,6 +520,19 @@ class CodeAgentTest {
         // 检查员的回答解析
         assertEquals(true to "好", com.guixing.jixunying.engine.AutoJudge.parse("<think>x</think>{\"allow\": true, \"reason\": \"好\"}"))
         assertNull(com.guixing.jixunying.engine.AutoJudge.parse("我觉得可以"))
+    }
+
+    /** 2026-10-18 待办清单：认 [x] / [>] / [ ] 和 Markdown 写法；一条回答里只留最新的一张。 */
+    @Test
+    fun todosUpdateInPlace() = runBlocking {
+        assertEquals("[x] a\n[>] b\n[ ] c", com.guixing.jixunying.engine.Todos.normalize("- [x] a\n* [>] b\nc\n\n"))
+        val e = engine()
+        val conv = codeConv(e)
+        e.call(Command.CodeSend(conv, "列待办"))
+        awaitStatus(e, conv, MsgStatus.DONE)
+        val todos = aiOf(e, conv)!!.tools.filter { it.kind == "todo" }
+        assertEquals(1, todos.size, "只留最新的一张")
+        assertEquals("[x] 读代码\n[>] 改代码\n[ ] 跑测试", todos.single().output)
     }
 
     /** 2026-10-18 预览：Edge 无界面截图，能看图的模型在下一条消息里收到截图；看不了图的读网页文字。 */

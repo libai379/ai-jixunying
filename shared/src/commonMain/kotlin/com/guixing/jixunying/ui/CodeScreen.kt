@@ -696,8 +696,10 @@ private fun CodeAiMessage(ctl: AppController, state: AppState, m: Message, canAc
                 }
             }
             Spacer(Modifier.height(6.dp))
+            // 待办清单放最上面（2026-10-18）
+            m.tools.lastOrNull { it.kind == "todo" }?.let { TodoCard(it.output) }
             // 每一步工具一行，点开看输入和输出；等批准的那一步自己展开
-            m.tools.forEach { CodeToolStep(ctl, m, it, canAct) }
+            m.tools.filter { it.kind != "todo" }.forEach { CodeToolStep(ctl, m, it, canAct) }
             if (reasoning.isNotEmpty()) CodeReasoning(reasoning, streaming = m.status == MsgStatus.STREAMING && body.isEmpty())
             if (body.isNotBlank()) SelectionContainer { MarkdownText(body) }
             if (m.status == MsgStatus.STREAMING && body.isEmpty() && reasoning.isEmpty() && m.tools.isEmpty()) CodeThinking()

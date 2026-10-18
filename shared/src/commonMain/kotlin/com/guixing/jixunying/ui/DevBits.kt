@@ -98,3 +98,29 @@ private fun BackgroundOutputDialog(ctl: AppController, conv: Conversation, p: Ba
         }
     }
 }
+
+/** 待办清单卡片（2026-10-18，开发补齐第 4 样）：[x] 做完打勾、[>] 正在做高亮、[ ] 没做；两栏共用。 */
+@Composable
+fun TodoCard(lines: String) {
+    val items = lines.lines().filter { it.length > 3 }
+    if (items.isEmpty()) return
+    val done = items.count { it.startsWith("[x]") }
+    Column(
+        Modifier.padding(bottom = 8.dp).fillMaxWidth().clip(RoundedCornerShape(12.dp))
+            .border(1.dp, Ext.c.border, RoundedCornerShape(12.dp)).padding(horizontal = 12.dp, vertical = 8.dp),
+    ) {
+        Text("待办 · $done / ${items.size}", style = MaterialTheme.typography.labelMedium, color = Ext.c.subtle)
+        items.forEach { l ->
+            val st = l.substring(1, 2)
+            val text = l.substring(3).trim()
+            Row(Modifier.padding(top = 3.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text(when (st) { "x" -> "✓"; ">" -> "▶"; else -> "○" }, style = MaterialTheme.typography.bodySmall,
+                    color = when (st) { "x" -> Ext.c.success; ">" -> MaterialTheme.colorScheme.primary; else -> Ext.c.subtle },
+                    modifier = Modifier.width(18.dp))
+                Text(text, style = MaterialTheme.typography.bodySmall,
+                    color = when (st) { "x" -> Ext.c.subtle; ">" -> MaterialTheme.colorScheme.onSurface; else -> MaterialTheme.colorScheme.onSurfaceVariant },
+                    textDecoration = if (st == "x") androidx.compose.ui.text.style.TextDecoration.LineThrough else null)
+            }
+        }
+    }
+}

@@ -2591,6 +2591,7 @@ class Engine(
                 }, listOf("command"))
             fn("read_output", "看一个后台命令到现在的输出（最后一截），以及它还在不在跑。",
                 buildJsonObject { put("id", prop("后台命令的编号")) }, listOf("id"))
+            fn("update_todos", Todos.DESC, buildJsonObject { put("items", prop("整张清单，一行一项，开头 [x] / [>] / [ ]")) }, listOf("items"))
             fn("preview", "打开一个网页截一张图给你看（比如后台开的开发服务器），检查页面对不对。看不了图的话给你网页上的文字。",
                 buildJsonObject { put("url", prop("网址")); put("width", prop("可选，浏览器宽度，默认 1280")) }, listOf("url"))
             fn("stop_process", "停掉一个后台命令。", buildJsonObject { put("id", prop("后台命令的编号")) }, listOf("id"))
@@ -3325,6 +3326,12 @@ class Engine(
             "find_files" -> chatFind(convId, msgId, args)
             "search_in_files" -> chatGrep(convId, msgId, args)
             "run_command" -> chatRun(convId, msgId, args)
+            "update_todos" -> {
+                val lines = Todos.normalize(args.str("items").orEmpty())
+                if (lines.isEmpty()) return "清单是空的：一行一项，开头写 [x] / [>] / [ ]"
+                updateMessage(convId, msgId) { m -> m.copy(tools = m.tools.filter { it.kind != "todo" } + ToolStep("todo", "待办", id = newId(), output = lines, ok = true)) }
+                Todos.reply(lines)
+            }
             "preview" -> {
                 val url = args.str("url").orEmpty().trim()
                 if (!url.startsWith("http")) return "url 要以 http:// 或 https:// 开头"
