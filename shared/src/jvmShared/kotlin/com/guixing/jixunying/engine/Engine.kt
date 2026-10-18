@@ -428,6 +428,11 @@ class Engine(
      * Code 会话改文件之前存的原样（docs/Code栏设计说明.md 第 5 节）：<数据目录>/code/<对话 id>/。
      * 会话自己存在 conversations（和普通对话一样），备份另放一处；删会话时用这里的 deleteAll 一起删掉。
      */
+    /** 连 GitHub 用的（只有能跑命令的设备有）：外壳、代理、gh 位置都照设置。 */
+    private fun gitHub(): com.guixing.jixunying.engine.code.GitHub? = codeRunner?.let {
+        com.guixing.jixunying.engine.code.GitHub(it, state.settings.code.shell, state.settings.proxy, state.settings.code.ghPath)
+    }
+
     private fun codeBackup(convId: String): com.guixing.jixunying.engine.code.CodeBackup =
         com.guixing.jixunying.engine.code.CodeBackup(File(File(storage.root, "code"), convId))
 
@@ -812,6 +817,41 @@ class Engine(
         is Command.CodeRevertTask -> codeAgent.revertTask(c.convId, c.messageId)
         // 只读：备份占了多少（手机发来也放行，见 engine/code/PhoneGate）
         is Command.CodeBackupSize -> CommandResult(data = codeBackupSize().toString())
+        is Command.GitHubStatus -> {
+            val gh = gitHub() ?: return CommandResult(false, "这台设备不能跑命令")
+            val (ok, text) = gh.status(File(System.getProperty("user.home")))
+            CommandResult(ok, text, data = text)
+        }
+        is Command.GitHubLogin -> {
+            val gh = gitHub() ?: return CommandResult(false, "这台设备不能跑命令")
+            if (gh.openLoginWindow(File(System.getProperty("user.home")))) CommandResult(message = "开了一个登录窗口：按提示在浏览器里点同意，登好了回来点「重新检查」")
+            else CommandResult(false, "开不了登录窗口")
+        }
+        is Command.CodeGit -> {
+            val spec = state.conversation(c.convId)?.code ?: return CommandResult(false, "这不是 Code 会话")
+            val gh = gitHub() ?: return CommandResult(false, "这台设备不能跑命令")
+            val dir = File(spec.folder)
+            when (c.op) {
+                "repo" -> CommandResult(data = JsonObject(gh.repo(dir).mapValues { kotlinx.serialization.json.JsonPrimitive(it.value) }).toString())
+                "commit" -> gh.commit(dir, c.message).let { CommandResult(it.ok, if (it.ok) "提交好了" else it.text.take(300), data = it.text) }
+                "push" -> gh.push(dir).let { CommandResult(it.ok, if (it.ok) "推上去了" else it.text.take(300), data = it.text) }
+                "commit_push" -> {
+                    val a = gh.commit(dir, c.message)
+                    if (!a.ok) CommandResult(false, a.text.take(300), data = a.text)
+                    else gh.push(dir).let { CommandResult(it.ok, if (it.ok) "提交并推上去了" else it.text.take(300), data = a.text + "\n" + it.text) }
+                }
+                "pr" -> {
+                    val a = gh.commit(dir, c.message)
+                    val b = if (a.ok) gh.push(dir) else a
+                    val p = if (b.ok) gh.pr(dir) else b
+                    CommandResult(p.ok, if (p.ok) "PR 开好了：" + (Regex("https://\\S+").find(p.text)?.value ?: "") else p.text.take(300), data = listOf(a.text, b.text, p.text).distinct().joinToString("\n"))
+                }
+                "create" -> gh.create(dir, c.name.ifBlank { dir.name }, c.private, c.message).let {
+                    CommandResult(it.ok, if (it.ok) "GitHub 上建好仓库并上传了：" + (Regex("https://github\\.com/\\S+").find(it.text)?.value ?: "") else it.text.take(300), data = it.text)
+                }
+                else -> CommandResult(false, "不认识的操作：${c.op}")
+            }
+        }
         is Command.SendMessage -> send(c)
         is Command.Stop -> { stop(c.convId); CommandResult() }
         is Command.DeleteMessage -> {

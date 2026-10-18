@@ -16,7 +16,9 @@ import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
@@ -116,6 +118,37 @@ fun CodePage(ctl: AppController, state: AppState) {
         }
     }
     Spacer(Modifier.height(12.dp))
+    // 2026-10-18 连 GitHub：开发完在会话上面点「上传」，提交、推送、开 PR、建仓库（engine/code/GitHub）
+    if (editable) {
+        SectionCard {
+            Text("GitHub", style = MaterialTheme.typography.titleSmall)
+            Text("开发完在 Code 会话上面点「上传」：提交、推到 GitHub、开 PR；还不是仓库的能直接在 GitHub 上建一个并上传。" +
+                "用的是 Git 和 GitHub 官方命令行 gh（和 Claude 桌面 App 一样），连 GitHub 走设置里的代理。",
+                style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle, modifier = Modifier.padding(top = 2.dp))
+            Spacer(Modifier.height(8.dp))
+            var ghStatus by remember { mutableStateOf<String?>(null) }
+            var ghOk by remember { mutableStateOf(false) }
+            var checking by remember { mutableStateOf(0) }
+            LaunchedEffect(checking) {
+                ghStatus = null
+                val r = ctl.backend.call(Command.GitHubStatus)
+                ghOk = r.ok
+                ghStatus = r.data.ifBlank { r.message }
+            }
+            Text(ghStatus ?: "正在检查…", style = MaterialTheme.typography.bodyMedium,
+                color = if (ghStatus != null && !ghOk) Ext.c.warning else MaterialTheme.colorScheme.onSurface)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                TextButton({ checking++ }) { Text("重新检查") }
+                if (!ghOk) TextButton({ ctl.run(Command.GitHubLogin) }) { Text("登录 GitHub") }
+                TextButton({ platform.openUrl("https://cli.github.com/") }) { Text("下载 gh") }
+            }
+            var gh by remember { mutableStateOf(c.ghPath) }
+            FieldLabel("gh.exe 的位置", "空着就自己找（PATH 里有就行）；找不到时填完整路径")
+            AppTextField(gh, { gh = it }, placeholder = "比如 C:\\Program Files\\GitHub CLI\\gh.exe")
+            AutoSave(gh, c.ghPath) { v -> set { it.copy(ghPath = v.trim()) } }
+        }
+        Spacer(Modifier.height(12.dp))
+    }
     SectionCard {
         Text("手机", style = MaterialTheme.typography.titleSmall)
         Spacer(Modifier.height(6.dp))

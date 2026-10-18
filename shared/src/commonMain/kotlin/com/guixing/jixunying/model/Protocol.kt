@@ -42,6 +42,17 @@ sealed interface Command {
      * 换文件夹时，以前改动记录里的相对路径换成完整路径，照样能撤销。只能在电脑上换（PhoneGate）。
      */
     @Serializable data class CodeSetProject(val convId: String, val folder: String = "", val providerId: String = "", val modelId: String = "") : Command
+    /**
+     * Code 栏连 GitHub（2026-10-18，engine/code/GitHub）：op =
+     * "repo" 看项目的 Git 状态（data 是 JSON：repo / branch / changes / remote / ahead）；"commit" 提交全部改动；
+     * "push" 推上去；"commit_push" 提交并推；"pr" 推上去并开 PR；"create" 还不是仓库的，建仓库并上传（name、private）。
+     * 结果 data 是命令的输出。只有 "repo" 手机上能用（PhoneGate）。
+     */
+    @Serializable data class CodeGit(val convId: String, val op: String, val message: String = "", val name: String = "", val private: Boolean = true) : Command
+    /** GitHub 连没连上：git、gh 装没装、登没登录。data 是给人看的几行字；ok = 都好了。 */
+    @Serializable data object GitHubStatus : Command
+    /** 开一个窗口登录 GitHub（gh auth login --web），用户在浏览器里点同意。只能在电脑上。 */
+    @Serializable data object GitHubLogin : Command
     /** Code 栏：换权限档（只影响之后的步骤，已经跑完的不变）。fromPhone 同上。 */
     @Serializable data class CodeSetMode(val convId: String, val mode: CodeMode, val fromPhone: Boolean = false,
         /** 2026-10-17：「全部放开」（CodeSpec.openAll）。手机发来 true 的一律拒（PhoneGate）。 */

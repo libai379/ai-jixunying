@@ -117,6 +117,8 @@ data class CodeSettings(
     val maxSteps: Int = 40,
     /** 允许手机使用 Code 栏（第二期；默认关，手机上只能选电脑上已经建过的项目文件夹）。 */
     val allowPhone: Boolean = false,
+    /** GitHub 命令行 gh.exe 的位置（2026-10-18）；空 = 靠 PATH 找。 */
+    val ghPath: String = "",
 )
 
 /**

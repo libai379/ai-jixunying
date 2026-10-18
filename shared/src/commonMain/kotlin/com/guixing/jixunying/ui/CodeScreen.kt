@@ -41,6 +41,7 @@ import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.ExpandLess
 import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.FolderOpen
+import androidx.compose.material.icons.rounded.CloudUpload
 import androidx.compose.material.icons.rounded.HourglassTop
 import androidx.compose.material.icons.rounded.Menu
 import androidx.compose.material.icons.rounded.PhoneAndroid
@@ -237,6 +238,23 @@ private fun CodeTopBar(ctl: AppController, state: AppState, conv: Conversation, 
             }
             Spacer(Modifier.width(10.dp))
         }
+        // 上传到 GitHub（2026-10-18）：电脑上才有
+        var showGit by remember(conv.id) { mutableStateOf(ctl.debugDialog == "git") }
+        if (LocalPlatform.current.isDesktop && !ctl.remoteMode) {
+            Row(
+                Modifier.clip(RoundedCornerShape(50)).border(1.dp, Ext.c.border, RoundedCornerShape(50))
+                    .clickable { showGit = true }.padding(horizontal = 9.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(Icons.Rounded.CloudUpload, "上传到 GitHub", Modifier.size(15.dp), tint = MaterialTheme.colorScheme.primary)
+                if (wide) {
+                    Spacer(Modifier.width(4.dp))
+                    Text("上传", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+            Spacer(Modifier.width(8.dp))
+        }
+        if (showGit) GitDialog(ctl, conv, spec) { showGit = false }
         // 工作区：项目文件夹 + 加进来的文件夹，还有「不再问」的命令（2026-10-17）
         val extra = spec.extraPaths.size + spec.allowedCommands.size
         Row(
@@ -268,6 +286,82 @@ private fun CodeTopBar(ctl: AppController, state: AppState, conv: Conversation, 
     }
     HorizontalDivider(color = Ext.c.border)
     if (showPath) WorkspaceDialog(ctl, conv, spec) { showPath = false }
+}
+
+/**
+ * 上传到 GitHub（2026-10-18，用户：「能不能连接 github，开发完帮忙上传」；engine/code/GitHub）。
+ * 是仓库、有远端：提交并推送 / 推送并开 PR。不是仓库或没有远端：在 GitHub 上建仓库并上传（默认私有）。
+ * 结果原样显示在下面（出错能看到 git / gh 说了什么）。
+ */
+@Composable
+private fun GitDialog(ctl: AppController, conv: Conversation, spec: CodeSpec, onClose: () -> Unit) {
+    var info by remember { mutableStateOf<Map<String, String>?>(null) }
+    var reload by remember { mutableStateOf(0) }
+    var busy by remember { mutableStateOf(false) }
+    var output by remember { mutableStateOf("") }
+    var message by remember { mutableStateOf(if (conv.title == "新对话") "" else conv.title) }
+    var name by remember { mutableStateOf(folderName(spec.folder)) }
+    var private by remember { mutableStateOf(true) }
+    LaunchedEffect(reload) {
+        val r = ctl.backend.call(Command.CodeGit(conv.id, "repo"))
+        info = runCatching { kotlinx.serialization.json.Json.parseToJsonElement(r.data).let { e ->
+            (e as kotlinx.serialization.json.JsonObject).mapValues { (it.value as kotlinx.serialization.json.JsonPrimitive).content } } }.getOrElse { mapOf("repo" to "false") }
+    }
+    fun go(op: String) {
+        busy = true
+        output = "正在做…"
+        ctl.run(Command.CodeGit(conv.id, op, message.ifBlank { "更新" }, name, private), okText = null, quiet = true) { r ->
+            busy = false
+            output = (if (r.ok) "✓ " else "✗ ") + r.message + if (r.data.isNotBlank()) "\n\n" + r.data else ""
+            reload++
+        }
+    }
+    val i = info
+    val isRepo = i?.get("repo") == "true"
+    val remote = i?.get("remote").orEmpty()
+    AppDialog("上传到 GitHub", onClose, width = 600.dp, actions = { Button(onClose) { Text("好了") } }) {
+        Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState())) {
+            when {
+                i == null -> Text("正在看项目的 Git 状态…", style = MaterialTheme.typography.bodyMedium, color = Ext.c.subtle)
+                isRepo -> {
+                    Text("分支：${i["branch"].orEmpty().ifBlank { "（还没有）" }}" + (if (remote.isNotBlank()) "　远端：$remote" else "　还没连到 GitHub"),
+                        style = MaterialTheme.typography.bodyMedium)
+                    val changes = i["changes"].orEmpty().lines().filter { it.isNotBlank() }
+                    Text(if (changes.isEmpty()) "没有没提交的改动" + (i["ahead"].orEmpty().takeIf { it.isNotBlank() && it != "0" }?.let { "（有 $it 个提交还没推上去）" } ?: "")
+                        else "有 ${changes.size} 个文件改过、还没提交：", style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle, modifier = Modifier.padding(top = 4.dp))
+                    if (changes.isNotEmpty()) MonoBox(changes.take(30).joinToString("\n") + if (changes.size > 30) "\n…还有 ${changes.size - 30} 个" else "")
+                }
+                else -> Text("这个文件夹还不是 Git 仓库。可以在 GitHub 上建一个仓库，把现在的文件传上去。",
+                    style = MaterialTheme.typography.bodyMedium)
+            }
+            Spacer(Modifier.height(10.dp))
+            FieldLabel("这次提交写什么", "空着就写「更新」")
+            AppTextField(message, { message = it }, placeholder = "比如：登录页加上记住密码")
+            Spacer(Modifier.height(10.dp))
+            if (i != null && (!isRepo || remote.isBlank())) {
+                FieldLabel("GitHub 上的仓库名", "只能用英文、数字、- _ .")
+                AppTextField(name, { name = it })
+                Row(Modifier.clickable { private = !private }.padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    androidx.compose.material3.Checkbox(private, { private = it })
+                    Text("私有仓库（只有你能看）", style = MaterialTheme.typography.bodyMedium)
+                }
+                Button({ go("create") }, enabled = !busy) { Text("在 GitHub 上建仓库并上传") }
+            } else if (i != null) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button({ go("commit_push") }, enabled = !busy) { Text("提交并推送") }
+                    OutlinedButton({ go("pr") }, enabled = !busy) { Text("推送并开 PR") }
+                    TextButton({ go("commit") }, enabled = !busy) { Text("只提交") }
+                }
+            }
+            if (output.isNotBlank()) {
+                Spacer(Modifier.height(10.dp))
+                MonoBox(output.take(4000))
+            }
+            Spacer(Modifier.height(6.dp))
+            Text("要先在 设置 → Code 栏 → GitHub 里登录。推不上去时看上面 git 说了什么，也可以直接让 AI 帮你查。",
+                style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
+        }
+    }
 }
 
 /**

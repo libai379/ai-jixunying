@@ -1,0 +1,64 @@
+package com.guixing.jixunying
+
+import com.guixing.jixunying.engine.Engine
+import com.guixing.jixunying.engine.Storage
+import com.guixing.jixunying.model.CodeMode
+import com.guixing.jixunying.model.Command
+import com.guixing.jixunying.model.ModelInfo
+import com.guixing.jixunying.model.ProviderConfig
+import kotlinx.coroutines.runBlocking
+import java.io.File
+import kotlin.test.AfterTest
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertNotNull
+import kotlin.test.assertTrue
+
+/**
+ * Code 栏上传到 GitHub（2026-10-18，engine/code/GitHub）：不连网，用本机一个空的「远端」仓库代替 GitHub，
+ * 走一遍：看状态 → 提交并推送 → 远端真收到了。建仓库（gh repo create）要连 GitHub、要登录，这里不测。
+ */
+class GitHubTest {
+    private val tmp = kotlin.io.path.createTempDirectory("jxy-git").toFile()
+
+    @AfterTest
+    fun cleanup() { tmp.deleteRecursively() }
+
+    private fun git(dir: File, vararg args: String): String {
+        val p = ProcessBuilder(listOf("git") + args).directory(dir).redirectErrorStream(true).start()
+        val out = p.inputStream.readBytes().toString(Charsets.UTF_8)
+        p.waitFor()
+        return out
+    }
+
+    @Test
+    fun commitAndPushToRemote() = runBlocking {
+        val remote = File(tmp, "remote.git").apply { mkdirs() }
+        git(remote, "init", "--bare", "-b", "main")
+        val proj = File(tmp, "proj").apply { mkdirs() }
+        git(proj, "init", "-b", "main")
+        git(proj, "config", "user.email", "t@t")
+        git(proj, "config", "user.name", "t")
+        git(proj, "remote", "add", "origin", remote.absolutePath)
+        File(proj, "a.txt").writeText("hello\n")
+
+        val e = Engine(Storage(File(tmp, "data")))
+        e.codeRunner = com.guixing.jixunying.engine.code.CodeShell()
+        e.call(Command.SaveProvider(ProviderConfig("p1", "custom", "假", "http://127.0.0.1:9/v1", "sk", listOf(ModelInfo("m")))))
+        // 测试里不走代理
+        e.call(Command.SaveSettings(e.state.settings.copy(proxy = "")))
+        val conv = e.call(Command.CodeCreate(proj.absolutePath, "p1", "m", CodeMode.MANUAL)).data
+
+        val st = e.call(Command.CodeGit(conv, "repo")).data
+        assertTrue("\"repo\":\"true\"" in st && "a.txt" in st, st)
+        val r = e.call(Command.CodeGit(conv, "commit_push", "第一次上传"))
+        assertTrue(r.ok, r.message + "\n" + r.data)
+        assertTrue("第一次上传" in git(remote, "log", "--oneline", "main"), "远端收到了提交")
+        // 再点一次：没有改动也不报错
+        assertTrue(e.call(Command.CodeGit(conv, "commit", "")).ok)
+        // 手机上只能看状态
+        val on = e.state.copy(settings = e.state.settings.copy(code = e.state.settings.code.copy(allowPhone = true)))
+        assertNotNull(com.guixing.jixunying.engine.code.PhoneGate.check(Command.CodeGit(conv, "push"), on).refusal)
+        assertEquals(null, com.guixing.jixunying.engine.code.PhoneGate.check(Command.CodeGit(conv, "repo"), on).refusal)
+    }
+}
