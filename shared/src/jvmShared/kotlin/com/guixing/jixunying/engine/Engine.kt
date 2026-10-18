@@ -1442,7 +1442,14 @@ class Engine(
         }
         val change = com.guixing.jixunying.model.FileChange(stepId, f.absolutePath, diff.added, diff.removed, created = created)
         updateMessage(convId, msgId) { m -> m.copy(tools = m.tools.map { if (it.id == stepId) it.copy(change = change) else it }) }
-        return "${if (edit) "改好了" else if (created) "新建好了" else "重写好了"}：${f.absolutePath}（+${diff.added} −${diff.removed}）。用户能在回答里一键撤销。"
+        // 改完文件后的钩子（2026-10-18，和 Code 栏同一条设置）
+        val hookOut = state.settings.code.hookAfterEdit.trim().takeIf { it.isNotEmpty() }?.let { hook ->
+            val runner = codeRunner ?: return@let ""
+            val r = runner.run(hook.replace("\$FILE", "\"${f.absolutePath}\""), f.absoluteFile.parentFile ?: f, state.settings.code.shell, state.settings.code.commandTimeoutSec, 6000)
+            updateMessage(convId, msgId) { m -> m.copy(tools = m.tools + ToolStep("run", "改完文件后的钩子：$hook", id = newId(), ok = r.exitCode == 0, output = r.output.take(6000), note = "钩子")) }
+            "\n钩子（$hook）" + (if (r.exitCode == 0) "跑完了" else "报错了") + "：" + r.output.take(3000)
+        }.orEmpty()
+        return "${if (edit) "改好了" else if (created) "新建好了" else "重写好了"}：${f.absolutePath}（+${diff.added} −${diff.removed}）。用户能在回答里一键撤销。$hookOut"
     }
 
     /**

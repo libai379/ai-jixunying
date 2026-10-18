@@ -158,6 +158,7 @@ class CodeAgent(private val host: CodeHost) {
                 output = notes.joinToString("\n\n") { "—— ${it.first} ——\n${it.second}" }.take(UI_TEXT_LIMIT), ok = true, note = "项目说明，每次开始自动读"))
             var steps = 0
             var reachedMax = false
+            var taskHookRan = false
             while (true) {
                 val mode = host.state.conversation(convId)?.code?.mode ?: spec.mode
                 val settings = host.state.settings.code
@@ -169,7 +170,16 @@ class CodeAgent(private val host: CodeHost) {
                 }
                 usage = Usage(usage.prompt + r.usage.prompt, usage.completion + r.usage.completion,
                     usage.cached + r.usage.cached, usage.millis + r.usage.millis)
-                if (r.toolCalls.isEmpty()) break
+                if (r.toolCalls.isEmpty()) {
+                    val hook = settings.hookAfterTask.trim()
+                    if (hook.isEmpty() || taskHookRan) break
+                    taskHookRan = true
+                    val out = runHook(convId, msg.id, hook, "任务做完后的钩子", File(spec.folder))
+                    if ("报错了" !in out) break
+                    working += buildJsonObject { put("role", "assistant"); put("content", r.content) }
+                    working += buildJsonObject { put("role", "user"); put("content", "（程序自动跑了用户设的检查，没过，改好它：）$out") }
+                    continue
+                }
                 working += assistantMsg(r, p)
                 var full = false
                 // 这一轮 read_file 读到的图片：工具结果里放不了图片（多数接口只认文字），等这一轮的工具结果都回完，
@@ -782,6 +792,26 @@ class CodeAgent(private val host: CodeHost) {
         return "$url 的网页文字（${if (seen == null) "你看不了图" else "截图没成功"}）：\n" + CodeRunnerRules.clip(text, RESULT_LIMIT).first
     }
 
+    /**
+     * 钩子（2026-10-18）：用户在设置里写的命令，AI 改完文件 / 做完任务后跑；不用批准（是用户自己写的）。
+     * 返回接在工具结果后面给 AI 看的一段（没设钩子返回空字符串）。
+     */
+    private suspend fun runHook(convId: String, msgId: String, command: String, label: String, dir: File): String {
+        val runner = host.runner ?: return ""
+        val code = host.state.settings.code
+        val r = runner.run(command, dir, code.shell, code.commandTimeoutSec, RESULT_LIMIT)
+        val ok = r.exitCode == 0
+        addStep(convId, msgId, ToolStep("run", "$label：$command", id = host.newId(), ok = ok, output = r.output.take(UI_TEXT_LIMIT),
+            note = if (ok) "钩子跑完了" else "钩子报错（退出码 ${r.exitCode ?: "超时"}）"))
+        return "\n\n【$label】$command\n" + (if (ok) "跑完了" else "报错了（退出码 ${r.exitCode ?: "超时"}），看看是不是要改") + "\n" + CodeRunnerRules.clip(r.output, 4000).first
+    }
+
+    private suspend fun afterEditHook(convId: String, msgId: String, file: File): String {
+        val hook = host.state.settings.code.hookAfterEdit.trim().ifBlank { return "" }
+        val spec = host.state.conversation(convId)?.code ?: return ""
+        return runHook(convId, msgId, hook.replace("\$FILE", "\"${file.absolutePath}\""), "改完文件后的钩子", File(spec.folder))
+    }
+
     /** 计划档：写文件的工具没有提供，模型硬调也不执行。 */
     private suspend fun planRefusal(convId: String, msgId: String, kind: String, path: String): String {
         addStep(convId, msgId, ToolStep(kind, path, id = host.newId(), ok = false, approval = "denied", note = "现在是计划档，没有提供这个工具，没有执行"))
@@ -814,7 +844,7 @@ class CodeAgent(private val host: CodeHost) {
         }
         val change = FileChange(stepId, rel, diff.added, diff.removed, created = created)
         setStep(convId, msgId, stepId) { it.copy(ok = true, output = uiText(diff.text), change = change) }
-        return "写好了：$rel（${if (created) "新建" else "重写"}，+${diff.added} −${diff.removed}）"
+        return "写好了：$rel（${if (created) "新建" else "重写"}，+${diff.added} −${diff.removed}）" + afterEditHook(convId, msgId, file)
     }
 
     private suspend fun editFile(convId: String, msgId: String, args: JsonObject, mode: CodeMode,
@@ -850,7 +880,7 @@ class CodeAgent(private val host: CodeHost) {
         }
         val change = FileChange(stepId, rel, diff.added, diff.removed, created = created)
         setStep(convId, msgId, stepId) { it.copy(ok = true, output = uiText(diff.text), change = change) }
-        return "改好了：$rel（+${diff.added} −${diff.removed}）"
+        return "改好了：$rel（+${diff.added} −${diff.removed}）" + afterEditHook(convId, msgId, file)
     }
 
     private suspend fun runCommand(convId: String, msgId: String, args: JsonObject, spec: CodeSpec): String {

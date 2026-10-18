@@ -129,6 +129,13 @@ data class CodeSettings(
     val ghPath: String = "",
     /** MCP 服务器（2026-10-18，开发补齐第 12 样）：名字 + 启动命令（stdio）。两栏的 AI 都能用它们的工具。只在电脑上配（PhoneGate 保留电脑上的 code 设置）。 */
     val mcpServers: List<McpServerConfig> = emptyList(),
+    /**
+     * 钩子（2026-10-18，开发补齐第 12 样；Claude Code 的 hooks 里最常用的两种）：
+     * hookAfterEdit = AI 每次改完一个文件后跑（$FILE 换成那个文件的完整路径，比如格式化）；hookAfterTask = 一次任务做完后跑（比如跑测试）。
+     * 输出给 AI 看、在回答里显示；空 = 不跑。只在电脑上配。
+     */
+    val hookAfterEdit: String = "",
+    val hookAfterTask: String = "",
 )
 
 @Serializable

@@ -636,6 +636,22 @@ class CodeAgentTest {
         e.closeMcp()
     }
 
+    /** 2026-10-18 钩子：改完文件后的钩子输出给 AI；任务做完后的钩子没过，AI 再改一轮（只一轮）。 */
+    @Test
+    fun hooksRunAndFeedBack() = runBlocking {
+        val e = engine()
+        e.call(Command.SaveSettings(e.state.settings.copy(code = e.state.settings.code.copy(
+            hookAfterEdit = "Write-Output \"HOOK_EDIT \$FILE\"", hookAfterTask = "Write-Output HOOK_TASK_FAIL; exit 1"))))
+        val conv = codeConv(e, CodeMode.ACCEPT_EDITS)
+        e.call(Command.CodeSend(conv, "所有 greeting"))
+        awaitStatus(e, conv, MsgStatus.DONE)
+        val all = requests.joinToString { it["messages"].toString() }
+        assertTrue("HOOK_EDIT" in all && "a.txt" in all, "改完文件后的钩子输出给了 AI")
+        assertTrue("程序自动跑了用户设的检查" in all && "HOOK_TASK_FAIL" in all, "任务钩子没过，告诉 AI")
+        val hookSteps = aiOf(e, conv)!!.tools.filter { it.input.startsWith("任务做完后的钩子") }
+        assertEquals(1, hookSteps.size, "任务钩子只跑一次，不会没完没了")
+    }
+
     /** 2026-10-18 技能：项目 .claude/skills/<名字>/SKILL.md 的名字和说明列进系统说明，正文不放（要用时自己读）。 */
     @Test
     fun projectSkillsListedInPrompt() = runBlocking {

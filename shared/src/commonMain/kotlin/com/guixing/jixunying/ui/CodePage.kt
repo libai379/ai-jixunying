@@ -150,6 +150,23 @@ fun CodePage(ctl: AppController, state: AppState) {
         }
         Spacer(Modifier.height(12.dp))
     }
+    // 钩子（2026-10-18，开发补齐第 12 样）
+    if (editable) {
+        SectionCard {
+            Text("钩子", style = MaterialTheme.typography.titleSmall)
+            Text("自己写的命令，在固定的时候自动跑，输出给 AI 看（报错了它会接着改）。不用批准：是你自己写的。",
+                style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle, modifier = Modifier.padding(top = 2.dp))
+            var he by remember { mutableStateOf(c.hookAfterEdit) }
+            var ht by remember { mutableStateOf(c.hookAfterTask) }
+            FieldLabel("改完文件后跑", "\$FILE 换成刚改的那个文件，比如 npx prettier --write \$FILE")
+            AppTextField(he, { he = it }, placeholder = "空着就不跑")
+            AutoSave(he, c.hookAfterEdit) { v -> set { it.copy(hookAfterEdit = v.trim()) } }
+            FieldLabel("任务做完后跑", "在项目文件夹里跑，比如 npm test；没过的话 AI 会再改一轮")
+            AppTextField(ht, { ht = it }, placeholder = "空着就不跑")
+            AutoSave(ht, c.hookAfterTask) { v -> set { it.copy(hookAfterTask = v.trim()) } }
+        }
+        Spacer(Modifier.height(12.dp))
+    }
     // MCP 外部工具（2026-10-18，开发补齐第 12 样）
     if (editable) {
         SectionCard {
