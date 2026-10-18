@@ -88,6 +88,12 @@ class CodeSafetyTest {
         assertEquals("./gradlew :shared:desktopTest", c.prefixOf("./gradlew :shared:desktopTest --tests X"))
         assertEquals("Get-ChildItem", c.prefixOf("Get-ChildItem -Recurse src"))
         assertEquals("npm", c.prefixOf("npm --version"))
+        assertEquals("python -m pytest", c.prefixOf("python -m pytest -q"))
+        assertEquals("python manage.py", c.prefixOf("python manage.py runserver"))
+        assertNull(c.prefixOf("python -c print(1)"), "直接执行一段代码的不给")
+        assertNull(c.prefixOf("node -e x"))
+        assertNull(c.prefixOf("powershell -Command Get-Date"), "再开一层外壳的不给")
+        assertNull(c.prefixOf("cmd /c dir"))
         // 拼起来的、危险的：不给「不再问」
         assertNull(c.prefixOf("git status; rm -rf /"))
         assertNull(c.prefixOf("echo hi && del x"))
@@ -109,6 +115,7 @@ class CodeSafetyTest {
         assertNull(c.allowedBy("git status; git push --force", allowed))
         assertNull(c.allowedBy("npm run x | tee log", allowed))
         assertNull(c.allowedBy("gitx status", allowed))
+        assertNull(c.allowedBy("python -c print(1)", listOf("python")), "记过 python 也不放行 -c")
     }
 
     @Test

@@ -180,4 +180,8 @@
 3. 会话上面加「工作区」按钮：看项目文件夹、加进来的文件夹（能加、能移出）、不再问的命令（能删）。
 4. 手机：批准时的两个「顺便放宽」一律当成只这一次；改工作区（CodeSetAccess）直接拒（engine/code/PhoneGate）。手机只能批准具体一步这条不变。
 5. 附件：Code 输入框和聊天一样能带附件（回形针、图片、拖进来、Ctrl+V）。图片只把最新一条任务里的发给能看图的模型；文档抽出文字接在任务后面；电脑上的文件把原路径写进任务、加进工作区（手机发来的路径清空）。read_file 照 Claude Code 的 Read：图片给能看图的模型看（工具结果放不了图片，所以这一轮工具结果回完后补一条 user 消息带上图片），PDF / Word / Excel / PPT 用 DocExtract 抽文字。
-6. 仍然不做「完全不问」（绕过权限）档：第 1 节的决定没被推翻，用户要的话再加。
+6. 个性化：设置里「我的资料」改名「个性化」，加「自定义指令」（Settings.personal.instructions，聊天每位成员的系统说明末尾和 Code 都用）和「Code 栏另外的指令」（codeInstructions，相当于 Claude Code 的个人 CLAUDE.md）。Settings.SCHEMA 升到 6，旧版手机发来的保存设置保留电脑上的。
+7. 项目说明：Code 每次任务开头读项目文件夹里的 CLAUDE.md、.claude/CLAUDE.md、CLAUDE.local.md，这三个都没有才读 AGENTS.md；每个最多 3 万字；读了哪些记一步给用户看。没做往上级目录找。
+8. 新工具：find_files（按文件名通配找，照 Glob；新改的在前）；web_search（和聊天同一套搜索引擎，不改本机，不问）；fetch_url（照 WebFetch 先问——读过本机文件的 AI 能把内容拼进网址发出去；可选「这个网站这个会话里不再问」，记成 web:网站 放在 allowedCommands）。
+9. 命令「不再问」补充：python / node 等解释器带 -c / -e、再开一层外壳（powershell、cmd、bash…）的不给；python -m 记到模块名。
+10. 仍然不做「完全不问」（绕过权限）档：第 1 节的决定没被推翻，用户要的话再加。

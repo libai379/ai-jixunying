@@ -23,7 +23,9 @@ import io.ktor.server.cio.CIO
 import io.ktor.server.engine.EmbeddedServer
 import io.ktor.server.engine.embeddedServer
 import io.ktor.server.request.receiveText
+import io.ktor.server.response.respondText
 import io.ktor.server.response.respondTextWriter
+import io.ktor.server.routing.get
 import io.ktor.server.routing.post
 import io.ktor.server.routing.routing
 import kotlinx.coroutines.delay
@@ -79,6 +81,8 @@ class CodeAgentTest {
 
         fake = embeddedServer(CIO, port = port) {
             routing {
+                // 2026-10-17：fetch_url 读的网页
+                get("/page") { call.respondText("<html><body><p>PAGE_BODY_42</p></body></html>", ContentType.Text.Html) }
                 post("/v1/chat/completions") {
                     val req = Json.parseToJsonElement(call.receiveText()).jsonObject
                     requests += req
@@ -159,6 +163,13 @@ class CodeAgentTest {
                             "看看图" in task -> if (toolResults.isEmpty())
                                 callTool("read_file", mapOf("path" to "pic.png"))
                             else say("看完了。")
+                            // 2026-10-17：按文件名找 / 读网页（参数跟在任务后面）
+                            task.startsWith("找文件 ") -> if (toolResults.isEmpty())
+                                callTool("find_files", mapOf("pattern" to task.removePrefix("找文件 ").trim()))
+                            else say("找完了。")
+                            task.startsWith("读网页 ") -> if (toolResults.isEmpty())
+                                callTool("fetch_url", mapOf("url" to task.removePrefix("读网页 ").trim()))
+                            else say("读完了。")
                             // 2026-10-17：跑任务后面跟的那条命令
                             task.startsWith("跑命令 ") -> if (toolResults.isEmpty())
                                 callTool("run_command", mapOf("command" to task.removePrefix("跑命令 ").trim()))
@@ -390,6 +401,59 @@ class CodeAgentTest {
         val n = sendTask(e, conv, "读外面的文件 $path")
         awaitStatus(e, conv, MsgStatus.DONE, minAi = n)
         assertTrue(aiOf(e, conv)!!.tools.none { it.approval.isNotEmpty() }, "加进工作区以后不该再问")
+    }
+
+    /** 2026-10-17：设置 → 个性化 的自定义指令、项目里的 CLAUDE.md 都进 Code 的系统说明；有 CLAUDE.md 时不读 AGENTS.md。 */
+    @Test
+    fun instructionsAndProjectNotesReachTheModel() = runBlocking {
+        File(project, "CLAUDE.md").writeText("NOTE_FROM_CLAUDE_MD\n")
+        File(project, "AGENTS.md").writeText("NOTE_FROM_AGENTS_MD\n")
+        val e = engine()
+        e.call(Command.SaveSettings(e.state.settings.copy(personal = com.guixing.jixunying.model.PersonalSettings("INSTR_ALL", "INSTR_CODE"))))
+        val conv = codeConv(e)
+        e.call(Command.CodeSend(conv, "你好"))
+        awaitStatus(e, conv, MsgStatus.DONE)
+        val system = requests.last()["messages"]!!.jsonArray.first().jsonObject["content"].toString()
+        assertTrue("INSTR_ALL" in system && "INSTR_CODE" in system, "自定义指令")
+        assertTrue("NOTE_FROM_CLAUDE_MD" in system, "项目说明")
+        assertFalse("NOTE_FROM_AGENTS_MD" in system, "有 CLAUDE.md 时不读 AGENTS.md")
+        assertTrue(aiOf(e, conv)!!.tools.any { it.note.contains("项目说明") && "CLAUDE.md" in it.input }, "读了哪些说明要记一步给用户看")
+        // 旧版手机（schema 5）不认识个性化，发来的保存设置不能把电脑上的自定义指令冲掉
+        assertTrue(e.call(Command.SaveSettings(e.state.settings.copy(schema = 5, personal = com.guixing.jixunying.model.PersonalSettings()))).ok)
+        assertEquals("INSTR_ALL", e.state.settings.personal.instructions)
+    }
+
+    /** 2026-10-17：find_files 按文件名找（*.kt 不写目录也能找到深层的）；指到外面的联接不跟。 */
+    @Test
+    fun findFilesByName() = runBlocking {
+        File(project, "src/deep/x").mkdirs()
+        File(project, "src/deep/x/Hello.kt").writeText("x")
+        File(project, "README.md").writeText("x")
+        val e = engine()
+        val conv = codeConv(e)
+        e.call(Command.CodeSend(conv, "找文件 *.kt"))
+        awaitStatus(e, conv, MsgStatus.DONE)
+        assertTrue("src/deep/x/Hello.kt" in lastToolTexts(), lastToolTexts().takeLast(300))
+        assertFalse("README.md" in lastToolTexts().substringAfter("找到"))
+        val n = sendTask(e, conv, "找文件 src/**/*.kt")
+        awaitStatus(e, conv, MsgStatus.DONE, minAi = n)
+        assertTrue("src/deep/x/Hello.kt" in lastToolTexts())
+    }
+
+    /** 2026-10-17：fetch_url 先问；选「这个网站不再问」以后同一个网站直接读。 */
+    @Test
+    fun fetchUrlAsksPerSite() = runBlocking {
+        val e = engine()
+        val conv = codeConv(e)
+        e.call(Command.CodeSend(conv, "读网页 ${base()}/page"))
+        val ask = awaitWaiting(e, conv, "fetch")
+        assertEquals("web:127.0.0.1", ask.prefix)
+        assertTrue(e.call(Command.CodeDecide(conv, ask.id, true, "command")).ok)
+        awaitStatus(e, conv, MsgStatus.DONE)
+        assertTrue("PAGE_BODY_42" in lastToolTexts(), lastToolTexts().takeLast(300))
+        val n = sendTask(e, conv, "读网页 ${base()}/page")
+        awaitStatus(e, conv, MsgStatus.DONE, minAi = n)
+        assertTrue(aiOf(e, conv)!!.tools.single { it.kind == "fetch" }.approval.isEmpty(), "同一个网站不再问")
     }
 
     private fun writePng(f: File) {

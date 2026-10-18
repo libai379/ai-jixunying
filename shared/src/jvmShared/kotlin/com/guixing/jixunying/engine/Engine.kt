@@ -208,6 +208,8 @@ class Engine(
         override fun cancel(convId: String) = stop(convId)
         override fun friendlyError(e: Throwable, p: ProviderConfig?) = this@Engine.friendlyError(e, p)
         override fun updateCode(convId: String, transform: (CodeSpec) -> CodeSpec) = updateCodeSpec(convId, transform)
+        override suspend fun webSearch(query: String) = runSearch(query, mutableListOf())
+        override suspend fun fetchUrl(url: String): String = runCatching { search.fetch(url, false) }.getOrElse { search.fetch(url, true) }
         override fun attachmentParts(m: Message, latest: Boolean, vision: Boolean): Pair<String, List<String>> {
             val sb = StringBuilder()
             val imgs = mutableListOf<String>()
@@ -601,8 +603,10 @@ class Engine(
                 val speechSettings = if (c.settings.schema >= 4) c.settings.speech else s.settings.speech
                 // 1.7.0 以前的不认识按意思搜设置（开关、向量模型）
                 val semantic = if (c.settings.schema >= 5) c.settings.semantic else s.settings.semantic
+                // 2026-10-17 以前的不认识个性化（自定义指令）
+                val personal = if (c.settings.schema >= 6) c.settings.personal else s.settings.personal
                 s.copy(settings = c.settings.copy(search = c.settings.search.copy(apiKeys = keys), costs = s.settings.costs, memory = memory, office = office, code = code,
-                    speech = speechSettings, semantic = semantic, schema = Settings.SCHEMA))
+                    speech = speechSettings, semantic = semantic, personal = personal, schema = Settings.SCHEMA))
             }
             if (before.enabled != state.settings.relay.enabled || before.brokers != state.settings.relay.brokers) onRelaySettingsChanged?.invoke()
             // 关掉了的后台活不会再跑，它以前的出错提示也就不会「成功一次自己消失」：直接清掉

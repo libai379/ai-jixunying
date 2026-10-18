@@ -51,16 +51,34 @@ object CodeCommands {
         val t = cmd.trim()
         if (t.isEmpty() || compound(t) || dangerous(t)) return null
         val parts = t.split(Regex("\\s+"))
-        val first = parts[0]
-        val n = if (program(first) in TWO_PART && parts.size > 1 && !parts[1].startsWith("-")) 2 else 1
+        val first = program(parts[0])
+        // 再开一层外壳、直接执行一段代码的：记了开头等于什么都放行
+        if (first in SHELLS) return null
+        val second = parts.getOrNull(1)?.lowercase()
+        if (first in INTERPRETERS && second in setOf("-c", "-e", "--eval", "-command", "-encodedcommand")) return null
+        val n = when {
+            // python -m pytest：记到模块名
+            first in INTERPRETERS && second == "-m" && parts.size > 2 -> 3
+            first in TWO_PART && second != null && !second.startsWith("-") -> 2
+            else -> 1
+        }
         return parts.take(n).joinToString(" ")
     }
+
+    /** 再开一层外壳的程序：不给「不再问」。 */
+    private val SHELLS = setOf("powershell", "pwsh", "cmd", "bash", "sh", "zsh", "wsl", "start-process", "invoke-command")
+    /** 能直接执行一段代码的解释器：-c / -e 不给「不再问」，-m 记到模块名。 */
+    private val INTERPRETERS = setOf("python", "python3", "py", "node", "deno", "ruby", "perl", "php")
 
     /** 这条命令被记下的哪个开头放行了；都没有返回 null。拼起来的、危险的永远不放行。 */
     fun allowedBy(cmd: String, prefixes: List<String>): String? {
         val t = cmd.trim()
         if (t.isEmpty() || compound(t) || dangerous(t)) return null
         val parts = t.split(Regex("\\s+"))
+        // 记过「python」开头（比如批准过 python --version），也不能顺带放行 python -c 一段代码、再开一层外壳
+        val first = program(parts[0])
+        val second = parts.getOrNull(1)?.lowercase()
+        if (first in SHELLS || (first in INTERPRETERS && second in setOf("-c", "-e", "--eval", "-command", "-encodedcommand"))) return null
         return prefixes.firstOrNull { p ->
             val pp = p.trim().split(Regex("\\s+")).filter { it.isNotEmpty() }
             pp.isNotEmpty() && pp.size <= parts.size && pp.indices.all { i ->

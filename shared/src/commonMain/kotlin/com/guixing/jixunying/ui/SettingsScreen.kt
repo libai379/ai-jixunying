@@ -686,7 +686,7 @@ private fun ThinkingPicker(mode: ThinkingMode, rule: ThinkingRule, onPick: (Thin
         color = if (Thinking.available(rule, mode)) Ext.c.subtle else MaterialTheme.colorScheme.error)
 }
 
-// ———————————————— 我的资料 ————————————————
+// ———————————————— 个性化（我的资料 + 自定义指令） ————————————————
 
 @Composable
 private fun ProfilePage(ctl: AppController, state: AppState) {
@@ -695,7 +695,24 @@ private fun ProfilePage(ctl: AppController, state: AppState) {
     var about by remember { mutableStateOf(state.profile.about) }
     AutoSave(name, state.profile.name) { v -> if (v.isNotBlank()) ctl.updateProfile { it.copy(name = v.trim().take(16)) } }
     AutoSave(about, state.profile.about) { v -> ctl.updateProfile { it.copy(about = v) } }
-    PageHeader("我的资料", "AI 会知道你是谁。写下你的身份和偏好，回答会更对路。改了会自动保存。")
+    // 自定义指令（2026-10-17，学 WorkBuddy 的 个性化 → 自定义指令）
+    val personal = state.settings.personal
+    var instructions by remember { mutableStateOf(personal.instructions) }
+    var codeInstructions by remember { mutableStateOf(personal.codeInstructions) }
+    AutoSave(instructions, personal.instructions) { v -> ctl.updateSettings { it.copy(personal = it.personal.copy(instructions = v)) } }
+    AutoSave(codeInstructions, personal.codeInstructions) { v -> ctl.updateSettings { it.copy(personal = it.personal.copy(codeInstructions = v)) } }
+    PageHeader("个性化", "AI 会知道你是谁、该怎么做。写下你的身份、偏好和要它一直照着做的规矩，回答会更对路。改了会自动保存。")
+    SectionCard {
+        FieldLabel("自定义指令", "每次回答都照着做：聊天里的每位成员、Code 栏都用")
+        AppTextField(instructions, { instructions = it }, singleLine = false, minLines = 5,
+            placeholder = "例如：回答先给结论再讲理由；事实要带出处，说不出出处就写「未确认」；不要表格；用中文")
+        Spacer(Modifier.height(10.dp))
+        FieldLabel("Code 栏另外的指令", "只给 Code 栏，管所有项目（每个项目自己的规矩写在项目里的 CLAUDE.md 或 AGENTS.md，Code 栏会自己读）")
+        AppTextField(codeInstructions, { codeInstructions = it }, singleLine = false, minLines = 4,
+            placeholder = "例如：改完先跑测试再说做完了；注释写中文；不要动 .git 和签名文件")
+        AutoSaveHint(if (instructions != personal.instructions || codeInstructions != personal.codeInstructions) "正在保存…" else "已保存")
+    }
+    Spacer(Modifier.height(12.dp))
     SectionCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
             MemberAvatar(null, 52.dp, emoji = state.profile.avatar, color = 0xFF4F5BEB)

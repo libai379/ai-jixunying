@@ -129,6 +129,13 @@ object Prompts {
                 appendLine("- 你能记事：用户说「记住……」，或者说出了以后的对话也用得上的个人信息（身份、职业、所在地、偏好、对回答方式的要求、长期项目）时，调用 remember 记下来，记完简单说一句「记住了」。密码、Key、证件号之类不要记。")
                 appendLine("- 你能翻以前的聊天：用户说「上次」「之前说过」「以前聊的」时，先用 search_history 搜以前的聊天记录再回答，别凭印象编。")
             }
+            // 用户在 设置 → 个性化 里写的自定义指令（2026-10-17）：放在最后，是用户本人的要求
+            val custom = state.settings.personal.instructions.trim()
+            if (custom.isNotEmpty()) {
+                appendLine()
+                appendLine("【${profile.name}的自定义指令】（他/她在设置里写的，每次回答都照着做；和上面的说法有出入时，以这里为准）")
+                appendLine(custom)
+            }
             appendLine()
             append("现在轮到你（${me.name}）发言。")
         }

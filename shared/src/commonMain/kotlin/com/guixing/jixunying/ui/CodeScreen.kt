@@ -41,6 +41,7 @@ import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.ExpandLess
 import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.FolderOpen
+import androidx.compose.material.icons.rounded.HourglassTop
 import androidx.compose.material.icons.rounded.Menu
 import androidx.compose.material.icons.rounded.PhoneAndroid
 import androidx.compose.material.icons.rounded.Psychology
@@ -306,10 +307,11 @@ private fun WorkspaceDialog(ctl: AppController, conv: Conversation, spec: CodeSp
                 Text("加一个文件夹")
             }
             Spacer(Modifier.height(12.dp))
-            FieldLabel("不再问的命令", if (spec.allowedCommands.isEmpty()) "还没有；批准命令时选「…开头的不再问」就会记在这里" else "以这些开头的命令直接跑；拼起来的和危险的命令照样每次都问")
+            FieldLabel("不再问的命令和网站", if (spec.allowedCommands.isEmpty()) "还没有；批准命令时选「…开头的不再问」就会记在这里" else "以这些开头的命令直接跑；拼起来的和危险的命令照样每次都问")
             spec.allowedCommands.forEach { c ->
                 Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text(c, style = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace), modifier = Modifier.weight(1f))
+                    Text(if (c.startsWith("web:")) "网站 " + c.removePrefix("web:") else c,
+                        style = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace), modifier = Modifier.weight(1f))
                     if (canEdit) TextButton({ save(spec.extraPaths, spec.allowedCommands - c) }) { Text("删掉", color = MaterialTheme.colorScheme.error) }
                 }
             }
@@ -512,9 +514,14 @@ private fun CodeToolStep(ctl: AppController, msg: Message, t: ToolStep, canAct: 
             Column(Modifier.fillMaxWidth().padding(start = 8.dp, top = 6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 when {
                     // 工作区外面的读 / 列目录 / 查找：等批准时写清是哪个路径
-                    waiting && (t.kind == "read" || t.kind == "list" || t.kind == "grep") -> {
+                    waiting && (t.kind == "read" || t.kind == "list" || t.kind == "grep" || t.kind == "find") -> {
                         Text(if (readonly) "读工作区外面的东西，在等你批准：" else "${t.note.ifBlank { "读工作区外面的东西" }}：",
                             style = MaterialTheme.typography.labelMedium, color = Ext.c.warning)
+                        MonoBox(t.input)
+                    }
+                    // 要打开的网页：等批准时写清网址（2026-10-17）
+                    waiting && t.kind == "fetch" -> {
+                        Text(if (readonly) "打开网页，在等你批准：" else "要打开这个网页：", style = MaterialTheme.typography.labelMedium, color = Ext.c.warning)
                         MonoBox(t.input)
                     }
                     // 要跑的命令：等批准的时候也要看得见
@@ -550,7 +557,10 @@ private fun CodeToolStep(ctl: AppController, msg: Message, t: ToolStep, canAct: 
                             if (canWiden && t.prefix.isNotBlank()) OutlinedButton(
                                 onClick = { ctl.run(Command.CodeDecide(msg.convId, t.id, true, "command")) },
                                 contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 14.dp, vertical = 6.dp),
-                            ) { Text("允许，「${t.prefix.take(30)}」开头的这个会话里不再问", maxLines = 1, overflow = TextOverflow.Ellipsis) }
+                            ) {
+                                Text(if (t.prefix.startsWith("web:")) "允许，${t.prefix.removePrefix("web:")} 这个会话里不再问"
+                                    else "允许，「${t.prefix.take(30)}」开头的这个会话里不再问", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
                             Box(
                                 Modifier.clip(RoundedCornerShape(50)).border(1.dp, MaterialTheme.colorScheme.error, RoundedCornerShape(50))
                                     .clickable { ctl.run(Command.CodeDecide(msg.convId, t.id, false)) }
@@ -570,6 +580,21 @@ private fun CodeToolStep(ctl: AppController, msg: Message, t: ToolStep, canAct: 
 /** 一行摘要：做了什么 + 这条的结果。 */
 private fun codeStepLine(t: ToolStep): Pair<ImageVector, String> {
     val where = t.input.ifBlank { "." }
+    // 还在等批准的：还没做，写「要…」（2026-10-17 截图看出「读了 X · 等你批准」自相矛盾）
+    if (t.approval == "waiting") {
+        val todo = when (t.kind) {
+            "read" -> "要读 ${t.input}"
+            "list" -> "要列 ${t.input}"
+            "grep" -> "要在 ${t.input} 里查找"
+            "find" -> "要在 ${t.input} 里找文件"
+            "write" -> "要写 ${t.input}"
+            "edit" -> "要改 ${t.input}"
+            "run" -> "要跑「${t.input.take(80)}」"
+            "fetch" -> "要打开 ${t.input.take(80)}"
+            else -> "${t.kind} ${t.input}"
+        }
+        return Icons.Rounded.HourglassTop to "$todo · 等你批准"
+    }
     val head = when (t.kind) {
         "read" -> "读了 ${t.input}"
         "list" -> if (where == ".") "列了项目根目录" else "列了 ${t.input}"
@@ -577,6 +602,9 @@ private fun codeStepLine(t: ToolStep): Pair<ImageVector, String> {
         "write" -> "写了 ${t.input}"
         "edit" -> "改了 ${t.input}"
         "run" -> "跑了「${t.input.take(80)}」"
+        "find" -> "找文件「${t.input}」"
+        "search" -> "搜了「${t.input}」"
+        "fetch" -> "打开了 ${t.input.take(80)}"
         else -> "${t.kind} ${t.input}"
     }
     val tail = when {
@@ -584,7 +612,8 @@ private fun codeStepLine(t: ToolStep): Pair<ImageVector, String> {
         t.approval == "denied" -> " · 没有做"
         t.kind == "run" && t.note.isNotEmpty() -> " · ${t.note}"
         t.kind == "write" || t.kind == "edit" -> t.change?.let { "（+${it.added} −${it.removed}）" } ?: ""
-        t.kind == "grep" && !t.ok -> " · 没找到"
+        (t.kind == "grep" || t.kind == "find") && !t.ok -> " · 没找到"
+        t.kind == "search" && t.ok -> " · ${t.sources.size} 条"
         t.kind == "read" && !t.ok -> " · 读不了"
         !t.ok -> " · 没成功"
         else -> ""
@@ -592,7 +621,7 @@ private fun codeStepLine(t: ToolStep): Pair<ImageVector, String> {
     return when (t.kind) {
         "read" -> Icons.Rounded.Description to (head + tail)
         "list" -> Icons.Rounded.FolderOpen to (head + tail)
-        "grep" -> Icons.Rounded.Search to (head + tail)
+        "grep", "find", "search" -> Icons.Rounded.Search to (head + tail)
         "write" -> Icons.Rounded.Add to (head + tail)
         "edit" -> Icons.Rounded.Edit to (head + tail)
         else -> Icons.Rounded.Computer to (head + tail)

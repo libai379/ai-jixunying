@@ -47,7 +47,7 @@ import kotlinx.coroutines.launch
 val LocalSnackbar = androidx.compose.runtime.staticCompositionLocalOf { SnackbarHostState() }
 
 enum class SettingsTab(val title: String) {
-    PROVIDERS("模型服务"), MEMBERS("AI 成员"), PROFILE("我的资料"), MEMORY("记忆"), SEMANTIC("按意思搜"), SEARCH("联网搜索"), IMAGE("画图"), SPEECH("语音"),
+    PROVIDERS("模型服务"), MEMBERS("AI 成员"), PROFILE("个性化"), MEMORY("记忆"), SEMANTIC("按意思搜"), SEARCH("联网搜索"), IMAGE("画图"), SPEECH("语音"),
     OFFICE("Word / Excel / PPT"),
     CODE("Code 栏"),
     WEIXIN("微信"), DEVICES("联机"), APPEARANCE("外观"), ABOUT("关于"),

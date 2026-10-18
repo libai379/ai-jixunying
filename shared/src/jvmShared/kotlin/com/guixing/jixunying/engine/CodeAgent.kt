@@ -14,6 +14,7 @@ import com.guixing.jixunying.model.CommandResult
 import com.guixing.jixunying.model.FileChange
 import com.guixing.jixunying.model.Message
 import com.guixing.jixunying.model.MsgStatus
+import com.guixing.jixunying.model.PersonalSettings
 import com.guixing.jixunying.model.ProviderConfig
 import com.guixing.jixunying.model.Role
 import com.guixing.jixunying.model.ToolStep
@@ -134,8 +135,12 @@ class CodeAgent(private val host: CodeHost) {
             val working = mutableListOf<JsonObject>()
             // 模型能不能看图（设置 → 模型服务 里的「能看图」）：能看就把用户发的图片、read_file 读到的图片发过去
             val vision = p.models.firstOrNull { it.id == spec.modelId }?.vision == true
-            working += systemMsg(spec, host.state.settings.code)
+            val notes = withContext(Dispatchers.IO) { projectNotes(File(spec.folder)) }
+            working += systemMsg(spec, host.state.settings.code, host.state.settings.personal, notes)
             working += history(convId, task, msg.id, vision)
+            // 读了哪些项目说明，记一步给用户看（和 Claude Code 开会话时读 CLAUDE.md 一样，每次任务开头读）
+            if (notes.isNotEmpty()) addStep(convId, msg.id, ToolStep("read", notes.joinToString("、") { it.first }, id = host.newId(),
+                output = notes.joinToString("\n\n") { "—— ${it.first} ——\n${it.second}" }.take(UI_TEXT_LIMIT), ok = true, note = "项目说明，每次开始自动读"))
             var steps = 0
             var reachedMax = false
             while (true) {
@@ -178,8 +183,27 @@ class CodeAgent(private val host: CodeHost) {
         }
     }
 
-    /** 给模型的系统说明：只讲环境（项目文件夹、外壳、有哪些工具），不加限制词。 */
-    private fun systemMsg(spec: CodeSpec, code: CodeSettings): JsonObject = buildJsonObject {
+    /**
+     * 项目里的说明文件（2026-10-17，照 Claude Code：https://code.claude.com/docs/en/memory 的表——
+     * 项目的 ./CLAUDE.md 或 ./.claude/CLAUDE.md、本人的 ./CLAUDE.local.md；没有 CLAUDE.md 时读 AGENTS.md）。
+     * 只读项目文件夹这一层（Claude Code 还会往上级目录找，我们先不做）。每个最多 MAX_NOTE 字。
+     */
+    private fun projectNotes(folder: File): List<Pair<String, String>> {
+        fun read(name: String): Pair<String, String>? {
+            val f = File(folder, name)
+            if (!f.isFile || f.length() > 2L * 1024 * 1024) return null
+            val t = runCatching { f.readText() }.getOrNull()?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+            return name to (if (t.length > MAX_NOTE) t.take(MAX_NOTE) + "\n…（后面还有 ${t.length - MAX_NOTE} 字没放进来，要的话用 read_file 读）" else t)
+        }
+        val claude = listOfNotNull(read("CLAUDE.md"), read(".claude/CLAUDE.md"))
+        val local = listOfNotNull(read("CLAUDE.local.md"))
+        val agents = if (claude.isEmpty() && local.isEmpty()) listOfNotNull(read("AGENTS.md")) else emptyList()
+        return claude + local + agents
+    }
+
+    /** 给模型的系统说明：讲环境（项目文件夹、外壳、有哪些工具），再接上用户自己的指令和项目说明；不加限制词。 */
+    private fun systemMsg(spec: CodeSpec, code: CodeSettings, personal: PersonalSettings = PersonalSettings(),
+                          notes: List<Pair<String, String>> = emptyList()): JsonObject = buildJsonObject {
         put("role", "system")
         put("content", buildString {
             append("你在帮用户改一个项目里的代码。\n")
@@ -189,9 +213,17 @@ class CodeAgent(private val host: CodeHost) {
             append("当前外壳：").append(shellLabel(code.shell)).append("；命令的工作目录就是项目文件夹；单条命令最多跑 ")
             append(code.commandTimeoutSec).append(" 秒，超时会把进程连同它的子进程杀掉。\n")
             append("系统是 Windows，文件按 UTF-8 读写。\n")
-            append("可以用的工具：read_file（读文件，可指定行范围）、list_dir（列目录）、grep（按内容查找）")
+            append("可以用的工具：read_file（读文件，可指定行范围；图片、PDF、Word、Excel 也能读）、list_dir（列目录）、grep（按内容查找）、find_files（按文件名找）")
             if (spec.mode != CodeMode.PLAN) append("、write_file（新建或整个重写）、edit_file（局部替换）")
-            append("、run_command（跑一条命令，返回退出码和输出）。")
+            append("、run_command（跑一条命令，返回退出码和输出）、web_search（联网搜索）、fetch_url（读网页）。")
+            // 用户自己写的（设置 → 个性化）和项目里的说明文件：照着做
+            val custom = listOf(personal.instructions.trim(), personal.codeInstructions.trim()).filter { it.isNotEmpty() }
+            if (custom.isNotEmpty()) {
+                append("\n\n【用户的自定义指令】（用户在设置里写的，每次都照着做）\n").append(custom.joinToString("\n\n"))
+            }
+            notes.forEach { (name, text) ->
+                append("\n\n【项目说明：").append(name).append("】（项目文件夹里的说明文件，照着做）\n").append(text)
+            }
         })
     }
 
@@ -317,6 +349,16 @@ class CodeAgent(private val host: CodeHost) {
                 put("end_line", prop("integer", "可选，读到第几行（含）"))
             }, listOf("path"))
         fn("list_dir", "列一个目录里有哪些文件和子目录。", buildJsonObject { put("path", path) }, emptyList())
+        // 2026-10-17 照 Claude Code 补的：按文件名找（Glob）、联网搜索（WebSearch）、读网页（WebFetch）
+        fn("find_files", "按文件名找文件，比如 **/*.kt、src/**/Test*.java、*.md；返回匹配的路径（新改的在前）。",
+            buildJsonObject {
+                put("pattern", text("文件名的通配写法：* 匹配一段名字，** 匹配任意几层目录"))
+                put("path", text("可选，在哪个目录底下找；不写就是项目文件夹"))
+            }, listOf("pattern"))
+        fn("web_search", "联网搜索，查文档、报错、库的最新版本这类本机上没有的信息。返回标题、网址和摘要。",
+            buildJsonObject { put("query", text("要搜的内容")) }, listOf("query"))
+        fn("fetch_url", "打开一个网页，读它的正文文字（比如官方文档、发布说明、报错讨论）。会先问用户。",
+            buildJsonObject { put("url", text("网址，http 或 https 开头")) }, listOf("url"))
         fn("grep", "按内容在项目里查找，返回命中的文件、行号和那一行。",
             buildJsonObject {
                 put("pattern", text("要找的内容，正则表达式或者普通文字"))
@@ -348,6 +390,9 @@ class CodeAgent(private val host: CodeHost) {
             "read_file" -> readFile(convId, msgId, args, guard, seen)
             "list_dir" -> listDir(convId, msgId, args, guard)
             "grep" -> grep(convId, msgId, args, guard)
+            "find_files" -> findFiles(convId, msgId, args, guard)
+            "web_search" -> webSearch(convId, msgId, args)
+            "fetch_url" -> fetchUrl(convId, msgId, args, spec)
             // 计划档不给这两个工具；模型硬要调，也在这里拒掉，文件不动
             "write_file" -> if (mode == CodeMode.PLAN) planRefusal(convId, msgId, "write", args.str("path").orEmpty())
                 else writeFile(convId, msgId, args, mode, guard, backup)
@@ -489,6 +534,88 @@ class CodeAgent(private val host: CodeHost) {
             if (hits.size >= GREP_MAX) "\n（只列了前 $GREP_MAX 条，写具体一点再找）" else ""
     }
 
+    /**
+     * 按文件名找（2026-10-17，照 Claude Code 的 Glob）。规矩和 grep 一样：工作区里不问，指到外面的联接跳过；
+     * 问过用户的外面目录，只在那个目录自己底下找。新改的排在前面（Claude Code 的 Glob 也这么排）。
+     */
+    private suspend fun findFiles(convId: String, msgId: String, args: JsonObject, guard: CodeGuard): String {
+        val pattern = args.str("pattern").orEmpty().trim().replace('\\', '/')
+        if (pattern.isBlank()) return "参数错误：缺少 pattern"
+        val raw = args.str("path").orEmpty().ifBlank { "." }
+        val start = guard.resolve(raw) ?: return outside(raw)
+        val rel = guard.relative(start).ifBlank { "." }
+        if (!start.isDirectory) return "不是目录：$rel"
+        val asked = try { askOutside(convId, msgId, "find", start, guard, "在工作区外面找文件") } catch (r: Refused) { return r.text }
+        val fence = if (asked == null) guard else CodeGuard(start)
+        fun allowed(f: File) = if (asked == null) fence.inScope(f) else fence.resolveInProject(f.absolutePath) != null
+        // 没写目录的（*.kt）按「任意一层」找，和大家的习惯一样
+        val glob = if ('/' in pattern) pattern else "**/$pattern"
+        val matcher = runCatching { java.nio.file.FileSystems.getDefault().getPathMatcher("glob:$glob") }.getOrElse { return "通配写法不对：$pattern" }
+        val rootMatcher = if ('/' in pattern) null else runCatching { java.nio.file.FileSystems.getDefault().getPathMatcher("glob:$pattern") }.getOrNull()
+        val found = mutableListOf<File>()
+        var scanned = 0
+        withContext(Dispatchers.IO) {
+            val queue = ArrayDeque<File>().apply { add(start) }
+            while (queue.isNotEmpty() && scanned < FIND_SCAN_MAX) {
+                val f = queue.removeFirst()
+                if (!allowed(f)) continue
+                if (f.isDirectory) {
+                    f.listFiles()?.filter { it.name != ".git" && it.name != "node_modules" }?.forEach { queue.add(it) }
+                } else {
+                    scanned++
+                    val r = start.toPath().relativize(f.toPath())
+                    if (matcher.matches(r) || rootMatcher?.matches(r) == true) found += f
+                }
+            }
+        }
+        val sorted = found.sortedByDescending { it.lastModified() }
+        val output = sorted.take(FIND_MAX).joinToString("\n") { guard.relative(it) }
+        record(convId, msgId, asked, ToolStep("find", "$pattern · $rel", id = host.newId(), output = output, ok = found.isNotEmpty()))
+        return if (found.isEmpty()) "在 $rel 里没找到「$pattern」（看了 $scanned 个文件）。"
+        else "$rel 里找到 ${found.size} 个：\n$output" + if (found.size > FIND_MAX) "\n（只列了最新的 $FIND_MAX 个，写具体一点再找）" else ""
+    }
+
+    /** 联网搜索（2026-10-17）：不改本机任何东西，不用问；结果记一步给用户看。 */
+    private suspend fun webSearch(convId: String, msgId: String, args: JsonObject): String {
+        val q = args.str("query").orEmpty().trim()
+        if (q.isBlank()) return "参数错误：缺少 query"
+        val (step, res) = host.webSearch(q)
+        addStep(convId, msgId, step.copy(id = host.newId(), output = res.joinToString("\n") { "${it.title}\n${it.url}" }))
+        return when {
+            !step.ok -> "搜索失败：${step.note}"
+            res.isEmpty() -> "没有搜到结果。"
+            else -> res.mapIndexed { i, r -> "[${i + 1}] ${r.title}\n${r.url}\n${r.snippet}" }.joinToString("\n\n")
+        }
+    }
+
+    /**
+     * 读网页（2026-10-17）：照 Claude Code 的 WebFetch 先问用户——读过本机文件的 AI 能把内容拼进网址发出去，
+     * 所以每个网站第一次都问；批准时可选「这个网站这个会话里不再问」（记成 web:网站 放在 allowedCommands 里）。
+     */
+    private suspend fun fetchUrl(convId: String, msgId: String, args: JsonObject, spec: CodeSpec): String {
+        val url = args.str("url").orEmpty().trim()
+        if (!url.startsWith("http://") && !url.startsWith("https://")) return "参数错误：url 要以 http:// 或 https:// 开头"
+        val host = runCatching { java.net.URI(url).host?.lowercase() }.getOrNull()?.takeIf { it.isNotBlank() } ?: return "网址不对：$url"
+        val key = "web:$host"
+        val stepId = this.host.newId()
+        val allowed = key in spec.allowedCommands
+        val step = ToolStep("fetch", url, id = stepId, ok = true, prefix = if (allowed) "" else key,
+            note = if (allowed) "$host 这个会话里不再问" else "")
+        if (!allowed) { if (!waitApproval(convId, msgId, step)) return refused("打开 $url") } else addStep(convId, msgId, step)
+        return try {
+            val text = this.host.fetchUrl(url)
+            val (shown, cut) = CodeRunnerRules.clip(text, RESULT_LIMIT)
+            setStep(convId, msgId, stepId) { it.copy(output = shown.take(UI_TEXT_LIMIT), ok = true) }
+            "$url 的正文：\n$shown" + if (cut) "\n（太长，中间省略了）" else ""
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            val why = this.host.friendlyError(e)
+            setStep(convId, msgId, stepId) { it.copy(ok = false, note = "打不开：$why") }
+            "网页打不开：$why"
+        }
+    }
+
     /** 计划档：写文件的工具没有提供，模型硬调也不执行。 */
     private suspend fun planRefusal(convId: String, msgId: String, kind: String, path: String): String {
         addStep(convId, msgId, ToolStep(kind, path, id = host.newId(), ok = false, approval = "denied", note = "现在是计划档，没有提供这个工具，没有执行"))
@@ -624,7 +751,8 @@ class CodeAgent(private val host: CodeHost) {
             }
             remember == "command" && step.prefix.isNotBlank() -> {
                 host.updateCode(convId) { s -> if (step.prefix in s.allowedCommands) s else s.copy(allowedCommands = s.allowedCommands + step.prefix) }
-                "（「${step.prefix}」开头的命令这个会话里不再问）"
+                if (step.prefix.startsWith("web:")) "（网站 ${step.prefix.removePrefix("web:")} 这个会话里不再问）"
+                else "（「${step.prefix}」开头的命令这个会话里不再问）"
             }
             else -> ""
         }
@@ -775,6 +903,8 @@ class CodeAgent(private val host: CodeHost) {
         private const val RESULT_LIMIT = 12_000
         /** 界面上一步显示的内容最长多少字。 */
         private const val UI_TEXT_LIMIT = 20_000
+        /** 每个项目说明文件（CLAUDE.md 等）最多放多少字进系统说明。 */
+        private const val MAX_NOTE = 30_000
         /** 单个文件多大就不读了。 */
         private const val MAX_FILE_BYTES = 4L * 1024 * 1024
         /** read_file 读图片、文档的上限（图片会先压小再发）。 */
@@ -783,6 +913,8 @@ class CodeAgent(private val host: CodeHost) {
         private val IMAGE_EXT = setOf("png", "jpg", "jpeg", "webp", "gif", "bmp")
         private val DOC_EXT = setOf("pdf", "docx", "xlsx", "pptx", "doc", "xls", "ppt")
         private const val LIST_MAX = 200
+        private const val FIND_MAX = 200
+        private const val FIND_SCAN_MAX = 50_000
         private const val GREP_MAX = 60
         private const val GREP_FILES = 2000
         private const val GREP_FILE_BYTES = 1L * 1024 * 1024
@@ -825,4 +957,9 @@ interface CodeHost {
      * 文档抽出的文字接在后面（最新一条给得多、以前的只给开头）；图片只有最新一条、模型能看图时才发。
      */
     fun attachmentParts(m: Message, latest: Boolean, vision: Boolean): Pair<String, List<String>> = "" to emptyList()
+    /** 联网搜索（和聊天成员同一套，设置 → 联网搜索 选的引擎）：返回（工具步骤，结果）。 */
+    suspend fun webSearch(query: String): Pair<ToolStep, List<com.guixing.jixunying.model.SearchSource>> =
+        ToolStep("search", query, ok = false, note = "这台设备不能联网搜索") to emptyList()
+    /** 打开一个网页，返回正文文字；打不开抛异常。 */
+    suspend fun fetchUrl(url: String): String = throw IllegalStateException("这台设备不能读网页")
 }

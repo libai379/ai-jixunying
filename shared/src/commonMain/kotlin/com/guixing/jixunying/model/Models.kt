@@ -228,6 +228,8 @@ data class Settings(
     val speech: SpeechSettings = SpeechSettings(),
     /** 按意思搜（1.7.0）：聊天记录、我的文档要不要算向量，用哪一家的向量模型（见 model/Semantic.kt）。 */
     val semantic: SemanticSettings = SemanticSettings(),
+    /** 个性化（2026-10-17，学 WorkBuddy 的 设置 → 个性化 → 自定义指令）：用户自己写的、每次都要照着做的指令。 */
+    val personal: PersonalSettings = PersonalSettings(),
     /**
      * 发设置的这一端认得哪一版设置。旧版手机不认识这个字段，发来的就是 0；
      * 电脑看到 0 就保留旧版不认识的那几项（不然手机一改设置就把电脑上的冲回默认值）。
@@ -237,12 +239,23 @@ data class Settings(
     companion object {
         /**
          * 1 = 1.4.0 加了裁判和 AI 核实；2 = 1.5.0 加了 office（Word / Excel）；3 = 1.6.0 加了 code（Code 栏）；
-         * 4 = 1.7.0 加了 speech（语音）；5 = 1.7.0 加了 semantic（按意思搜）。
+         * 4 = 1.7.0 加了 speech（语音）；5 = 1.7.0 加了 semantic（按意思搜）；6 = 2026-10-17 加了 personal（自定义指令）。
          * 以后再加旧版不认识的设置项，就加一，并在 SaveSettings 里保留。
          */
-        const val SCHEMA = 5
+        const val SCHEMA = 6
     }
 }
+
+/**
+ * 设置 → 个性化 → 自定义指令（2026-10-17，用户：「也可以学 WorkBuddy，在个性化里面自定义指令」）。
+ * WorkBuddy 的做法（腾讯云开发者社区教程，官方文档没写这一页，未确认）：设置中心 → 个性化 → 自定义指令，写下的规则每次对话、每个任务都生效。
+ * 我们分两格：instructions 聊天和 Code 栏都用；codeInstructions 只给 Code 栏（相当于 Claude Code 的个人 CLAUDE.md，管所有项目）。
+ */
+@Serializable
+data class PersonalSettings(
+    val instructions: String = "",
+    val codeInstructions: String = "",
+)
 
 /**
  * 设置 → Word / Excel：AI 做文件时怎么排版（用户 10-08：「做精细，人性化智能化，后台多做开关我可以主动调试」）。

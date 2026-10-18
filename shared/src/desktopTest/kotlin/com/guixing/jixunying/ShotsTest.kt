@@ -198,6 +198,12 @@ class ShotsTest {
             // 手机发起建的（第二期 2026-10-13）：电脑上侧栏和会话上面都要标「手机发起」
             Conversation("c10", "手机建的会话", emptyList(), createdAt = now - 300_000, updatedAt = now - 10_000,
                 code = com.guixing.jixunying.model.CodeSpec(File(root, "我的项目").absolutePath, "pd", "deepseek-flash", fromPhone = true)),
+            // 2026-10-17：读工作区外面的文件在等批准（带「加进工作区」）、命令在等批准（带「同样开头不再问」）
+            Conversation("c11", "读别处的资料", emptyList(), createdAt = now - 200_000, updatedAt = now - 5_000,
+                code = com.guixing.jixunying.model.CodeSpec(File(root, "我的项目").absolutePath, "pd", "deepseek-flash",
+                    extraPaths = listOf("G:\\资料\\接口文档"), allowedCommands = listOf("git status", "web:docs.python.org"))),
+            Conversation("c12", "跑测试", emptyList(), createdAt = now - 150_000, updatedAt = now - 4_000,
+                code = com.guixing.jixunying.model.CodeSpec(File(root, "我的项目").absolutePath, "pd", "deepseek-flash")),
         )
         val st = Storage(root)
         st.saveState(AppState(
@@ -406,6 +412,19 @@ class ShotsTest {
                 createdAt = now - 290_000, modelLabel = "deepseek-flash（DeepSeek 4.1 Flash）",
                 tools = listOf(ToolStep("edit", "README.md", id = "s101", output = diffReadme, change = FileChange("s101", "README.md", added = 4, removed = 1)))),
         ))
+        st.saveMessages("c11", listOf(
+            Message("u11", "c11", Role.USER, USER_ID, "照 G:\\资料\\设计稿\\登录页说明.md 把登录页改一下", createdAt = now - 20_000),
+            Message("r11", "c11", Role.AI, "tool:code", "先读一下那份说明。", status = MsgStatus.STREAMING,
+                createdAt = now - 10_000, modelLabel = "deepseek-flash（DeepSeek 4.1 Flash）",
+                tools = listOf(ToolStep("read", "G:\\资料\\设计稿\\登录页说明.md", id = "s111", note = "读工作区外面的文件",
+                    approval = "waiting", scopeDir = "G:\\资料\\设计稿"))),
+        ))
+        st.saveMessages("c12", listOf(
+            Message("u12", "c12", Role.USER, USER_ID, "跑一下测试", createdAt = now - 20_000),
+            Message("r12", "c12", Role.AI, "tool:code", "", status = MsgStatus.STREAMING,
+                createdAt = now - 10_000, modelLabel = "deepseek-flash（DeepSeek 4.1 Flash）",
+                tools = listOf(ToolStep("run", "python -m pytest -q", id = "s121", approval = "waiting", prefix = "python -m pytest"))),
+        ))
         // 备份攒过头（1 GB 以上，设置 → Code 栏 顶上要提醒）：写一个稀疏文件占位，不真占盘
         java.io.RandomAccessFile(File(root, "code/c8/big.orig"), "rw").use { it.setLength(1_100_000_000L) }
         val e = Engine(Storage(root))
@@ -512,6 +531,9 @@ class ShotsTest {
         shoot("desktop-code-tab", 1280, 820, 1f, hub, desktop, "code")
         shoot("desktop-code", 1280, 820, 1f, hub, desktop, "code:c8")
         shoot("desktop-code-tall", 1280, 1300, 1f, hub, desktop, "code:c8")
+        shoot("desktop-code-outside", 1280, 820, 1f, hub, desktop, "code:c11")
+        shoot("desktop-code-remember-cmd", 1280, 820, 1f, hub, desktop, "code:c12")
+        shoot("desktop-code-workspace", 1280, 820, 1f, hub, desktop, "code:c11#path")
         shoot("desktop-code-diff", 1280, 820, 1f, hub, desktop, "code:c8#diff")
         shoot("desktop-code-new", 1280, 820, 1f, hub, desktop, "newcode")
         // 窗口矮（用户 10-14 截图：「建好」被挤到窗口外）：按钮要一直在对话框底部看得见
