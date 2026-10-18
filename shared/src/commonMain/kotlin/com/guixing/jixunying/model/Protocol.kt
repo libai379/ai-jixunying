@@ -38,7 +38,9 @@ sealed interface Command {
         val fromPhone: Boolean = false,
     ) : Command
     /** Code 栏：换权限档（只影响之后的步骤，已经跑完的不变）。fromPhone 同上。 */
-    @Serializable data class CodeSetMode(val convId: String, val mode: CodeMode, val fromPhone: Boolean = false) : Command
+    @Serializable data class CodeSetMode(val convId: String, val mode: CodeMode, val fromPhone: Boolean = false,
+        /** 2026-10-17：「全部放开」（CodeSpec.openAll）。手机发来 true 的一律拒（PhoneGate）。 */
+        val openAll: Boolean = false) : Command
     /** Code 栏：发一条任务，开始跑编码循环（同一个会话已经在跑就排队，前一个跑完接着跑）。 */
     @Serializable data class CodeSend(
         val convId: String,
@@ -50,6 +52,8 @@ sealed interface Command {
          * 手机发来的一律清空（手机上的路径电脑上没有，也不许手机放大工作区，PhoneGate）。
          */
         val paths: List<String> = emptyList(),
+        /** 手机发来的（PhoneGate 填 true）：这个任务里读工作区外的文件照旧要问。 */
+        val fromPhone: Boolean = false,
     ) : Command
     /** Code 栏：停下这个会话正在跑的循环（模型请求和正在跑的命令都停），消息状态变 STOPPED。 */
     @Serializable data class CodeStop(val convId: String) : Command
@@ -95,6 +99,8 @@ sealed interface Command {
      * 手机发来的 remember 一律当 ""（PhoneGate）。
      */
     @Serializable data class ChatDecide(val convId: String, val stepId: String, val allow: Boolean, val remember: String = "") : Command
+    /** 对话页：撤销 AI 改的一处文件（恢复成改之前的样子，原来没有的文件删掉）。2026-10-17。 */
+    @Serializable data class ChatRevert(val convId: String, val changeId: String) : Command
     /** 对话页：改这个对话「不用再问」的路径（整份替换）。只能在电脑上改。 */
     @Serializable data class ChatSetGranted(val convId: String, val paths: List<String>) : Command
 

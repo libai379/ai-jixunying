@@ -184,6 +184,9 @@ class ShotsTest {
                 stanceTopics = 2, stanceAt = now),
             Conversation("c1", "租房合同要注意什么", listOf("ma", "mb"), ReplyMode.INDEPENDENT, createdAt = now - 3_600_000, updatedAt = now - 60_000),
             Conversation("c2", "微信对话", listOf("ma"), createdAt = now - 7_200_000, updatedAt = now - 3_000_000, channel = "weixin:u1@im.wechat"),
+            // 2026-10-17 对话栏 = Chat + Cowork：改文件在等批准（带差异）、改过一个文件（能撤销），拖进来过一个文件夹
+            Conversation("c14", "整理八字项目的资料", listOf("ma"), createdAt = now - 100_000, updatedAt = now - 1_000,
+                grantedPaths = listOf("G:\\八字五行人格分析app开发")),
             Conversation("c3", "画一只在月球上喝茶的橘猫", listOf("md"), createdAt = now - 90_000_000, updatedAt = now - 86_000_000),
             Conversation("c4", "新对话", listOf("mc"), createdAt = now - 900_000_000, updatedAt = now - 800_000_000),
             Conversation("c6", "聊了很久的对话", listOf("ma"), createdAt = now - 950_000_000, updatedAt = now - 900_000_000),
@@ -263,6 +266,19 @@ class ShotsTest {
         val made = Attachment("a3", "租房合同补充条款.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", madeDoc.bytes.size.toLong(),
             AttachmentKind.DOCUMENT, textChars = madeDoc.text.length, note = madeDoc.summary, generated = true)
         st.putFile(made, madeDoc.bytes, madeDoc.text)
+        st.saveMessages("c14", listOf(
+            Message("u14", "c14", Role.USER, USER_ID, "把这个文件夹里的需求整理成一份清单，放到 G:\\资料\\清单.md\n\n附上的文件 / 文件夹（在这台电脑上，可以直接用 list_folder / read_document 读）：\n- G:\\八字五行人格分析app开发", createdAt = now - 60_000),
+            Message("r14", "c14", Role.AI, "ma", "先看了文件夹里的需求文档，又把 README 里的错字改了。清单要写到 G 盘资料文件夹，那里不在这个对话的文件夹里，等你点一下。",
+                createdAt = now - 30_000, status = MsgStatus.STREAMING, modelLabel = "deepseek-flash",
+                tools = listOf(
+                    ToolStep("doc", "看了文件夹 八字五行人格分析app开发 · 12 项"),
+                    ToolStep("doc", "读《需求说明.docx》"),
+                    ToolStep("edit", "G:\\八字五行人格分析app开发\\README.md", id = "w1", output = "--- a/README.md\n+++ b/README.md\n@@ -1,2 +1,2 @@\n-# 八字五行人格分析app\n+# 八字五行人格分析 App\n 需求见 需求说明.docx", note = "替换 README.md 里的一段",
+                        change = FileChange("w1", "G:\\八字五行人格分析app开发\\README.md", added = 1, removed = 1)),
+                    ToolStep("write", "G:\\资料\\清单.md", id = "w2", output = "--- /dev/null\n+++ b/清单.md\n@@ -0,0 +1,4 @@\n+# 需求清单\n+1. 输入生辰，排出八字\n+2. 五行强弱分析\n+3. 人格解读报告", note = "新建这个文件",
+                        approval = "waiting", scopeDir = "G:\\资料"),
+                )),
+        ))
         st.saveMessages("c1", listOf(
             Message("u1", "c1", Role.USER, USER_ID, "帮我看看这份合同有什么坑", attachments = listOf(doc), createdAt = now - 120_000),
             Message("r1", "c1", Role.AI, "ma",
@@ -532,6 +548,7 @@ class ShotsTest {
         shoot("desktop-code", 1280, 820, 1f, hub, desktop, "code:c8")
         shoot("desktop-code-tall", 1280, 1300, 1f, hub, desktop, "code:c8")
         shoot("desktop-code-outside", 1280, 820, 1f, hub, desktop, "code:c11")
+        shoot("desktop-chat-cowork", 1280, 900, 1f, hub, desktop, "conv:c14")
         shoot("desktop-code-remember-cmd", 1280, 820, 1f, hub, desktop, "code:c12")
         shoot("desktop-code-workspace", 1280, 820, 1f, hub, desktop, "code:c11#path")
         shoot("desktop-code-diff", 1280, 820, 1f, hub, desktop, "code:c8#diff")

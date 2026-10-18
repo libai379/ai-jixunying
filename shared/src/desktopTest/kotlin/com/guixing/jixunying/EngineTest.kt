@@ -1061,15 +1061,11 @@ class EngineTest {
         assertEquals(listOf("doc", "doc"), ai.tools.map { it.kind })
         assertTrue("文档" in systemOf(requests.first { runCatching { memberName(it) }.getOrNull() == "小智" }))
 
-        // 2026-10-17 用户定「和 Code 一样放开」：收录范围外的不再一律拒，而是先问用户；用户拒绝就读不到
+        // 2026-10-17 用户：「比 Claude 更开放」——电脑上发起的，收录范围外的也直接读，不问
         e.call(Command.SendMessage(conv, "偷看 ${secret.path}"))
-        withTimeout(20_000) {
-            while (e.store.messages.value[conv]!!.last().tools.none { it.approval == "waiting" }) delay(30)
-        }
-        val ask = e.store.messages.value[conv]!!.last().tools.first { it.approval == "waiting" }
-        assertTrue(e.call(Command.ChatDecide(conv, ask.id, false)).ok)
         waitIdle(e, conv, 2)
-        assertEquals("读不了。", e.store.messages.value[conv]!!.last().content)
+        assertTrue(e.store.messages.value[conv]!!.last().tools.none { it.approval.isNotEmpty() }, "读不问")
+        assertTrue(requests.any { "机密" in it.toString() }, "收录范围外的文件也读到了")
 
         val att = AppJson.decodeFromString(com.guixing.jixunying.model.Attachment.serializer(), e.call(Command.DocAttach(hits.first().path)).data)
         assertTrue(att.textChars > 0)

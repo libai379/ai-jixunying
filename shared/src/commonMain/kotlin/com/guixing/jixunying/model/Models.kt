@@ -350,6 +350,11 @@ data class Conversation(
      * 拖进这个对话的、批准时选了「以后这个文件夹不再问」的。「我的文档」收录的本来就不用问。
      */
     val grantedPaths: List<String> = emptyList(),
+    /**
+     * 对话页改文件「全部放开」（2026-10-17，用户：「比 Claude 更开放」）：AI 新建、修改文件都不问；改之前照样备份、能撤销。
+     * 关着时：拖进来的 / 选了「不再问」的文件夹里直接改，别处的先问。只能在电脑上打开（PhoneGate）。
+     */
+    val fileOpen: Boolean = false,
 ) {
     val isGroup: Boolean get() = memberIds.size > 1
 

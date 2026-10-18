@@ -48,6 +48,12 @@ data class CodeSpec(
     val extraPaths: List<String> = emptyList(),
     /** 这个会话里「同样开头不再问」的命令开头（2026-10-17，engine/code/CodeCommands 判断）。手机上加不了。 */
     val allowedCommands: List<String> = emptyList(),
+    /**
+     * 全部放开（2026-10-17 用户：「比 Claude 更开放」）：改文件、跑命令都不问，只有危险命令照样问；改之前照样备份、能撤销。
+     * 不做成 CodeMode 的新值：旧版手机解不开新的枚举值，整个状态会读坏（和会审开关同一个道理）。界面上是「接受编辑 + 这个开关」。
+     * 只能在电脑上打开（PhoneGate）。
+     */
+    val openAll: Boolean = false,
 )
 
 /**

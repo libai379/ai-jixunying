@@ -155,6 +155,10 @@ class CodeAgentTest {
                                 1 -> callTool("edit_file", mapOf("path" to "a.txt", "old_text" to "hello world", "new_text" to "hey world"))
                                 else -> say("改了两次。")
                             }
+                            // 2026-10-17：写工作区外面的一个文件（路径跟在任务后面）
+                            task.startsWith("写外面的文件 ") -> if (toolResults.isEmpty())
+                                callTool("write_file", mapOf("path" to task.removePrefix("写外面的文件 ").trim(), "content" to "WRITTEN\n"))
+                            else say("写完了。")
                             // 2026-10-17：读工作区外面的一个文件（路径跟在任务后面）
                             task.startsWith("读外面的文件 ") -> if (toolResults.isEmpty())
                                 callTool("read_file", mapOf("path" to task.removePrefix("读外面的文件 ").trim()))
@@ -361,10 +365,9 @@ class CodeAgentTest {
         val write = awaitWaiting(e, conv, "write")
         assertTrue(write.scopeDir.isNotBlank(), "工作区外的写要给出「加进工作区」的文件夹")
         assertTrue(e.call(Command.CodeDecide(conv, write.id, false)).ok)
-        val read = awaitWaiting(e, conv, "read")
-        assertTrue("win.ini" in read.input, read.input)
-        assertTrue(e.call(Command.CodeDecide(conv, read.id, true)).ok)
+        // 2026-10-17「比 Claude 更开放」：电脑上发起的，工作区外面的读不问
         awaitStatus(e, conv, MsgStatus.DONE)
+        assertTrue(aiOf(e, conv)!!.tools.single { it.kind == "read" }.approval.isEmpty(), "读外面的不该问")
 
         assertFalse(File(dir, "evil.txt").exists(), "拒绝了就不能建出文件")
         assertTrue("用户拒绝了" in lastToolTexts(), "拒绝要告诉模型")
@@ -389,18 +392,23 @@ class CodeAgentTest {
         assertEquals("", (viaPhone.command as Command.CodeDecide).remember, "开关开着：批准放行，但「加进工作区」只当这一次")
         assertNotNull(gate.check(Command.CodeSetAccess(conv, listOf(path), emptyList()), on).refusal, "手机不能改工作区")
 
+        // 读外面的不问（2026-10-17）
         e.call(Command.CodeSend(conv, "读外面的文件 $path"))
-        val ask = awaitWaiting(e, conv, "read")
-        assertEquals(outsideDir.absolutePath.lowercase(), ask.scopeDir.lowercase())
-        assertTrue(e.call(Command.CodeDecide(conv, ask.id, true, "dir")).ok)
         awaitStatus(e, conv, MsgStatus.DONE)
         assertTrue("OTHER_CONTENT" in lastToolTexts())
+        // 写外面的要问；选「加进工作区」
+        val n1 = sendTask(e, conv, "写外面的文件 $path")
+        val ask = awaitWaiting(e, conv, "write")
+        assertEquals(outsideDir.absolutePath.lowercase(), ask.scopeDir.lowercase())
+        assertTrue(e.call(Command.CodeDecide(conv, ask.id, true, "dir")).ok)
+        awaitStatus(e, conv, MsgStatus.DONE, minAi = n1)
+        assertEquals("WRITTEN\n", File(path).readText())
         assertEquals(listOf(outsideDir.absolutePath.lowercase()), e.state.conversation(conv)!!.code!!.extraPaths.map { it.lowercase() })
-
-        // 第二次读同一个文件夹：不再问，直接读到
-        val n = sendTask(e, conv, "读外面的文件 $path")
-        awaitStatus(e, conv, MsgStatus.DONE, minAi = n)
-        assertTrue(aiOf(e, conv)!!.tools.none { it.approval.isNotEmpty() }, "加进工作区以后不该再问")
+        // 第二次写同一个文件夹：手动档下工作区里的写照样问（手动档的规矩），切到接受编辑就不问
+        e.call(Command.CodeSetMode(conv, CodeMode.ACCEPT_EDITS))
+        val n2 = sendTask(e, conv, "写外面的文件 $path")
+        awaitStatus(e, conv, MsgStatus.DONE, minAi = n2)
+        assertTrue(aiOf(e, conv)!!.tools.none { it.approval.isNotEmpty() }, "加进工作区、接受编辑以后不该再问")
     }
 
     /** 2026-10-17：设置 → 个性化 的自定义指令、项目里的 CLAUDE.md 都进 Code 的系统说明；有 CLAUDE.md 时不读 AGENTS.md。 */
@@ -440,20 +448,41 @@ class CodeAgentTest {
         assertTrue("src/deep/x/Hello.kt" in lastToolTexts())
     }
 
-    /** 2026-10-17：fetch_url 先问；选「这个网站不再问」以后同一个网站直接读。 */
+    /** 2026-10-17：fetch_url 不问（和对话栏统一，读网页不改本机任何东西）。 */
     @Test
-    fun fetchUrlAsksPerSite() = runBlocking {
+    fun fetchUrlReadsWithoutAsking() = runBlocking {
         val e = engine()
         val conv = codeConv(e)
         e.call(Command.CodeSend(conv, "读网页 ${base()}/page"))
-        val ask = awaitWaiting(e, conv, "fetch")
-        assertEquals("web:127.0.0.1", ask.prefix)
-        assertTrue(e.call(Command.CodeDecide(conv, ask.id, true, "command")).ok)
         awaitStatus(e, conv, MsgStatus.DONE)
         assertTrue("PAGE_BODY_42" in lastToolTexts(), lastToolTexts().takeLast(300))
-        val n = sendTask(e, conv, "读网页 ${base()}/page")
+        assertTrue(aiOf(e, conv)!!.tools.single { it.kind == "fetch" }.approval.isEmpty())
+    }
+
+    /** 2026-10-17「全部放开」：写工作区外面、跑命令都不问；危险命令照样问；手机打不开。 */
+    @Test
+    fun openAllSkipsApprovalsExceptDangerous() = runBlocking {
+        val e = engine()
+        val conv = codeConv(e)
+        val on = e.state.copy(settings = e.state.settings.copy(code = e.state.settings.code.copy(allowPhone = true)))
+        assertNotNull(com.guixing.jixunying.engine.code.PhoneGate.check(Command.CodeSetMode(conv, CodeMode.ACCEPT_EDITS, openAll = true), on).refusal, "手机打不开全部放开")
+        assertTrue(e.call(Command.CodeSetMode(conv, CodeMode.ACCEPT_EDITS, openAll = true)).ok)
+        val out = File(dir, "elsewhere/y.txt").apply { parentFile.mkdirs() }
+        e.call(Command.CodeSend(conv, "写外面的文件 ${out.absolutePath}"))
+        awaitStatus(e, conv, MsgStatus.DONE)
+        assertEquals("WRITTEN\n", out.readText())
+        val n = sendTask(e, conv, "跑命令 Write-Output 放开")
         awaitStatus(e, conv, MsgStatus.DONE, minAi = n)
-        assertTrue(aiOf(e, conv)!!.tools.single { it.kind == "fetch" }.approval.isEmpty(), "同一个网站不再问")
+        assertTrue(aiOf(e, conv)!!.tools.single { it.kind == "run" }.approval.isEmpty(), "全部放开不问命令")
+        // 改之前照样备份：能撤销
+        val ch = listOf(e, conv).flatMap { m -> m.tools.mapNotNull { it.change } }.first { it.path.endsWith("y.txt") }
+        assertTrue(e.call(Command.CodeReview(conv, ch.id, false)).ok)
+        assertFalse(out.exists(), "新建的撤销后删掉")
+        // 危险命令照样问
+        sendTask(e, conv, "跑命令 Remove-Item x -Recurse")
+        assertEquals("run", awaitWaiting(e, conv, "run").kind)
+        e.call(Command.CodeStop(conv))
+        Unit
     }
 
     private fun writePng(f: File) {

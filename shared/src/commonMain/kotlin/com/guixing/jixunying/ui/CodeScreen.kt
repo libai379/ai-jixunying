@@ -251,8 +251,13 @@ private fun CodeTopBar(ctl: AppController, state: AppState, conv: Conversation, 
             }
         }
         Spacer(Modifier.width(8.dp))
-        CodeModePicker(spec.mode, CodeUi.modesFor(access, spec), enabled = access.canAct) { m ->
-            ctl.run(Command.CodeSetMode(conv.id, m), okText = "权限档换成「${m.label}」")
+        // 2026-10-17「全部放开」：电脑上才有（手机上打不开，PhoneGate 也会拒）；界面上排在「接受编辑」后面
+        val canOpen = LocalPlatform.current.isDesktop && !ctl.remoteMode
+        val options = CodeUi.modesFor(access, spec).flatMap { m ->
+            if (m == CodeMode.ACCEPT_EDITS && canOpen) listOf(m to false, m to true) else listOf(m to false)
+        } + (if (spec.openAll && !canOpen) listOf(CodeMode.ACCEPT_EDITS to true) else emptyList())
+        CodeModePicker(spec.mode to (spec.openAll && spec.mode != CodeMode.PLAN), options.distinct(), enabled = access.canAct) { (m, open) ->
+            ctl.run(Command.CodeSetMode(conv.id, m, openAll = open), okText = "权限档换成「${if (open) "全部放开" else m.label}」")
         }
     }
     HorizontalDivider(color = Ext.c.border)
@@ -344,7 +349,7 @@ private fun PhoneMadeMark() {
  * modes 是这台设备上能选的档（手机上只有手动、计划，见 CodeUi.modesFor）。
  */
 @Composable
-private fun CodeModePicker(mode: CodeMode, modes: List<CodeMode>, enabled: Boolean, onPick: (CodeMode) -> Unit) {
+private fun CodeModePicker(mode: Pair<CodeMode, Boolean>, modes: List<Pair<CodeMode, Boolean>>, enabled: Boolean, onPick: (Pair<CodeMode, Boolean>) -> Unit) {
     Row(
         Modifier.clip(RoundedCornerShape(50)).border(1.dp, Ext.c.border, RoundedCornerShape(50)).padding(2.dp),
     ) {
@@ -356,8 +361,8 @@ private fun CodeModePicker(mode: CodeMode, modes: List<CodeMode>, enabled: Boole
                     .clickable(enabled = enabled) { if (!on) onPick(m) }
                     .padding(horizontal = 10.dp, vertical = 5.dp),
             ) {
-                Text(m.label, style = MaterialTheme.typography.labelMedium,
-                    color = if (on) MaterialTheme.colorScheme.primary else Ext.c.subtle)
+                Text(if (m.second) "全部放开" else m.first.label, style = MaterialTheme.typography.labelMedium,
+                    color = if (on) (if (m.second) Ext.c.warning else MaterialTheme.colorScheme.primary) else Ext.c.subtle)
             }
         }
     }
@@ -930,7 +935,7 @@ private fun DiffPane(text: String?, error: String?, c: FileChange?) {
 
 /** 统一差异：+ 绿、− 红、@@ 是位置行，可以选中复制。 */
 @Composable
-private fun DiffLines(text: String) {
+internal fun DiffLines(text: String) {
     val lines = remember(text) { text.lines() }
     SelectionContainer {
         Column {
@@ -975,7 +980,7 @@ private fun MonoBox(text: String) {
 
 /** 等宽 / 差异内容外面那层：横向能滑，长行在手机上也不会被截掉。 */
 @Composable
-private fun ScrollPane(modifier: Modifier = Modifier, content: @Composable () -> Unit) {
+internal fun ScrollPane(modifier: Modifier = Modifier, content: @Composable () -> Unit) {
     Box(modifier.clip(RoundedCornerShape(8.dp)).background(Ext.c.codeBg)) {
         Column(Modifier.horizontalScroll(rememberScrollState()).padding(8.dp)) { content() }
     }
@@ -1104,7 +1109,7 @@ private fun CodeComposer(ctl: AppController, conv: Conversation, running: Boolea
                 }
             }
             Text(
-                "工作区外面的文件也能读写，会先问你；改过的都能撤销。" + when {
+                "电脑上的文件都能读；改工作区外面的会先问你（全部放开就不问），改过的都能撤销。" + when {
                     ctl.remoteMode -> "这个会话在电脑上跑。"
                     platform.isDesktop -> "命令在这台电脑上跑。"
                     else -> ""

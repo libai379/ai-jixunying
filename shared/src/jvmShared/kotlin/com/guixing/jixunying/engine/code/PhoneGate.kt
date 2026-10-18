@@ -46,6 +46,12 @@ object PhoneGate {
             is Command.Regenerate -> return Verdict(c.copy(fromPhone = true))
             is Command.ChatDecide -> return Verdict(c.copy(remember = ""))
             is Command.ChatSetGranted -> return refuse(c, "对话里不用再问的文件夹只能在电脑上改")
+            // 手机改对话设置：电脑上的「全部放开」「不用再问的文件夹」、Code 会话的设定一律保留
+            // （手机不能放宽；旧版手机不认识这几个字段，发回来是默认值，不保留会把电脑上的冲掉）
+            is Command.UpdateConversation -> {
+                val cur = s.conversation(c.conversation.id) ?: return Verdict(c)
+                return Verdict(c.copy(conversation = c.conversation.copy(fileOpen = cur.fileOpen, grantedPaths = cur.grantedPaths, code = cur.code)))
+            }
             else -> Unit
         }
         if (!isCodeWrite(c)) return Verdict(c)
@@ -58,6 +64,7 @@ object PhoneGate {
             }
             is Command.CodeSetMode -> {
                 val spec = s.conversation(c.convId)?.code ?: return Verdict(c.copy(fromPhone = true)) // 不存在的会话交给引擎报错
+                if (c.openAll) return refuse(c, "「全部放开」只能在电脑上打开")
                 if (c.mode == CodeMode.ACCEPT_EDITS && !CodePhone.mayAcceptEdits(spec)) {
                     return refuse(c, "「接受编辑」要在电脑上给这个会话打开，手机上只能换「手动」或「计划」")
                 }
@@ -67,7 +74,7 @@ object PhoneGate {
             // 2026-10-17：手机不能把工作区放大、不能让命令「不再问」——这两样都比「批准这一步」宽
             is Command.CodeSetAccess -> refuse(c, "工作区和「不再问」的命令只能在电脑上改")
             is Command.CodeDecide -> Verdict(c.copy(remember = ""))
-            is Command.CodeSend -> Verdict(c.copy(paths = emptyList()))
+            is Command.CodeSend -> Verdict(c.copy(paths = emptyList(), fromPhone = true))
             else -> Verdict(c)
         }
     }

@@ -69,8 +69,17 @@ class CodeAgent(private val host: CodeHost) {
     private val runs = ConcurrentHashMap<String, Run>()
     private val waitings = ConcurrentHashMap<String, Waiting>()
 
+    /** 手机发起的任务（消息编号）：这些任务里读工作区外的文件照旧要问（2026-10-17，电脑上发起的读不问）。 */
+    private val phoneTasks = ConcurrentHashMap.newKeySet<String>()
+
+    /** 这一轮是手机发起的（放在协程上下文里，往下的工具都看得到）。 */
+    private class PhoneTask : kotlin.coroutines.AbstractCoroutineContextElement(PhoneTask) {
+        companion object Key : kotlin.coroutines.CoroutineContext.Key<PhoneTask>
+    }
+
     /** 用户发了一条任务：没人跑就直接跑，有人在跑就排队（一个会话同时只跑一个循环）。 */
-    fun submit(convId: String, task: Message) {
+    fun submit(convId: String, task: Message, fromPhone: Boolean = false) {
+        if (fromPhone) phoneTasks += task.id
         val run = runs.getOrPut(convId) { Run(convId) }
         synchronized(run) {
             if (run.running) {
@@ -104,7 +113,7 @@ class CodeAgent(private val host: CodeHost) {
     private fun start(run: Run, task: Message) {
         run.job = host.launch(run.convId) {
             try {
-                loop(run.convId, task)
+                withContext(if (phoneTasks.remove(task.id)) PhoneTask() else kotlin.coroutines.EmptyCoroutineContext) { loop(run.convId, task) }
             } finally {
                 val next = synchronized(run) { run.queued.removeFirstOrNull() }
                 if (next == null) synchronized(run) { run.running = false } else start(run, next)
@@ -209,7 +218,7 @@ class CodeAgent(private val host: CodeHost) {
             append("你在帮用户改一个项目里的代码。\n")
             append("项目文件夹：").append(spec.folder).append("（工具里的 path 可以写相对它的路径，比如 src/main.kt，也可以写完整路径，比如 G:\\资料\\说明.md）\n")
             if (spec.extraPaths.isNotEmpty()) append("另外加进工作区的：").append(spec.extraPaths.joinToString("；")).append('\n')
-            append("工作区（项目文件夹和上面加进来的）里面读文件不用问；工作区外面的文件也能读能改，程序会先问用户一声。\n")
+            append("电脑上任何地方的文件都能读；改工作区（项目文件夹和上面加进来的）外面的文件，程序会先问用户一声（用户开了「全部放开」就不问）。\n")
             append("当前外壳：").append(shellLabel(code.shell)).append("；命令的工作目录就是项目文件夹；单条命令最多跑 ")
             append(code.commandTimeoutSec).append(" 秒，超时会把进程连同它的子进程杀掉。\n")
             append("系统是 Windows，文件按 UTF-8 读写。\n")
@@ -357,7 +366,7 @@ class CodeAgent(private val host: CodeHost) {
             }, listOf("pattern"))
         fn("web_search", "联网搜索，查文档、报错、库的最新版本这类本机上没有的信息。返回标题、网址和摘要。",
             buildJsonObject { put("query", text("要搜的内容")) }, listOf("query"))
-        fn("fetch_url", "打开一个网页，读它的正文文字（比如官方文档、发布说明、报错讨论）。会先问用户。",
+        fn("fetch_url", "打开一个网页，读它的正文文字（比如官方文档、发布说明、报错讨论）。",
             buildJsonObject { put("url", text("网址，http 或 https 开头")) }, listOf("url"))
         fn("grep", "按内容在项目里查找，返回命中的文件、行号和那一行。",
             buildJsonObject {
@@ -410,6 +419,8 @@ class CodeAgent(private val host: CodeHost) {
      */
     private suspend fun askOutside(convId: String, msgId: String, kind: String, file: File, guard: CodeGuard, note: String): ToolStep? {
         if (guard.inScope(file)) return null
+        // 2026-10-17 用户：「比 Claude 更开放」——电脑上发起的，工作区外面的也直接读，不问；只有手机发起的任务才停下来问
+        if (kotlin.coroutines.coroutineContext[PhoneTask] == null) return null
         val step = ToolStep(kind, guard.relative(file), id = host.newId(), ok = true, note = note, scopeDir = guard.folderToAdd(file))
         if (!waitApproval(convId, msgId, step)) throw Refused(refused("${note}：${guard.relative(file)}"))
         return step
@@ -483,7 +494,7 @@ class CodeAgent(private val host: CodeHost) {
         val asked = try { askOutside(convId, msgId, "list", dir, guard, "列工作区外面的目录") } catch (r: Refused) { return r.text }
         val all = runCatching { dir.listFiles()?.sortedBy { it.name } }.getOrNull() ?: return "读不了这个目录：$rel"
         // 在工作区里列的时候，目录联接 / 符号链接指到工作区外面的：照列名字，但标出来（要读会先问用户，CodeGuard 按真实路径判断）
-        val inside = asked == null
+        val inside = guard.inScope(dir)
         val shown = all.take(LIST_MAX).joinToString("\n") {
             (if (it.isDirectory) it.name + "/" else it.name) + if (inside && !guard.inScope(it)) "（指到工作区外面，读的时候会先问用户）" else ""
         }
@@ -501,8 +512,9 @@ class CodeAgent(private val host: CodeHost) {
         if (!start.exists()) return "没有这个路径：$rel"
         val asked = try { askOutside(convId, msgId, "grep", start, guard, "在工作区外面查找") } catch (r: Refused) { return r.text }
         // 找的范围：在工作区里就是整个工作区（指到外面的联接跳过）；问过用户的外面目录，只在那个目录自己底下找
-        val fence = if (asked == null) guard else CodeGuard(if (start.isDirectory) start else start.parentFile ?: start)
-        fun allowed(f: File) = if (asked == null) fence.inScope(f) else fence.resolveInProject(f.absolutePath) != null
+        val inside = guard.inScope(start)
+        val fence = if (inside) guard else CodeGuard(if (start.isDirectory) start else start.parentFile ?: start)
+        fun allowed(f: File) = if (inside) fence.inScope(f) else fence.resolveInProject(f.absolutePath) != null
         val re = runCatching { Regex(pattern, RegexOption.IGNORE_CASE) }.getOrNull()
         // 每行最多看 2000 字：写坏了的正则在超长行上会卡很久（Kotlin 的正则停不下来）
         fun hit(line: String) = line.take(2000).let { l -> re?.containsMatchIn(l) ?: l.contains(pattern, ignoreCase = true) }
@@ -546,8 +558,9 @@ class CodeAgent(private val host: CodeHost) {
         val rel = guard.relative(start).ifBlank { "." }
         if (!start.isDirectory) return "不是目录：$rel"
         val asked = try { askOutside(convId, msgId, "find", start, guard, "在工作区外面找文件") } catch (r: Refused) { return r.text }
-        val fence = if (asked == null) guard else CodeGuard(start)
-        fun allowed(f: File) = if (asked == null) fence.inScope(f) else fence.resolveInProject(f.absolutePath) != null
+        val inside = guard.inScope(start)
+        val fence = if (inside) guard else CodeGuard(start)
+        fun allowed(f: File) = if (inside) fence.inScope(f) else fence.resolveInProject(f.absolutePath) != null
         // 没写目录的（*.kt）按「任意一层」找，和大家的习惯一样
         val glob = if ('/' in pattern) pattern else "**/$pattern"
         val matcher = runCatching { java.nio.file.FileSystems.getDefault().getPathMatcher("glob:$glob") }.getOrElse { return "通配写法不对：$pattern" }
@@ -598,7 +611,8 @@ class CodeAgent(private val host: CodeHost) {
         val host = runCatching { java.net.URI(url).host?.lowercase() }.getOrNull()?.takeIf { it.isNotBlank() } ?: return "网址不对：$url"
         val key = "web:$host"
         val stepId = this.host.newId()
-        val allowed = key in spec.allowedCommands
+        // 2026-10-17 用户：「比 Claude 更开放」，和对话栏统一——读网页不改本机任何东西，不问
+        val allowed = true
         val step = ToolStep("fetch", url, id = stepId, ok = true, prefix = if (allowed) "" else key,
             note = if (allowed) "$host 这个会话里不再问" else "")
         if (!allowed) { if (!waitApproval(convId, msgId, step)) return refused("打开 $url") } else addStep(convId, msgId, step)
@@ -639,7 +653,7 @@ class CodeAgent(private val host: CodeHost) {
             note = (if (existed) "重写这个文件" else "新建这个文件") + if (out) "（在工作区外面）" else "",
             scopeDir = if (out) guard.folderToAdd(file) else "")
         // 不用批准（接受编辑档）也要先把这一步记到消息上，不然改了文件却没有改动记录，没法审阅、撤销（主会话审查 10-12 补）
-        if (out || needsApproval(mode, "write")) { if (!waitApproval(convId, msgId, step)) return refused("写 $rel") } else addStep(convId, msgId, step)
+        if (!openAll(convId) && (out || needsApproval(mode, "write"))) { if (!waitApproval(convId, msgId, step)) return refused("写 $rel") } else addStep(convId, msgId, step)
         val created = backup.save(stepId, file)
         val err = runCatching { file.parentFile?.mkdirs(); file.writeText(content, Charsets.UTF_8) }.exceptionOrNull()
         if (err != null) {
@@ -675,7 +689,7 @@ class CodeAgent(private val host: CodeHost) {
         val step = ToolStep("edit", rel, id = stepId, output = uiText(diff.text), ok = true,
             note = "替换 $rel 里的一段" + if (out) "（在工作区外面）" else "", scopeDir = if (out) guard.folderToAdd(file) else "")
         // 同 writeFile：不用批准也要先记上这一步；工作区外面的改动哪一档都要问
-        if (out || needsApproval(mode, "edit")) { if (!waitApproval(convId, msgId, step)) return refused("改 $rel") } else addStep(convId, msgId, step)
+        if (!openAll(convId) && (out || needsApproval(mode, "edit"))) { if (!waitApproval(convId, msgId, step)) return refused("改 $rel") } else addStep(convId, msgId, step)
         val created = backup.save(stepId, file)
         val err = runCatching { file.writeText(after, Charsets.UTF_8) }.exceptionOrNull()
         if (err != null) {
@@ -698,7 +712,9 @@ class CodeAgent(private val host: CodeHost) {
         val step = ToolStep("run", command, id = stepId, ok = true,
             note = if (by != null) "「$by」开头的命令这个会话里不再问" else "",
             prefix = if (by == null) CodeCommands.prefixOf(command).orEmpty() else "")
-        if (by == null && needsApproval(host.state.conversation(convId)?.code?.mode ?: spec.mode, "run")) {
+        // 全部放开：不问；只有危险命令（递归删除、格式化、改注册表……）照样问一次
+        val ask = if (openAll(convId)) CodeCommands.dangerous(command) else by == null && needsApproval(host.state.conversation(convId)?.code?.mode ?: spec.mode, "run")
+        if (ask) {
             if (!waitApproval(convId, msgId, step)) return refused("跑这条命令")
         } else addStep(convId, msgId, step)
         val r = runner.run(command, File(spec.folder), code.shell, code.commandTimeoutSec, RESULT_LIMIT)
@@ -717,6 +733,9 @@ class CodeAgent(private val host: CodeHost) {
     }
 
     // ———————————————— 批准 ————————————————
+
+    /** 这个会话开了「全部放开」（2026-10-17）：改文件、跑命令都不问（危险命令除外），改之前照样备份。计划档不算。 */
+    private fun openAll(convId: String): Boolean = host.state.conversation(convId)?.code?.let { it.openAll && it.mode != CodeMode.PLAN } == true
 
     private fun needsApproval(mode: CodeMode, kind: String): Boolean = when (kind) {
         "write", "edit" -> mode == CodeMode.MANUAL

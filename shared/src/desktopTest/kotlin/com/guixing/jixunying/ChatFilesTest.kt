@@ -71,8 +71,17 @@ class ChatFilesTest {
                             write("data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n")
                         }
                         val folder = Regex("- (.+)").find(task)?.groupValues?.get(1)?.trim()
+                        fun callArgs(name: String, args: Map<String, String>) {
+                            val fn = JsonObject(mapOf("name" to JsonPrimitive(name), "arguments" to JsonPrimitive(JsonObject(args.mapValues { JsonPrimitive(it.value) }).toString())))
+                            val c = JsonObject(mapOf("index" to JsonPrimitive(0), "id" to JsonPrimitive("c${results.size}"), "type" to JsonPrimitive("function"), "function" to fn))
+                            chunk(JsonObject(mapOf("tool_calls" to JsonArray(listOf(c)))).toString())
+                            write("data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n")
+                        }
+                        val target = Regex("目标：(.+)").find(task)?.groupValues?.get(1)?.trim()
                         when {
                             !hasTools -> say("[]")
+                            "写文件" in task && results.isEmpty() && target != null -> callArgs("write_file", mapOf("path" to target, "content" to "NEW_CONTENT\n"))
+                            "找文件" in task && results.isEmpty() -> callArgs("find_files", mapOf("pattern" to "*.md", "path" to outside.absolutePath))
                             "看文件夹" in task && results.isEmpty() && folder != null -> call("list_folder", folder)
                             "读别处" in task && results.isEmpty() -> call("read_document", File(outside, "说明.md").absolutePath)
                             else -> say("好的。")
@@ -109,23 +118,66 @@ class ChatFilesTest {
         assertTrue(ai(e, conv)!!.tools.none { it.approval.isNotEmpty() }, "拖进来的不用问")
     }
 
+    /** 2026-10-17「比 Claude 更开放」：电脑上发起的，别处的文件直接读，不问；按文件名也能找。 */
     @Test
-    fun outsideAsksThenRemembers() = runBlocking {
+    fun outsideReadsWithoutAsking() = runBlocking {
         val (e, conv) = setup()
         e.call(Command.SendMessage(conv, "读别处"))
-        await { ai(e, conv)?.tools?.any { it.approval == "waiting" } == true }
-        val step = ai(e, conv)!!.tools.first { it.approval == "waiting" }
-        assertEquals(outside.absolutePath.lowercase(), step.scopeDir.lowercase())
-        assertTrue(e.call(Command.ChatDecide(conv, step.id, true, "dir")).ok)
         await { ai(e, conv)?.status == MsgStatus.DONE }
         assertTrue("OUTSIDE_BODY_7" in lastTools())
-        assertTrue(e.state.conversation(conv)!!.grantedPaths.any { it.equals(outside.absolutePath, ignoreCase = true) })
-        // 第二次：不再问
+        assertTrue(ai(e, conv)!!.tools.none { it.approval.isNotEmpty() })
         val before = e.store.messages.value[conv].orEmpty().size
-        e.call(Command.SendMessage(conv, "再读别处"))
+        e.call(Command.SendMessage(conv, "找文件"))
         await { e.store.messages.value[conv].orEmpty().size > before + 1 && ai(e, conv)?.status == MsgStatus.DONE }
-        assertTrue(ai(e, conv)!!.tools.none { it.approval == "waiting" })
-        assertTrue("OUTSIDE_BODY_7" in lastTools())
+        assertTrue("说明.md" in lastTools())
+    }
+
+    /** 对话栏改文件：别处的先问（带差异），允许后写好、能撤销；「不再问」之后同一个文件夹不问；全部放开都不问；拖进来的文件夹里不问。 */
+    @Test
+    fun writeAsksThenRevertsAndOpens() = runBlocking {
+        val (e, conv) = setup()
+        val target = File(outside, "新文件.md")
+        e.call(Command.SendMessage(conv, "写文件 目标：${target.absolutePath}"))
+        await { ai(e, conv)?.tools?.any { it.approval == "waiting" } == true }
+        val ask = ai(e, conv)!!.tools.first { it.approval == "waiting" }
+        assertTrue("NEW_CONTENT" in ask.output, "卡片上要有差异")
+        assertTrue(!target.exists(), "没批准不能先写")
+        assertTrue(e.call(Command.ChatDecide(conv, ask.id, true, "dir")).ok)
+        await { ai(e, conv)?.status == MsgStatus.DONE }
+        assertEquals("NEW_CONTENT\n", target.readText())
+        val ch = ai(e, conv)!!.tools.mapNotNull { it.change }.single()
+        assertTrue(ch.created)
+        assertTrue(e.call(Command.ChatRevert(conv, ch.id)).ok)
+        assertTrue(!target.exists(), "撤销新建的 = 删掉")
+        // 同一个文件夹已经「不再问」
+        var before = e.store.messages.value[conv].orEmpty().size
+        e.call(Command.SendMessage(conv, "写文件 目标：${target.absolutePath}"))
+        await { e.store.messages.value[conv].orEmpty().size > before + 1 && ai(e, conv)?.status == MsgStatus.DONE }
+        assertTrue(ai(e, conv)!!.tools.none { it.approval.isNotEmpty() })
+        // 全部放开：别的文件夹也不问
+        val other = File(dir, "另一处").apply { mkdirs() }
+        e.call(Command.UpdateConversation(e.state.conversation(conv)!!.copy(fileOpen = true)))
+        before = e.store.messages.value[conv].orEmpty().size
+        e.call(Command.SendMessage(conv, "写文件 目标：${File(other, "b.md").absolutePath}"))
+        await { e.store.messages.value[conv].orEmpty().size > before + 1 && ai(e, conv)?.status == MsgStatus.DONE }
+        assertTrue(ai(e, conv)!!.tools.none { it.approval.isNotEmpty() })
+        assertEquals("NEW_CONTENT\n", File(other, "b.md").readText())
+        // 手机改不了「全部放开」和不用问的文件夹（PhoneGate 保留电脑上的）
+        val cur = e.state.conversation(conv)!!
+        val viaPhone = com.guixing.jixunying.engine.code.PhoneGate.check(Command.UpdateConversation(cur.copy(fileOpen = false, grantedPaths = emptyList(), title = "改个名")), e.state).command as Command.UpdateConversation
+        assertTrue(viaPhone.conversation.fileOpen && viaPhone.conversation.grantedPaths.isNotEmpty() && viaPhone.conversation.title == "改个名")
+    }
+
+    /** 手机发起的这一轮不许改电脑上的文件。 */
+    @Test
+    fun phoneTurnCannotWrite() = runBlocking {
+        val (e, conv) = setup()
+        val target = File(outside, "x.md")
+        val viaPhone = com.guixing.jixunying.engine.code.PhoneGate.check(Command.SendMessage(conv, "写文件 目标：${target.absolutePath}"), e.state).command
+        e.call(viaPhone)
+        await { ai(e, conv)?.status == MsgStatus.DONE }
+        assertTrue(!target.exists())
+        assertTrue("手机上发起" in lastTools())
     }
 
     @Test

@@ -185,3 +185,14 @@
 8. 新工具：find_files（按文件名通配找，照 Glob；新改的在前）；web_search（和聊天同一套搜索引擎，不改本机，不问）；fetch_url（照 WebFetch 先问——读过本机文件的 AI 能把内容拼进网址发出去；可选「这个网站这个会话里不再问」，记成 web:网站 放在 allowedCommands）。
 9. 命令「不再问」补充：python / node 等解释器带 -c / -e、再开一层外壳（powershell、cmd、bash…）的不给；python -m 记到模块名。
 10. 仍然不做「完全不问」（绕过权限）档：第 1 节的决定没被推翻，用户要的话再加。
+
+## 13 两栏定型、比 Claude 更开放（2026-10-17 用户定）
+
+用户原话：「我们分两栏一栏 chat+cowork，一栏是 code」「我需要的不仅要 claude 那一套，而且比 claude 更开放」「对话和 code 同步……只是专业不一样」。
+参照：Claude 桌面 App 官方三栏 Chat / Cowork / Code（https://code.claude.com/docs/en/desktop）；Cowork「read, edit, and create files in folders you specify」「uses the same agentic approach as Claude Code」（https://claude.com/product/cowork）。
+
+1. 读：电脑上发起的，两栏都不问（推翻第 12 节「工作区外的读先问」）。手机发起的 Code 任务读工作区外照旧问（CodeSend.fromPhone → PhoneTask）；对话栏手机 / 微信发起的不许读收录范围外的。
+2. 改：Code 栏手动 / 接受编辑照旧，新加「全部放开」（CodeSpec.openAll）：写文件、跑命令不问，危险命令（CodeCommands.dangerous）照样问。对话栏：拖进来的 / 选了「不再问」的文件夹（grantedPaths）里直接改，别处的先问（卡片带差异），「全部放开」（Conversation.fileOpen）都不问；手机 / 微信发起的不许改。两栏改之前都备份（<数据目录>/code/<对话 id>/），都能撤销。
+3. 读网页：两栏都不问。
+4. 手机：全部放开只能在电脑上打开；改对话设置保留电脑上的 fileOpen / grantedPaths / code。
+

@@ -347,7 +347,13 @@ private fun AiMessage(ctl: AppController, state: AppState, m: Message,
             }
             Spacer(Modifier.height(6.dp))
             m.tools.filter { it.approval == "waiting" }.forEach { ReadApprovalCard(ctl, m, it, member?.name ?: "AI") }
-            ToolStepsView(m.tools.filter { it.approval != "waiting" }, streaming = m.status == MsgStatus.STREAMING)
+            ToolStepsView(m.tools.filter { it.approval != "waiting" && it.change == null && it.kind != "write" && it.kind != "edit" }, streaming = m.status == MsgStatus.STREAMING)
+            // 改过的文件单独列出来（能看差异、能撤销）；拒绝了 / 没改成的写一句
+            m.tools.filter { it.change != null }.forEach { ChangedFileView(ctl, m, it) }
+            m.tools.filter { (it.kind == "write" || it.kind == "edit") && it.change == null && it.approval != "waiting" && it.note.isNotBlank() }.forEach {
+                Text("${it.input.substringAfterLast('\\').substringAfterLast('/')}：${it.note}", style = MaterialTheme.typography.bodySmall,
+                    color = Ext.c.warning, modifier = Modifier.padding(bottom = 4.dp))
+            }
             if (reasoning.isNotEmpty()) ReasoningView(reasoning, streaming = m.status == MsgStatus.STREAMING && body.isEmpty())
             if (body.isNotBlank() && folded) Text(body.lineSequence().firstOrNull { it.isNotBlank() }?.take(80).orEmpty() + " …",
                 style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle, modifier = Modifier.clickable { folded = false })
@@ -367,7 +373,8 @@ private fun AiMessage(ctl: AppController, state: AppState, m: Message,
 }
 
 /**
- * AI 要读「我的文档」收录范围外的文件 / 文件夹，停下来问用户（2026-10-17，用户定「和 Code 一样放开」）。
+ * AI 要新建 / 修改电脑上的文件，停下来问用户（2026-10-17，对话栏 = Chat + Cowork）：卡片上带差异。
+ * 读文件不问（用户：「比 Claude 更开放」）；拖进来的文件夹、选了「不再问」的、开了「全部放开」的也不问。
  * 「以后这个文件夹不再问」只在电脑上给（手机上点了也只算这一次，见 PhoneGate）。
  */
 @OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
@@ -379,8 +386,9 @@ private fun ReadApprovalCard(ctl: AppController, m: Message, t: ToolStep, who: S
             .border(1.dp, Ext.c.warning.copy(alpha = 0.6f), RoundedCornerShape(12.dp)).padding(12.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        Text("$who ${t.note.ifBlank { "想读这个文件" }}（不在「我的文档」收录范围里）：", style = MaterialTheme.typography.labelMedium, color = Ext.c.warning)
+        Text("$who 要${t.note.ifBlank { "改这个文件" }}：", style = MaterialTheme.typography.labelMedium, color = Ext.c.warning)
         SelectionContainer { Text(t.input, style = MaterialTheme.typography.bodyMedium) }
+        if (t.output.isNotBlank()) ScrollPane { DiffLines(t.output) }
         androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Button(onClick = { ctl.run(Command.ChatDecide(m.convId, t.id, true)) },
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 16.dp, vertical = 6.dp)) {
@@ -394,6 +402,72 @@ private fun ReadApprovalCard(ctl: AppController, m: Message, t: ToolStep, who: S
                 Modifier.clip(RoundedCornerShape(50)).border(1.dp, MaterialTheme.colorScheme.error, RoundedCornerShape(50))
                     .clickable { ctl.run(Command.ChatDecide(m.convId, t.id, false)) }.padding(horizontal = 16.dp, vertical = 6.dp),
             ) { Text("拒绝", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.error) }
+        }
+    }
+}
+
+/**
+ * 这个对话里 AI 不用问就能改的文件夹（2026-10-17，和 Code 栏的「工作区」对应）：拖进来的、批准时选了「不再问」的。
+ * 读文件本来就不问；这里管的是改。只能在电脑上改（PhoneGate）。
+ */
+@Composable
+private fun ChatFoldersDialog(ctl: AppController, conv: Conversation, onClose: () -> Unit) {
+    val platform = LocalPlatform.current
+    val scope = rememberCoroutineScope()
+    fun save(paths: List<String>) = ctl.run(Command.ChatSetGranted(conv.id, paths), quiet = true) { r -> if (!r.ok) ctl.toast(r.message.ifBlank { "没改成" }) }
+    AppDialog("这个对话的文件夹", onClose, width = 560.dp, actions = { Button(onClose) { Text("好了") } }) {
+        Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState())) {
+            Text("电脑上的文件 AI 都能读，不用问。下面这些文件夹里，AI 新建、修改文件也不问；别处的改之前会先问你（打开「改文件全部放开」就都不问）。" +
+                "改过的文件都在回答里能一键撤销。", style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
+            Spacer(Modifier.height(10.dp))
+            if (conv.grantedPaths.isEmpty()) Text("还没有。把文件夹拖进输入框，或者点下面加一个。", style = MaterialTheme.typography.bodyMedium, color = Ext.c.subtle)
+            conv.grantedPaths.forEach { p ->
+                Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Rounded.FolderOpen, null, Modifier.size(15.dp), tint = Ext.c.subtle)
+                    Spacer(Modifier.width(6.dp))
+                    Text(p, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f), maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    TextButton({ save(conv.grantedPaths - p) }) { Text("移出", color = MaterialTheme.colorScheme.error) }
+                }
+            }
+            TextButton({
+                scope.launch {
+                    val f = platform.pickFolder("加一个文件夹") ?: return@launch
+                    if (conv.grantedPaths.any { it.equals(f, ignoreCase = true) }) { ctl.toast("已经加过了"); return@launch }
+                    save(conv.grantedPaths + f)
+                }
+            }) { Text("加一个文件夹") }
+        }
+    }
+}
+
+/** AI 在对话里改过的一个文件：一行摘要，点开看差异，能「撤销」（恢复成改之前的样子）。 */
+@Composable
+private fun ChangedFileView(ctl: AppController, m: Message, t: ToolStep) {
+    val ch = t.change ?: return
+    var open by remember(t.id) { mutableStateOf(false) }
+    val undone = ch.review == "rejected"
+    Column(Modifier.padding(bottom = 6.dp)) {
+        Row(
+            Modifier.clip(RoundedCornerShape(8.dp)).background(MaterialTheme.colorScheme.surfaceVariant)
+                .clickable { open = !open }.padding(horizontal = 10.dp, vertical = 5.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(Icons.Rounded.Description, null, Modifier.size(14.dp), tint = if (undone) Ext.c.subtle else MaterialTheme.colorScheme.primary)
+            Spacer(Modifier.width(6.dp))
+            Text((if (ch.created) "新建了 " else "改了 ") + ch.path.substringAfterLast('\\').substringAfterLast('/') +
+                "（+${ch.added} −${ch.removed}）" + if (undone) " · 已撤销" else "",
+                style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 460.dp))
+            Icon(if (open) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore, null, Modifier.size(16.dp), tint = Ext.c.subtle)
+        }
+        AnimatedVisibility(open) {
+            Column(Modifier.padding(start = 8.dp, top = 6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                SelectionContainer { Text(ch.path, style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle) }
+                if (t.output.isNotBlank()) ScrollPane { DiffLines(t.output) }
+                if (!undone && LocalPlatform.current.isDesktop && !ctl.remoteMode) TextButton({ ctl.run(Command.ChatRevert(m.convId, ch.id)) }) {
+                    Text(if (ch.created) "撤销（删掉这个新建的文件）" else "撤销（恢复成改之前的样子）", color = MaterialTheme.colorScheme.error)
+                }
+            }
         }
     }
 }
@@ -821,6 +895,8 @@ private fun Composer(ctl: AppController, state: AppState, conv: Conversation, ru
     val scope = rememberCoroutineScope()
     var text by remember(conv.id) { mutableStateOf(TextFieldValue("")) }
     var drawMode by remember(conv.id) { mutableStateOf(false) }
+    var showFolders by remember(conv.id) { mutableStateOf(false) }
+    if (showFolders) ChatFoldersDialog(ctl, conv) { showFolders = false }
     val pending = remember(conv.id) { mutableStateListOf<PendingFile>() }
     var uploading by remember { mutableStateOf(0) }
     val members = conv.memberIds.mapNotNull { state.member(it) }
@@ -1082,6 +1158,17 @@ private fun Composer(ctl: AppController, state: AppState, conv: Conversation, ru
                         }
                         Spacer(Modifier.width(6.dp))
                         ToggleChip("直接画图", Icons.Rounded.Brush, drawMode) { drawMode = !drawMode }
+                        // 2026-10-17 对话栏 = Chat + Cowork：AI 改文件要不要先问（电脑上才有；手机上改不了，PhoneGate 也会保留电脑上的）
+                        if (platform.isDesktop && !ctl.remoteMode) {
+                            Spacer(Modifier.width(6.dp))
+                            // 这个对话里 AI 直接改、不用问的文件夹（拖进来的、选了「不再问」的），和 Code 栏的「工作区」一样能加能移出
+                            ToggleChip(if (conv.grantedPaths.isEmpty()) "文件夹" else "文件夹 ${conv.grantedPaths.size}", Icons.Rounded.FolderOpen, conv.grantedPaths.isNotEmpty()) { showFolders = true }
+                            Spacer(Modifier.width(6.dp))
+                            ToggleChip(if (conv.fileOpen) "改文件全部放开" else "改文件先问我", Icons.Rounded.Edit, conv.fileOpen) {
+                                ctl.run(Command.UpdateConversation(conv.copy(fileOpen = !conv.fileOpen)),
+                                    okText = if (conv.fileOpen) "改文件之前会先问你（拖进来的文件夹里照样直接改）" else "改文件全部放开：AI 新建、修改文件都不问，改之前照样备份、能撤销")
+                            }
+                        }
                         Spacer(Modifier.weight(1f))
                         // 有回答 / 画图在进行时，停止按钮单独放在发送键旁边，不挡着发新消息
                         if (running) {

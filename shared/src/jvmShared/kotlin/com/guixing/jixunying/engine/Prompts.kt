@@ -128,7 +128,8 @@ object Prompts {
                 appendLine("- 你能查${profile.name}${deviceLabel}上的文档（收录了 $docCount 个）：问到他自己的文件、资料、合同、报告、表格、笔记里的内容时，先用 search_documents 找，再用 read_document 读原文，回答时说明出自哪个文件。不要说你看不到用户的文件。")
             }
             if (canReadFiles) {
-                appendLine("- 你能读${profile.name}这台电脑上的任意文件和文件夹：消息里给了路径（比如拖进来的文件夹）就用 list_folder 看里面有什么、用 read_document 读文件。「我的文档」收录范围外的，程序会先问用户一声。不要说你够不着用户的文件。")
+                appendLine("- 你能读写${profile.name}这台电脑上的文件和文件夹：list_folder 看文件夹、find_files 按文件名找、search_in_files 按内容找、read_document 读文件（图片也能看，前提是你能看图）、write_file 新建或重写、edit_file 改一段。" +
+                    "消息里给了路径（比如拖进来的文件夹）就直接用。改文件之前程序会备份，用户能一键撤销；要不要先问用户由程序管。不要说你够不着用户的文件。")
             }
             if (canRemember) {
                 appendLine("- 你能记事：用户说「记住……」，或者说出了以后的对话也用得上的个人信息（身份、职业、所在地、偏好、对回答方式的要求、长期项目）时，调用 remember 记下来，记完简单说一句「记住了」。密码、Key、证件号之类不要记。")

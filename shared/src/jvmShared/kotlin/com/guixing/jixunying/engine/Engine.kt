@@ -7,6 +7,7 @@ import com.guixing.jixunying.model.AppState
 import com.guixing.jixunying.model.Attachment
 import com.guixing.jixunying.model.AttachmentKind
 import com.guixing.jixunying.model.BgJob
+import com.guixing.jixunying.model.CodeMode
 import com.guixing.jixunying.model.CodeSpec
 import com.guixing.jixunying.model.Command
 import com.guixing.jixunying.model.CommandResult
@@ -97,7 +98,8 @@ const val CHAIR_ID = "tool:chair"
 const val CODE_ID = "tool:code"
 
 /** 一次回答最多调几次工具（搜索、读网页、画图）。 */
-const val MAX_TOOL_USES = 8
+/** 一次回答最多用几次工具（2026-10-17 从 8 放到 40：对话栏也要能多步干活，读文件、改文件常常要十几步）。 */
+const val MAX_TOOL_USES = 40
 
 const val NO_IMAGE_MODEL = "还没有能画图的服务商。到 设置 → 模型服务 添加任意一家能画图的平台并填 Key：千问AI平台或阿里百炼（千问图像，画里的中文字写得准）、" +
     "火山方舟（豆包 Seedream）、MiniMax（image-01）、智谱开放平台（cogview-3-flash 免费，但写不好字）等都行。加好以后在聊天里说「画一张……」就会自动用它，不用别的设置。"
@@ -679,7 +681,8 @@ class Engine(
             convs.remove(c.id)
             storage.deleteConversation(c.id, atts)
             // Code 会话的改动备份（<数据目录>/code/<对话 id>/）跟着会话一起删，别留在盘上白占地方
-            if (state.conversation(c.id)?.isCode == true) codeBackup(c.id).deleteAll()
+            // 2026-10-17 起对话页改文件也有备份（同一个地方），一起删
+            codeBackup(c.id).deleteAll()
             if (synchronized(stanceBook) { stanceBook.removeAll { it.convId == c.id } }) storage.saveStances(synchronized(stanceBook) { stanceBook.toList() })
             updateState { s -> s.copy(conversations = s.conversations.filterNot { it.id == c.id }) }
             emit(Event.ConversationRemoved(c.id))
@@ -718,7 +721,7 @@ class Engine(
             val conv = state.conversation(c.convId) ?: return CommandResult(false, "对话不存在")
             val spec = conv.code ?: return CommandResult(false, "这不是 Code 会话")
             // 电脑上选的档记下来：手机能切到哪档以它为准（PhoneGate）
-            val next = spec.copy(mode = c.mode, pcMode = if (c.fromPhone) spec.pcMode else c.mode)
+            val next = spec.copy(mode = c.mode, pcMode = if (c.fromPhone) spec.pcMode else c.mode, openAll = c.openAll && c.mode != CodeMode.PLAN)
             if (next == spec) return CommandResult()
             updateState { s ->
                 s.copy(conversations = s.conversations.map { if (it.id == conv.id) it.copy(code = next, updatedAt = now()) else it })
@@ -742,7 +745,7 @@ class Engine(
             addMessage(userMsg)
             touchConversation(conv.id, c.text.ifBlank { atts.firstOrNull()?.name ?: paths.firstOrNull()?.let { File(it).name }.orEmpty() })
             // 循环本身在 CodeAgent 里；同一个会话已经在跑就排队，前一个跑完接着跑
-            codeAgent.submit(conv.id, userMsg)
+            codeAgent.submit(conv.id, userMsg, c.fromPhone)
             CommandResult()
         }
         is Command.CodeStop -> { codeAgent.stop(c.convId); CommandResult() }
@@ -782,6 +785,7 @@ class Engine(
             w.second.complete(c.allow to (if (c.allow) c.remember else ""))
             CommandResult()
         }
+        is Command.ChatRevert -> chatRevert(c.convId, c.changeId)
         is Command.ChatSetGranted -> {
             if (state.conversation(c.convId) == null) return CommandResult(false, "对话不存在")
             val paths = c.paths.map { it.trim() }.filter { it.isNotEmpty() }.distinctBy { it.lowercase() }
@@ -1000,44 +1004,188 @@ class Engine(
     }
 
     /**
-     * 对话页 AI 要读 f（2026-10-17，用户定「和 Code 一样放开」）：
-     * 收录范围 / 不用再问的清单里的直接读；微信对话、手机发起的这一轮不许读外面的；其余的在聊天里停下来问用户。
+     * 对话页 AI 要读 f。2026-10-17 用户：「比 Claude 更开放」——电脑上发起的，哪儿都能读，不问；
+     * 微信对话、手机发起的这一轮不许读收录范围外的（手机、微信丢了就等于整台电脑的文件被人读）。
      * 返回 null = 可以读；返回文字 = 不读，把这句话回给模型。
      */
     private suspend fun askToRead(convId: String, msgId: String, f: File): String? {
         if (f.path.startsWith("\\\\") || f.path.startsWith("//")) return "网络路径不能读：${f.path}"
         if (readable(convId, f)) return null
+        remoteRefusal(convId, "读", f)?.let { return it }
+        return null
+    }
+
+    /** 微信对话、手机发起的这一轮：收录范围外的不许碰。返回不为空就是拒绝的说法。 */
+    private suspend fun remoteRefusal(convId: String, what: String, f: File): String? {
+        if (state.conversation(convId)?.channel?.startsWith("weixin:") == true)
+            return "这是微信里发来的，收录范围外的文件不能$what（${f.path}）。如实告诉用户：要${what}就在电脑上的 AI集训营 里说。"
+        if (kotlin.coroutines.coroutineContext[PhoneTurn] != null)
+            return "这一轮是手机上发起的，收录范围外的文件不能$what（${f.path}）。如实告诉用户：要${what}就在电脑上说，或者把它加进「我的文档」。"
+        return null
+    }
+
+    /**
+     * 对话页 AI 要改 / 新建 f（2026-10-17，对话栏 = Chat + Cowork）：
+     * 微信、手机发起的一律不许改；开了「全部放开」或者在拖进来 / 不用再问的文件夹里，直接改；别处的停下来问（卡片上带差异）。
+     * 返回 null = 可以改；返回文字 = 不改。stepId 是这一步的编号（改完把改动挂在它上面）。
+     */
+    private suspend fun askToWrite(convId: String, msgId: String, f: File, stepId: String, diff: String, note: String): String? {
+        if (f.path.startsWith("\\\\") || f.path.startsWith("//")) return "网络路径不能改：${f.path}"
         val conv = state.conversation(convId)
-        if (conv?.channel?.startsWith("weixin:") == true) return "这是微信里发来的，收录范围外的文件不能读（${f.path}）。如实告诉用户：要读就在电脑上的 AI集训营 里问。"
-        if (kotlin.coroutines.coroutineContext[PhoneTurn] != null) return "这一轮是手机上发起的，收录范围外的文件不能读（${f.path}）。如实告诉用户：要读就在电脑上问，或者把它加进「我的文档」。"
-        val stepId = newId()
-        val dir = (if (f.isDirectory) f else f.absoluteFile.parentFile ?: f).absolutePath
+        if (conv?.channel?.startsWith("weixin:") == true) return "这是微信里发来的，不能改电脑上的文件（${f.path}）。如实告诉用户：要改就在电脑上的 AI集训营 里说。"
+        if (kotlin.coroutines.coroutineContext[PhoneTurn] != null) return "这一轮是手机上发起的，不能改电脑上的文件（${f.path}）。如实告诉用户：要改就在电脑上说。"
+        val step = ToolStep(if (note.startsWith("替换")) "edit" else "write", f.absolutePath, id = stepId, output = diff, ok = true, note = note,
+            scopeDir = (f.absoluteFile.parentFile ?: f).absolutePath)
+        if (conv?.fileOpen == true || grantedForWrite(convId, f)) {
+            updateMessage(convId, msgId) { it.copy(tools = it.tools + step) }
+            return null
+        }
         val done = CompletableDeferred<Pair<Boolean, String>>()
         chatWaitings[stepId] = convId to done
-        updateMessage(convId, msgId) { it.copy(tools = it.tools + ToolStep("doc", f.absolutePath, id = stepId, approval = "waiting", scopeDir = dir,
-            note = if (f.isDirectory) "想看这个文件夹" else "想读这个文件")) }
+        updateMessage(convId, msgId) { it.copy(tools = it.tools + step.copy(approval = "waiting")) }
         val (allow, remember) = try {
             done.await()
         } catch (e: CancellationException) {
-            withContext(NonCancellable) { updateMessage(convId, msgId) { m -> m.copy(tools = m.tools.map { if (it.id == stepId) it.copy(approval = "denied", ok = false, note = "停下来时没有读") else it }) } }
+            withContext(NonCancellable) { updateMessage(convId, msgId) { m -> m.copy(tools = m.tools.map { if (it.id == stepId) it.copy(approval = "denied", ok = false, note = "停下来时没有改") else it }) } }
             throw e
         } finally {
             chatWaitings.remove(stepId)
         }
-        if (allow && remember == "dir") grantPaths(convId, listOf(dir))
+        if (allow && remember == "dir") grantPaths(convId, listOf(step.scopeDir))
         updateMessage(convId, msgId) { m -> m.copy(tools = m.tools.map {
             if (it.id != stepId) it else it.copy(approval = if (allow) "allowed" else "denied", ok = allow,
-                note = if (!allow) "你拒绝了，没有读" else if (remember == "dir") "允许了，$dir 这个对话里以后不再问" else "允许了这一次")
+                note = if (!allow) "你拒绝了，没有改" else if (remember == "dir") "$note（${step.scopeDir} 这个对话里以后不再问）" else note)
         }) }
-        return if (allow) null else "用户拒绝了读 ${f.path}。不要再试同一个文件，如实告诉用户没读到。"
+        return if (allow) null else "用户拒绝了改 ${f.path}。不要原样再试，可以换个做法或者问用户。"
+    }
+
+    /** 拖进来的 / 选了「不再问」的文件夹里（不含「我的文档」——那是只读的收录范围）。 */
+    private fun grantedForWrite(convId: String, f: File): Boolean {
+        val real = runCatching { (if (f.exists()) f else f.absoluteFile.parentFile ?: f).toPath().toRealPath().toString() }.getOrElse { f.absolutePath }.lowercase()
+        return state.conversation(convId)?.grantedPaths.orEmpty()
+            .mapNotNull { runCatching { File(it).toPath().toRealPath().toString() }.getOrNull()?.lowercase() }
+            .any { r -> real == r || real.startsWith(r.trimEnd('\\', '/') + File.separator) }
+    }
+
+    /** 新建 / 重写（edit = false）或局部替换（edit = true）一个文本文件：先问（看情况）、备份、写，改动挂在这一步上能撤销。 */
+    private suspend fun chatWrite(convId: String, msgId: String, args: JsonObject, edit: Boolean): String {
+        val path = args.str("path").orEmpty().trim().removeSurrounding("\"").ifBlank { return "参数错误：缺少 path" }
+        val f = File(path)
+        if (!f.isAbsolute) return "path 要写完整路径（比如 G:\\资料\\笔记.md）：$path"
+        if (f.isDirectory) return "这是文件夹，不能当文件写：$path"
+        val before = withContext(Dispatchers.IO) { if (f.isFile) runCatching { f.readText() }.getOrNull() else "" } ?: return "读不了原来的 ${f.name}（可能没有权限）"
+        val after = if (!edit) args.str("content") ?: return "参数错误：缺少 content" else {
+            val old = args.str("old_text").orEmpty()
+            val new = args.str("new_text") ?: return "参数错误：缺少 new_text"
+            if (!f.isFile) return "${f.name} 不存在（要新建就用 write_file）"
+            if (old.isEmpty()) return "参数错误：old_text 不能是空的"
+            var n = 0
+            var at = before.indexOf(old)
+            while (at >= 0) { n++; at = before.indexOf(old, at + old.length) }
+            if (n == 0) return "文件里没有这段文字，没有改动。先用 read_document 看一下现在的内容。"
+            if (n > 1) return "这段文字在文件里出现了 $n 次，分不清改哪一处，没有改动。把 old_text 写长一点。"
+            before.replaceFirst(old, new)
+        }
+        val diff = CodeDiff.make(f.absolutePath, before, after)
+        val stepId = newId()
+        val note = if (edit) "替换 ${f.name} 里的一段" else if (f.isFile) "重写这个文件" else "新建这个文件"
+        askToWrite(convId, msgId, f, stepId, diff.text.take(20_000), note)?.let { return it }
+        val created = withContext(Dispatchers.IO) { codeBackup(convId).save(stepId, f) }
+        val err = withContext(Dispatchers.IO) { runCatching { f.absoluteFile.parentFile?.mkdirs(); f.writeText(after, Charsets.UTF_8) }.exceptionOrNull() }
+        if (err != null) {
+            updateMessage(convId, msgId) { m -> m.copy(tools = m.tools.map { if (it.id == stepId) it.copy(ok = false, note = "没写成：${err.message}") else it }) }
+            return "写不了 ${f.absolutePath}：${err.message}"
+        }
+        val change = com.guixing.jixunying.model.FileChange(stepId, f.absolutePath, diff.added, diff.removed, created = created)
+        updateMessage(convId, msgId) { m -> m.copy(tools = m.tools.map { if (it.id == stepId) it.copy(change = change) else it }) }
+        return "${if (edit) "改好了" else if (created) "新建好了" else "重写好了"}：${f.absolutePath}（+${diff.added} −${diff.removed}）。用户能在回答里一键撤销。"
+    }
+
+    /** 撤销对话页 AI 改的一处文件：按备份恢复，原来没有的删掉。 */
+    private suspend fun chatRevert(convId: String, changeId: String): CommandResult {
+        val msg = snapshot(convId).firstOrNull { m -> m.tools.any { it.change?.id == changeId } } ?: return CommandResult(false, "找不到这处改动")
+        val ch = msg.tools.first { it.change?.id == changeId }.change!!
+        if (ch.review == "rejected") return CommandResult(message = "已经撤销过了")
+        val ok = withContext(Dispatchers.IO) { codeBackup(convId).restore(changeId, File(ch.path)) }
+        if (!ok) return CommandResult(false, "这处改动的备份不在了，没法恢复")
+        updateMessage(convId, msg.id) { m -> m.copy(tools = m.tools.map { if (it.change?.id == changeId) it.copy(change = it.change.copy(review = "rejected")) else it }) }
+        return CommandResult(message = if (ch.created) "撤销了：${File(ch.path).name} 是新建的，已经删掉" else "撤销了：${File(ch.path).name} 恢复成改之前的样子")
+    }
+
+    /** 按文件名找（和 Code 栏的 find_files 同一套规矩：跳过 .git、node_modules，新改的在前）。 */
+    private suspend fun chatFind(convId: String, msgId: String, args: JsonObject): String {
+        val pattern = args.str("pattern").orEmpty().trim().replace('\\', '/').ifBlank { return "参数错误：缺少 pattern" }
+        val dir = File(args.str("path").orEmpty().trim().removeSurrounding("\"").ifBlank { return "参数错误：缺少 path（在哪个文件夹底下找）" })
+        if (!dir.isDirectory) return "没有这个文件夹：${dir.path}"
+        askToRead(convId, msgId, dir)?.let { return it }
+        val glob = if ('/' in pattern) pattern else "**/$pattern"
+        val m1 = runCatching { java.nio.file.FileSystems.getDefault().getPathMatcher("glob:$glob") }.getOrElse { return "通配写法不对：$pattern" }
+        val m2 = if ('/' in pattern) null else runCatching { java.nio.file.FileSystems.getDefault().getPathMatcher("glob:$pattern") }.getOrNull()
+        val found = mutableListOf<File>()
+        withContext(Dispatchers.IO) {
+            val q = ArrayDeque<File>().apply { add(dir) }
+            var n = 0
+            while (q.isNotEmpty() && n < 50_000) {
+                val f = q.removeFirst()
+                if (f.isDirectory) f.listFiles()?.filter { it.name != ".git" && it.name != "node_modules" }?.forEach { q.add(it) }
+                else { n++; val r = dir.toPath().relativize(f.toPath()); if (m1.matches(r) || m2?.matches(r) == true) found += f }
+            }
+        }
+        val list = found.sortedByDescending { it.lastModified() }.take(200)
+        updateMessage(convId, msgId, persist = false) { it.copy(tools = it.tools + ToolStep("doc", "找文件「$pattern」· ${found.size} 个", ok = found.isNotEmpty())) }
+        return if (found.isEmpty()) "在 ${dir.path} 底下没找到「$pattern」。"
+        else "找到 ${found.size} 个：\n" + list.joinToString("\n") { it.absolutePath } + if (found.size > 200) "\n（只列了最新的 200 个）" else ""
+    }
+
+    /** 按内容找（和 Code 栏的 grep 同一套：跳过二进制和超过 1MB 的文件）。 */
+    private suspend fun chatGrep(convId: String, msgId: String, args: JsonObject): String {
+        val pattern = args.str("pattern").orEmpty().ifBlank { return "参数错误：缺少 pattern" }
+        val dir = File(args.str("path").orEmpty().trim().removeSurrounding("\"").ifBlank { return "参数错误：缺少 path（在哪个文件夹底下找）" })
+        if (!dir.exists()) return "没有这个路径：${dir.path}"
+        askToRead(convId, msgId, dir)?.let { return it }
+        val re = runCatching { Regex(pattern, RegexOption.IGNORE_CASE) }.getOrNull()
+        val skip = setOf("png", "jpg", "jpeg", "gif", "webp", "ico", "zip", "jar", "class", "exe", "dll", "so", "pdf", "docx", "xlsx", "pptx", "mp3", "mp4", "ttf", "woff", "woff2")
+        val hits = mutableListOf<String>()
+        withContext(Dispatchers.IO) {
+            val q = ArrayDeque<File>().apply { add(dir) }
+            var n = 0
+            while (q.isNotEmpty() && hits.size < 60 && n < 3000) {
+                val f = q.removeFirst()
+                if (f.isDirectory) f.listFiles()?.filter { it.name != ".git" && it.name != "node_modules" }?.sortedBy { it.name }?.forEach { q.add(it) }
+                else if (f.length() <= 1L * 1024 * 1024 && f.extension.lowercase() !in skip) {
+                    n++
+                    val text = runCatching { f.readText() }.getOrNull() ?: continue
+                    var i = 0
+                    for (line in text.lineSequence()) {
+                        i++
+                        if (hits.size >= 60) break
+                        val l = line.take(2000)
+                        if (re?.containsMatchIn(l) ?: l.contains(pattern, ignoreCase = true)) hits += "${f.absolutePath}:$i: ${line.trim().take(300)}"
+                    }
+                }
+            }
+        }
+        updateMessage(convId, msgId, persist = false) { it.copy(tools = it.tools + ToolStep("doc", "按内容找「${pattern.take(30)}」· ${hits.size} 处", ok = hits.isNotEmpty())) }
+        return if (hits.isEmpty()) "在 ${dir.path} 底下没找到「$pattern」。" else hits.joinToString("\n") + if (hits.size >= 60) "\n（只列了前 60 条）" else ""
     }
 
     /** 读收录范围外的一个文件（先过 askToRead）：文档抽文字，文本照读。 */
-    private suspend fun readAnyFile(convId: String, msgId: String, path: String, start: Int): String {
+    private suspend fun readAnyFile(convId: String, msgId: String, path: String, start: Int, seen: MutableList<Pair<String, String>>? = null): String {
         val f = File(path)
-        if (!f.exists()) return "没有这个文件：$path（先用 list_folder 看看文件夹里有什么，或者用 search_documents 搜）"
+        if (!f.exists()) return "没有这个文件：$path（先用 list_folder 看看文件夹里有什么，或者用 find_files 找）"
         if (f.isDirectory) return "这是文件夹：$path。用 list_folder 看里面有什么。"
         askToRead(convId, msgId, f)?.let { return it }
+        // 图片：能看图的模型在下一条消息里看到（和 Code 栏的 read_file 一样）
+        if (DocExtract.isImage(f.name, "")) {
+            if (seen == null) return "${f.name} 是图片，你这个模型看不了图片。如实告诉用户，可以换一个能看图的成员。"
+            if (f.length() > 30L * 1024 * 1024) return "${f.name} 是图片，但太大了（${f.length()} 字节）"
+            val bytes = withContext(Dispatchers.IO) { f.readBytes() }
+            val shrunk = runCatching { shrinkImageToJpeg(bytes, 1600, 1_500_000) }.getOrNull()
+            seen += f.name to (if (shrunk != null) "data:image/jpeg;base64," + Base64.getEncoder().encodeToString(shrunk)
+                else "data:${DocExtract.imageMime(f.name, "")};base64," + Base64.getEncoder().encodeToString(bytes))
+            updateMessage(convId, msgId, persist = false) { it.copy(tools = it.tools + ToolStep("doc", "看了图片《${f.name}》")) }
+            return "${f.name} 是图片，已经附在下一条消息里给你看。"
+        }
         if (f.length() > 50L * 1024 * 1024) return "${f.name} 太大（${f.length()} 字节），读不了"
         val (text, note) = withContext(Dispatchers.IO) { DocExtract.extract(f.name, f.readBytes()) }
         updateMessage(convId, msgId, persist = false) { it.copy(tools = it.tools + ToolStep("doc", "读《${f.name}》", ok = text != null)) }
@@ -1985,7 +2133,7 @@ class Engine(
                 val before = snapshot(convId).firstOrNull { it.id == msg.id }?.content?.length ?: 0
                 val r = llm.chat(provider, model.id, working, member.temperature, tools, extra, onSources, thinking) { c, rs -> appendDelta(convId, msg.id, c, rs) }
                 usage = Usage(usage.prompt + r.usage.prompt, usage.completion + r.usage.completion, usage.cached + r.usage.cached, usage.millis + r.usage.millis)
-                if (r.toolCalls.isEmpty() || rounds >= 8) break
+                if (r.toolCalls.isEmpty() || rounds >= MAX_TOOL_USES) break
                 // 这一轮说的是「我去查一下」「这页打不开，换个词再搜」之类的过程话，挪进推理过程，正文只留最后的回答
                 updateMessage(convId, msg.id, persist = false) { m ->
                     val cut = before.coerceIn(0, m.content.length)
@@ -2005,14 +2153,23 @@ class Engine(
                         }
                     }
                 }
+                val seen = mutableListOf<Pair<String, String>>()
                 for (tc in r.toolCalls) {
-                    // 一次回答最多用 8 次工具，超过就让它根据已有结果直接回答
+                    // 一次回答最多用 MAX_TOOL_USES 次工具，超过就让它根据已有结果直接回答
                     val result = if (toolUses >= MAX_TOOL_USES)
-                        "这次回答已经用了 $MAX_TOOL_USES 次工具，不能再搜了。请直接根据前面的结果回答；没查到的就如实说。"
-                    else { toolUses++; runTool(convId, msg.id, tc, sources, kimiSearch) }
+                        "这次回答已经用了 $MAX_TOOL_USES 次工具，不能再用了。请直接根据前面的结果回答；没做完的如实说。"
+                    else { toolUses++; runTool(convId, msg.id, tc, sources, kimiSearch, if (model.vision) seen else null) }
                     working += buildJsonObject {
                         put("role", "tool"); put("tool_call_id", tc.id)
                         put("content", result)
+                    }
+                }
+                // read_document 读到的图片：工具结果里放不了图片，补一条 user 消息带上（和 Code 栏一样）
+                if (seen.isNotEmpty()) working += buildJsonObject {
+                    put("role", "user")
+                    putJsonArray("content") {
+                        add(buildJsonObject { put("type", "text"); put("text", "（这是刚才读到的图片：" + seen.joinToString("、") { it.first } + "）") })
+                        seen.forEach { (_, url) -> add(buildJsonObject { put("type", "image_url"); putJsonObject("image_url") { put("url", url) } }) }
                     }
                 }
             } }
@@ -2109,6 +2266,28 @@ class Engine(
             // 2026-10-17 用户定「和 Code 一样放开」：电脑上任意文件 / 文件夹都能读，收录范围外的程序先问用户
             fn("list_folder", "列出电脑上一个文件夹里有哪些文件和子文件夹（任意完整路径都行，比如用户拖进来的文件夹）。",
                 buildJsonObject { put("path", prop("文件夹的完整路径")) }, listOf("path"))
+            // 2026-10-17 对话栏 = Chat + Cowork：和 Code 栏同一套找文件、搜内容、新建 / 修改文件
+            fn("find_files", "在一个文件夹底下按文件名找文件，比如 *.xlsx、**/合同*.docx、*.md；返回完整路径（新改的在前）。",
+                buildJsonObject {
+                    put("pattern", prop("文件名的通配写法：* 匹配一段名字，** 匹配任意几层目录"))
+                    put("path", prop("在哪个文件夹底下找（完整路径）"))
+                }, listOf("pattern", "path"))
+            fn("search_in_files", "在一个文件夹底下按内容找：哪些文本文件里有这段文字，返回文件、行号和那一行。",
+                buildJsonObject {
+                    put("pattern", prop("要找的文字或正则表达式"))
+                    put("path", prop("在哪个文件夹底下找（完整路径）"))
+                }, listOf("pattern", "path"))
+            fn("write_file", "在电脑上新建一个文本文件，或者整个重写一个已有的文本文件（Markdown、CSV、代码、配置、txt 等；Word / Excel / PPT 文件用专门做文件的工具）。改之前程序会备份，用户能一键撤销。",
+                buildJsonObject {
+                    put("path", prop("文件的完整路径"))
+                    put("content", prop("文件的全部内容"))
+                }, listOf("path", "content"))
+            fn("edit_file", "把电脑上一个已有文本文件里的一段文字换成另一段。old_text 在文件里必须正好出现一次。改之前程序会备份，用户能一键撤销。",
+                buildJsonObject {
+                    put("path", prop("文件的完整路径"))
+                    put("old_text", prop("要换掉的原文（要唯一，写长一点，包括换行）"))
+                    put("new_text", prop("换成什么（删掉就填空）"))
+                }, listOf("path", "old_text", "new_text"))
         }
         if (docs || files) {
             if (docs) fn("search_documents", "搜索用户这台设备上的文档（PDF、Word、Excel、PPT、文本等），按文件名和内容匹配。" +
@@ -2738,7 +2917,8 @@ class Engine(
         }
     }
 
-    private suspend fun runTool(convId: String, msgId: String, tc: ToolCall, sources: MutableList<SearchSource>, kimiSearch: ProviderConfig? = null): String {
+    private suspend fun runTool(convId: String, msgId: String, tc: ToolCall, sources: MutableList<SearchSource>, kimiSearch: ProviderConfig? = null,
+                                seen: MutableList<Pair<String, String>>? = null): String {
         val args = runCatching { Json.parse(tc.arguments.ifBlank { "{}" }).jsonObject }.getOrNull() ?: JsonObject(emptyMap())
         return when (tc.name) {
             "web_search" -> {
@@ -2826,6 +3006,10 @@ class Engine(
                     append("要看全文就用 read_document，path 填上面的路径。回答时说明出自哪个文件。")
                 }
             }
+            "find_files" -> chatFind(convId, msgId, args)
+            "search_in_files" -> chatGrep(convId, msgId, args)
+            "write_file" -> chatWrite(convId, msgId, args, edit = false)
+            "edit_file" -> chatWrite(convId, msgId, args, edit = true)
             "list_folder" -> {
                 val p = args.str("path").orEmpty().trim().removeSurrounding("\"").ifBlank { return "参数错误：缺少 path" }
                 val dir = File(p)
@@ -2841,7 +3025,7 @@ class Engine(
             }
             "read_document" -> {
                 val p = args.str("path").orEmpty().trim().removeSurrounding("\"").ifBlank { return "参数错误：缺少 path" }
-                val e = docs.find(p) ?: return readAnyFile(convId, msgId, p, args.str("start")?.trim()?.toIntOrNull() ?: 0)
+                val e = docs.find(p) ?: return readAnyFile(convId, msgId, p, args.str("start")?.trim()?.toIntOrNull() ?: 0, seen)
                 val text = withContext(Dispatchers.IO) { docs.text(e.path) }
                 updateMessage(convId, msgId, persist = false) { it.copy(tools = it.tools + ToolStep("doc", "读《${e.name}》", ok = text != null)) }
                 if (text == null) "《${e.name}》读不出文字：${e.note.ifBlank { "可能是扫描件或老格式" }}。如实告诉用户。"
