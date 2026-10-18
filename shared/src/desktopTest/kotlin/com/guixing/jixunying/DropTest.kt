@@ -25,7 +25,7 @@ class DropTest {
         override fun getTransferData(flavor: DataFlavor) = data[flavor] ?: throw java.awt.datatransfer.UnsupportedFlavorException(flavor)
     }
 
-    private val platform = DesktopPlatform { null }
+    private val platform = DesktopPlatform(fileLog = false) { null }
 
     @Test
     fun fileListKeepsFoldersAndBigFiles() {

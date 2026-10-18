@@ -6,6 +6,7 @@ import com.guixing.jixunying.ui.PickedFile
 import com.guixing.jixunying.ui.Platform
 import androidx.compose.foundation.draganddrop.dragAndDropTarget
 import androidx.compose.ui.draganddrop.awtTransferable
+import androidx.compose.ui.composed
 import kotlinx.coroutines.Dispatchers
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
@@ -19,7 +20,8 @@ import java.io.File
 import java.net.URI
 import java.nio.file.Files
 
-class DesktopPlatform(private val window: () -> Frame?) : Platform {
+/** fileLog：诊断日志写不写进数据目录（测试里关掉，2026-10-17 测试把日志写进了用户真的数据目录）。 */
+class DesktopPlatform(private val fileLog: Boolean = true, private val window: () -> Frame?) : Platform {
     override val isDesktop = true
     override val deviceName: String = runCatching { java.net.InetAddress.getLocalHost().hostName }.getOrDefault("电脑")
 
@@ -108,28 +110,77 @@ class DesktopPlatform(private val window: () -> Frame?) : Platform {
         }.getOrDefault(emptyList())
     }
 
-    @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class, androidx.compose.ui.ExperimentalComposeUiApi::class)
+    /**
+     * 拖文件进窗口（2026-10-17 第二次改）。
+     * 用户实测：从资源管理器拖进来、松了手，四次里只有一次送到了（日志里三次只有「开始拖」没有「松开」）。
+     * 以前走的是 Compose 的 dragAndDropTarget；它架在 AWT 上，Windows 资源管理器默认是「移动」，Compose 那层没接成就不交「松开」
+     * （Kotlin Slack 上有人报过同样的事：光标在加号和禁止之间跳，禁止时 onDrop 不来，
+     * https://slack-chats.kotlinlang.org/t/34310586/are-there-any-apis-for-file-dropping-like-dragging-a-file-fr ，没有解决办法）。
+     * 现在不走 Compose 那层：直接在窗口的每个 AWT 组件上装我们自己的 DropTarget，进来就按「复制」收下（acceptDrag / acceptDrop），
+     * 松开时交给当前最上面那个页面（聊天或 Code，后注册的在上面）。Compose 自己的拖放我们没用到（输入框是旧式的，不带拖放）。
+     * 拿不到窗口（截图、测试）时什么都不做。
+     */
     override fun fileDropTarget(modifier: androidx.compose.ui.Modifier, onHover: (Boolean) -> Unit, onFiles: (List<PickedFile>) -> Unit): androidx.compose.ui.Modifier =
-        modifier.then(androidx.compose.ui.Modifier.dragAndDropTarget(
-            // 2026-10-17：什么都接（以前只认文件列表，从浏览器、微信拖的图、网址列表都进不来）；认不出来的在 onDrop 里说
-            shouldStartDragAndDrop = { e ->
-                log("JxyDrop", "开始拖：" + runCatching { e.awtTransferable.transferDataFlavors.joinToString { it.mimeType.substringBefore(';') } }.getOrDefault("?").take(400))
-                true
-            },
-            target = object : androidx.compose.ui.draganddrop.DragAndDropTarget {
-                override fun onEntered(event: androidx.compose.ui.draganddrop.DragAndDropEvent) = onHover(true)
-                override fun onExited(event: androidx.compose.ui.draganddrop.DragAndDropEvent) = onHover(false)
-                override fun onEnded(event: androidx.compose.ui.draganddrop.DragAndDropEvent) = onHover(false)
-                override fun onDrop(event: androidx.compose.ui.draganddrop.DragAndDropEvent): Boolean {
-                    onHover(false)
-                    // 内容要在这里（松开的这一刻）取出来：过了这一刻系统就收回了
-                    val files = runCatching { readTransfer(event.awtTransferable) }.onFailure { log("JxyDrop", "读拖进来的东西出错：$it") }.getOrDefault(emptyList())
-                    log("JxyDrop", "认出 ${files.size} 个：" + files.joinToString { "${it.path.ifBlank { it.name }}（${it.bytes.size} 字节${if (it.pathOnly) "，只给路径" else ""}）" }.take(800))
-                    dropScope.launch { withContext(Dispatchers.Swing) { onFiles(files) } }
-                    return true
-                }
-            },
-        ))
+        modifier.then(androidx.compose.ui.Modifier.composed {
+            val h = androidx.compose.runtime.remember { DropHandler() }
+            h.onHover = onHover
+            h.onFiles = onFiles
+            androidx.compose.runtime.DisposableEffect(Unit) {
+                dropHandlers.add(h)
+                installWindowDrop()
+                onDispose { dropHandlers.remove(h) }
+            }
+            androidx.compose.ui.Modifier
+        })
+
+    private class DropHandler {
+        @Volatile var onHover: (Boolean) -> Unit = {}
+        @Volatile var onFiles: (List<PickedFile>) -> Unit = {}
+    }
+
+    /** 正在显示、能收拖放的页面；最后一个是最上面的。 */
+    private val dropHandlers = java.util.concurrent.CopyOnWriteArrayList<DropHandler>()
+
+    private val windowDrop = object : java.awt.dnd.DropTargetAdapter() {
+        override fun dragEnter(e: java.awt.dnd.DropTargetDragEvent) {
+            e.acceptDrag(java.awt.dnd.DnDConstants.ACTION_COPY)
+            log("JxyDrop", "开始拖：" + runCatching { e.currentDataFlavors.joinToString { it.mimeType.substringBefore(';') } }.getOrDefault("?").take(400))
+            dropHandlers.lastOrNull()?.onHover?.invoke(true)
+        }
+        override fun dragOver(e: java.awt.dnd.DropTargetDragEvent) = e.acceptDrag(java.awt.dnd.DnDConstants.ACTION_COPY)
+        override fun dropActionChanged(e: java.awt.dnd.DropTargetDragEvent) = e.acceptDrag(java.awt.dnd.DnDConstants.ACTION_COPY)
+        override fun dragExit(e: java.awt.dnd.DropTargetEvent) { dropHandlers.lastOrNull()?.onHover?.invoke(false) }
+        override fun drop(e: java.awt.dnd.DropTargetDropEvent) {
+            val h = dropHandlers.lastOrNull()
+            h?.onHover?.invoke(false)
+            // 一律按「复制」收下；内容要在这里（松开的这一刻）取出来，过了这一刻系统就收回了
+            e.acceptDrop(java.awt.dnd.DnDConstants.ACTION_COPY)
+            val files = runCatching { readTransfer(e.transferable) }.onFailure { log("JxyDrop", "读拖进来的东西出错：$it") }.getOrDefault(emptyList())
+            e.dropComplete(true)
+            log("JxyDrop", "认出 ${files.size} 个：" + files.joinToString { "${it.path.ifBlank { it.name }}（${it.bytes.size} 字节${if (it.pathOnly) "，只给路径" else ""}）" }.take(800) +
+                if (h == null) "（这一页不收文件）" else "")
+            if (h != null) dropScope.launch { withContext(Dispatchers.Swing) { h.onFiles(files) } }
+        }
+    }
+
+    @Volatile private var dropTimer: javax.swing.Timer? = null
+
+    /** 给窗口里每个组件装上我们的 DropTarget（Compose 自己装的换掉）；之后每 2 秒查一次，新冒出来的组件也装上。 */
+    private fun installWindowDrop() {
+        java.awt.EventQueue.invokeLater {
+            val w = window() ?: return@invokeLater
+            fun apply(c: java.awt.Component) {
+                val dt = c.dropTarget
+                if (dt == null || dt !is OurDropTarget) runCatching { c.dropTarget = OurDropTarget(c, windowDrop) }
+                if (c is java.awt.Container) c.components.forEach { apply(it) }
+            }
+            apply(w)
+            if (dropTimer == null) dropTimer = javax.swing.Timer(2000) { window()?.let { apply(it) } }.apply { start() }
+        }
+    }
+
+    private class OurDropTarget(c: java.awt.Component, l: java.awt.dnd.DropTargetListener) :
+        java.awt.dnd.DropTarget(c, java.awt.dnd.DnDConstants.ACTION_COPY_OR_MOVE or java.awt.dnd.DnDConstants.ACTION_LINK, l, true)
 
     private val dropScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + Dispatchers.IO)
 
@@ -138,6 +189,7 @@ class DesktopPlatform(private val window: () -> Frame?) : Platform {
      * 写在 <数据目录>\logs\jxy.log，超过 2MB 就从头写。不写文件内容、不写 Key。
      */
     override fun log(tag: String, text: String) {
+        if (!fileLog) return
         runCatching {
             val dir = File(System.getProperty("jxy.data") ?: (System.getenv("APPDATA") ?: (System.getProperty("user.home") + "/.config")) + "/ai-jixunying", "logs")
             dir.mkdirs()
