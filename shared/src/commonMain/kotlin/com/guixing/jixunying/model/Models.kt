@@ -345,6 +345,11 @@ data class Conversation(
      * 放在最后加：旧版手机不认识这个字段直接忽略（AppJson.ignoreUnknownKeys），不会读坏整个状态。
      */
     val code: CodeSpec? = null,
+    /**
+     * 对话页 AI 不用再问就能读的文件 / 文件夹（2026-10-17 用户定「和 Code 一样放开」）：
+     * 拖进这个对话的、批准时选了「以后这个文件夹不再问」的。「我的文档」收录的本来就不用问。
+     */
+    val grantedPaths: List<String> = emptyList(),
 ) {
     val isGroup: Boolean get() = memberIds.size > 1
 

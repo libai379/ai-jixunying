@@ -39,6 +39,15 @@ object PhoneGate {
         if (c is Command.SaveSettings) {
             return Verdict(c.copy(settings = c.settings.copy(code = s.settings.code)))
         }
+        // 2026-10-17 对话页 AI 能读电脑上任意文件（收录范围外的先问用户）：手机发起的这一轮一律不许读收录范围外的；
+        // 手机不能带电脑上的路径进来、不能放宽「不再问」的路径
+        when (c) {
+            is Command.SendMessage -> return Verdict(c.copy(paths = emptyList(), fromPhone = true))
+            is Command.Regenerate -> return Verdict(c.copy(fromPhone = true))
+            is Command.ChatDecide -> return Verdict(c.copy(remember = ""))
+            is Command.ChatSetGranted -> return refuse(c, "对话里不用再问的文件夹只能在电脑上改")
+            else -> Unit
+        }
         if (!isCodeWrite(c)) return Verdict(c)
         if (!s.settings.code.allowPhone) return refuse(c, OFF)
         return when (c) {

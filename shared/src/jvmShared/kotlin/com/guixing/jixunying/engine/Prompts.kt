@@ -43,6 +43,8 @@ object Prompts {
         deviceLabel: String = "这台电脑",
         /** 能用 create_word / create_excel 做文件。 */
         canMakeFiles: Boolean = false,
+        /** 能读电脑上任意文件和文件夹（list_folder / read_document；收录范围外的程序先问用户，2026-10-17）。 */
+        canReadFiles: Boolean = false,
     ): String {
         val profile = state.profile
         val others = conv.memberIds.filter { it != me.id }.mapNotNull { state.member(it) }
@@ -124,6 +126,9 @@ object Prompts {
             }
             if (docCount > 0) {
                 appendLine("- 你能查${profile.name}${deviceLabel}上的文档（收录了 $docCount 个）：问到他自己的文件、资料、合同、报告、表格、笔记里的内容时，先用 search_documents 找，再用 read_document 读原文，回答时说明出自哪个文件。不要说你看不到用户的文件。")
+            }
+            if (canReadFiles) {
+                appendLine("- 你能读${profile.name}这台电脑上的任意文件和文件夹：消息里给了路径（比如拖进来的文件夹）就用 list_folder 看里面有什么、用 read_document 读文件。「我的文档」收录范围外的，程序会先问用户一声。不要说你够不着用户的文件。")
             }
             if (canRemember) {
                 appendLine("- 你能记事：用户说「记住……」，或者说出了以后的对话也用得上的个人信息（身份、职业、所在地、偏好、对回答方式的要求、长期项目）时，调用 remember 记下来，记完简单说一句「记住了」。密码、Key、证件号之类不要记。")

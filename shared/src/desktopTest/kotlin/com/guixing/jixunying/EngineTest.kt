@@ -204,7 +204,7 @@ class EngineTest {
                                 callTool("read_document", mapOf("path" to Regex("路径：(.+)").find(toolTexts.first { "路径：" in it })!!.groupValues[1].trim()))
                             // 想读文档库以外的文件
                             hasTool("read_document") && latest.contains("偷看") && !sawTool -> callTool("read_document", mapOf("path" to latest.substringAfter("偷看").trim()))
-                            toolTexts.any { "文档库里没有" in it } -> say("读不了。")
+                            toolTexts.any { "文档库里没有" in it || "用户拒绝了" in it } -> say("读不了。")
                             // Kimi：用我们的 web_search 工具，搜索由客户端去调 Kimi 官方搜索接口（/v1/tools/search）
                             model == "kimi-fake" && hasFnSearch && !sawTool -> callTool("web_search", mapOf("query" to "最新消息"))
                             model == "kimi-fake" -> say("Kimi 搜到了。")
@@ -1061,7 +1061,13 @@ class EngineTest {
         assertEquals(listOf("doc", "doc"), ai.tools.map { it.kind })
         assertTrue("文档" in systemOf(requests.first { runCatching { memberName(it) }.getOrNull() == "小智" }))
 
+        // 2026-10-17 用户定「和 Code 一样放开」：收录范围外的不再一律拒，而是先问用户；用户拒绝就读不到
         e.call(Command.SendMessage(conv, "偷看 ${secret.path}"))
+        withTimeout(20_000) {
+            while (e.store.messages.value[conv]!!.last().tools.none { it.approval == "waiting" }) delay(30)
+        }
+        val ask = e.store.messages.value[conv]!!.last().tools.first { it.approval == "waiting" }
+        assertTrue(e.call(Command.ChatDecide(conv, ask.id, false)).ok)
         waitIdle(e, conv, 2)
         assertEquals("读不了。", e.store.messages.value[conv]!!.last().content)
 

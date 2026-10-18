@@ -80,12 +80,23 @@ sealed interface Command {
         val convId: String,
         val text: String,
         val attachmentIds: List<String> = emptyList(),
+        /** 2026-10-17：电脑上拖进来 / 选的文件和文件夹的路径：写进消息、这个对话的 AI 读它不用再问。手机发来的清空（PhoneGate）。 */
+        val paths: List<String> = emptyList(),
+        /** 手机发来的（PhoneGate 填 true，手机自己填的不算）：这一轮 AI 不许读收录范围外的文件。 */
+        val fromPhone: Boolean = false,
         /** true 时不走聊天模型，直接把文字当画图提示词。 */
         val drawImage: Boolean = false,
     ) : Command
     @Serializable data class Stop(val convId: String) : Command
     @Serializable data class DeleteMessage(val convId: String, val messageId: String) : Command
-    @Serializable data class Regenerate(val convId: String, val messageId: String) : Command
+    @Serializable data class Regenerate(val convId: String, val messageId: String, val fromPhone: Boolean = false) : Command
+    /**
+     * 对话页：AI 要读收录范围外的文件，用户批准或拒绝（2026-10-17）。remember = "dir"：允许并且这个文件夹在这个对话里以后不再问。
+     * 手机发来的 remember 一律当 ""（PhoneGate）。
+     */
+    @Serializable data class ChatDecide(val convId: String, val stepId: String, val allow: Boolean, val remember: String = "") : Command
+    /** 对话页：改这个对话「不用再问」的路径（整份替换）。只能在电脑上改。 */
+    @Serializable data class ChatSetGranted(val convId: String, val paths: List<String>) : Command
 
     /** 远程上传附件：内容 Base64。结果 data 是 Attachment 的 JSON。 */
     @Serializable data class UploadFile(val name: String, val mime: String, val base64: String) : Command

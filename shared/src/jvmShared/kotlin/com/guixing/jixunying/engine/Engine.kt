@@ -55,6 +55,7 @@ import com.guixing.jixunying.model.UsageRecord
 import com.guixing.jixunying.model.isMaskedKey
 import com.guixing.jixunying.model.maskKey
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -774,7 +775,19 @@ class Engine(
             dropStanceMessage(c.convId, c.messageId)
             CommandResult()
         }
-        is Command.Regenerate -> regenerate(c.convId, c.messageId)
+        is Command.Regenerate -> regenerate(c.convId, c.messageId, c.fromPhone)
+        is Command.ChatDecide -> {
+            val w = chatWaitings[c.stepId] ?: return CommandResult(false, "这一步已经不在等你了")
+            if (w.first != c.convId) return CommandResult(false, "这一步已经不在等你了")
+            w.second.complete(c.allow to (if (c.allow) c.remember else ""))
+            CommandResult()
+        }
+        is Command.ChatSetGranted -> {
+            if (state.conversation(c.convId) == null) return CommandResult(false, "对话不存在")
+            val paths = c.paths.map { it.trim() }.filter { it.isNotEmpty() }.distinctBy { it.lowercase() }
+            updateState { s -> s.copy(conversations = s.conversations.map { if (it.id == c.convId) it.copy(grantedPaths = paths) else it }) }
+            CommandResult()
+        }
         is Command.SaveMemory -> {
             val text = c.item.text.trim()
             if (text.isBlank()) return CommandResult(false, "内容是空的")
@@ -931,7 +944,7 @@ class Engine(
 
     private suspend fun send(c: Command.SendMessage): CommandResult {
         var conv = state.conversation(c.convId) ?: return CommandResult(false, "对话不存在")
-        if (c.text.isBlank() && c.attachmentIds.isEmpty()) return CommandResult(false, "空消息")
+        if (c.text.isBlank() && c.attachmentIds.isEmpty() && c.paths.isEmpty()) return CommandResult(false, "空消息")
         // @ 了（或者开头直接喊了）不在这个对话里的成员：直接拉进来让他回答（以前会悄悄换成别人答）
         val invited = if (c.drawImage) emptyList() else outsidersCalled(c.text, conv)
         if (invited.isNotEmpty()) {
@@ -941,10 +954,15 @@ class Engine(
         }
         if (!c.drawImage && conv.memberIds.isEmpty()) return CommandResult(false, "这个对话还没有 AI 成员，点右上角加几位")
         val atts = c.attachmentIds.mapNotNull { storage.fileMeta(it) }
-        val userMsg = Message(newId(), conv.id, Role.USER, USER_ID, c.text.trim(), attachments = atts, createdAt = now())
+        // 2026-10-17：电脑上拖进来的文件 / 文件夹：路径写进消息，这个对话的 AI 读它不用再问
+        val paths = c.paths.map { it.trim() }.filter { it.isNotEmpty() && !it.startsWith("\\\\") && File(it).exists() }.distinct()
+        if (paths.isNotEmpty()) grantPaths(conv.id, paths)
+        val text = c.text.trim() + if (paths.isEmpty()) "" else
+            (if (c.text.isBlank()) "" else "\n\n") + "附上的文件 / 文件夹（在这台电脑上，可以直接用 list_folder / read_document 读）：\n" + paths.joinToString("\n") { "- $it" }
+        val userMsg = Message(newId(), conv.id, Role.USER, USER_ID, text, attachments = atts, createdAt = now())
         addMessage(userMsg)
-        touchConversation(conv.id, c.text.ifBlank { atts.firstOrNull()?.name.orEmpty() })
-        launchFor(conv.id) {
+        touchConversation(conv.id, c.text.ifBlank { atts.firstOrNull()?.name ?: paths.firstOrNull()?.let { File(it).name }.orEmpty() })
+        launchFor(conv.id) { withContext(if (c.fromPhone) PhoneTurn() else kotlin.coroutines.EmptyCoroutineContext) {
             if (c.drawImage) drawDirect(conv.id, userMsg) else {
                 runTurn(conv.id, userMsg)
                 // 答完以后在后台：聊天太长就压缩，攒够了就挑出值得长期记住的
@@ -952,8 +970,85 @@ class Engine(
                 // 新答的内容也要算进按意思搜（开关开着才动，见 kickEmbedding）
                 kickEmbedding()
             }
-        }
+        } }
         return CommandResult()
+    }
+
+    /** 这一轮是手机发起的（2026-10-17）：AI 不许读收录范围外的文件。放在协程上下文里，往下调的工具都看得到。 */
+    private class PhoneTurn : kotlin.coroutines.AbstractCoroutineContextElement(PhoneTurn) {
+        companion object Key : kotlin.coroutines.CoroutineContext.Key<PhoneTurn>
+    }
+
+    /** 把路径加进这个对话「不用再问」的清单（不分大小写去重）。 */
+    private fun grantPaths(convId: String, paths: List<String>) {
+        updateState { s ->
+            s.copy(conversations = s.conversations.map { c ->
+                if (c.id != convId) c else c.copy(grantedPaths = c.grantedPaths + paths.filter { p -> c.grantedPaths.none { it.equals(p, ignoreCase = true) } })
+            })
+        }
+    }
+
+    /** 对话页等用户批准的读文件：步骤编号 → （对话编号，结果：允不允许 + remember）。 */
+    private val chatWaitings = ConcurrentHashMap<String, Pair<String, CompletableDeferred<Pair<Boolean, String>>>>()
+
+    /** 收录范围或这个对话「不用再问」的清单里有没有它（按真实路径比，不分大小写）。 */
+    private fun readable(convId: String, f: File): Boolean {
+        val real = runCatching { f.toPath().toRealPath().toString() }.getOrElse { f.absolutePath }.lowercase()
+        val roots = (state.conversation(convId)?.grantedPaths.orEmpty() + state.docs.roots)
+            .mapNotNull { runCatching { File(it).toPath().toRealPath().toString() }.getOrNull()?.lowercase() }
+        return roots.any { r -> real == r || real.startsWith(r.trimEnd('\\', '/') + File.separator) }
+    }
+
+    /**
+     * 对话页 AI 要读 f（2026-10-17，用户定「和 Code 一样放开」）：
+     * 收录范围 / 不用再问的清单里的直接读；微信对话、手机发起的这一轮不许读外面的；其余的在聊天里停下来问用户。
+     * 返回 null = 可以读；返回文字 = 不读，把这句话回给模型。
+     */
+    private suspend fun askToRead(convId: String, msgId: String, f: File): String? {
+        if (f.path.startsWith("\\\\") || f.path.startsWith("//")) return "网络路径不能读：${f.path}"
+        if (readable(convId, f)) return null
+        val conv = state.conversation(convId)
+        if (conv?.channel?.startsWith("weixin:") == true) return "这是微信里发来的，收录范围外的文件不能读（${f.path}）。如实告诉用户：要读就在电脑上的 AI集训营 里问。"
+        if (kotlin.coroutines.coroutineContext[PhoneTurn] != null) return "这一轮是手机上发起的，收录范围外的文件不能读（${f.path}）。如实告诉用户：要读就在电脑上问，或者把它加进「我的文档」。"
+        val stepId = newId()
+        val dir = (if (f.isDirectory) f else f.absoluteFile.parentFile ?: f).absolutePath
+        val done = CompletableDeferred<Pair<Boolean, String>>()
+        chatWaitings[stepId] = convId to done
+        updateMessage(convId, msgId) { it.copy(tools = it.tools + ToolStep("doc", f.absolutePath, id = stepId, approval = "waiting", scopeDir = dir,
+            note = if (f.isDirectory) "想看这个文件夹" else "想读这个文件")) }
+        val (allow, remember) = try {
+            done.await()
+        } catch (e: CancellationException) {
+            withContext(NonCancellable) { updateMessage(convId, msgId) { m -> m.copy(tools = m.tools.map { if (it.id == stepId) it.copy(approval = "denied", ok = false, note = "停下来时没有读") else it }) } }
+            throw e
+        } finally {
+            chatWaitings.remove(stepId)
+        }
+        if (allow && remember == "dir") grantPaths(convId, listOf(dir))
+        updateMessage(convId, msgId) { m -> m.copy(tools = m.tools.map {
+            if (it.id != stepId) it else it.copy(approval = if (allow) "allowed" else "denied", ok = allow,
+                note = if (!allow) "你拒绝了，没有读" else if (remember == "dir") "允许了，$dir 这个对话里以后不再问" else "允许了这一次")
+        }) }
+        return if (allow) null else "用户拒绝了读 ${f.path}。不要再试同一个文件，如实告诉用户没读到。"
+    }
+
+    /** 读收录范围外的一个文件（先过 askToRead）：文档抽文字，文本照读。 */
+    private suspend fun readAnyFile(convId: String, msgId: String, path: String, start: Int): String {
+        val f = File(path)
+        if (!f.exists()) return "没有这个文件：$path（先用 list_folder 看看文件夹里有什么，或者用 search_documents 搜）"
+        if (f.isDirectory) return "这是文件夹：$path。用 list_folder 看里面有什么。"
+        askToRead(convId, msgId, f)?.let { return it }
+        if (f.length() > 50L * 1024 * 1024) return "${f.name} 太大（${f.length()} 字节），读不了"
+        val (text, note) = withContext(Dispatchers.IO) { DocExtract.extract(f.name, f.readBytes()) }
+        updateMessage(convId, msgId, persist = false) { it.copy(tools = it.tools + ToolStep("doc", "读《${f.name}》", ok = text != null)) }
+        if (text == null) return "《${f.name}》读不出文字：$note。如实告诉用户。"
+        val s = start.coerceIn(0, text.length)
+        val end = minOf(text.length, s + 10_000)
+        return buildString {
+            appendLine("《${f.name}》（${f.absolutePath}）共 ${text.length} 字，下面是第 ${s + 1}～$end 字：")
+            appendLine(text.substring(s, end))
+            if (end < text.length) append("（后面还有 ${text.length - end} 字；要接着读就再调 read_document，start=$end）")
+        }
     }
 
     // ———————————————— 记账 ————————————————
@@ -1692,7 +1787,7 @@ class Engine(
 
     fun memberName(id: String) = state.member(id)?.name
 
-    private suspend fun regenerate(convId: String, messageId: String): CommandResult {
+    private suspend fun regenerate(convId: String, messageId: String, fromPhone: Boolean = false): CommandResult {
         val all = snapshot(convId)
         val idx = all.indexOfFirst { it.id == messageId }
         if (idx < 0) return CommandResult(false, "消息不存在")
@@ -1706,14 +1801,14 @@ class Engine(
         save(convId)
         dropStanceMessage(convId, messageId)
         val prev = all.getOrNull(idx - 1)
-        launchFor(convId) {
+        launchFor(convId) { withContext(if (fromPhone) PhoneTurn() else kotlin.coroutines.EmptyCoroutineContext) {
             if (old.senderId == PAINTER_ID) {
                 prev?.takeIf { it.role == Role.USER }?.let { drawDirect(convId, it) }
             } else {
-                val m = state.member(old.senderId) ?: return@launchFor
+                val m = state.member(old.senderId) ?: return@withContext
                 reply(convId, m, cutoffId = prev?.id, independent = false, calledBy = null)
             }
-        }
+        } }
         return CommandResult()
     }
 
@@ -1837,7 +1932,9 @@ class Engine(
         val memOn = state.settings.memory.enabled
         val docsOn = docsUsable()
         val officeOn = state.settings.office.enabled
-        val useTools = toolsOk && (wantSearch || hasImageModel || memOn || docsOn || officeOn)
+        // 电脑上：任意文件 / 文件夹都能读（收录范围外的先问用户；微信、手机发起的不许）
+        val filesOn = !isPhone
+        val useTools = toolsOk && (wantSearch || hasImageModel || memOn || docsOn || officeOn || filesOn)
 
         try {
             val working = mutableListOf<JsonObject>()
@@ -1846,7 +1943,7 @@ class Engine(
                 nativeSearch = native != NativeSearch.NONE, hasImageModel = hasImageModel,
                 memories = if (memOn) Recorder.forPrompt(state.memories) else emptyList(), canRemember = memOn && useTools,
                 docCount = if (docsOn && useTools) docs.count else 0, deviceLabel = if (isPhone) "这台手机" else "这台电脑",
-                canMakeFiles = officeOn && useTools)
+                canMakeFiles = officeOn && useTools, canReadFiles = filesOn && useTools)
             working += buildJsonObject { put("role", "system"); put("content", sys) }
             working += buildHistory(convId, member, cutoffId, excludeId = msg.id, vision = model.vision)
 
@@ -1861,7 +1958,7 @@ class Engine(
                 }
             }
 
-            val tools = if (useTools) toolDefs(fnSearch, fetch = wantSearch, draw = hasImageModel, native = native, memory = memOn, docs = docsOn, office = officeOn) else null
+            val tools = if (useTools) toolDefs(fnSearch, fetch = wantSearch, draw = hasImageModel, native = native, memory = memOn, docs = docsOn, office = officeOn, files = filesOn) else null
             val extra = if (native == NativeSearch.QWEN) buildJsonObject {
                 put("enable_search", true)
                 putJsonObject("search_options") {
@@ -1962,7 +2059,7 @@ class Engine(
     }
 
     private fun toolDefs(search: Boolean, fetch: Boolean, draw: Boolean, native: NativeSearch, memory: Boolean = false, docs: Boolean = false,
-                         office: Boolean = false): JsonArray = buildJsonArray {
+                         office: Boolean = false, files: Boolean = false): JsonArray = buildJsonArray {
         when (native) {
             NativeSearch.ZHIPU -> add(buildJsonObject {
                 put("type", "web_search")
@@ -2008,11 +2105,17 @@ class Engine(
             fn("search_history", "搜索以前所有对话的聊天记录。用户提到「上次」「之前说过」「以前聊的」，或者需要回忆更早的原话时使用。返回匹配的片段（对话标题、日期、谁说的）。",
                 buildJsonObject { put("query", prop("关键词，越具体越好")) }, listOf("query"))
         }
-        if (docs) {
-            fn("search_documents", "搜索用户这台设备上的文档（PDF、Word、Excel、PPT、文本等），按文件名和内容匹配。" +
+        if (files) {
+            // 2026-10-17 用户定「和 Code 一样放开」：电脑上任意文件 / 文件夹都能读，收录范围外的程序先问用户
+            fn("list_folder", "列出电脑上一个文件夹里有哪些文件和子文件夹（任意完整路径都行，比如用户拖进来的文件夹）。",
+                buildJsonObject { put("path", prop("文件夹的完整路径")) }, listOf("path"))
+        }
+        if (docs || files) {
+            if (docs) fn("search_documents", "搜索用户这台设备上的文档（PDF、Word、Excel、PPT、文本等），按文件名和内容匹配。" +
                 "用户问到他自己的文件、资料、合同、报告、表格、笔记时用。关键词留空返回最近修改的文档。",
                 buildJsonObject { put("query", prop("关键词：文件名里的词或内容里的词，可以留空")) }, emptyList())
-            fn("read_document", "读一个文档的文字内容。path 用 search_documents 返回的完整路径。一次最多返回约 1 万字，没读完会提示 start 接着读。",
+            fn("read_document", (if (files) "读电脑上一个文件的文字内容（PDF、Word、Excel、PPT、代码、文本等，任意完整路径都行）。" else "读一个文档的文字内容。path 用 search_documents 返回的完整路径。") +
+                "一次最多返回约 1 万字，没读完会提示 start 接着读。",
                 buildJsonObject {
                     put("path", prop("文档的完整路径"))
                     put("start", prop("可选，从第几个字开始读，默认 0"))
@@ -2723,9 +2826,22 @@ class Engine(
                     append("要看全文就用 read_document，path 填上面的路径。回答时说明出自哪个文件。")
                 }
             }
+            "list_folder" -> {
+                val p = args.str("path").orEmpty().trim().removeSurrounding("\"").ifBlank { return "参数错误：缺少 path" }
+                val dir = File(p)
+                if (!dir.isDirectory) return "没有这个文件夹：$p"
+                askToRead(convId, msgId, dir)?.let { return it }
+                val all = withContext(Dispatchers.IO) { dir.listFiles()?.sortedWith(compareBy({ !it.isDirectory }, { it.name.lowercase() })) }.orEmpty()
+                updateMessage(convId, msgId, persist = false) { it.copy(tools = it.tools + ToolStep("doc", "看了文件夹 ${dir.name} · ${all.size} 项")) }
+                buildString {
+                    appendLine("${dir.absolutePath} 里 ${all.size} 项：")
+                    all.take(300).forEach { f -> appendLine(if (f.isDirectory) "${f.name}/" else "${f.name}（${f.length()} 字节）") }
+                    if (all.size > 300) append("（还有 ${all.size - 300} 项没列出来）")
+                }
+            }
             "read_document" -> {
-                val p = args.str("path").orEmpty().ifBlank { return "参数错误：缺少 path" }
-                val e = docs.find(p) ?: return "文档库里没有「$p」。只能读 search_documents 找到的文件，先搜一下。"
+                val p = args.str("path").orEmpty().trim().removeSurrounding("\"").ifBlank { return "参数错误：缺少 path" }
+                val e = docs.find(p) ?: return readAnyFile(convId, msgId, p, args.str("start")?.trim()?.toIntOrNull() ?: 0)
                 val text = withContext(Dispatchers.IO) { docs.text(e.path) }
                 updateMessage(convId, msgId, persist = false) { it.copy(tools = it.tools + ToolStep("doc", "读《${e.name}》", ok = text != null)) }
                 if (text == null) "《${e.name}》读不出文字：${e.note.ifBlank { "可能是扫描件或老格式" }}。如实告诉用户。"

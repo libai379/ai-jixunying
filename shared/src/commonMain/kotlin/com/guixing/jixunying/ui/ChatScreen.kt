@@ -346,7 +346,8 @@ private fun AiMessage(ctl: AppController, state: AppState, m: Message,
                 StanceChip(t, e) { onStance(t.id) }
             }
             Spacer(Modifier.height(6.dp))
-            ToolStepsView(m.tools, streaming = m.status == MsgStatus.STREAMING)
+            m.tools.filter { it.approval == "waiting" }.forEach { ReadApprovalCard(ctl, m, it, member?.name ?: "AI") }
+            ToolStepsView(m.tools.filter { it.approval != "waiting" }, streaming = m.status == MsgStatus.STREAMING)
             if (reasoning.isNotEmpty()) ReasoningView(reasoning, streaming = m.status == MsgStatus.STREAMING && body.isEmpty())
             if (body.isNotBlank() && folded) Text(body.lineSequence().firstOrNull { it.isNotBlank() }?.take(80).orEmpty() + " …",
                 style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle, modifier = Modifier.clickable { folded = false })
@@ -361,6 +362,38 @@ private fun AiMessage(ctl: AppController, state: AppState, m: Message,
             if (sources.isNotEmpty() && m.status != MsgStatus.STREAMING) SourcesRow(sources)
             if (m.status != MsgStatus.STREAMING && !folded) MessageActions(ctl, m, alignEnd = false, canRegenerate = !review && !chair,
                 export = state.settings.office.exportButtons && !painter && body.isNotBlank() && m.status == MsgStatus.DONE, body = body)
+        }
+    }
+}
+
+/**
+ * AI 要读「我的文档」收录范围外的文件 / 文件夹，停下来问用户（2026-10-17，用户定「和 Code 一样放开」）。
+ * 「以后这个文件夹不再问」只在电脑上给（手机上点了也只算这一次，见 PhoneGate）。
+ */
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+@Composable
+private fun ReadApprovalCard(ctl: AppController, m: Message, t: ToolStep, who: String) {
+    val canWiden = LocalPlatform.current.isDesktop && !ctl.remoteMode
+    Column(
+        Modifier.padding(bottom = 8.dp).fillMaxWidth().clip(RoundedCornerShape(12.dp))
+            .border(1.dp, Ext.c.warning.copy(alpha = 0.6f), RoundedCornerShape(12.dp)).padding(12.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Text("$who ${t.note.ifBlank { "想读这个文件" }}（不在「我的文档」收录范围里）：", style = MaterialTheme.typography.labelMedium, color = Ext.c.warning)
+        SelectionContainer { Text(t.input, style = MaterialTheme.typography.bodyMedium) }
+        androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Button(onClick = { ctl.run(Command.ChatDecide(m.convId, t.id, true)) },
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 16.dp, vertical = 6.dp)) {
+                Text(if (canWiden) "只允许这一次" else "允许")
+            }
+            if (canWiden && t.scopeDir.isNotBlank()) androidx.compose.material3.OutlinedButton(
+                onClick = { ctl.run(Command.ChatDecide(m.convId, t.id, true, "dir")) },
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 14.dp, vertical = 6.dp),
+            ) { Text("允许，${t.scopeDir.substringAfterLast('\\').substringAfterLast('/')} 这个对话里以后不再问", maxLines = 1, overflow = TextOverflow.Ellipsis) }
+            Box(
+                Modifier.clip(RoundedCornerShape(50)).border(1.dp, MaterialTheme.colorScheme.error, RoundedCornerShape(50))
+                    .clickable { ctl.run(Command.ChatDecide(m.convId, t.id, false)) }.padding(horizontal = 16.dp, vertical = 6.dp),
+            ) { Text("拒绝", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.error) }
         }
     }
 }
@@ -847,9 +880,14 @@ private fun Composer(ctl: AppController, state: AppState, conv: Conversation, ru
         if (cid != conv.id) return@LaunchedEffect
         ctl.composerInbox = null
         inc.attachments.forEach { pending.add(PendingFile(it.name, it)) }
-        // 文件夹、太大的、读不了的只有路径：聊天要传内容，放不进来，说清楚去 Code 栏
+        // 文件夹、太大的、读不了的只有路径（2026-10-17 用户定「和 Code 一样放开」）：电脑上把路径交给 AI，它用 list_folder / read_document 去读；
+        // 手机遥控电脑时手机上的路径电脑上没有，放不进来
         val (pathOnly, readable) = inc.files.partition { it.pathOnly }
-        if (pathOnly.isNotEmpty()) ctl.toast("「${pathOnly.joinToString("、") { it.name }}」是文件夹、超过 50MB 或读不了，聊天里放不进来；Code 栏可以直接用它的路径")
+        if (pathOnly.isNotEmpty()) {
+            if (platform.isDesktop && !ctl.remoteMode) pathOnly.filter { it.path.isNotBlank() }.forEach { f ->
+                if (pending.none { it.local && it.path.equals(f.path, ignoreCase = true) }) pending.add(PendingFile(f.name, path = f.path, local = true))
+            } else ctl.toast("「${pathOnly.joinToString("、") { it.name }}」读不了内容，手机上放不进来")
+        }
         readable.forEach { f ->
             val p = PendingFile(f.name)
             pending.add(p)
@@ -940,8 +978,9 @@ private fun Composer(ctl: AppController, state: AppState, conv: Conversation, ru
     fun send() {
         if (uploading > 0) return
         val ids = pending.mapNotNull { it.att?.id }
-        if (text.text.isBlank() && ids.isEmpty()) return
-        ctl.run(Command.SendMessage(conv.id, text.text, ids, drawImage = drawMode))
+        val paths = pending.filter { it.local }.map { it.path }
+        if (text.text.isBlank() && ids.isEmpty() && paths.isEmpty()) return
+        ctl.run(Command.SendMessage(conv.id, text.text, ids, paths = paths, drawImage = drawMode))
         text = TextFieldValue("")
         pending.clear()
         // 「直接画图」只管这一条，发完回到正常聊天
@@ -1057,7 +1096,7 @@ private fun Composer(ctl: AppController, state: AppState, conv: Conversation, ru
                             }
                             Spacer(Modifier.width(8.dp))
                         }
-                        val canSend = (text.text.isNotBlank() || pending.any { it.att != null }) && uploading == 0
+                        val canSend = (text.text.isNotBlank() || pending.any { it.att != null || it.local }) && uploading == 0
                         Box(
                             Modifier.size(36.dp).clip(CircleShape)
                                 .background(if (canSend) (if (drawMode) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary) else MaterialTheme.colorScheme.surfaceContainerHighest)
