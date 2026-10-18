@@ -2591,6 +2591,8 @@ class Engine(
                 }, listOf("command"))
             fn("read_output", "看一个后台命令到现在的输出（最后一截），以及它还在不在跑。",
                 buildJsonObject { put("id", prop("后台命令的编号")) }, listOf("id"))
+            fn("preview", "打开一个网页截一张图给你看（比如后台开的开发服务器），检查页面对不对。看不了图的话给你网页上的文字。",
+                buildJsonObject { put("url", prop("网址")); put("width", prop("可选，浏览器宽度，默认 1280")) }, listOf("url"))
             fn("stop_process", "停掉一个后台命令。", buildJsonObject { put("id", prop("后台命令的编号")) }, listOf("id"))
             fn("delete_file", "删掉电脑上的一个文件或文件夹。删之前程序会整个备份，用户能一键恢复。",
                 buildJsonObject { put("path", prop("要删的文件或文件夹的完整路径")) }, listOf("path"))
@@ -3323,6 +3325,22 @@ class Engine(
             "find_files" -> chatFind(convId, msgId, args)
             "search_in_files" -> chatGrep(convId, msgId, args)
             "run_command" -> chatRun(convId, msgId, args)
+            "preview" -> {
+                val url = args.str("url").orEmpty().trim()
+                if (!url.startsWith("http")) return "url 要以 http:// 或 https:// 开头"
+                val width = args.str("width")?.trim()?.toIntOrNull()?.coerceIn(320, 2560) ?: 1280
+                val png = if (seen != null) withContext(Dispatchers.IO) { com.guixing.jixunying.engine.code.Preview.screenshot(url, width) } else null
+                if (png != null) {
+                    val small = runCatching { shrinkImageToJpeg(png, 1600, 1_500_000) }.getOrNull()
+                    seen!! += url to (if (small != null) "data:image/jpeg;base64," + Base64.getEncoder().encodeToString(small) else "data:image/png;base64," + Base64.getEncoder().encodeToString(png))
+                    updateMessage(convId, msgId, persist = false) { it.copy(tools = it.tools + ToolStep("fetch", url, ok = true, note = "预览截图")) }
+                    "$url 的截图已经附在下一条消息里给你看。"
+                } else {
+                    val t = runCatching { search.fetch(url, false) }.getOrElse { return "打不开 $url：${friendlyError(it)}" }
+                    updateMessage(convId, msgId, persist = false) { it.copy(tools = it.tools + ToolStep("fetch", url, ok = true)) }
+                    "$url 的网页文字：\n" + t.take(12_000)
+                }
+            }
             "read_output" -> {
                 val id = args.str("id").orEmpty().trim()
                 val out = codeRunner?.backgroundOutput(id) ?: return "没有这个后台命令：$id"

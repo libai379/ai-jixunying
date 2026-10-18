@@ -176,6 +176,10 @@ class CodeAgentTest {
                             task.startsWith("读网页 ") -> if (toolResults.isEmpty())
                                 callTool("fetch_url", mapOf("url" to task.removePrefix("读网页 ").trim()))
                             else say("读完了。")
+                            // 2026-10-18：预览一个网址
+                            task.startsWith("预览 ") -> if (toolResults.isEmpty())
+                                callTool("preview", mapOf("url" to task.removePrefix("预览 ").trim()))
+                            else say("看完了。")
                             // 2026-10-18：后台跑一条命令，再看一次输出
                             task.startsWith("后台跑 ") -> when (toolResults.size) {
                                 0 -> callTool("run_command", mapOf("command" to task.removePrefix("后台跑 ").trim(), "background" to "true"))
@@ -510,6 +514,24 @@ class CodeAgentTest {
         // 检查员的回答解析
         assertEquals(true to "好", com.guixing.jixunying.engine.AutoJudge.parse("<think>x</think>{\"allow\": true, \"reason\": \"好\"}"))
         assertNull(com.guixing.jixunying.engine.AutoJudge.parse("我觉得可以"))
+    }
+
+    /** 2026-10-18 预览：Edge 无界面截图，能看图的模型在下一条消息里收到截图；看不了图的读网页文字。 */
+    @Test
+    fun previewScreenshotsPage() = runBlocking {
+        if (com.guixing.jixunying.engine.code.Preview.browser() == null) { println("没有 Edge / Chrome，跳过"); return@runBlocking }
+        val png = com.guixing.jixunying.engine.code.Preview.screenshot("${base()}/page")
+        assertNotNull(png, "截图")
+        assertNotNull(javax.imageio.ImageIO.read(java.io.ByteArrayInputStream(png)), "是一张能读的图")
+        val e = engine()
+        val conv = codeConv(e)
+        e.call(Command.CodeSend(conv, "预览 ${base()}/page"))
+        awaitStatus(e, conv, MsgStatus.DONE, timeoutMs = 90_000)
+        assertTrue("PAGE_BODY_42" in lastToolTexts(), "看不了图的模型读到网页文字")
+        e.call(Command.SaveProvider(e.state.provider("p1")!!.copy(models = listOf(ModelInfo("code-model", vision = true)))))
+        val n = sendTask(e, conv, "预览 ${base()}/page")
+        awaitStatus(e, conv, MsgStatus.DONE, minAi = n, timeoutMs = 90_000)
+        assertTrue("data:image" in requests.last()["messages"].toString(), "能看图的模型收到截图")
     }
 
     /** 2026-10-18 终端：在项目文件夹里跑；cd 只换目录、记得住；末尾 & 放后台；手机上用不了。 */

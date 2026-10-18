@@ -399,6 +399,12 @@ class CodeAgent(private val host: CodeHost) {
             }, listOf("command"))
         fn("read_output", "看一个后台命令到现在的输出（最后一截），以及它还在不在跑。",
             buildJsonObject { put("id", text("run_command 后台跑时给的编号")) }, listOf("id"))
+        // 2026-10-18 开发补齐第 3 样：改完自己看页面
+        fn("preview", "打开一个网页（比如后台开的开发服务器 http://localhost:5173）截一张图给你看，用来检查改完的页面对不对。看不了图的话给你网页上的文字。",
+            buildJsonObject {
+                put("url", text("网址"))
+                put("width", prop("integer", "可选，浏览器宽度，默认 1280（看手机版填 390）"))
+            }, listOf("url"))
         fn("stop_process", "停掉一个后台命令（连同它开出的子进程）。",
             buildJsonObject { put("id", text("后台命令的编号")) }, listOf("id"))
     }
@@ -414,6 +420,7 @@ class CodeAgent(private val host: CodeHost) {
             "find_files" -> findFiles(convId, msgId, args, guard)
             "web_search" -> webSearch(convId, msgId, args)
             "fetch_url" -> fetchUrl(convId, msgId, args, spec)
+            "preview" -> previewTool(convId, msgId, args, seen)
             "read_output" -> {
                 val id = args.str("id").orEmpty().trim()
                 val out = host.backgroundOutput(id) ?: return "没有这个后台命令：$id"
@@ -653,6 +660,25 @@ class CodeAgent(private val host: CodeHost) {
             setStep(convId, msgId, stepId) { it.copy(ok = false, note = "打不开：$why") }
             "网页打不开：$why"
         }
+    }
+
+    /** 预览（2026-10-18）：截图给能看图的模型；看不了图或截不了的，给网页文字。 */
+    private suspend fun previewTool(convId: String, msgId: String, args: JsonObject, seen: MutableList<Pair<String, String>>?): String {
+        val url = args.str("url").orEmpty().trim()
+        if (!url.startsWith("http://") && !url.startsWith("https://")) return "url 要以 http:// 或 https:// 开头"
+        val width = args.str("width")?.trim()?.toIntOrNull()?.coerceIn(320, 2560) ?: 1280
+        if (seen != null) {
+            val png = withContext(Dispatchers.IO) { com.guixing.jixunying.engine.code.Preview.screenshot(url, width, if (width < 600) 844 else 800) }
+            if (png != null) {
+                val small = runCatching { shrinkImageToJpeg(png, 1600, 1_500_000) }.getOrNull()
+                seen += url to (if (small != null) "data:image/jpeg;base64," + java.util.Base64.getEncoder().encodeToString(small) else "data:image/png;base64," + java.util.Base64.getEncoder().encodeToString(png))
+                addStep(convId, msgId, ToolStep("fetch", "预览 $url", id = host.newId(), ok = true, note = "截了图给 AI 看"))
+                return "$url 的截图已经附在下一条消息里给你看。"
+            }
+        }
+        val text = runCatching { host.fetchUrl(url) }.getOrElse { return "打不开 $url：${host.friendlyError(it)}（开发服务器开了没有？可以用 read_output 看后台命令的输出）" }
+        addStep(convId, msgId, ToolStep("fetch", "预览 $url", id = host.newId(), ok = true, note = if (seen == null) "这个模型看不了图，读了网页文字" else "截不了图，读了网页文字"))
+        return "$url 的网页文字（${if (seen == null) "你看不了图" else "截图没成功"}）：\n" + CodeRunnerRules.clip(text, RESULT_LIMIT).first
     }
 
     /** 计划档：写文件的工具没有提供，模型硬调也不执行。 */
