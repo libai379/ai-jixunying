@@ -170,6 +170,8 @@ class ShotsTest {
             ProviderConfig("pz", "zhipu", "智谱开放平台", zhipuUrl, "abcd.efgh",
                 listOf(ModelInfo("GLM-5.3-Flash"), ModelInfo("cogview-3-flash", tools = false, imageGen = true))),
             ProviderConfig("pi", "mimo", "小米 MiMo", "https://api.xiaomimimo.com/v1", "sk-mimo-xxxx", listOf(ModelInfo("mimo-v2.6-flash"))),
+            // 做视频（2026-10-20）只有千问AI平台 / 百炼能做：设置页的「做视频」那块要有东西可选
+            ProviderConfig("pqv", "qianwen", "千问AI平台（阿里）", "https://maas.qianwenaiapi.com/compatible-mode/v1", "sk-qw-xxxx", listOf(ModelInfo("qwen3.8-max"))),
         ) + extraProviders
         val members = listOf(
             Member("ma", "阿德", "🧠", 0xFF5B6CFF, "pd", "deepseek-flash", "全能助手，回答准确、条理清楚，遇到事实问题先查证再说。",
@@ -358,9 +360,15 @@ class ShotsTest {
                     if (i == 15) "\n\n这是最新一条回答的最后一行。" else "", createdAt = at + 1000),
             )
         })
+        val clip = Attachment("a4", "视频_123456.mp4", "video/mp4", 1_225_913, AttachmentKind.DOCUMENT, note = "2 秒 · 480P · wan3.0-video", generated = true)
+        st.putFile(clip, ByteArray(16), null)
         st.saveMessages("c3", listOf(
             Message("u3", "c3", Role.USER, USER_ID, "画一只在月球上喝茶的橘猫", createdAt = now - 86_100_000),
             Message("r3", "c3", Role.AI, "md", "画好了。", attachments = listOf(cat), tools = listOf(ToolStep("image", "月球上喝茶的橘猫，水彩风格")), createdAt = now - 86_000_000,
+                modelLabel = "mimo-v2.6-flash（小米 MiMo）"),
+            Message("u3b", "c3", Role.USER, USER_ID, "再做一段它伸懒腰的视频", createdAt = now - 85_900_000),
+            Message("r3b", "c3", Role.AI, "md", "做好了，点一下就能播放。", attachments = listOf(clip),
+                tools = listOf(ToolStep("video", "橘猫在窗台上伸懒腰，午后阳光，镜头缓慢推近", note = "2 秒 · 480P · wan3.0-video")), createdAt = now - 85_800_000,
                 modelLabel = "mimo-v2.6-flash（小米 MiMo）"),
         ))
         // Code 会话（c8）：一条做完了、带一处改动；一条正等着批准改 README
@@ -557,6 +565,8 @@ class ShotsTest {
         shoot("phone-speaking", 824, 1784, 2f, Hub(HangingSpeech(e)), FakeAvPlatform(phone), "conv:c1#speak")
         // 语音那一页很长：整个画出来才看得到「试听」和「听写」两节
         shoot("desktop-settings-speech-tall", 1280, 1700, 1f, hub, av, "settings:SPEECH")
+        // 画图和视频那一页很长：整个画出来才看得到「做视频」那块
+        shoot("desktop-settings-image-tall", 1280, 2200, 1f, hub, desktop, "settings:IMAGE")
         shoot("phone-settings-speech-tall", 824, 2600, 2f, hub, FakeAvPlatform(phone), "settings:SPEECH")
 
         // Code 栏：侧栏那一栏（没开会话）、会话本身（含等批准那一步）、差异查看器、新建对话框

@@ -45,6 +45,8 @@ object UsageKinds {
     const val ASR = "asr"
     /** 按意思搜（向量，1.7.0）。 */
     const val EMBED = "embed"
+    /** 做视频（按秒，2026-10-20）。 */
+    const val VIDEO = "video"
 
     fun label(kind: String) = when (kind) {
         CHAT -> "成员回答"
@@ -55,6 +57,7 @@ object UsageKinds {
         "stances" -> "立场档案"
         "council" -> "会审（互评、汇总）"
         IMAGE -> "画图"
+        VIDEO -> "做视频"
         TTS -> "读出来"
         ASR -> "听写"
         EMBED -> "按意思搜"

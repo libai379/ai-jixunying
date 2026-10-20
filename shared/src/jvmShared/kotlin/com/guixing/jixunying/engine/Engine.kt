@@ -21,6 +21,7 @@ import com.guixing.jixunying.model.Event
 import com.guixing.jixunying.model.HistoryHit
 import com.guixing.jixunying.model.ImageChoice
 import com.guixing.jixunying.model.ImagePick
+import com.guixing.jixunying.model.VideoPick
 import com.guixing.jixunying.model.JudgePick
 import com.guixing.jixunying.model.Member
 import com.guixing.jixunying.model.MemoryItem
@@ -140,6 +141,8 @@ class Engine(
     private val llm = LlmClient { proxyFor(it.useProxy) }
     private val search = WebSearch { state.settings.proxy.trim().ifEmpty { null } }
     private val images = ImageGen { proxyFor(it.useProxy) }
+    /** 做视频；查任务进度的间隔测试里调小（jxy.videoPollMs）。 */
+    private val videos = VideoGen({ proxyFor(it.useProxy) }, System.getProperty("jxy.videoPollMs")?.toLongOrNull() ?: 10_000)
 
     /** 语音：读出来 / 听写（model/Speech.kt 是设置和数据、engine/Speech.kt 是各家的协议）。 */
     private val speech = Speech { proxyFor(it.useProxy) }.also { sp ->
@@ -1770,10 +1773,10 @@ class Engine(
 
     // ———————————————— 记账 ————————————————
 
-    private fun recordUsage(p: ProviderConfig, model: String, u: Usage, kind: String, tag: UsageTag?, images: Int = 0) {
+    private fun recordUsage(p: ProviderConfig, model: String, u: Usage, kind: String, tag: UsageTag?, images: Int = 0, units: Double = 0.0, unit: String = "") {
         runCatching {
             ledger.add(UsageRecord(now(), kind, p.id, p.name, Thinking.platformOf(p), model, u.prompt, u.cached, u.completion, images,
-                tag?.memberId.orEmpty(), tag?.convId.orEmpty()))
+                tag?.memberId.orEmpty(), tag?.convId.orEmpty(), units = units, unit = unit))
         }
     }
 
@@ -2597,6 +2600,48 @@ class Engine(
         }
     }
 
+    /**
+     * 做一段视频（generate_video）：进度写在这一步上（排队中 / 生成中 / 下载中），做好了挂成「AI 做的文件」（点开用系统播放器放，
+     * 手机遥控时先取过来，微信里发回去）。按成功生成的秒数记账，做好了只是下载失败的也记。
+     */
+    private suspend fun makeVideo(convId: String, msgId: String, args: JsonObject): String {
+        val prompt = args.str("prompt").orEmpty().ifBlank { return "参数错误：缺少 prompt" }
+        val choice = VideoPick.resolve(state) ?: return "做视频没开，或者没有能用的服务商（要千问AI平台或阿里百炼的 Key）。请告诉用户到 设置 → 画图和视频 里看看。"
+        val p = state.provider(choice.providerId) ?: return "做视频的服务商不见了"
+        val v = state.settings.videoGen
+        val duration = args.str("duration")?.trim()?.filter { it.isDigit() }?.toIntOrNull() ?: v.duration
+        val ratio = args.str("ratio")?.trim()?.takeIf { it.isNotEmpty() } ?: v.ratio
+        val stepId = newId()
+        fun step(persist: Boolean = false, f: (ToolStep) -> ToolStep) =
+            updateMessage(convId, msgId, persist) { m -> m.copy(tools = m.tools.map { if (it.id == stepId) f(it) else it }) }
+        updateMessage(convId, msgId, persist = false) { it.copy(tools = it.tools + ToolStep("video", prompt.take(200), id = stepId, note = "提交中")) }
+        val tag = currentCoroutineContext()[UsageTag]
+        fun bill(seconds: Double, res: String) = recordUsage(p, VideoPick.billingModel(choice.model.id, res), Usage(), UsageKinds.VIDEO, tag,
+            units = seconds, unit = com.guixing.jixunying.model.SpeechUnits.SECOND)
+        return try {
+            val r = videos.generate(p, choice.model.id, prompt, v.resolution, duration, ratio, v.audio) { s -> step { it.copy(note = s) } }
+            bill(r.seconds, r.resolution)
+            val secs = if (r.seconds % 1.0 == 0.0) r.seconds.toInt().toString() else "%.1f".format(r.seconds)
+            val note = "$secs 秒 · ${r.resolution} · ${choice.model.id}"
+            val name = "视频_${System.currentTimeMillis() % 1_000_000}.mp4"
+            val att = Attachment(newId(), name, "video/mp4", r.bytes.size.toLong(), AttachmentKind.DOCUMENT, note = note,
+                generated = true, savedPath = saveOfficeCopy(name, r.bytes))
+            storage.putFile(att, r.bytes, null)
+            updateMessage(convId, msgId) { m -> m.copy(attachments = m.attachments + att, tools = m.tools.map { if (it.id == stepId) it.copy(note = note) else it }) }
+            "视频做好了（${choice.model.id}，${r.resolution}，$secs 秒），已经显示给用户，点一下就能播放。简单说一句就行，不用再描述画面。"
+        } catch (e: CancellationException) {
+            withContext(NonCancellable) { step(true) { it.copy(ok = false, note = "停了（已经提交的任务服务端可能还会做完，做完照样按秒收费）") } }
+            throw e
+        } catch (e: VideoGen.DownloadFailed) {
+            bill(e.seconds, e.resolution)
+            step(true) { it.copy(ok = false, note = e.message.orEmpty()) }
+            "视频做好了（已按 ${e.seconds} 秒收费），但是${e.message}。请如实告诉用户。"
+        } catch (e: Throwable) {
+            step(true) { it.copy(ok = false, note = friendlyError(e)) }
+            "做视频失败：${friendlyError(e)}。请告诉用户。"
+        }
+    }
+
     private suspend fun paint(target: Pair<ProviderConfig, String>, prompt: String, size: String? = null): Pair<Attachment, String?> {
         // 画成一张记一张（成员在聊天里画的记在成员账上；测试画的算测试）。画好了只是下载失败的也已经扣钱，照样记
         val tag = currentCoroutineContext()[UsageTag]
@@ -2639,6 +2684,7 @@ class Engine(
         val thinking = if (llm.thinkingDropped(provider, model.id)) null else Thinking.params(Thinking.rule(provider, model.id), member.thinking)
         if (thinking != null) updateMessage(convId, msg.id, persist = false) { it.copy(modelLabel = it.modelLabel + "· " + Thinking.label(member.thinking)) }
         val hasImageModel = ImagePick.resolve(state).isNotEmpty()
+        val hasVideo = VideoPick.resolve(state) != null
         val wantSearch = conv.webSearch
         val toolsOk = model.tools && !llm.toolsDropped(provider, model.id)
         // 平台有官方内置搜索就用内置的（智谱、千问），否则用我们自己的搜索工具。
@@ -2651,7 +2697,7 @@ class Engine(
         val officeOn = state.settings.office.enabled
         // 电脑上：任意文件 / 文件夹都能读（收录范围外的先问用户；微信、手机发起的不许）
         val filesOn = !isPhone
-        val useTools = toolsOk && (wantSearch || hasImageModel || memOn || docsOn || officeOn || filesOn)
+        val useTools = toolsOk && (wantSearch || hasImageModel || hasVideo || memOn || docsOn || officeOn || filesOn)
 
         try {
             val working = mutableListOf<JsonObject>()
@@ -2660,7 +2706,7 @@ class Engine(
                 nativeSearch = native != NativeSearch.NONE, hasImageModel = hasImageModel,
                 memories = if (memOn) Recorder.forPrompt(state.memories) else emptyList(), canRemember = memOn && useTools,
                 docCount = if (docsOn && useTools) docs.count else 0, deviceLabel = if (isPhone) "这台手机" else "这台电脑",
-                canMakeFiles = officeOn && useTools, canReadFiles = filesOn && useTools)
+                canMakeFiles = officeOn && useTools, canReadFiles = filesOn && useTools, canVideo = hasVideo && useTools)
             working += buildJsonObject { put("role", "system"); put("content", sys) }
             working += buildHistory(convId, member, cutoffId, excludeId = msg.id, vision = model.vision)
 
@@ -2677,7 +2723,7 @@ class Engine(
 
             // MCP 外部工具（2026-10-18）：电脑上对话栏也能用，和 Code 栏同一套
             val mcp = if (useTools && filesOn) runCatching { mcpTools() }.getOrDefault(emptyList()) else emptyList()
-            val tools = if (useTools) JsonArray(toolDefs(fnSearch, fetch = wantSearch, draw = hasImageModel, native = native, memory = memOn, docs = docsOn, office = officeOn, files = filesOn) +
+            val tools = if (useTools) JsonArray(toolDefs(fnSearch, fetch = wantSearch, draw = hasImageModel, native = native, memory = memOn, docs = docsOn, office = officeOn, files = filesOn, video = hasVideo) +
                 mcp.map { (n, _, t) -> buildJsonObject {
                     put("type", "function")
                     putJsonObject("function") { put("name", n); put("description", ("（外部工具 ${t.name}）" + t.description).take(1000)); put("parameters", t.inputSchema) }
@@ -2791,7 +2837,7 @@ class Engine(
     }
 
     private fun toolDefs(search: Boolean, fetch: Boolean, draw: Boolean, native: NativeSearch, memory: Boolean = false, docs: Boolean = false,
-                         office: Boolean = false, files: Boolean = false): JsonArray = buildJsonArray {
+                         office: Boolean = false, files: Boolean = false, video: Boolean = false): JsonArray = buildJsonArray {
         when (native) {
             NativeSearch.ZHIPU -> add(buildJsonObject {
                 put("type", "web_search")
@@ -2825,6 +2871,15 @@ class Engine(
                 buildJsonObject {
                     put("prompt", prop("画面描述：主体、风格、构图、光线、色彩，越具体越好"))
                     put("size", prop("可选，图片尺寸，如 1024x1024、1024x1792"))
+                }, listOf("prompt"))
+        }
+        if (video) {
+            val v = state.settings.videoGen
+            fn("generate_video", "根据文字描述做一段短视频（按秒收费，比画图贵；要一到几分钟），做好后会显示给用户、点开就能播放。只在用户明确要视频时用。",
+                buildJsonObject {
+                    put("prompt", prop("视频内容描述：主体、动作、场景、镜头运动、光线、风格、声音，越具体越好"))
+                    put("duration", prop("可选，秒数。用户没说就不填（默认 ${v.duration} 秒）"))
+                    put("ratio", prop("可选，画面比例：16:9、9:16、1:1、4:3、3:4。用户没说就不填（默认 ${v.ratio}）"))
                 }, listOf("prompt"))
         }
         if (memory) {
@@ -3568,6 +3623,7 @@ class Engine(
                     "画图失败：${friendlyError(e)}。请告诉用户。"
                 }
             }
+            "generate_video" -> makeVideo(convId, msgId, args)
             "remember" -> {
                 val text = args.str("text").orEmpty()
                 val kind = args.str("kind")?.trim()?.takeIf { it in Recorder.kinds } ?: "关于我"

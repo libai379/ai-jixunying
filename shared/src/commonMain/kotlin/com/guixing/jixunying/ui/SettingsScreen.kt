@@ -87,6 +87,8 @@ import com.guixing.jixunying.model.AppState
 import com.guixing.jixunying.model.Command
 import com.guixing.jixunying.model.Evals
 import com.guixing.jixunying.model.ImagePick
+import com.guixing.jixunying.model.Prices
+import com.guixing.jixunying.model.VideoPick
 import com.guixing.jixunying.model.Member
 import com.guixing.jixunying.model.MemberTemplates
 import com.guixing.jixunying.model.Thinking
@@ -838,7 +840,7 @@ private fun ImagePage(ctl: AppController, state: AppState) {
     var testImage by remember { mutableStateOf<com.guixing.jixunying.model.Attachment?>(null) }
     fun save(f: (com.guixing.jixunying.model.ImageGenSettings) -> com.guixing.jixunying.model.ImageGenSettings) = ctl.updateSettings { it.copy(imageGen = f(it.imageGen)) }
 
-    PageHeader("画图", "不用专门设置：在任何对话里说「画一张……」，AI 会自己调用画图模型。输入框上的「直接画图」则不经过 AI，直接把你写的话当画面描述。")
+    PageHeader("画图和视频", "不用专门设置：在任何对话里说「画一张……」「做一段……的视频」，AI 会自己调用画图 / 视频模型。输入框上的「直接画图」则不经过 AI，直接把你写的话当画面描述。")
     if (candidates.isEmpty()) {
         SectionCard {
             Text("还没有能画图的服务商", style = MaterialTheme.typography.titleSmall)
@@ -857,6 +859,8 @@ private fun ImagePage(ctl: AppController, state: AppState) {
             Spacer(Modifier.height(10.dp))
             Button(onClick = { ctl.openSettings(SettingsTab.PROVIDERS) }) { Text("去添加服务商") }
         }
+        Spacer(Modifier.height(12.dp))
+        VideoSection(ctl, state)
         return
     }
     SectionCard {
@@ -915,6 +919,76 @@ private fun ImagePage(ctl: AppController, state: AppState) {
                 else androidx.compose.material3.CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
             }
         }
+    }
+    Spacer(Modifier.height(12.dp))
+    VideoSection(ctl, state)
+}
+
+/**
+ * 做视频（2026-10-20）：千问AI平台 / 阿里百炼的视频模型。按秒收费，所以默认最便宜的一档（wan3.0-video、480P、5 秒），
+ * 每个选项旁边写清这样一段大约多少钱。
+ */
+@Composable
+private fun VideoSection(ctl: AppController, state: AppState) {
+    val v = state.settings.videoGen
+    fun save(f: (com.guixing.jixunying.model.VideoGenSettings) -> com.guixing.jixunying.model.VideoGenSettings) = ctl.updateSettings { it.copy(videoGen = f(it.videoGen)) }
+    val providers = remember(state.providers) { VideoPick.candidates(state.providers) }
+    val m = VideoPick.model(v.modelId)
+    val res = VideoPick.resolutionFor(m, v.resolution)
+    val secs = VideoPick.durationFor(m, v.duration)
+    fun perSec(model: String, r: String) = Prices.of("qwen", VideoPick.billingModel(model, r), state.settings.costs.overrides)?.perSecond
+    SectionCard {
+        SwitchRow("让 AI 做视频", "在对话里说「做一段……的视频」，AI 会调用视频模型，做好了点开就能播放。按秒收费，做一段要一到几分钟。", v.enabled) { on ->
+            save { it.copy(enabled = on) }
+        }
+        if (providers.isEmpty()) {
+            Spacer(Modifier.height(6.dp))
+            Text("要先在「模型服务」里添加千问AI平台或阿里百炼并填 Key（和聊天、画图用同一个 Key）。",
+                style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
+            return@SectionCard
+        }
+        if (!v.enabled) return@SectionCard
+        if (providers.size > 1) {
+            Spacer(Modifier.height(8.dp))
+            FieldLabel("用哪家")
+            val cur = providers.firstOrNull { it.id == v.providerId } ?: providers.first()
+            providers.forEach { p ->
+                RadioRow(p.id == cur.id, p.name, null) { save { it.copy(providerId = p.id) } }
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        FieldLabel("视频模型", "价格是阿里云百炼官方价（每秒），千问AI平台按同样的价算")
+        VideoPick.models.forEach { vm ->
+            val r = VideoPick.resolutionFor(vm, v.resolution)
+            val price = perSec(vm.id, r)?.let { " · $r 每秒 ${it} 元" }.orEmpty()
+            RadioRow(vm.id == m.id, vm.id, vm.label + price + if (vm.minSec < vm.maxSec) " · ${vm.minSec}–${vm.maxSec} 秒" else "") { save { it.copy(modelId = vm.id) } }
+        }
+        Spacer(Modifier.height(8.dp))
+        FieldLabel("清晰度")
+        FlowRowCompat {
+            m.resolutions.forEach { r ->
+                Box(Modifier.padding(end = 6.dp, bottom = 6.dp)) { ToggleChip(r, Icons.Rounded.Brush, res == r) { save { it.copy(resolution = r) } } }
+            }
+        }
+        FieldLabel("默认时长", "AI 也可以按你说的改")
+        FlowRowCompat {
+            (listOf(2, 3, 5, 8, 10, 15, 30).filter { it in m.minSec..m.maxSec }.ifEmpty { listOf(m.minSec) }).forEach { s ->
+                Box(Modifier.padding(end = 6.dp, bottom = 6.dp)) { ToggleChip("$s 秒", Icons.Rounded.Brush, secs == s) { save { it.copy(duration = s) } } }
+            }
+        }
+        if (!m.bySize) {
+            FieldLabel("默认画面比例", "AI 也可以按你说的改")
+            FlowRowCompat {
+                m.ratios.forEach { r ->
+                    Box(Modifier.padding(end = 6.dp, bottom = 6.dp)) { ToggleChip(r, Icons.Rounded.Brush, VideoPick.ratioFor(m, v.ratio) == r) { save { it.copy(ratio = r) } } }
+                }
+            }
+        }
+        if (m.audioSwitch) SwitchRow("带声音", "关掉就是无声视频，价格一样", v.audio) { on -> save { it.copy(audio = on) } }
+        val each = perSec(m.id, res)?.let { it * secs }
+        Text((if (each != null) "按现在的设置，一段 $secs 秒大约 ${yuan(each)}" else "这个模型的价格没查到") +
+            "（成功了才收费，失败不收）。花了多少在「花费」页能看到。",
+            style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, modifier = Modifier.padding(top = 6.dp))
     }
 }
 

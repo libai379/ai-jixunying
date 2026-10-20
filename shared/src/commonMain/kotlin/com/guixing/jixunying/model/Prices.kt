@@ -52,6 +52,11 @@ object Prices {
     private fun hourly(price: Double, note: String = "") = ModelPrice("CNY", perHour = price, note = note)
     /** 听写：每秒的价格（官方只给了每秒的估算价时用这个）。 */
     private fun perSec(price: Double, note: String = "") = ModelPrice("CNY", perSecond = price, note = note)
+    /** 做视频：每秒的价格，按模型名后面的档位（「wan3.0-video 480P」）挑；没写档位按最低一档。 */
+    private fun videoPrice(model: String, byRes: Map<String, Double>, note: String = ""): ModelPrice {
+        val res = model.substringAfterLast(' ', "").uppercase()
+        return ModelPrice("CNY", perSecond = byRes[res] ?: byRes.values.first(), note = note)
+    }
     private val FREE = ModelPrice("CNY", listOf(t(0.0, 0.0, 0.0)), perImage = 0.0, note = "免费")
     private val FREE_IMAGE = ModelPrice("CNY", perImage = 0.0, note = "免费")
 
@@ -124,6 +129,14 @@ object Prices {
             m.startsWith("qwen-image-3.0") -> img(0.18)
             m.startsWith("wan2.7-image-pro") -> img(0.5)
             m.startsWith("wan2.7-image") || m.startsWith("wan2.6-image") || m.startsWith("wan2.6-t2i") -> img(0.2)
+            // 做视频按秒，模型名后面带档位（VideoPick.billingModel）。阿里云百炼官方价格页华北 2（北京）2026-10-20 原文；
+            // 千问AI平台自己的价格页是动态加载的读不到，按百炼的算（画图两边一样）。wan3.0-video 写的是原价（页面写「限时 7 折」）
+            m.startsWith("wan3.0-video-prime") -> videoPrice(m, mapOf("480P" to 0.45, "720P" to 0.9, "1080P" to 1.8))
+            m.startsWith("wan3.0-video") -> videoPrice(m, mapOf("480P" to 0.3, "720P" to 0.6, "1080P" to 1.2), "原价；官方写限时 7 折，实际可能更便宜")
+            m.startsWith("happyhorse-1.1-t2v") -> videoPrice(m, mapOf("480P" to 0.45, "720P" to 0.9, "1080P" to 1.2))
+            m.startsWith("wan2.7-t2v") || m.startsWith("wan2.6-t2v") -> videoPrice(m, mapOf("720P" to 0.6, "1080P" to 1.0))
+            m.startsWith("wan2.2-t2v-plus") -> videoPrice(m, mapOf("480P" to 0.14, "1080P" to 0.7))
+            m.startsWith("wanx2.1-t2v-turbo") -> videoPrice(m, mapOf("480P" to 0.24, "720P" to 0.24))
             else -> null
         }
         "kimi" -> when {

@@ -34,6 +34,7 @@ import androidx.compose.material.icons.rounded.AlternateEmail
 import androidx.compose.material.icons.rounded.ArrowUpward
 import androidx.compose.material.icons.rounded.AttachFile
 import androidx.compose.material.icons.rounded.Brush
+import androidx.compose.material.icons.rounded.Movie
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.Delete
@@ -519,6 +520,7 @@ private fun ToolStepsView(tools: List<ToolStep>, streaming: Boolean) {
     val searches = tools.count { it.kind == "search" }
     val pages = tools.count { it.kind == "fetch" }
     val images = tools.count { it.kind == "image" }
+    val videos = tools.count { it.kind == "video" }
     val docs = tools.count { it.kind == "doc" }
     val history = tools.count { it.kind == "history" }
     val memos = tools.count { it.kind == "memory" }
@@ -531,6 +533,7 @@ private fun ToolStepsView(tools: List<ToolStep>, streaming: Boolean) {
         if (history > 0) add("翻了 $history 次聊天记录")
         if (memos > 0) add("记了 $memos 条")
         if (images > 0) add("画了 $images 张图")
+        if (videos > 0) add("做了 $videos 段视频")
     }.joinToString(" · ")
     val latest = tools.last()
     Column(Modifier.padding(bottom = 6.dp)) {
@@ -542,7 +545,7 @@ private fun ToolStepsView(tools: List<ToolStep>, streaming: Boolean) {
             Icon(Icons.Rounded.Language, null, Modifier.size(14.dp), tint = MaterialTheme.colorScheme.primary)
             Spacer(Modifier.width(6.dp))
             Text(
-                if (streaming) "$summary · 正在${if (latest.kind == "fetch") "读网页" else if (latest.kind == "image") "画图" else "搜「${latest.input.take(16)}」"}…" else summary,
+                if (streaming) "$summary · 正在${if (latest.kind == "fetch") "读网页" else if (latest.kind == "image") "画图" else if (latest.kind == "video") "做视频" else "搜「${latest.input.take(16)}」"}…" else summary,
                 style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 520.dp),
             )
@@ -565,6 +568,7 @@ private fun ToolStepView(t: ToolStep) {
         "doc" -> Icons.Rounded.FolderOpen to (if (t.ok) t.input.take(60) else "${t.input.take(50)}（没找到）")
         "file" -> Icons.Rounded.Description to (if (t.ok) "做了文件《${t.input.take(50)}》" else "文件没做成：${t.input.take(40)}")
         "run" -> Icons.Rounded.Edit to ("跑了「${t.input.take(50)}」" + if (t.note.isNotBlank()) " · ${t.note.take(30)}" else "")
+        "video" -> Icons.Rounded.Movie to ((if (t.ok) "做视频：" else "视频没做成：") + t.input.take(30) + if (t.note.isNotBlank()) " · ${t.note.take(30)}" else "")
         else -> Icons.Rounded.Brush to (if (t.ok) "画图：${t.input.take(40)}" else "画图失败")
     }
     Column(Modifier.padding(bottom = 6.dp)) {
@@ -788,7 +792,7 @@ private fun MadeFileChip(ctl: AppController, a: Attachment) {
         val ext = a.name.substringAfterLast('.', "").uppercase().take(4)
         Box(Modifier.size(36.dp).clip(RoundedCornerShape(8.dp)).background(docColor(ext)), contentAlignment = Alignment.Center) {
             if (busy) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp, color = Color.White)
-            else Text(when (ext) { "XLSX" -> "表"; "DOCX" -> "文"; "PPTX" -> "演"; else -> ext }, color = Color.White, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+            else Text(when (ext) { "XLSX" -> "表"; "DOCX" -> "文"; "PPTX" -> "演"; "MP4" -> "视"; else -> ext }, color = Color.White, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
         }
         Spacer(Modifier.width(10.dp))
         Column(Modifier.widthIn(max = 280.dp)) {

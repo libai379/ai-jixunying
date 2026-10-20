@@ -69,6 +69,9 @@ import kotlin.test.assertTrue
 class EngineTest {
     private val requests = Collections.synchronizedList(mutableListOf<JsonObject>())
     private val imageRequests = Collections.synchronizedList(mutableListOf<String>())
+    /** 假的视频任务查了几次（第一次 RUNNING，之后 SUCCEEDED）。 */
+    private val videoPolls = java.util.concurrent.atomic.AtomicInteger()
+    private val mp4 = ByteArray(2048) { (it % 251).toByte() }
     private val kimiSearches = Collections.synchronizedList(mutableListOf<JsonObject>())
     // 假微信
     private val wxInbox = java.util.concurrent.ConcurrentLinkedQueue<String>()
@@ -218,6 +221,13 @@ class EngineTest {
                                 chunk("""{"content":""}""", """"search_info":{"search_results":[{"index":2,"title":"第二","url":"https://q.example/2"},{"index":1,"title":"第一","url":"https://q.example/1"}]},""")
                                 say("千问答[1]。")
                             }
+                            // 聊天里要视频：先调 generate_video，做好了再说话
+                            hasTool("generate_video") && latest.contains("视频") && !sawTool -> {
+                                chunk("""{"tool_calls":[{"index":0,"id":"vid_1","type":"function","function":{"name":"generate_video","arguments":"{\"prompt\":\"海边日落\",\"duration\":\"3\"}"}}]}""")
+                                write("data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n")
+                            }
+                            toolTexts.any { "视频做好了" in it } -> say("做好了。")
+                            toolTexts.any { "做视频失败" in it } -> say("没做成。")
                             // 聊天里要图：先调 generate_image，拿到结果再说话
                             hasDraw && latest.contains("画") && !sawTool -> {
                                 chunk("""{"tool_calls":[{"index":0,"id":"img_1","type":"function","function":{"name":"generate_image","arguments":"{\"prompt\":\"一只慢吞吞的猫\"}"}}]}""")
@@ -326,6 +336,21 @@ class EngineTest {
                     else call.respondText("""{"output":{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":[{"image":"http://127.0.0.1:$port/img/1.png"}]}}]}}""",
                         ContentType.Application.Json)
                 }
+                // 做视频（千问AI平台 / 百炼，只有异步）：Key 是 fail-video 的任务做失败
+                post("/api/v1/services/aigc/video-generation/video-synthesis") {
+                    imageRequests += "video:" + call.request.headers["X-DashScope-Async"] + ":" + call.receiveText()
+                    val id = if (call.request.headers["Authorization"] == "Bearer fail-video") "vbad" else "v1"
+                    call.respondText("""{"request_id":"r","output":{"task_id":"$id","task_status":"PENDING"}}""", ContentType.Application.Json)
+                }
+                get("/api/v1/tasks/v1") {
+                    if (videoPolls.incrementAndGet() == 1) call.respondText("""{"output":{"task_id":"v1","task_status":"RUNNING"}}""", ContentType.Application.Json)
+                    else call.respondText("""{"output":{"task_id":"v1","task_status":"SUCCEEDED","video_url":"http://127.0.0.1:$port/vid/1.mp4"},"usage":{"duration":3.0,"output_video_duration":3.0,"video_count":1}}""",
+                        ContentType.Application.Json)
+                }
+                get("/api/v1/tasks/vbad") {
+                    call.respondText("""{"output":{"task_id":"vbad","task_status":"FAILED","code":"DataInspectionFailed","message":"Input data may contain inappropriate content."}}""", ContentType.Application.Json)
+                }
+                get("/vid/1.mp4") { call.respondBytes(mp4, ContentType.parse("video/mp4")) }
                 get("/api/v1/tasks/t1") {
                     call.respondText("""{"output":{"task_id":"t1","task_status":"SUCCEEDED","choices":[{"message":{"content":[{"image":"http://127.0.0.1:$port/img/1.png"}]}}]}}""", ContentType.Application.Json)
                 }
@@ -1287,6 +1312,58 @@ class EngineTest {
         // 第二句的上下文里不该有第一句还没说完的半截回答
         val second = requests.first { r -> "顺便问一下你是谁" in r["messages"].toString() }
         assertFalse("画好了" in second["messages"].toString())
+    }
+
+    /** 聊天里要视频：AI 调 generate_video，提交异步任务、查到做好、下载，挂成能点开播放的文件；按秒记账。做失败的说清原因、不记账。 */
+    @Test
+    fun chatMakesVideo() = runBlocking {
+        System.setProperty("jxy.videoPollMs", "30")
+        val (e, ms) = engineWithMembers("小智")
+        e.call(Command.SaveProvider(ProviderConfig("pq", "qianwen", "千问AI平台（阿里）", "${base()}/compatible-mode/v1", "k", listOf(ModelInfo("qwen3.8-max")))))
+        val conv = e.call(Command.CreateConversation(listOf(ms[0].id))).data
+        e.call(Command.UpdateConversation(e.state.conversation(conv)!!.copy(webSearch = false)))
+        e.call(Command.SendMessage(conv, "做一段海边日落的视频"))
+        waitIdle(e, conv, 1)
+        val ai = e.store.messages.value[conv]!!.last { it.role == Role.AI }
+        assertEquals(MsgStatus.DONE, ai.status, ai.error)
+        assertEquals("做好了。", ai.content)
+        val a = ai.attachments.single()
+        assertEquals("video/mp4", a.mime)
+        assertTrue(a.generated && a.name.endsWith(".mp4"))
+        assertContentEquals(mp4, e.fileBytes(a.id))
+        assertTrue(File(a.savedPath).isFile, "电脑上另存一份，点开直接用播放器放")
+        val step = ai.tools.single { it.kind == "video" }
+        assertTrue(step.ok && step.note == "3 秒 · 480P · wan3.0-video", step.note)
+        assertTrue(requests.any { "你可以做短视频" in systemOf(it) })
+        // 默认最便宜的一档：wan3.0-video 480P；AI 说的 3 秒传过去；不加水印
+        val sent = imageRequests.single { it.startsWith("video:") }
+        assertTrue(sent.startsWith("video:enable:"), sent)
+        for (part in listOf("\"model\":\"wan3.0-video\"", "\"resolution\":\"480P\"", "\"duration\":3", "\"ratio\":\"16:9\"", "\"watermark\":false", "\"audio\":true")) {
+            assertTrue(part in sent, "$part 不在 $sent")
+        }
+        val rec = com.guixing.jixunying.engine.Ledger(File(dir, "usage")).since().single { it.kind == "video" }
+        assertEquals("wan3.0-video 480P", rec.model)
+        assertEquals(3.0, rec.units)
+        val price = com.guixing.jixunying.model.Prices.of("qwen", rec.model)
+        assertEquals(0.9, com.guixing.jixunying.model.Prices.cost(rec, price)!!, 1e-9)
+
+        // 做失败（内容审核没过）：说清原因，不记账
+        e.call(Command.SaveProvider(e.state.provider("pq")!!.copy(apiKey = "fail-video")))
+        e.call(Command.SendMessage(conv, "再做一段视频"))
+        waitIdle(e, conv, 2)
+        val bad = e.store.messages.value[conv]!!.last { it.role == Role.AI }
+        assertEquals("没做成。", bad.content)
+        val badStep = bad.tools.single { it.kind == "video" }
+        assertFalse(badStep.ok)
+        assertTrue("inappropriate" in badStep.note, badStep.note)
+        assertEquals(1, com.guixing.jixunying.engine.Ledger(File(dir, "usage")).since().count { it.kind == "video" })
+
+        // 设置里关掉：AI 就看不到这个工具
+        e.call(Command.SaveSettings(e.state.settings.copy(videoGen = e.state.settings.videoGen.copy(enabled = false))))
+        requests.clear()
+        e.call(Command.SendMessage(conv, "你是谁"))
+        waitIdle(e, conv, 3)
+        assertTrue(requests.none { r -> (r["tools"] as? JsonArray)?.any { "generate_video" in it.toString() } == true })
     }
 
     @Test

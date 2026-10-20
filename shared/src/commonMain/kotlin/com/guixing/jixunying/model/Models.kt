@@ -76,6 +76,24 @@ data class ImageGenSettings(
 )
 
 /**
+ * 做视频（2026-10-20，用户充了千问之后）：千问AI平台 / 阿里百炼的视频生成（异步任务，按秒收费）。
+ * 默认最便宜能用的一档：wan3.0-video、480P、5 秒。模型、档位出处见 docs/参考资料.md「视频生成」。
+ */
+@Serializable
+data class VideoGenSettings(
+    /** 关了 AI 就看不到做视频的工具。 */
+    val enabled: Boolean = true,
+    /** 空 = 自动（千问AI平台优先，其次阿里百炼）。 */
+    val providerId: String = "",
+    val modelId: String = VideoPick.DEFAULT_MODEL,
+    val resolution: String = "480P",
+    val duration: Int = 5,
+    val ratio: String = "16:9",
+    /** 有声（wan3.0 能关；别的模型按它自己的默认）。 */
+    val audio: Boolean = true,
+)
+
+/**
  * 联机：手机和电脑隔着半个地球也能连。两边都主动连到公共中转服务器（MQTT），
  * 内容用配对时交换的密钥端到端加密，中转服务器只看得到乱码。不需要自己的服务器。
  */
@@ -211,6 +229,7 @@ data class WeixinInfo(
 data class Settings(
     val search: SearchSettings = SearchSettings(),
     val imageGen: ImageGenSettings = ImageGenSettings(),
+    val videoGen: VideoGenSettings = VideoGenSettings(),
     val proxy: String = "127.0.0.1:10809",
     val relay: RelaySettings = RelaySettings(),
     val darkMode: Int = 0, // 0 跟随系统 1 浅色 2 深色
