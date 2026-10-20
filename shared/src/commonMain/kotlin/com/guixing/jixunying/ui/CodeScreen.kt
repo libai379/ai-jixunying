@@ -109,7 +109,10 @@ import com.guixing.jixunying.model.Conversation
 import com.guixing.jixunying.model.FileChange
 import com.guixing.jixunying.model.Message
 import com.guixing.jixunying.model.MsgStatus
+import com.guixing.jixunying.model.ModelInfo
+import com.guixing.jixunying.model.ProviderConfig
 import com.guixing.jixunying.model.Role
+import com.guixing.jixunying.model.TeamSeat
 import com.guixing.jixunying.model.Thinking
 import com.guixing.jixunying.model.ToolStep
 import kotlinx.coroutines.launch
@@ -587,6 +590,8 @@ private fun WorkspaceDialog(ctl: AppController, conv: Conversation, spec: CodeSp
                 }
             }
             Spacer(Modifier.height(12.dp))
+            TeamSection(ctl, conv, spec, canEdit, options)
+            Spacer(Modifier.height(12.dp))
             FieldLabel("加进来的文件夹", if (spec.extraPaths.isEmpty()) "还没有" else null)
             spec.extraPaths.forEach { p ->
                 Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -629,6 +634,54 @@ private fun WorkspaceDialog(ctl: AppController, conv: Conversation, spec: CodeSp
             if (!canEdit) {
                 Spacer(Modifier.height(8.dp))
                 Text("工作区和「不再问」只能在电脑上改。", style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
+            }
+        }
+    }
+}
+
+/**
+ * 团队（2026-10-19，多角色派活，设计说明第 16 节）：上面选的模型当主控，开发 / 审查 / 测试各选一个脑子（或者不用）。
+ * 主控是 Claude Code 时不能派活（它调不了我们的 assign_task），只显示说明。
+ */
+@Composable
+private fun TeamSection(ctl: AppController, conv: Conversation, spec: CodeSpec, canEdit: Boolean,
+                        options: List<Pair<ProviderConfig, ModelInfo>>) {
+    FieldLabel("团队", if (spec.team.isEmpty()) "不组队就是一个 AI 从头做到尾" else "上面选的模型当主控，拆好活派给下面的角色")
+    if (spec.isClaudeCode) {
+        Text("主控是 Claude Code 时不能派活给团队（它用的是自己的工具）。要组队，主控换成自己加的模型。",
+            style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
+        return
+    }
+    TeamSeat.ROLES.forEach { (role, label, what) ->
+        val seat = spec.seat(role)
+        var open by remember { mutableStateOf(false) }
+        fun pick(providerId: String, modelId: String, ok: String) {
+            open = false
+            ctl.run(Command.CodeSetTeam(conv.id, role, providerId, modelId), okText = ok)
+        }
+        Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(label, style = MaterialTheme.typography.bodyMedium)
+                Text(what, style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            }
+            Box {
+                val current = when {
+                    seat == null -> "不用"
+                    seat.isClaudeCode -> "Claude Code · " + CodeSpec.claudeModelLabel(seat.modelId)
+                    else -> options.firstOrNull { it.first.id == seat.providerId && it.second.id == seat.modelId }
+                        ?.let { "${it.first.name} · ${it.second.id}" } ?: "${seat.modelId}（服务商不在了）"
+                }
+                TextButton({ open = true }, enabled = canEdit) { Text(current, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+                androidx.compose.material3.DropdownMenu(open, { open = false }) {
+                    androidx.compose.material3.DropdownMenuItem({ Text("不用") }, { pick("", "", "$label：不用了") })
+                    CodeSpec.CLAUDE_MODELS.forEach { (id, l) ->
+                        androidx.compose.material3.DropdownMenuItem({ Text("Claude Code · $l") },
+                            { pick(CodeSpec.CLAUDE_CODE, id, "$label 交给 Claude Code（$l）") })
+                    }
+                    options.forEach { (p, m) ->
+                        androidx.compose.material3.DropdownMenuItem({ Text("${p.name} · ${m.id}") }, { pick(p.id, m.id, "$label 用 ${m.id}") })
+                    }
+                }
             }
         }
     }

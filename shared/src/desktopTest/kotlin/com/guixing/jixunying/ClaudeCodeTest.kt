@@ -249,7 +249,7 @@ class ClaudeCodeTest {
 
     companion object {
         /** 假 claude：照真 claude 2.1.302 的 stream-json 和 can_use_tool 协议说话；参数记进 args.log，收到的每一行记进 stdin.log。 */
-        private val FAKE = """
+        internal val FAKE = """
 import sys, json, os
 here = os.path.dirname(os.path.abspath(__file__))
 args = sys.argv[1:]

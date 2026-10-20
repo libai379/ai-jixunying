@@ -232,3 +232,16 @@
 7. 和自己的循环不一样的地方：它判断为只读的命令（Get-Content、git status 之类）在手动档也不问——这是它自己的规则，我们收不到请求。它用的是它自己的工具和系统提示词，我们的预览、后台命令、MCP 设置不给它（它有自己的一套）。
 8. 测试：ClaudeCodeTest 用 Python 写的假 claude（照真协议）走一遍手动 / 接受编辑 / 拒绝 / 计划 / 接不上会话 / 没登录 / 停止，还有从真输出摘的几行解析；LiveClaudeCodeTest（设 JXY_LIVE_CLAUDE=1）用本机真的 Claude Code（haiku）改一个文件：读 → 改（等批准）→ 跑命令确认 → 撤销，10-18 通过。
 
+
+## 16 多角色派活（2026-10-19 用户：「直接做，不用问我」，接第 15 节的第二步）
+
+第 7 节写的通用做法落到实处：一个主控拆活、几个角色按任务单干活，各用各的脑子。
+
+1. 用法：Code 会话「工作区 → 团队」给开发 / 审查 / 测试各选一个脑子：「不用」、Claude Code（默认 / Opus / Sonnet / Haiku），或者自己加的能调工具的模型。上面选的模型就是主控。一个都不选 = 不组队，和以前一样。存在 CodeSpec.team（TeamSeat：role、providerId、modelId），Command.CodeSetTeam 改，只能在电脑上改（PhoneGate）。
+2. 主控：组了队的主控多一个工具 assign_task（role 只能填组了的角色，task 是任务单，name 可选），系统说明里列出手下有谁、各用什么脑子、干什么；一轮里派几张单子同时做。主控是 Claude Code 时不能组队（它调不了我们的工具），界面上写明。
+3. 角色怎么跑（engine/CodeAgent.assign）：自己加的模型走 subAgent——一份新的上下文、同样的工具和权限，不能再派活；审查只给只读的工具（照计划档：没有 write_file / edit_file，系统说明也不提）。Claude Code 走 claudeWorker——每张任务单开一个新的 claude 进程（不 --resume，不记进会话编号），审查用它的 plan 档；它的步子、要批准的都记在主控这条回答上，它说的话不进回答正文，收起来当 assign_task 的结果交回主控。
+4. 开场话（CodeAgent.roleIntro）：只讲角色是谁、交回什么，不加限制词（用户 10-08 的规矩）。
+5. 怎么知道做完了：自己的模型不再调工具就是做完；Claude Code 是它发的 result 事件。步数到上限、出错都写进交回的结果里，不悄悄当成功。
+6. 隔离：每个角色用自己那个服务商的 Key；Claude Code 用用户自己登录的那份。改文件照样改前备份，回答里能看差异、拒绝、撤销整条。
+7. 测试：TeamTest 三条（自己的模型当开发 / 审查；Claude Code 当开发 / 审查，用 ClaudeCodeTest 的假 claude；选角色的规矩和手机把关）。LiveTeamTest（设 JXY_LIVE_TEAM=数据文件夹）：主控和审查 deepseek-flash、开发真 Claude Code haiku，修一个写错的 add 函数，10-19 通过（70 秒，主控派了开发和审查、自己核对、汇报里写清了开发贴的验证命令其实跑不通）。
+8. 没做：测试角色没有专门的工具（和开发一样）；手机端界面只能看不能改团队；接 Codex、Gemini 是下一步。

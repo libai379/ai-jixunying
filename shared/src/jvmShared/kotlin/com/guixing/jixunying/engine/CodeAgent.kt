@@ -19,6 +19,7 @@ import com.guixing.jixunying.model.MsgStatus
 import com.guixing.jixunying.model.PersonalSettings
 import com.guixing.jixunying.model.ProviderConfig
 import com.guixing.jixunying.model.Role
+import com.guixing.jixunying.model.TeamSeat
 import com.guixing.jixunying.model.ToolStep
 import com.guixing.jixunying.model.Usage
 import com.guixing.jixunying.model.UsageKinds
@@ -165,10 +166,11 @@ class CodeAgent(private val host: CodeHost) {
             var taskHookRan = false
             while (true) {
                 val mode = host.state.conversation(convId)?.code?.mode ?: spec.mode
+                val team = host.state.conversation(convId)?.code?.team ?: spec.team
                 val settings = host.state.settings.code
                 val mcp = runCatching { host.mcpToolDefs() }.getOrDefault(emptyList())
                 val r = withContext(UsageTag(UsageKinds.CODE, convId = convId)) {
-                    host.llmClient.chat(p, spec.modelId, working, null, toolsFor(mode, mcp = mcp), null, {}, null) { c, rs ->
+                    host.llmClient.chat(p, spec.modelId, working, null, toolsFor(mode, mcp = mcp, team = team), null, {}, null) { c, rs ->
                         host.appendDelta(convId, msg.id, c, rs)
                     }
                 }
@@ -189,11 +191,15 @@ class CodeAgent(private val host: CodeHost) {
                 // 这一轮 read_file 读到的图片：工具结果里放不了图片（多数接口只认文字），等这一轮的工具结果都回完，
                 // 再补一条 user 消息把图片带上
                 val seen = mutableListOf<Pair<String, String>>()
-                // 子代理（2026-10-18）：这一轮派的几个一起跑，结果按顺序接回去
-                val subs = r.toolCalls.filter { it.name == "spawn_agent" }
+                // 子代理（2026-10-18）和派给团队角色的活（2026-10-19）：这一轮派的几个一起跑，结果按顺序接回去
+                val subs = r.toolCalls.filter { it.name == "spawn_agent" || it.name == "assign_task" }
                 val subResults = if (subs.isEmpty()) emptyMap() else kotlinx.coroutines.coroutineScope {
-                    subs.associate { tc -> tc.id to async { subAgent(convId, msg.id, tc, p, spec, backup, vision) } }
-                        .mapValues { it.value.await() }
+                    subs.associate { tc ->
+                        tc.id to async {
+                            if (tc.name == "assign_task") assign(convId, msg.id, tc, spec, backup)
+                            else spawn(convId, msg.id, tc, p, spec, backup, vision)
+                        }
+                    }.mapValues { it.value.await() }
                 }
                 for (tc in r.toolCalls) {
                     if (steps >= settings.maxSteps) { full = true; break }
@@ -220,27 +226,68 @@ class CodeAgent(private val host: CodeHost) {
         }
     }
 
-    /**
-     * 子代理（2026-10-18，开发补齐第 11 样；Claude Code 的 Agent 工具）：一个新的上下文，同样的工具（不能再派子代理）和权限，
-     * 步子都记在同一条回答上（界面上看得见它在干什么、要批准的照样弹）；最多走 maxSteps 的一半；返回它最后说的话。
-     */
-    private suspend fun subAgent(convId: String, msgId: String, tc: ToolCall, p: ProviderConfig, spec: CodeSpec, backup: CodeBackup, vision: Boolean): String {
+    /** spawn_agent：同一个模型开一个子代理。 */
+    private suspend fun spawn(convId: String, msgId: String, tc: ToolCall, p: ProviderConfig, spec: CodeSpec, backup: CodeBackup, vision: Boolean): String {
         val args = runCatching { Json.parseToJsonElement(tc.arguments.ifBlank { "{}" }).jsonObject }.getOrNull() ?: JsonObject(emptyMap())
         val task = args.str("task").orEmpty().ifBlank { return "参数错误：缺少 task" }
         val name = args.str("name").orEmpty().ifBlank { task.take(12) }
+        return subAgent(convId, msgId, task, name, p, spec.modelId, spec, backup, vision,
+            "你是主 AI 派出来的帮手，专心做下面这件事，做完用几句话交回结果（发现了什么、改了什么、还有什么没做）：", readOnly = false, who = "子代理")
+    }
+
+    /**
+     * assign_task（2026-10-19，多角色派活，docs/Code栏设计说明.md 第 16 节）：主控把一张任务单派给团队里的一个角色。
+     * 角色用自己的脑子：自己加的模型走 subAgent（同样的工具和权限，审查不给改文件的工具），Claude Code 走 claudeWorker（每张单子一个新会话）。
+     * 步子都记在主控这条回答上，要批准的照样弹；交回角色最后说的话。
+     */
+    private suspend fun assign(convId: String, msgId: String, tc: ToolCall, spec: CodeSpec, backup: CodeBackup): String {
+        val args = runCatching { Json.parseToJsonElement(tc.arguments.ifBlank { "{}" }).jsonObject }.getOrNull() ?: JsonObject(emptyMap())
+        val role = args.str("role").orEmpty().trim()
+        val task = args.str("task").orEmpty().ifBlank { return "参数错误：缺少 task" }
+        val cur = host.state.conversation(convId)?.code ?: spec
+        val seat = cur.seat(role) ?: return "团队里没有「${TeamSeat.label(role)}」这个角色。现在有：" +
+            cur.team.joinToString("、") { "${it.role}（${TeamSeat.label(it.role)}）" }.ifEmpty { "（没有，自己做）" }
+        val label = TeamSeat.label(role)
+        val brief = args.str("name").orEmpty().ifBlank { task.lineSequence().first().take(16) }
+        val intro = roleIntro(role)
+        if (seat.isClaudeCode) return claudeWorker(convId, msgId, seat, "$label：$brief", "$intro\n\n$task", role == "review", cur, backup)
+        val p = host.state.provider(seat.providerId)
+        providerProblem(p)?.let { return "「$label」的模型用不了：$it。跟用户说一声，或者自己做。" }
+        val vision = p!!.models.firstOrNull { it.id == seat.modelId }?.vision == true
+        return subAgent(convId, msgId, task, "$label：$brief", p, seat.modelId, cur, backup, vision, intro,
+            readOnly = role == "review", who = "「$label」（${seat.modelId}）")
+    }
+
+    /** 给角色的开场话：它是谁、交回什么（不加限制词，讲清楚活就行）。 */
+    private fun roleIntro(role: String) = when (role) {
+        "dev" -> "你是团队里的「开发」，主控派给你下面这张任务单。按单子改代码，改完自己跑一下（编译或者相关的测试）确认没坏。" +
+            "做完用几句话交回：改了哪些文件、怎么验证的、还有什么没做。"
+        "review" -> "你是团队里的「审查」，只看不改（改文件的工具没给你）。读任务单里说的改动和相关代码，找真问题：会出错的、漏掉的情况、安全问题。" +
+            "按严重程度列出来，每条写清文件和行号、为什么是问题、怎么改；没发现问题就直说。"
+        "test" -> "你是团队里的「测试」。按任务单写测试或者跑已有的测试，交回：跑了什么命令、几个过几个没过、没过的原因（贴关键的报错）。"
+        else -> "你是团队里的一员，专心做下面这件事，做完用几句话交回结果："
+    }
+
+    /**
+     * 子代理（2026-10-18，开发补齐第 11 样；Claude Code 的 Agent 工具）：一个新的上下文，同样的工具（不能再派子代理）和权限，
+     * 步子都记在同一条回答上（界面上看得见它在干什么、要批准的照样弹）；最多走 maxSteps 的一半；返回它最后说的话。
+     * 2026-10-19：团队角色也走这里，用角色自己的模型（p、modelId）；readOnly = 审查，不给写文件的工具。
+     */
+    private suspend fun subAgent(convId: String, msgId: String, task: String, name: String, p: ProviderConfig, modelId: String,
+                                 spec: CodeSpec, backup: CodeBackup, vision: Boolean, intro: String, readOnly: Boolean, who: String): String {
         val stepId = host.newId()
-        addStep(convId, msgId, ToolStep("agent", name, id = stepId, ok = true, note = "子代理开始干活", output = task))
+        addStep(convId, msgId, ToolStep("agent", name, id = stepId, ok = true, note = "${who}开始干活", output = task))
         val working = mutableListOf<JsonObject>()
-        working += systemMsg(spec, host.state.settings.code, host.state.settings.personal, emptyList())
-        working += buildJsonObject { put("role", "user"); put("content", "你是主 AI 派出来的帮手，专心做下面这件事，做完用几句话交回结果（发现了什么、改了什么、还有什么没做）：\n\n$task") }
+        working += systemMsg(if (readOnly) spec.copy(mode = CodeMode.PLAN) else spec, host.state.settings.code, host.state.settings.personal, emptyList(), sub = true)
+        working += buildJsonObject { put("role", "user"); put("content", "$intro\n\n$task") }
         val limit = maxOf(5, host.state.settings.code.maxSteps / 2)
         var steps = 0
         var last = ""
         try {
             while (true) {
-                val mode = host.state.conversation(convId)?.code?.mode ?: spec.mode
+                val mode = if (readOnly) CodeMode.PLAN else host.state.conversation(convId)?.code?.mode ?: spec.mode
                 val r = withContext(UsageTag(UsageKinds.CODE, convId = convId)) {
-                    host.llmClient.chat(p, spec.modelId, working, null, toolsFor(mode, sub = true), null, {}, null) { _, _ -> }
+                    host.llmClient.chat(p, modelId, working, null, toolsFor(mode, sub = true), null, {}, null) { _, _ -> }
                 }
                 last = r.content.replace(THINK, "").trim()
                 if (r.toolCalls.isEmpty()) break
@@ -253,16 +300,36 @@ class CodeAgent(private val host: CodeHost) {
                     working += toolMsg(t.id, step(convId, msgId, t, mode, cur, CodeGuard(File(cur.folder), cur.extraPaths), backup, if (vision) seen else null))
                 }
                 if (seen.isNotEmpty()) working += contentMsg("user", "（这是刚才读到的图片）", seen.map { it.second })
-                if (steps >= limit) { last = (last + "\n（子代理走到了 $limit 步上限，停下了）").trim(); break }
+                if (steps >= limit) { last = (last + "\n（${who}走到了 $limit 步上限，停下了）").trim(); break }
                 trimWorking(working)
             }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Throwable) {
-            last = "子代理出错了：${host.friendlyError(e, p)}"
+            last = "${who}出错了：${host.friendlyError(e, p)}"
         }
-        setStep(convId, msgId, stepId) { it.copy(note = "子代理做完了（$steps 步）", output = "任务：$task\n\n结果：\n${last.ifBlank { "（没说什么）" }}".take(UI_TEXT_LIMIT)) }
-        return "子代理「$name」做完了（$steps 步）。它交回的结果：\n${last.ifBlank { "（没说什么）" }}"
+        setStep(convId, msgId, stepId) { it.copy(note = "${who}做完了（$steps 步）", output = "任务：$task\n\n结果：\n${last.ifBlank { "（没说什么）" }}".take(UI_TEXT_LIMIT)) }
+        return "${who}「$name」做完了（$steps 步）。交回的结果：\n${last.ifBlank { "（没说什么）" }}"
+    }
+
+    /**
+     * 团队角色交给 Claude Code（2026-10-19）：每张任务单开一个新的 claude 会话（不接主会话的 --resume，免得串），
+     * 它的步子、要批准的都记在主控这条回答上；它说的话不进回答正文，收起来交回主控。审查用它的 plan 档（只看不改）。
+     */
+    private suspend fun claudeWorker(convId: String, msgId: String, seat: TeamSeat, name: String, text: String, readOnly: Boolean,
+                                     spec: CodeSpec, backup: CodeBackup): String {
+        val stepId = host.newId()
+        val who = "Claude Code" + seat.modelId.takeIf { it.isNotBlank() }?.let { "（${CodeSpec.claudeModelLabel(it)}）" }.orEmpty()
+        addStep(convId, msgId, ToolStep("agent", name, id = stepId, ok = true, note = "${who}开始干活", output = uiText(text)))
+        val exe = ClaudeCli.findExe(host.state.settings.code.claudePath)
+        val worker = ClaudeWorker(text, seat.modelId, readOnly)
+        val result = if (exe == null) "没找到 Claude Code：先在 设置 → Code 栏 检查装好、登录了" else {
+            val r = claudeRound(convId, msgId, null, spec, exe, "", null, backup, worker)
+            val said = worker.out.toString().trim()
+            if (r.error != null) "出错了：${r.error}" + if (said.isNotEmpty()) "\n它出错前说的：\n$said" else "" else said.ifBlank { "（没说什么）" }
+        }
+        setStep(convId, msgId, stepId) { it.copy(note = "${who}做完了", output = "任务：$text\n\n结果：\n$result".take(UI_TEXT_LIMIT)) }
+        return "$who「$name」交回的结果：\n$result"
     }
 
     /**
@@ -285,7 +352,7 @@ class CodeAgent(private val host: CodeHost) {
 
     /** 给模型的系统说明：讲环境（项目文件夹、外壳、有哪些工具），再接上用户自己的指令和项目说明；不加限制词。 */
     private fun systemMsg(spec: CodeSpec, code: CodeSettings, personal: PersonalSettings = PersonalSettings(),
-                          notes: List<Pair<String, String>> = emptyList()): JsonObject = buildJsonObject {
+                          notes: List<Pair<String, String>> = emptyList(), sub: Boolean = false): JsonObject = buildJsonObject {
         put("role", "system")
         put("content", buildString {
             append("你在帮用户改一个项目里的代码。\n")
@@ -298,7 +365,20 @@ class CodeAgent(private val host: CodeHost) {
             append("用户消息里「@路径」是点名给你的文件，先读它。\n")
             append("可以用的工具：read_file（读文件，可指定行范围；图片、PDF、Word、Excel 也能读）、list_dir（列目录）、grep（按内容查找）、find_files（按文件名找）")
             if (spec.mode != CodeMode.PLAN) append("、write_file（新建或整个重写）、edit_file（局部替换）")
-            append("、run_command（跑一条命令，返回退出码和输出，能放后台）、web_search（联网搜索）、fetch_url（读网页）、preview（给网页截图看）、update_todos（待办清单）、spawn_agent（派子代理）。")
+            append("、run_command（跑一条命令，返回退出码和输出，能放后台）、web_search（联网搜索）、fetch_url（读网页）、preview（给网页截图看）、update_todos（待办清单）")
+            append(if (sub) "。" else "、spawn_agent（派子代理）。")
+            // 团队（2026-10-19）：主控知道手下有谁、各用什么脑子
+            if (!sub && spec.team.isNotEmpty()) {
+                append("\n\n【你的团队】你是主控，手下有：\n")
+                spec.team.forEach { s ->
+                    val role = TeamSeat.ROLES.firstOrNull { it.first == s.role }
+                    append("- ").append(s.role).append("（").append(role?.second ?: s.role).append("，")
+                    append(if (s.isClaudeCode) "Claude Code" + s.modelId.takeIf { it.isNotBlank() }?.let { " " + CodeSpec.claudeModelLabel(it) }.orEmpty() else s.modelId)
+                    append("）：").append(role?.third.orEmpty()).append('\n')
+                }
+                append("用 assign_task 把活派给他们，每张任务单写清目标、范围、怎么算做完；一轮里派几张会同时做（比如改完同时派审查和测试）。")
+                append("他们交回的结果你自己核对，有问题再派一轮，最后由你向用户汇报。")
+            }
             // 用户自己写的（设置 → 个性化）和项目里的说明文件：照着做
             val custom = listOf(personal.instructions.trim(), personal.codeInstructions.trim()).filter { it.isNotEmpty() }
             if (custom.isNotEmpty()) {
@@ -417,7 +497,8 @@ class CodeAgent(private val host: CodeHost) {
 
     // ———————————————— 工具 ————————————————
 
-    private fun toolsFor(mode: CodeMode, sub: Boolean = false, mcp: List<Triple<String, String, JsonObject>> = emptyList()): JsonArray = buildJsonArray {
+    private fun toolsFor(mode: CodeMode, sub: Boolean = false, mcp: List<Triple<String, String, JsonObject>> = emptyList(),
+                         team: List<TeamSeat> = emptyList()): JsonArray = buildJsonArray {
         // MCP 外部工具（2026-10-18）：原样给模型（名字、说明、参数格式）
         mcp.forEach { (n, d, schema) ->
             add(buildJsonObject {
@@ -489,6 +570,17 @@ class CodeAgent(private val host: CodeHost) {
                 put("task", text("交给它的活，写清楚目标和要交回什么"))
                 put("name", text("可选，给它起个短名字，比如「查登录」"))
             }, listOf("task"))
+        // 2026-10-19 多角色派活：只有组了队的主控才有
+        if (!sub && team.isNotEmpty()) fn("assign_task", "把一张任务单派给团队里的一个角色，等它做完交回结果。" +
+            "现在有：" + team.joinToString("、") { "${it.role}（${TeamSeat.label(it.role)}）" } + "。一轮里派几张会同时做。",
+            buildJsonObject {
+                put("role", buildJsonObject {
+                    put("type", "string"); put("description", "派给谁")
+                    putJsonArray("enum") { team.forEach { add(it.role) } }
+                })
+                put("task", text("任务单：目标、范围（哪些文件）、怎么算做完、要交回什么"))
+                put("name", text("可选，这张单子的短名字，比如「加登录接口」"))
+            }, listOf("role", "task"))
         // 2026-10-18 开发补齐第 4 样：待办清单
         fn("update_todos", Todos.DESC, buildJsonObject { put("items", text("整张清单，一行一项，开头 [x] / [>] / [ ]")) }, listOf("items"))
         // 2026-10-18 开发补齐第 3 样：改完自己看页面
@@ -943,6 +1035,9 @@ class CodeAgent(private val host: CodeHost) {
 
     private class ClaudeRound(val error: String? = null, val stale: Boolean = false, val usage: Usage = Usage())
 
+    /** Claude Code 当团队角色（2026-10-19）：这张任务单的文字、--model、要不要只看不改；它说的话收在 out 里。 */
+    private class ClaudeWorker(val text: String, val modelId: String, val readOnly: Boolean) { val out = StringBuilder() }
+
     /**
      * 这条任务交给用户自己装、自己登录的 Claude Code（engine/code/ClaudeCli，走用户自己的订阅）：它自己读文件、改文件、跑命令，
      * 我们把它的每一步画成和自己的循环一样的步骤；它要改文件、跑命令时来问，我们按这个会话的权限档答（要问用户的照样停下来等），
@@ -991,12 +1086,15 @@ class CodeAgent(private val host: CodeHost) {
         }
     }
 
-    /** 开一个 claude 进程把这条任务做完（含任务钩子没过时多改的一轮）。 */
-    private suspend fun claudeRound(convId: String, msgId: String, task: Message, spec: CodeSpec, exe: File, resume: String,
-                                    instr: File?, backup: CodeBackup): ClaudeRound {
+    /**
+     * 开一个 claude 进程把这条任务做完（含任务钩子没过时多改的一轮）。
+     * worker 不为空 = 它是团队里的一个角色（2026-10-19）：任务文字用 worker 的，不记会话编号、不跑任务钩子，说的话收进 worker.out。
+     */
+    private suspend fun claudeRound(convId: String, msgId: String, task: Message?, spec: CodeSpec, exe: File, resume: String,
+                                    instr: File?, backup: CodeBackup, worker: ClaudeWorker? = null): ClaudeRound {
         val settings = host.state.settings
         val cur = host.state.conversation(convId)?.code ?: spec
-        val cmd = ClaudeCli.launcher(exe) + ClaudeCli.args(cur.modelId, cur.mode == CodeMode.PLAN, resume,
+        val cmd = ClaudeCli.launcher(exe) + ClaudeCli.args(worker?.modelId ?: cur.modelId, worker?.readOnly == true || cur.mode == CodeMode.PLAN, resume,
             cur.extraPaths.filter { File(it).isDirectory }, instr)
         val proc = withContext(Dispatchers.IO) {
             runCatching { ClaudeProcess(cmd, File(cur.folder), ClaudeCli.env(System.getenv(), settings.proxy)) }
@@ -1007,17 +1105,18 @@ class CodeAgent(private val host: CodeHost) {
         var hookRan = false
         var usage = Usage()
         try {
-            val (text, images) = claudeTaskText(convId, task, resume.isBlank())
+            val (text, images) = if (worker != null) worker.text to emptyList() else claudeTaskText(convId, task!!, resume.isBlank())
             proc.send(ClaudeCli.initRequest())
             proc.send(ClaudeCli.userMessage(text, images))
             for (line in proc.lines) {
                 for (ev in ClaudeCli.parse(line)) when (ev) {
-                    is ClaudeCli.Init -> if (ev.sessionId.isNotBlank()) host.updateCode(convId) { it.copy(externalSession = ev.sessionId) }
+                    is ClaudeCli.Init -> if (worker == null && ev.sessionId.isNotBlank()) host.updateCode(convId) { it.copy(externalSession = ev.sessionId) }
                     is ClaudeCli.Text -> if (!ev.sub) {
-                        host.appendDelta(convId, msgId, (if (wrote) "\n\n" else "") + ev.text, "")
+                        if (worker != null) worker.out.append(if (wrote) "\n\n" else "").append(ev.text)
+                        else host.appendDelta(convId, msgId, (if (wrote) "\n\n" else "") + ev.text, "")
                         wrote = true
                     }
-                    is ClaudeCli.Thinking -> host.appendDelta(convId, msgId, "", ev.text)
+                    is ClaudeCli.Thinking -> if (worker == null) host.appendDelta(convId, msgId, "", ev.text)
                     is ClaudeCli.ToolUse -> claudeToolUse(convId, msgId, ev, uses, steps)
                     is ClaudeCli.Permission -> proc.send(claudePermission(convId, msgId, ev, steps, backup))
                     is ClaudeCli.ToolResult -> claudeToolResult(convId, msgId, ev, uses, steps)
@@ -1035,14 +1134,16 @@ class CodeAgent(private val host: CodeHost) {
                         }
                         // 任务做完后的钩子：没过就再交给它改一轮（只一轮），和自己的循环一样
                         val hook = host.state.settings.code.hookAfterTask.trim()
-                        val again = if (hook.isEmpty() || hookRan) false else {
+                        val again = if (worker != null || hook.isEmpty() || hookRan) false else {
                             hookRan = true
                             "报错了" in runHook(convId, msgId, hook, "任务做完后的钩子", File(cur.folder)).also { out ->
                                 if ("报错了" in out) proc.send(ClaudeCli.userMessage("（程序自动跑了用户设的检查，没过，改好它：）$out"))
                             }
                         }
                         if (!again) {
-                            if (!wrote && ev.text.isNotBlank()) host.appendDelta(convId, msgId, ev.text, "")
+                            if (!wrote && ev.text.isNotBlank()) {
+                                if (worker != null) worker.out.append(ev.text) else host.appendDelta(convId, msgId, ev.text, "")
+                            }
                             proc.closeInput()
                             withContext(Dispatchers.IO) { proc.waitExit(5_000) }
                             return ClaudeRound(usage = usage)

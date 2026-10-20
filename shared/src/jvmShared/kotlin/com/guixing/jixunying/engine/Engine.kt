@@ -9,6 +9,7 @@ import com.guixing.jixunying.model.AttachmentKind
 import com.guixing.jixunying.model.BgJob
 import com.guixing.jixunying.model.CodeMode
 import com.guixing.jixunying.model.CodeSpec
+import com.guixing.jixunying.model.TeamSeat
 import com.guixing.jixunying.model.Command
 import com.guixing.jixunying.model.CommandResult
 import com.guixing.jixunying.model.Conversation
@@ -931,6 +932,26 @@ class Engine(
                 }
             }
             updateCodeSpec(conv.id) { next }
+            CommandResult()
+        }
+        is Command.CodeSetTeam -> {
+            val conv = state.conversation(c.convId) ?: return CommandResult(false, "对话不存在")
+            val spec = conv.code ?: return CommandResult(false, "这不是 Code 会话")
+            if (TeamSeat.ROLES.none { it.first == c.role }) return CommandResult(false, "没有这个角色：${c.role}")
+            val seat = when {
+                c.providerId.isBlank() -> null
+                c.providerId == CodeSpec.CLAUDE_CODE -> TeamSeat(c.role, CodeSpec.CLAUDE_CODE, c.modelId.trim())
+                else -> {
+                    val p = state.provider(c.providerId) ?: return CommandResult(false, "服务商不存在：${c.providerId}")
+                    val m = p.models.firstOrNull { it.id == c.modelId } ?: return CommandResult(false, "「${p.name}」里没有模型 ${c.modelId}")
+                    if (!m.tools) return CommandResult(false, "「${m.id}」不能调用工具，干不了 Code 栏的活")
+                    TeamSeat(c.role, p.id, m.id)
+                }
+            }
+            // 按 ROLES 的顺序排，界面和给主控的说明都稳定
+            val others = spec.team.filter { it.role != c.role }
+            val team = (others + listOfNotNull(seat)).sortedBy { s -> TeamSeat.ROLES.indexOfFirst { it.first == s.role } }
+            updateCodeSpec(conv.id) { it.copy(team = team) }
             CommandResult()
         }
         is Command.CodeSetMode -> {

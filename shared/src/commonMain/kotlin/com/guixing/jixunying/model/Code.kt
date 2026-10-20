@@ -72,9 +72,16 @@ data class CodeSpec(
      * 它自己记得前面做过什么。换回自己的模型时留着，换回来还能接上。
      */
     val externalSession: String = "",
+    /**
+     * 团队（2026-10-19，多角色派活，docs/Code栏设计说明.md 第 16 节）：会话自己的模型当主控，拆活后用 assign_task 派给这些角色，
+     * 每个角色一个脑子（自己加的模型，或者 Claude Code）。空 = 不组队，和以前一样。只能在电脑上改（PhoneGate）。
+     */
+    val team: List<TeamSeat> = emptyList(),
 ) {
     /** 这个会话交给外部 Claude Code（用户自己装、自己登录的官方 claude，走用户自己的订阅）。 */
     val isClaudeCode: Boolean get() = providerId == CLAUDE_CODE
+
+    fun seat(role: String): TeamSeat? = team.firstOrNull { it.role == role }
 
     companion object {
         /** providerId 填这个 = 用外部 Claude Code；modelId 是给它的 --model（空 = 它自己的默认，或者 opus / sonnet / haiku）。 */
@@ -82,6 +89,25 @@ data class CodeSpec(
         /** 界面上给选的几个（它认这些别名，指向各自最新的模型）。 */
         val CLAUDE_MODELS = listOf("" to "默认", "opus" to "Opus", "sonnet" to "Sonnet", "haiku" to "Haiku")
         fun claudeModelLabel(id: String) = CLAUDE_MODELS.firstOrNull { it.first == id }?.second ?: id
+    }
+}
+
+/**
+ * 团队里的一个角色（2026-10-19）：role 是 TeamSeat.ROLES 里的一个；providerId 是 CodeSpec.CLAUDE_CODE 时交给 Claude Code，
+ * modelId 是它的 --model 别名（空 = 它的默认）。
+ */
+@Serializable
+data class TeamSeat(val role: String, val providerId: String, val modelId: String = "") {
+    val isClaudeCode: Boolean get() = providerId == CodeSpec.CLAUDE_CODE
+
+    companion object {
+        /** 角色编号、名字、干什么（给主控看的说明也用这个）。 */
+        val ROLES = listOf(
+            Triple("dev", "开发", "按任务单写代码、改文件，改完自己跑一下确认能编译"),
+            Triple("review", "审查", "只看不改：读改动和相关代码，按严重程度列出问题"),
+            Triple("test", "测试", "写测试、跑测试，报告哪些过了哪些没过、为什么"),
+        )
+        fun label(role: String) = ROLES.firstOrNull { it.first == role }?.second ?: role
     }
 }
 

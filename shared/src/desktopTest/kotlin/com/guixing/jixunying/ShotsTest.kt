@@ -204,7 +204,9 @@ class ShotsTest {
             // 2026-10-17：读工作区外面的文件在等批准（带「加进工作区」）、命令在等批准（带「同样开头不再问」）
             Conversation("c11", "读别处的资料", emptyList(), createdAt = now - 200_000, updatedAt = now - 5_000,
                 code = com.guixing.jixunying.model.CodeSpec(File(root, "我的项目").absolutePath, "pd", "deepseek-flash",
-                    extraPaths = listOf("G:\\资料\\接口文档"), allowedCommands = listOf("git status", "web:docs.python.org"))),
+                    extraPaths = listOf("G:\\资料\\接口文档"), allowedCommands = listOf("git status", "web:docs.python.org"),
+                    team = listOf(com.guixing.jixunying.model.TeamSeat("dev", com.guixing.jixunying.model.CodeSpec.CLAUDE_CODE, "opus"),
+                        com.guixing.jixunying.model.TeamSeat("review", "pd", "deepseek-flash")))),
             Conversation("c12", "跑测试", emptyList(), createdAt = now - 150_000, updatedAt = now - 4_000,
                 code = com.guixing.jixunying.model.CodeSpec(File(root, "我的项目").absolutePath, "pd", "deepseek-flash")),
             // 2026-10-18 外部 Claude Code：交给用户自己的 Claude Code（订阅）做，改文件在等批准
@@ -501,7 +503,7 @@ class ShotsTest {
         dir.mkdirs()
         val tmp = kotlin.io.path.createTempDirectory("jxy-scroll").toFile()
         val hub = Hub(seed(File(tmp, "data"), File(tmp, "文档").apply { mkdirs() }))
-        val desktop = DesktopPlatform { null }
+        val desktop = DesktopPlatform(fileLog = false) { null }
         // 侧栏位置（1280×820）：绳子剪几段 299、租房合同 349、聊了很久的对话 579；聊天区中间 (800, 400)
         // 10-14 侧栏改版后列表上面多了三张卡片，原来的 210 / 260 / 490 会点到卡片上（打开「我的文档」，后台扫描从别的线程改状态，截图偶发报错）
         val c5 = Offset(140f, 299f); val c1 = Offset(140f, 349f); val c6 = Offset(140f, 579f); val chat = Offset(800f, 400f)
@@ -526,7 +528,7 @@ class ShotsTest {
         File(docs, "会议纪要.txt").writeText("周一例会：确定上线时间为 10 月 20 日。", Charsets.UTF_8)
         val e = seed(File(tmp, "data"), docs)
         val hub = Hub(e)
-        val desktop = DesktopPlatform { null }
+        val desktop = DesktopPlatform(fileLog = false) { null }
         val phone = PhonePlatform()
 
         val wide = listOf(
@@ -567,6 +569,8 @@ class ShotsTest {
         shoot("phone-toast", 824, 1784, 2f, hub, phone, "conv:c14#toast")
         shoot("desktop-code-remember-cmd", 1280, 820, 1f, hub, desktop, "code:c12")
         shoot("desktop-code-workspace", 1280, 820, 1f, hub, desktop, "code:c11#path")
+        // 2026-10-19 多角色派活：工作区里的「团队」一节（窗口拉高看全）
+        shoot("desktop-code-team", 1280, 1500, 1f, hub, desktop, "code:c11#path")
         shoot("desktop-code-claude", 1280, 820, 1f, hub, desktop, "code:c15")
         shoot("desktop-code-claude-workspace", 1280, 900, 1f, hub, desktop, "code:c15#path")
         shoot("desktop-settings-code-tall", 1280, 1900, 1f, hub, desktop, "settings:CODE")

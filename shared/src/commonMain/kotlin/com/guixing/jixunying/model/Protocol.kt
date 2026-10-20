@@ -45,6 +45,11 @@ sealed interface Command {
      */
     @Serializable data class CodeSetProject(val convId: String, val folder: String = "", val providerId: String = "", val modelId: String = "") : Command
     /**
+     * Code 栏：给团队的一个角色选脑子（2026-10-19，多角色派活）。providerId 空 = 这个角色不要了；
+     * CodeSpec.CLAUDE_CODE = 交给 Claude Code（modelId 是 --model 别名）。只能在电脑上改（PhoneGate）。
+     */
+    @Serializable data class CodeSetTeam(val convId: String, val role: String, val providerId: String = "", val modelId: String = "") : Command
+    /**
      * Code 栏连 GitHub（2026-10-18，engine/code/GitHub）：op =
      * "repo" 看项目的 Git 状态（data 是 JSON：repo / branch / changes / remote / ahead）；"commit" 提交全部改动；
      * "push" 推上去；"commit_push" 提交并推；"pr" 推上去并开 PR；"create" 还不是仓库的，建仓库并上传（name、private）；

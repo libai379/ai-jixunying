@@ -134,6 +134,31 @@ class CodeSafetyTest {
         assertTrue(g.output.lines().count { "你好 world" in it } >= 2, g.output)
     }
 
+    /**
+     * 2026-10-19 真模型测团队时踩到：命令里带双引号（python -c "…"）时，Java 起进程不转义引号，PowerShell 把它们吃掉，命令被拆散；
+     * 解析阶段就出错，设 UTF-8 的前缀没跑，报错是 GBK 乱码。
+     */
+    @Test
+    fun shellKeepsQuotesAndUtf8Errors() = runBlocking {
+        val sh = CodeShell()
+        val py = runCatching { ProcessBuilder("python", "--version").start().waitFor() == 0 }.getOrDefault(false)
+        if (py) {
+            val r = sh.run("python -c \"print('a b', 1 + 2)\"", root, timeoutSec = 60)
+            assertEquals(0, r.exitCode, r.output)
+            assertTrue("a b 3" in r.output, r.output)
+            assertEquals(4, sh.run("python -c \"import sys; sys.exit(4)\"", root, timeoutSec = 60).exitCode, "原生命令的退出码传回来")
+        }
+        // PowerShell 里双引号串中写两个双引号 = 一个双引号；结尾的反斜杠也不能被当成转义
+        val q = sh.run("Write-Output \"他说 \"\"你好\"\"  路径 C:\\temp\\\"", root, timeoutSec = 60)
+        assertEquals("他说 \"你好\"  路径 C:\\temp\\", q.output.trim(), q.output)
+        val bad = sh.run("Write-Output (1 +", root, timeoutSec = 60)
+        assertTrue(bad.exitCode != 0, bad.output)
+        assertFalse('\uFFFD' in bad.output, "解析出错的报错也按 UTF-8：" + bad.output)
+        assertEquals(5, sh.run("cmd /c exit 5", root, timeoutSec = 60).exitCode, "最后一条原生命令的退出码")
+        assertEquals(0, sh.run("Write-Output ok", root, timeoutSec = 60).exitCode)
+        Unit
+    }
+
     @Test
     fun shellHidesKeysAndProxies() = runBlocking {
         // 真实情况：本机全部环境变量经白名单过滤；把假的 Key、代理混进去

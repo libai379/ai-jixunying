@@ -83,6 +83,7 @@ object PhoneGate {
             // 2026-10-17：手机不能把工作区放大、不能让命令「不再问」——这两样都比「批准这一步」宽
             is Command.CodeSetAccess -> refuse(c, "工作区和「不再问」的命令只能在电脑上改")
             is Command.CodeSetProject -> refuse(c, "项目文件夹和模型只能在电脑上换")
+            is Command.CodeSetTeam -> refuse(c, "团队只能在电脑上改")
             is Command.CodeDecide -> Verdict(c.copy(remember = ""))
             is Command.CodeSend -> Verdict(c.copy(paths = emptyList(), fromPhone = true))
             else -> Verdict(c)
@@ -103,7 +104,7 @@ object PhoneGate {
 
     private fun isCodeWrite(c: Command) = c is Command.CodeCreate || c is Command.CodeSend || c is Command.CodeStop ||
         c is Command.CodeDecide || c is Command.CodeSetMode || c is Command.CodeReview || c is Command.CodeRevertTask ||
-        c is Command.CodeSetAccess || c is Command.CodeSetProject
+        c is Command.CodeSetAccess || c is Command.CodeSetProject || c is Command.CodeSetTeam
 
     private fun refuse(c: Command, why: String) = Verdict(c, CommandResult(false, why))
 }

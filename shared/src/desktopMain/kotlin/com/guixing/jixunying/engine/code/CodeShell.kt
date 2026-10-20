@@ -116,11 +116,18 @@ class CodeShell(private val envSource: () -> Map<String, String> = System::geten
         // Windows 自带的 PowerShell 5.1 读没有 BOM 的文件默认按系统编码（中文 Windows 是 GBK），
         // 我们写的 UTF-8 文件用 Get-Content 一看全是乱码（10-12 真模型测试里 MiniMax、小米都踩了，以为文件坏了）。
         // 只把「读」的几个命令默认改成 UTF-8；写文件的不改（5.1 的 -Encoding UTF8 会加 BOM）。
+        // 2026-10-19：命令本身转成 Base64 放进去，在 PowerShell 里解码再执行。原来直接拼在 -Command 后面，
+        // Java 起进程不转义参数里的双引号，python -c "…" 这类命令的引号被吃掉、命令被拆散；解析阶段就出错时设 UTF-8 的前缀也没跑，报错是乱码。
+        // 不用 -EncodedCommand：PowerShell 5.1 用它时标准错误会变成 CLIXML。
+        // 退出码：有原生命令退出码不是 0 就用它，否则出错是 1、没出错是 0；命令里自己写 exit N 照样是 N。
         "", "powershell" -> listOf(
             "powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command",
             "[Console]::OutputEncoding = [Text.UTF8Encoding]::new(\$false); \$OutputEncoding = [Text.UTF8Encoding]::new(\$false); " +
                 "\$PSDefaultParameterValues['Get-Content:Encoding'] = 'UTF8'; \$PSDefaultParameterValues['Select-String:Encoding'] = 'UTF8'; " +
-                "\$PSDefaultParameterValues['Import-Csv:Encoding'] = 'UTF8'; $command",
+                "\$PSDefaultParameterValues['Import-Csv:Encoding'] = 'UTF8'; \$global:LASTEXITCODE = 0; " +
+                "Invoke-Expression ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" +
+                java.util.Base64.getEncoder().encodeToString(command.toByteArray(Charsets.UTF_8)) + "'))); " +
+                "\$ok = \$?; if (\$global:LASTEXITCODE) { exit \$global:LASTEXITCODE }; if (-not \$ok) { exit 1 }; exit 0",
         )
         // cmd：没有控制台窗口时 chcp 65001 不生效（10-12 测试里中文成了乱码），输出按系统本地编码（中文 Windows 是 GBK）读
         "cmd" -> listOf("cmd.exe", "/d", "/s", "/c", command)

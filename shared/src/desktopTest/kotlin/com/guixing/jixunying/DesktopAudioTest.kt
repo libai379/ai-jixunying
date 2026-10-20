@@ -23,7 +23,7 @@ class DesktopAudioTest {
     @Test
     fun stopIsImmediateAndNormalPlayFinishes() = runBlocking {
         if (!hasOutput()) { println("这台机器没有放音设备，跳过"); return@runBlocking }
-        val p = DesktopPlatform { null }
+        val p = DesktopPlatform(fileLog = false) { null }
 
         // 3 秒的静音，0.3 秒后点停止：要在 1 秒内结束（以前 drain 不理会取消，要等缓冲放完）
         val t0 = System.currentTimeMillis()
