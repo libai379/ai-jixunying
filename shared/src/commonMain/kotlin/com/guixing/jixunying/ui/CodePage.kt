@@ -33,6 +33,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.guixing.jixunying.model.AppState
 import com.guixing.jixunying.model.CodeSettings
+import com.guixing.jixunying.model.CodeSpec
 import com.guixing.jixunying.model.Command
 
 private const val POWERSHELL = "powershell"
@@ -148,6 +149,34 @@ fun CodePage(ctl: AppController, state: AppState) {
             FieldLabel("claude.exe 的位置", "空着就自己找（PATH 里、官方安装器默认装的 用户文件夹\\.local\\bin）")
             AppTextField(cp, { cp = it }, placeholder = "比如 C:\\Users\\你\\.local\\bin\\claude.exe")
             AutoSave(cp, c.claudePath) { v -> set { it.copy(claudePath = v.trim()) } }
+        }
+        Spacer(Modifier.height(12.dp))
+        // 2026-10-20 Codex / Gemini CLI：用户自己装、自己登录的官方命令行（engine/code/AgentCli）
+        SectionCard {
+            Text("Codex 和 Gemini CLI（用你自己的账号）", style = MaterialTheme.typography.titleSmall)
+            Text("在 Code 会话的「工作区 → 模型」或「团队」里选它们。它们不能一步步问你：「手动」档交出去之前问一次，「计划」档和审查只读；" +
+                "交出去之前给工作区拍一份快照，做完比对，改了的文件照样能看差异、撤销。登录在它们自己的窗口里完成，本程序不碰你的账号。",
+                style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle, modifier = Modifier.padding(top = 2.dp))
+            listOf(Triple(CodeSpec.CODEX, c.codexPath, "比如 C:\\Users\\你\\AppData\\Roaming\\npm\\codex.cmd"),
+                Triple(CodeSpec.GEMINI, c.geminiPath, "比如 C:\\Users\\你\\AppData\\Roaming\\npm\\gemini.cmd")).forEach { (agent, path, hint) ->
+                Spacer(Modifier.height(8.dp))
+                var status by remember { mutableStateOf<String?>(null) }
+                var ok by remember { mutableStateOf(false) }
+                var check by remember { mutableStateOf(0) }
+                LaunchedEffect(check, path) {
+                    status = null
+                    val r = ctl.backend.call(Command.AgentStatus(agent))
+                    ok = r.ok
+                    status = r.data.ifBlank { r.message }
+                }
+                Text(status ?: "正在检查 ${CodeSpec.agentName(agent)}…", style = MaterialTheme.typography.bodyMedium,
+                    color = if (status != null && !ok) Ext.c.warning else MaterialTheme.colorScheme.onSurface)
+                TextButton({ check++ }) { Text("重新检查") }
+                var p by remember { mutableStateOf(path) }
+                FieldLabel("${CodeSpec.agentName(agent)} 的位置", "空着就自己找（PATH 里、npm 装的 %APPDATA%\\npm）")
+                AppTextField(p, { p = it }, placeholder = hint)
+                AutoSave(p, path) { v -> set { if (agent == CodeSpec.CODEX) it.copy(codexPath = v.trim()) else it.copy(geminiPath = v.trim()) } }
+            }
         }
         Spacer(Modifier.height(12.dp))
     }

@@ -46,7 +46,8 @@ sealed interface Command {
     @Serializable data class CodeSetProject(val convId: String, val folder: String = "", val providerId: String = "", val modelId: String = "") : Command
     /**
      * Code 栏：给团队的一个角色选脑子（2026-10-19，多角色派活）。providerId 空 = 这个角色不要了；
-     * CodeSpec.CLAUDE_CODE = 交给 Claude Code（modelId 是 --model 别名）。只能在电脑上改（PhoneGate）。
+     * CodeSpec.CLAUDE_CODE = 交给 Claude Code（modelId 是 --model 别名）；CodeSpec.CODEX / GEMINI = 交给 Codex / Gemini CLI（2026-10-20）。
+     * 只能在电脑上改（PhoneGate）。
      */
     @Serializable data class CodeSetTeam(val convId: String, val role: String, val providerId: String = "", val modelId: String = "") : Command
     /**
@@ -87,6 +88,8 @@ sealed interface Command {
     @Serializable data object ClaudeStatus : Command
     /** 开一个终端窗口运行 claude，让用户在它自己的界面里登录（/login）。只能在电脑上。 */
     @Serializable data object ClaudeLogin : Command
+    /** Codex / Gemini CLI（2026-10-20）：装没装、什么版本（Codex 还查登没登录）。agent 是 CodeSpec.CODEX / GEMINI。 */
+    @Serializable data class AgentStatus(val agent: String) : Command
     /** Code 栏：换权限档（只影响之后的步骤，已经跑完的不变）。fromPhone 同上。 */
     @Serializable data class CodeSetMode(val convId: String, val mode: CodeMode, val fromPhone: Boolean = false,
         /** 2026-10-17：「全部放开」（CodeSpec.openAll）。手机发来 true 的一律拒（PhoneGate）。 */

@@ -207,7 +207,7 @@ private fun CodeTopBar(ctl: AppController, state: AppState, conv: Conversation, 
     // 开发截图用：-Djxy.start=code:会话编号#path 直接把这个弹窗打开
     LaunchedEffect(Unit) { if (ctl.debugDialog == "path") showPath = true }
     val subtitle = (if (wide) spec.folder else folderName(spec.folder)) +
-        if (spec.isClaudeCode) " · Claude Code（${CodeSpec.claudeModelLabel(spec.modelId)}）" else (provider?.let { " · ${it.name}" } ?: "") + " · ${spec.modelId}"
+        if (spec.isAgent) " · " + CodeSpec.agentLabel(spec.providerId, spec.modelId) else (provider?.let { " · ${it.name}" } ?: "") + " · ${spec.modelId}"
     Row(Modifier.fillMaxWidth().height(60.dp).padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
         if (!wide) IconButton(onClick = openDrawer) { Icon(Icons.Rounded.Menu, "菜单") }
         Column(Modifier.weight(1f).padding(start = 6.dp)) {
@@ -558,21 +558,27 @@ private fun WorkspaceDialog(ctl: AppController, conv: Conversation, spec: CodeSp
             }
             Spacer(Modifier.height(12.dp))
             FieldLabel("模型", "只列能调用工具的")
-            // 外部 Claude Code（2026-10-18）：用你自己装、自己登录的 Claude Code，走你的 Claude 订阅
-            Text("Claude Code（用你的 Claude 订阅；先在 设置 → Code 栏 检查装好、登录了）", style = MaterialTheme.typography.labelMedium,
+            // 本机的编程命令行：Claude Code（2026-10-18，走你的 Claude 订阅）、Codex / Gemini CLI（2026-10-20，各用你自己的账号）
+            Text("本机的编程命令行（用你自己的账号；先在 设置 → Code 栏 检查装好、登录了）", style = MaterialTheme.typography.labelMedium,
                 color = Ext.c.subtle, modifier = Modifier.padding(start = 8.dp, top = 2.dp, bottom = 2.dp))
-            CodeSpec.CLAUDE_MODELS.forEach { (id, label) ->
-                val on = spec.isClaudeCode && spec.modelId == id
-                Row(
-                    Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).background(if (on) Ext.c.sidebarSelected else Color.Transparent)
-                        .clickable(enabled = canEdit && !on) { ctl.run(Command.CodeSetProject(conv.id, providerId = CodeSpec.CLAUDE_CODE, modelId = id), okText = "换成 Claude Code（$label）") }
-                        .padding(horizontal = 8.dp, vertical = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    RadioButton(on, null, enabled = canEdit)
-                    Text("Claude Code · $label", style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            CodeSpec.AGENTS.forEach { (agent, _) ->
+                CodeSpec.agentModels(agent).forEach { (id, _) ->
+                    val on = spec.providerId == agent && spec.modelId == id
+                    val label = CodeSpec.agentLabel(agent, id)
+                    Row(
+                        Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).background(if (on) Ext.c.sidebarSelected else Color.Transparent)
+                            .clickable(enabled = canEdit && !on) { ctl.run(Command.CodeSetProject(conv.id, providerId = agent, modelId = id), okText = "换成 $label") }
+                            .padding(horizontal = 8.dp, vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        RadioButton(on, null, enabled = canEdit)
+                        Text(label, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
                 }
             }
+            if (spec.isCliAgent) Text("${CodeSpec.agentName(spec.providerId)} 不能一步步问你：「手动」档交出去之前问一次，「计划」档只读；" +
+                "做完拿交出去之前的快照比对，改了的文件照样能看差异、撤销。手机发来的任务不交给它。",
+                style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle, modifier = Modifier.padding(start = 8.dp, top = 2.dp))
             Text("自己加的模型", style = MaterialTheme.typography.labelMedium,
                 color = Ext.c.subtle, modifier = Modifier.padding(start = 8.dp, top = 6.dp, bottom = 2.dp))
             val st by ctl.backend.store.state.collectAsState()
@@ -647,8 +653,8 @@ private fun WorkspaceDialog(ctl: AppController, conv: Conversation, spec: CodeSp
 private fun TeamSection(ctl: AppController, conv: Conversation, spec: CodeSpec, canEdit: Boolean,
                         options: List<Pair<ProviderConfig, ModelInfo>>) {
     FieldLabel("团队", if (spec.team.isEmpty()) "不组队就是一个 AI 从头做到尾" else "上面选的模型当主控，拆好活派给下面的角色")
-    if (spec.isClaudeCode) {
-        Text("主控是 Claude Code 时不能派活给团队（它用的是自己的工具）。要组队，主控换成自己加的模型。",
+    if (spec.isAgent) {
+        Text("主控是 ${CodeSpec.agentName(spec.providerId)} 时不能派活给团队（它用的是自己的工具）。要组队，主控换成自己加的模型。",
             style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
         return
     }
@@ -667,16 +673,18 @@ private fun TeamSection(ctl: AppController, conv: Conversation, spec: CodeSpec, 
             Box {
                 val current = when {
                     seat == null -> "不用"
-                    seat.isClaudeCode -> "Claude Code · " + CodeSpec.claudeModelLabel(seat.modelId)
+                    seat.isAgent -> CodeSpec.agentLabel(seat.providerId, seat.modelId)
                     else -> options.firstOrNull { it.first.id == seat.providerId && it.second.id == seat.modelId }
                         ?.let { "${it.first.name} · ${it.second.id}" } ?: "${seat.modelId}（服务商不在了）"
                 }
                 TextButton({ open = true }, enabled = canEdit) { Text(current, maxLines = 1, overflow = TextOverflow.Ellipsis) }
                 androidx.compose.material3.DropdownMenu(open, { open = false }) {
                     androidx.compose.material3.DropdownMenuItem({ Text("不用") }, { pick("", "", "$label：不用了") })
-                    CodeSpec.CLAUDE_MODELS.forEach { (id, l) ->
-                        androidx.compose.material3.DropdownMenuItem({ Text("Claude Code · $l") },
-                            { pick(CodeSpec.CLAUDE_CODE, id, "$label 交给 Claude Code（$l）") })
+                    CodeSpec.AGENTS.forEach { (agent, _) ->
+                        CodeSpec.agentModels(agent).forEach { (id, _) ->
+                            val l = CodeSpec.agentLabel(agent, id)
+                            androidx.compose.material3.DropdownMenuItem({ Text(l) }, { pick(agent, id, "$label 交给 $l") })
+                        }
                     }
                     options.forEach { (p, m) ->
                         androidx.compose.material3.DropdownMenuItem({ Text("${p.name} · ${m.id}") }, { pick(p.id, m.id, "$label 用 ${m.id}") })

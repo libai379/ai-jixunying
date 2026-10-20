@@ -536,6 +536,28 @@ class Engine(
     }
 
     /**
+     * Codex / Gemini CLI 装没装（2026-10-20）：跑它自己的 --version；Codex 再跑 login status（只看它报的结果，不碰凭据文件）。
+     * Gemini 没有不进界面就能查登录的命令，只报版本。
+     */
+    private suspend fun agentStatus(agent: String, exe: File): Pair<Boolean, String> = withContext(Dispatchers.IO) {
+        val cc = com.guixing.jixunying.engine.code.ClaudeCli
+        fun run(vararg args: String): String? = runCatching {
+            val p = ProcessBuilder(cc.launcher(exe) + args).directory(File(System.getProperty("user.home"))).redirectErrorStream(true)
+                .also { pb -> pb.environment().clear(); pb.environment().putAll(cc.env(System.getenv(), state.settings.proxy)) }.start()
+            p.outputStream.close()
+            val out = p.inputStream.bufferedReader(Charsets.UTF_8).readText()
+            if (!p.waitFor(60, java.util.concurrent.TimeUnit.SECONDS)) { p.destroyForcibly(); null } else out.trim()
+        }.getOrNull()
+        val name = CodeSpec.agentName(agent)
+        val version = run("--version")?.lineSequence()?.lastOrNull { it.isNotBlank() }
+            ?: return@withContext false to "找到了 ${exe.absolutePath}，但运行不起来"
+        if (agent != CodeSpec.CODEX) return@withContext true to "$name $version\n${exe.absolutePath}\n登录状态这里查不了：没登录的话发任务时会报错，到终端里运行一次 gemini 登录"
+        val login = run("login", "status")?.lineSequence()?.lastOrNull { it.isNotBlank() }.orEmpty()
+        val ok = Regex("(?i)logged in").containsMatchIn(login) && !Regex("(?i)not logged in").containsMatchIn(login)
+        ok to "$name $version\n${exe.absolutePath}\n" + if (ok) login else "还没登录：到终端里运行一次 codex login（它说：${login.take(200)}）"
+    }
+
+    /**
      * 外部 Claude Code 装没装、登没登录（2026-10-18）：跑它自己的 --version 和 auth status（只看它报的结果，不碰凭据文件）。
      * 返回（能不能用，给人看的几行字）。
      */
@@ -876,9 +898,8 @@ class Engine(
                     if (ex.parentFile.isDirectory && ".claude/worktrees/" !in (if (ex.isFile) ex.readText() else "")) ex.appendText("\n.claude/worktrees/\n")
                 }
             }
-            // 外部 Claude Code（2026-10-18）：不用服务商，modelId 是给它的 --model
-            val claude = pick.first == CodeSpec.CLAUDE_CODE
-            if (!claude) {
+            // 外部 Claude Code（2026-10-18）、Codex / Gemini CLI（2026-10-20）：不用服务商，modelId 是给它的模型参数
+            if (!CodeSpec.isAgent(pick.first)) {
                 val provider = state.provider(pick.first) ?: return CommandResult(false, "服务商不存在（可能被删了）：${pick.first}")
                 val model = provider.models.firstOrNull { it.id == pick.second }
                     ?: return CommandResult(false, "「${provider.name}」里没有模型 ${pick.second}")
@@ -911,8 +932,8 @@ class Engine(
                 if (!f.isDirectory) return CommandResult(false, "不是文件夹或者不存在：${c.folder}")
                 next = next.copy(folder = f.absolutePath)
             }
-            if (c.providerId == CodeSpec.CLAUDE_CODE) {
-                next = next.copy(providerId = CodeSpec.CLAUDE_CODE, modelId = c.modelId.trim())
+            if (CodeSpec.isAgent(c.providerId)) {
+                next = next.copy(providerId = c.providerId, modelId = c.modelId.trim())
             } else if (c.providerId.isNotBlank()) {
                 val p = state.provider(c.providerId) ?: return CommandResult(false, "服务商不存在：${c.providerId}")
                 val m = p.models.firstOrNull { it.id == c.modelId } ?: return CommandResult(false, "「${p.name}」里没有模型 ${c.modelId}")
@@ -940,7 +961,7 @@ class Engine(
             if (TeamSeat.ROLES.none { it.first == c.role }) return CommandResult(false, "没有这个角色：${c.role}")
             val seat = when {
                 c.providerId.isBlank() -> null
-                c.providerId == CodeSpec.CLAUDE_CODE -> TeamSeat(c.role, CodeSpec.CLAUDE_CODE, c.modelId.trim())
+                CodeSpec.isAgent(c.providerId) -> TeamSeat(c.role, c.providerId, c.modelId.trim())
                 else -> {
                     val p = state.provider(c.providerId) ?: return CommandResult(false, "服务商不存在：${c.providerId}")
                     val m = p.models.firstOrNull { it.id == c.modelId } ?: return CommandResult(false, "「${p.name}」里没有模型 ${c.modelId}")
@@ -1110,6 +1131,15 @@ class Engine(
             val exe = com.guixing.jixunying.engine.code.ClaudeCli.findExe(state.settings.code.claudePath)
                 ?: return CommandResult(false, "没找到 Claude Code：装好以后在这里点「重新检查」；装在别处的，在下面填 claude.exe 的位置")
             val (ok, text) = claudeStatus(exe)
+            CommandResult(ok, text, data = text)
+        }
+        is Command.AgentStatus -> {
+            if (codeRunner == null) return CommandResult(false, "这台设备不能跑 Codex / Gemini CLI")
+            val name = CodeSpec.agentName(c.agent)
+            val exe = com.guixing.jixunying.engine.code.AgentCli.findExe(c.agent,
+                if (c.agent == CodeSpec.CODEX) state.settings.code.codexPath else state.settings.code.geminiPath)
+                ?: return CommandResult(false, "没找到 $name：装好以后点「重新检查」；装在别处的，在下面填它的位置")
+            val (ok, text) = agentStatus(c.agent, exe)
             CommandResult(ok, text, data = text)
         }
         is Command.ClaudeLogin -> {

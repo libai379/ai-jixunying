@@ -27,6 +27,19 @@ class CodeBackup(private val dir: File) {
         }
     }
 
+    /**
+     * 改完了才知道改了的（2026-10-20，Codex / Gemini 跑完拿快照比对）：直接存快照里的原样。
+     * before = null 表示原来没有这个文件。已经存过的 changeId 不会覆盖。
+     */
+    fun saveBytes(changeId: String, before: ByteArray?) {
+        require(SAFE_ID.matches(changeId)) { "changeId 不合法" }
+        dir.mkdirs()
+        val orig = File(dir, "$changeId.orig")
+        val created = File(dir, "$changeId.new")
+        if (orig.exists() || created.exists()) return
+        if (before != null) orig.writeBytes(before) else created.writeText("")
+    }
+
     /** 改之前的内容；原来没有这个文件返回 null。 */
     fun original(changeId: String): ByteArray? = File(dir, "$changeId.orig").takeIf { it.isFile }?.readBytes()
 

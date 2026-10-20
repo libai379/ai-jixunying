@@ -62,6 +62,9 @@ class TeamTest {
         val fk = File(dir, "fake").apply { mkdirs() }
         File(fk, "fake_claude.py").writeText(ClaudeCodeTest.FAKE, Charsets.UTF_8)
         fakeCmd = File(fk, "claude.cmd").apply { writeText("@python -u -X utf8 \"%~dp0fake_claude.py\" %*\r\n") }
+        File(fk, "fake_agent.py").writeText(AgentCliTest.FAKE, Charsets.UTF_8)
+        File(fk, "codex.cmd").writeText("@python -u -X utf8 \"%~dp0fake_agent.py\" codex %*\r\n")
+        File(fk, "gemini.cmd").writeText("@python -u -X utf8 \"%~dp0fake_agent.py\" gemini %*\r\n")
 
         fake = embeddedServer(CIO, port = port) {
             routing {
@@ -117,7 +120,8 @@ class TeamTest {
         e.call(Command.SaveProvider(ProviderConfig("p1", "custom", "假服务商", "http://127.0.0.1:$port/v1", "sk-test",
             listOf(ModelInfo("code-model"), ModelInfo("dev-model"), ModelInfo("review-model"), ModelInfo("chat-only", tools = false)))))
         e.call(Command.SaveSettings(e.state.settings.copy(
-            code = CodeSettings(shell = "powershell", commandTimeoutSec = 120, maxSteps = 10, claudePath = fakeCmd.absolutePath),
+            code = CodeSettings(shell = "powershell", commandTimeoutSec = 120, maxSteps = 10, claudePath = fakeCmd.absolutePath,
+                codexPath = File(dir, "fake/codex.cmd").absolutePath, geminiPath = File(dir, "fake/gemini.cmd").absolutePath),
         )))
         return e
     }
@@ -191,6 +195,31 @@ class TeamTest {
         assertTrue("看完了。" in last, "它说的话交回主控")
         assertTrue(m.tools.count { it.kind == "agent" } == 2, m.tools.map { it.kind to it.input }.toString())
         assertTrue(m.tools.any { it.kind == "read" }, "它读文件的步子也记在这条回答上")
+    }
+
+    /** 角色交给 Gemini CLI（开发，auto_edit）和 Codex（审查，只读沙箱）：它们说的话交回主控，不进回答正文。 */
+    @Test
+    fun cliAgentsAsRoles() = runBlocking {
+        if (!runCatching { ProcessBuilder("cmd.exe", "/c", "python", "--version").start().waitFor() == 0 }.getOrDefault(false)) {
+            println("没有 python，跳过"); return@runBlocking
+        }
+        val e = engine()
+        val c = conv(e)
+        assertTrue(e.call(Command.CodeSetTeam(c, "dev", CodeSpec.GEMINI, "")).ok)
+        assertTrue(e.call(Command.CodeSetTeam(c, "review", CodeSpec.CODEX, "")).ok)
+        e.call(Command.CodeSend(c, "组队看看"))
+        awaitDone(e, c)
+        val m = ai(e, c)!!
+        assertEquals("团队做完了。", m.content, "它们说的话不进主控的正文")
+        val runs = File(dir, "fake/args.log").readLines(Charsets.UTF_8).filter { it.isNotBlank() }
+        assertEquals(2, runs.size, runs.toString())
+        assertTrue("--approval-mode auto_edit" in runs[0], runs[0])
+        assertTrue("-s read-only" in runs[1], "审查只读：" + runs[1])
+        val main = requests.first()["messages"].toString()
+        assertTrue("【你的团队】" in main && "Gemini CLI · 默认" in main, main)
+        val last = requests.last()["messages"].toString()
+        assertTrue("Gemini CLI · 默认「开发：改问候」交回的结果" in last && "我来改。" in last, last)
+        assertEquals(listOf("开发：改问候", "审查：审一下刚才的改动"), m.tools.filter { it.kind == "agent" }.map { it.input })
     }
 
     /** 选角色的规矩：不认识的角色、不能调工具的模型拒；选「不用」删掉；没组队没有 assign_task；手机改不了。 */

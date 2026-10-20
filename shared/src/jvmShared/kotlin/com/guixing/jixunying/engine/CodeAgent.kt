@@ -1,5 +1,6 @@
 package com.guixing.jixunying.engine
 
+import com.guixing.jixunying.engine.code.AgentCli
 import com.guixing.jixunying.engine.code.CodeBackup
 import com.guixing.jixunying.engine.code.CodeCommands
 import com.guixing.jixunying.engine.code.CodeGuard
@@ -7,6 +8,7 @@ import com.guixing.jixunying.engine.code.CodeRunner
 import com.guixing.jixunying.engine.code.CodeRunnerRules
 import com.guixing.jixunying.engine.code.ClaudeCli
 import com.guixing.jixunying.engine.code.ClaudeProcess
+import com.guixing.jixunying.engine.code.Snapshot
 import com.guixing.jixunying.model.AppState
 import com.guixing.jixunying.model.CodeMode
 import com.guixing.jixunying.model.CodeSettings
@@ -136,6 +138,8 @@ class CodeAgent(private val host: CodeHost) {
         currentTask[convId] = task.content
         // 2026-10-18：交给外部 Claude Code（用户自己的订阅）
         if (spec.isClaudeCode) return loopClaude(convId, task, spec)
+        // 2026-10-20：交给本机的 Codex / Gemini CLI
+        if (spec.isCliAgent) return loopAgent(convId, task, spec)
         val provider = host.state.provider(spec.providerId)
         // 回复也用一条普通消息：和聊天一样流式推给界面（工具步骤挂在 tools 上）
         val msg = Message(
@@ -251,6 +255,7 @@ class CodeAgent(private val host: CodeHost) {
         val brief = args.str("name").orEmpty().ifBlank { task.lineSequence().first().take(16) }
         val intro = roleIntro(role)
         if (seat.isClaudeCode) return claudeWorker(convId, msgId, seat, "$label：$brief", "$intro\n\n$task", role == "review", cur, backup)
+        if (seat.isAgent) return agentWorker(convId, msgId, seat, "$label：$brief", "$intro\n\n$task", role == "review")
         val p = host.state.provider(seat.providerId)
         providerProblem(p)?.let { return "「$label」的模型用不了：$it。跟用户说一声，或者自己做。" }
         val vision = p!!.models.firstOrNull { it.id == seat.modelId }?.vision == true
@@ -373,7 +378,7 @@ class CodeAgent(private val host: CodeHost) {
                 spec.team.forEach { s ->
                     val role = TeamSeat.ROLES.firstOrNull { it.first == s.role }
                     append("- ").append(s.role).append("（").append(role?.second ?: s.role).append("，")
-                    append(if (s.isClaudeCode) "Claude Code" + s.modelId.takeIf { it.isNotBlank() }?.let { " " + CodeSpec.claudeModelLabel(it) }.orEmpty() else s.modelId)
+                    append(if (s.isAgent) CodeSpec.agentLabel(s.providerId, s.modelId) else s.modelId)
                     append("）：").append(role?.third.orEmpty()).append('\n')
                 }
                 append("用 assign_task 把活派给他们，每张任务单写清目标、范围、怎么算做完；一轮里派几张会同时做（比如改完同时派审查和测试）。")
@@ -1159,9 +1164,234 @@ class CodeAgent(private val host: CodeHost) {
         }
     }
 
-    /** 给 Claude Code 的这条任务：正文 + 附件（文档抽出的文字、图片）；新开的会话把前面的对话带上。 */
-    private fun claudeTaskText(convId: String, task: Message, fresh: Boolean): Pair<String, List<String>> {
-        val (more, images) = host.attachmentParts(task, latest = true, vision = true)
+    // ———————————————— Codex / Gemini CLI（2026-10-20，设计说明第 17 节） ————————————————
+
+    /** 跑一轮的结果。denied = 手动档用户没同意交出去；said = 它说的话。 */
+    private class AgentRound(val error: String? = null, val usage: Usage = Usage(), val said: String = "", val denied: Boolean = false)
+
+    /** 同一个会话里会改文件的 Codex / Gemini 一次只跑一个：快照比对按会话算，两个同时改分不清是谁改的。 */
+    private val agentLocks = ConcurrentHashMap<String, kotlinx.coroutines.sync.Mutex>()
+
+    /**
+     * 这条任务交给本机的 Codex / Gemini CLI（用户自己装、自己登录）。它们不能一步步问权限，所以：
+     * 手动档交出去之前问一次（整张单子）；计划档只读；交出去之前给工作区拍快照，跑完比对，改了的照样能看差异、拒绝、撤销。
+     * 每条任务开一个新进程，前面的对话带进去（不接它们自己的会话）。
+     */
+    private suspend fun loopAgent(convId: String, task: Message, spec: CodeSpec) {
+        val name = CodeSpec.agentName(spec.providerId)
+        val msg = Message(
+            host.newId(), convId, Role.AI, CODE_ID, status = MsgStatus.STREAMING, createdAt = host.now(),
+            modelLabel = CodeSpec.agentLabel(spec.providerId, spec.modelId),
+        )
+        host.addMessage(msg)
+        // 手机发起的任务不许读收录范围外的文件：它们读文件不经过我们，管不住，干脆不交
+        if (kotlin.coroutines.coroutineContext[PhoneTask] != null) {
+            host.updateMessage(convId, msg.id) { it.copy(status = MsgStatus.ERROR, error = phoneNoAgent(name)) }
+            return
+        }
+        val backup = host.backupOf(convId)
+        try {
+            val readOnly = (host.state.conversation(convId)?.code ?: spec).mode == CodeMode.PLAN
+            val body = claudeTaskText(convId, task, fresh = true, vision = false).first
+            val text = agentPrompt(body, readOnly)
+            var r = agentRound(convId, msg.id, spec.providerId, spec.modelId, text, readOnly, backup, intoAnswer = true)
+            var usage = r.usage
+            // 任务做完后的钩子：没过就再交给它改一轮（只一轮），和别的循环一样
+            val hook = host.state.settings.code.hookAfterTask.trim()
+            if (r.error == null && !r.denied && hook.isNotEmpty()) {
+                val out = runHook(convId, msg.id, hook, "任务做完后的钩子", File(spec.folder))
+                if ("报错了" in out) {
+                    val again = "（你刚才在做这件事：）\n$text\n\n（你交回的：）\n${r.said}\n\n（程序自动跑了用户设的检查，没过，改好它：）$out"
+                    r = agentRound(convId, msg.id, spec.providerId, spec.modelId, again, readOnly, backup, intoAnswer = true)
+                    usage = Usage(usage.prompt + r.usage.prompt, usage.completion + r.usage.completion, usage.cached + r.usage.cached, usage.millis + r.usage.millis)
+                }
+            }
+            val err = r.error
+            val denied = r.denied
+            host.updateMessage(convId, msg.id) {
+                when {
+                    err != null -> it.copy(status = MsgStatus.ERROR, error = err, usage = usage)
+                    denied -> it.copy(content = "你没同意，这次没交给 $name。", status = MsgStatus.DONE)
+                    else -> it.copy(content = it.content.trim(), status = MsgStatus.DONE, usage = usage)
+                }
+            }
+        } catch (e: CancellationException) {
+            withContext(NonCancellable) { host.updateMessage(convId, msg.id) { it.copy(status = MsgStatus.STOPPED) } }
+            throw e
+        } catch (e: Throwable) {
+            host.updateMessage(convId, msg.id) { it.copy(status = MsgStatus.ERROR, error = host.friendlyError(e)) }
+        }
+    }
+
+    /** 团队角色交给 Codex / Gemini：和 claudeWorker 一样，步子记在主控这条回答上，说的话交回主控。 */
+    private suspend fun agentWorker(convId: String, msgId: String, seat: TeamSeat, name: String, text: String, readOnly: Boolean): String {
+        val who = CodeSpec.agentLabel(seat.providerId, seat.modelId)
+        val stepId = host.newId()
+        addStep(convId, msgId, ToolStep("agent", name, id = stepId, ok = true, note = "${who}开始干活", output = uiText(text)))
+        val result = if (kotlin.coroutines.coroutineContext[PhoneTask] != null) phoneNoAgent(CodeSpec.agentName(seat.providerId)) + "。这张单子你自己做。" else {
+            val r = agentRound(convId, msgId, seat.providerId, seat.modelId, agentPrompt(text, readOnly), readOnly, host.backupOf(convId), intoAnswer = false)
+            when {
+                r.denied -> "用户没同意把这张单子交给 $who，没做。"
+                r.error != null -> "出错了：${r.error}" + if (r.said.isNotEmpty()) "\n它出错前说的：\n${r.said}" else ""
+                else -> r.said.ifBlank { "（没说什么）" }
+            }
+        }
+        setStep(convId, msgId, stepId) { it.copy(note = "${who}做完了", output = "任务：$text\n\n结果：\n$result".take(UI_TEXT_LIMIT)) }
+        return "$who「$name」交回的结果：\n$result"
+    }
+
+    private fun phoneNoAgent(name: String) = "手机发来的任务不交给 $name：它自己读文件，管不住只读收录范围里的。" +
+        "在电脑上发，或者在电脑上把这个会话换成别的模型"
+
+    /** 给它的话：用户的自定义指令 + 任务；只读时说一声（它改不了文件，交回做法）。 */
+    private fun agentPrompt(body: String, readOnly: Boolean): String = buildString {
+        val p = host.state.settings.personal
+        val custom = listOf(p.instructions.trim(), p.codeInstructions.trim()).filter { it.isNotEmpty() }
+        if (custom.isNotEmpty()) append("【用户的自定义指令】（每次都照着做）\n").append(custom.joinToString("\n\n")).append("\n\n")
+        if (readOnly) append("（这次是只读的：改不了文件。读完代码，交回你的发现和做法。）\n\n")
+        append(body)
+    }
+
+    /** 手动档（没开自动、全部放开）交出去之前问一次。 */
+    private fun askBeforeHanding(convId: String): Boolean =
+        host.state.conversation(convId)?.code?.let { it.mode == CodeMode.MANUAL && !it.openAll && !it.autoMode } == true
+
+    /**
+     * 开一个 codex / gemini 进程把 text 做完。intoAnswer = 它说的话进回答正文（主会话）；否则只收在 said 里（团队角色）。
+     * 不是只读时：手动档先问；拍快照 → 跑 → 比对，改动挂在 msgId 这条回答上（停下、出错也比对，改了一半的照样能撤销）。
+     */
+    private suspend fun agentRound(convId: String, msgId: String, agent: String, modelId: String, text: String, readOnly: Boolean,
+                                   backup: CodeBackup, intoAnswer: Boolean): AgentRound {
+        val settings = host.state.settings
+        val cur = host.state.conversation(convId)?.code ?: return AgentRound("会话已经不在了")
+        val name = CodeSpec.agentName(agent)
+        val exe = AgentCli.findExe(agent, if (agent == CodeSpec.CODEX) settings.code.codexPath else settings.code.geminiPath)
+            ?: return AgentRound("没找到 $name：先装好它、在终端里运行一次登录好；装在别处的，到 设置 → Code 栏 填它的位置")
+        if (!readOnly && askBeforeHanding(convId)) {
+            val first = text.lineSequence().map { it.trim() }.firstOrNull { it.isNotEmpty() && !it.startsWith("【") && !it.startsWith("（") }.orEmpty()
+            val step = ToolStep("run", "交给 $name：" + first.take(60), id = host.newId(), ok = true, output = uiText(text),
+                note = "$name 不能一步步问你：同意后它自己读文件、改工作区里的文件、跑命令；做完改了哪些文件照样列出来，能看差异、撤销")
+            if (!waitApproval(convId, msgId, step)) return AgentRound(denied = true)
+        }
+        val dirs = cur.extraPaths.filter { File(it).isDirectory }
+        val roots = listOf(File(cur.folder)) + dirs.map { File(it) }
+        val lock = if (readOnly) null else agentLocks.getOrPut(convId) { kotlinx.coroutines.sync.Mutex() }
+        lock?.lock()
+        try {
+            val snap = if (readOnly) null else withContext(Dispatchers.IO) { Snapshot.take(roots) }
+            val cmd = ClaudeCli.launcher(exe) + AgentCli.args(agent, modelId, readOnly, openAll(convId), dirs)
+            val proc = withContext(Dispatchers.IO) {
+                runCatching { ClaudeProcess(cmd, File(cur.folder), ClaudeCli.env(System.getenv(), settings.proxy)) }
+            }.getOrElse { return AgentRound("启动不了 $name（${exe.absolutePath}）：${it.message}") }
+            val said = StringBuilder()
+            val guard = guardOf(convId)
+            val open = HashMap<String, String>()
+            var usage = Usage()
+            var error: String? = null
+            var finished = false
+            var afterTool = false
+            var stopped = false
+            try {
+                proc.send(text)
+                proc.closeInput()
+                for (line in proc.lines) for (ev in AgentCli.parse(agent, line)) when (ev) {
+                    is AgentCli.Session -> Unit
+                    is AgentCli.Text -> {
+                        val piece = (if (said.isNotEmpty() && (!ev.delta || afterTool)) "\n\n" else "") + if (ev.delta) ev.text else ev.text.trim()
+                        said.append(piece)
+                        if (intoAnswer) host.appendDelta(convId, msgId, piece, "")
+                        afterTool = false
+                    }
+                    is AgentCli.Thinking -> if (intoAnswer) host.appendDelta(convId, msgId, "", ev.text)
+                    is AgentCli.Tool -> {
+                        afterTool = true
+                        // 路径换成相对项目的（Codex 改文件的条目给的是完整路径）
+                        val shown = if (ev.kind in setOf("read", "edit", "write", "list")) guard?.resolve(ev.summary)?.let { guard.relative(it) } ?: ev.summary else ev.summary
+                        if (!ev.done) {
+                            val id = host.newId()
+                            open[ev.id] = id
+                            addStep(convId, msgId, ToolStep(ev.kind, shown, id = id, ok = true, note = "$name 在做"))
+                        } else {
+                            val id = open.remove(ev.id)
+                            // 没见过开头、也不知道是什么的结果（Gemini 不显示的那几个工具）：不记
+                            if (id == null && ev.kind.isBlank()) Unit
+                            else if (id == null) addStep(convId, msgId, ToolStep(ev.kind, shown, id = host.newId(), ok = ev.ok,
+                                output = uiText(ev.output), note = if (ev.ok) "" else "没成功"))
+                            else setStep(convId, msgId, id) { it.copy(ok = ev.ok, output = uiText(ev.output), note = if (ev.ok) "" else "没成功") }
+                        }
+                    }
+                    is AgentCli.Note -> if (ev.text.isNotBlank()) addStep(convId, msgId, ToolStep("run", "$name 的提示", id = host.newId(), ok = false, note = ev.text.take(300)))
+                    is AgentCli.Done -> { usage = ev.usage; error = ev.error; finished = true }
+                }
+                if (!finished) error = proc.stderrTail().ifBlank { "$name 没做完就退出了（退出码 ${proc.exitCode() ?: "?"}）" }
+                withContext(Dispatchers.IO) { proc.waitExit(5_000) }
+            } catch (e: CancellationException) {
+                stopped = true
+                throw e
+            } finally {
+                withContext(NonCancellable + Dispatchers.IO) { proc.close() }
+                withContext(NonCancellable) {
+                    if (snap != null) collectChanges(convId, msgId, snap, roots, backup, name, hooks = !stopped)
+                    // 停下时还没收到结果的步子
+                    open.values.forEach { id -> setStep(convId, msgId, id) { it.copy(note = "停下了") } }
+                }
+            }
+            return AgentRound(error?.let { agentError(name, it) }, usage, said.toString().trim())
+        } finally {
+            lock?.unlock()
+        }
+    }
+
+    /** 跑完比对快照：改了的、新建的、删掉的各记一步，原来的内容交给备份（能拒绝、能撤销）。hooks = 每个改完的文件跑「改完文件后的钩子」。 */
+    private suspend fun collectChanges(convId: String, msgId: String, snap: Snapshot, roots: List<File>, backup: CodeBackup, name: String, hooks: Boolean) {
+        val guard = guardOf(convId) ?: return
+        val changes = withContext(Dispatchers.IO) { snap.changes(roots) }
+        fun utf8(b: ByteArray): String? = if (b.any { it == 0.toByte() }) null else runCatching {
+            Charsets.UTF_8.newDecoder().onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
+                .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT).decode(java.nio.ByteBuffer.wrap(b)).toString()
+        }.getOrNull()
+        for (c in changes) {
+            val stepId = host.newId()
+            val rel = guard.relative(c.file)
+            val kind = if (c.existed && !c.deleted) "edit" else "write"
+            if (c.tooBig) {
+                addStep(convId, msgId, ToolStep(kind, rel, id = stepId, ok = true,
+                    note = "$name ${if (c.deleted) "删掉" else "改"}了这个文件（超过 ${Snapshot.MAX_FILE / 1024 / 1024}MB，没留原样，撤销不了）"))
+                continue
+            }
+            val now = if (c.deleted) ByteArray(0) else withContext(Dispatchers.IO) { runCatching { c.file.readBytes() }.getOrNull() } ?: continue
+            withContext(Dispatchers.IO) { backup.saveBytes(stepId, c.before) }
+            val before = if (c.before == null) "" else utf8(c.before)
+            val after = utf8(now)
+            val diff = if (before != null && after != null) CodeDiff.make(rel, before, after) else null
+            val note = when {
+                c.deleted -> "$name 删掉了这个文件"
+                !c.existed -> "$name 新建了这个文件"
+                else -> "$name 改了这个文件"
+            }
+            addStep(convId, msgId, ToolStep(kind, rel, id = stepId, ok = true,
+                output = uiText(diff?.text ?: "（不是 UTF-8 文本，不显示差异；拒绝照样能恢复原样）"), note = note,
+                change = FileChange(stepId, rel, diff?.added ?: 0, diff?.removed ?: 0, created = !c.existed)))
+            if (hooks && !c.deleted) afterEditHook(convId, msgId, c.file)
+        }
+        if (!snap.complete) addStep(convId, msgId, ToolStep("run", "比对改动", id = host.newId(), ok = false,
+            note = "工作区文件太多，只比对了前 ${snap.size} 个文件，后面的改动没列出来、撤销不了"))
+    }
+
+    private fun agentError(name: String, text: String): String {
+        val t = text.trim()
+        return when {
+            Regex("(?i)not logged in|please log ?in|unauthori[sz]ed|authenticat|credential|api key").containsMatchIn(t) ->
+                "$name 还没登录，或者登录过期了：在终端里运行一次 ${if (name == "Codex") "codex login" else "gemini"} 登录好再发。\n（它说：${t.take(300)}）"
+            Regex("(?i)usage limit|rate limit|quota|exhausted").containsMatchIn(t) -> "$name 的额度用完了，等恢复了再发；或者先换别的模型。\n（它说：${t.take(300)}）"
+            t.isEmpty() -> "$name 出错了，没说原因"
+            else -> "$name 报错：${t.take(800)}"
+        }
+    }
+
+    /** 给 Claude Code 的这条任务：正文 + 附件（文档抽出的文字、图片）；新开的会话把前面的对话带上。vision = false：不带图片（Codex / Gemini）。 */
+    private fun claudeTaskText(convId: String, task: Message, fresh: Boolean, vision: Boolean = true): Pair<String, List<String>> {
+        val (more, images) = host.attachmentParts(task, latest = true, vision = vision)
         val body = task.content + more
         if (!fresh) return body to images
         val earlier = host.messagesOf(convId).takeWhile { it.id != task.id }

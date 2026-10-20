@@ -81,6 +81,12 @@ data class CodeSpec(
     /** 这个会话交给外部 Claude Code（用户自己装、自己登录的官方 claude，走用户自己的订阅）。 */
     val isClaudeCode: Boolean get() = providerId == CLAUDE_CODE
 
+    /** 交给本机装的编程命令行（Claude Code、Codex、Gemini CLI，2026-10-20）：不用服务商，自己读写、跑命令。 */
+    val isAgent: Boolean get() = isAgent(providerId)
+
+    /** Codex 或 Gemini CLI（2026-10-20）：不能一步步问权限，靠事前快照、事后比对来列改动（设计说明第 17 节）。 */
+    val isCliAgent: Boolean get() = providerId == CODEX || providerId == GEMINI
+
     fun seat(role: String): TeamSeat? = team.firstOrNull { it.role == role }
 
     companion object {
@@ -89,6 +95,20 @@ data class CodeSpec(
         /** 界面上给选的几个（它认这些别名，指向各自最新的模型）。 */
         val CLAUDE_MODELS = listOf("" to "默认", "opus" to "Opus", "sonnet" to "Sonnet", "haiku" to "Haiku")
         fun claudeModelLabel(id: String) = CLAUDE_MODELS.firstOrNull { it.first == id }?.second ?: id
+
+        /** OpenAI 的 Codex 命令行（2026-10-20，用户自己装、自己登录）；modelId 是给它的 -m，空 = 它自己配的默认。 */
+        const val CODEX = "codex"
+        /** Google 的 Gemini CLI（2026-10-20，同上）。 */
+        const val GEMINI = "gemini-cli"
+        /** 本机编程命令行：编号、名字。 */
+        val AGENTS = listOf(CLAUDE_CODE to "Claude Code", CODEX to "Codex", GEMINI to "Gemini CLI")
+        fun isAgent(providerId: String) = AGENTS.any { it.first == providerId }
+        fun agentName(providerId: String) = AGENTS.firstOrNull { it.first == providerId }?.second ?: providerId
+        /** 界面上给选的模型。Codex、Gemini 只给「默认」：模型名以后要用，从它们自己的配置里选（不凭记忆写）。 */
+        fun agentModels(providerId: String) = if (providerId == CLAUDE_CODE) CLAUDE_MODELS else listOf("" to "默认")
+        /** 「Claude Code · Opus」「Codex · 默认」这样一行。 */
+        fun agentLabel(providerId: String, modelId: String) = agentName(providerId) + " · " +
+            (agentModels(providerId).firstOrNull { it.first == modelId }?.second ?: modelId)
     }
 }
 
@@ -99,6 +119,8 @@ data class CodeSpec(
 @Serializable
 data class TeamSeat(val role: String, val providerId: String, val modelId: String = "") {
     val isClaudeCode: Boolean get() = providerId == CodeSpec.CLAUDE_CODE
+    /** 交给本机编程命令行（Claude Code / Codex / Gemini CLI）。 */
+    val isAgent: Boolean get() = CodeSpec.isAgent(providerId)
 
     companion object {
         /** 角色编号、名字、干什么（给主控看的说明也用这个）。 */
@@ -180,6 +202,9 @@ data class CodeSettings(
     val hookAfterTask: String = "",
     /** claude.exe 的位置（2026-10-18，外部 Claude Code）；空 = 自己找（PATH、官方安装器的默认位置、npm）。 */
     val claudePath: String = "",
+    /** codex、gemini 的位置（2026-10-20）；空 = 自己找（PATH、npm 装的 %APPDATA%\npm）。 */
+    val codexPath: String = "",
+    val geminiPath: String = "",
 )
 
 @Serializable

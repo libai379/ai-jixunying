@@ -244,4 +244,17 @@
 5. 怎么知道做完了：自己的模型不再调工具就是做完；Claude Code 是它发的 result 事件。步数到上限、出错都写进交回的结果里，不悄悄当成功。
 6. 隔离：每个角色用自己那个服务商的 Key；Claude Code 用用户自己登录的那份。改文件照样改前备份，回答里能看差异、拒绝、撤销整条。
 7. 测试：TeamTest 三条（自己的模型当开发 / 审查；Claude Code 当开发 / 审查，用 ClaudeCodeTest 的假 claude；选角色的规矩和手机把关）。LiveTeamTest（设 JXY_LIVE_TEAM=数据文件夹）：主控和审查 deepseek-flash、开发真 Claude Code haiku，修一个写错的 add 函数，10-19 通过（70 秒，主控派了开发和审查、自己核对、汇报里写清了开发贴的验证命令其实跑不通）。
-8. 没做：测试角色没有专门的工具（和开发一样）；手机端界面只能看不能改团队；接 Codex、Gemini 是下一步。
+8. 没做：测试角色没有专门的工具（和开发一样）；手机端界面只能看不能改团队。接 Codex、Gemini 见第 17 节。
+
+## 17 接 Codex、Gemini CLI（2026-10-20 用户：「按甲做，直接做」，第 15 节说的第三步）
+
+两家的无界面模式都不能一步步问权限，改文件之前也不通知（本机实测，docs/参考资料.md「Codex / Gemini 命令行无界面模式」）。10-19 我给了甲乙两个方案，用户选甲：
+
+1. 用法：Code 会话「工作区 → 模型」和「团队」的下拉里多了「Codex · 默认」「Gemini CLI · 默认」（CodeSpec.providerId = codex / gemini-cli，modelId 空 = 它们自己配的默认；模型名不凭记忆写，以后要选再从它们自己的配置里查）。设置 → Code 栏「Codex 和 Gemini CLI」：各自装没装、版本（跑 --version），Codex 再跑 login status 看登没登录；Gemini 没有不进界面查登录的命令，只报版本；位置可以自己填（CodeSettings.codexPath / geminiPath），空着就在 PATH 和 %APPDATA%\npm 里找。主控是它们时不能组队（和 Claude Code 一样，它们调不了 assign_task）。
+2. 怎么跑（engine/code/AgentCli.kt）：每条任务起一个新进程，任务走标准输入（codex exec --json --skip-git-repo-check -s <沙箱> [-m] [--add-dir] - ；gemini -p . --output-format stream-json --skip-trust --approval-mode <档> [-m] [--include-directories]），写完就关输入。10-20 实测两家都认标准输入（Gemini 把 -p 的字接在后面，所以只给一个「.」）。不接它们自己的会话，把这个会话前面的对话（最多 2 万字）带进去；图片不带（附件只带文档文字）。用户的自定义指令放在任务前面；它们自己会读项目里的 AGENTS.md / GEMINI.md。
+3. 权限（方案甲）：手动档（没开自动、全部放开）交出去之前弹一张批准卡片，整张单子问一次，不同意就不启动；接受编辑、自动不弹。计划档和审查角色只读：Codex -s read-only、Gemini --approval-mode plan，并在任务前写一句「这次是只读的」。其余 Codex 用 workspace-write 沙箱、Gemini 用 auto_edit（要批准的命令它会跳过）；全部放开时 Codex danger-full-access、Gemini yolo。
+4. 撤销靠快照（engine/code/Snapshot.kt）：不是只读时，交出去之前把工作区（项目文件夹 + 加进来的）里的文件原样记一份，跳过 .git、node_modules、build、.gradle 这类目录；单个文件超过 1MB 只记大小和修改时间；最多 2 万个文件、64MB。跑完（停下、出错也算）再扫一遍比对：改了的、新建的、删掉的各记一步，原样交给 CodeBackup.saveBytes，挂上 FileChange——回答里照样看差异、拒绝、撤销整条、回到这里。超过 1MB 的只说「改了、撤销不了」。没扫完时只报改了和删了的，不报新建（后扫到的可能是当时没扫到的老文件，拒绝新建会删文件）；界面上写明只比对了多少个。同一个会话里会改文件的 Codex / Gemini 一次只跑一个（快照按会话算，两个同时改分不清）。
+5. 手机：手机发起的任务不交给它们（它们自己读文件，管不住「不许读收录范围外」这条），主会话直接报错说明，团队里派给它们的单子交回「你自己做」。
+6. 显示：它们说的话进回答正文（团队角色收起来交回主控）；Codex 的 reasoning 进推理过程；跑的命令、读写文件、搜索各记一步（Codex 的命令去掉外面那层 powershell -Command）；Gemini 自己记思路的 update_topic 不显示；Codex 不致命的 error 条目记成一步「提示」。报错取出里面那层 message（Codex 的报错是一整段 JSON），没登录、额度用完各给一句怎么办。
+7. 和 Claude Code 不一样的地方：中间不能拦——手动档也只能整张单子问一次；改工作区外面的文件我们比对不到（Codex 的沙箱只许写工作区，Gemini auto_edit 能不能写外面没实测，未确认）；同一时间别的角色（自己的模型）也在改文件时，它的改动会同时记在两边（都能撤销，撤销到同一个原样）。
+8. 测试：AgentCliTest 五条（两家的输出解析和启动参数、快照比对、Codex 接受编辑改建删并撤销、Gemini 手动档先问、计划档只读 + 报错 + 手机不交），假 codex / gemini 是 python 脚本，照实测格式输出；TeamTest.cliAgentsAsRoles（开发 Gemini、审查 Codex 只读）。LiveAgentTest（设 JXY_LIVE_AGENT=codex,gemini）用本机真的 Codex、Gemini 修一个写错的 add：10-20 两家都通过（Codex 56 秒、Gemini 34 秒），改动比对出来、撤销回原样。
