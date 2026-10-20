@@ -2618,8 +2618,8 @@ class Engine(
         val tag = currentCoroutineContext()[UsageTag]
         fun bill(seconds: Double, res: String) = recordUsage(p, VideoPick.billingModel(choice.model.id, res), Usage(), UsageKinds.VIDEO, tag,
             units = seconds, unit = com.guixing.jixunying.model.SpeechUnits.SECOND)
-        return try {
-            val r = videos.generate(p, choice.model.id, prompt, v.resolution, duration, ratio, v.audio) { s -> step { it.copy(note = s) } }
+        /** 做好了：记账、挂到这条回答上，返回「几秒 · 档位 · 模型」。 */
+        fun keep(r: VideoGen.Result, extra: String = ""): String {
             bill(r.seconds, r.resolution)
             val secs = if (r.seconds % 1.0 == 0.0) r.seconds.toInt().toString() else "%.1f".format(r.seconds)
             val note = "$secs 秒 · ${r.resolution} · ${choice.model.id}"
@@ -2627,10 +2627,39 @@ class Engine(
             val att = Attachment(newId(), name, "video/mp4", r.bytes.size.toLong(), AttachmentKind.DOCUMENT, note = note,
                 generated = true, savedPath = saveOfficeCopy(name, r.bytes))
             storage.putFile(att, r.bytes, null)
-            updateMessage(convId, msgId) { m -> m.copy(attachments = m.attachments + att, tools = m.tools.map { if (it.id == stepId) it.copy(note = note) else it }) }
-            "视频做好了（${choice.model.id}，${r.resolution}，$secs 秒），已经显示给用户，点一下就能播放。简单说一句就行，不用再描述画面。"
+            updateMessage(convId, msgId) { m -> m.copy(attachments = m.attachments + att, tools = m.tools.map { if (it.id == stepId) it.copy(note = note + extra) else it }) }
+            return note
+        }
+        var taskId: String? = null
+        return try {
+            val r = videos.generate(p, choice.model.id, prompt, v.resolution, duration, ratio, v.audio, onTask = { taskId = it }) { s -> step { it.copy(note = s) } }
+            val note = keep(r)
+            "视频做好了（$note），已经显示给用户，点一下就能播放。简单说一句就行，不用再描述画面。"
         } catch (e: CancellationException) {
-            withContext(NonCancellable) { step(true) { it.copy(ok = false, note = "停了（已经提交的任务服务端可能还会做完，做完照样按秒收费）") } }
+            // 用户点了停止：还在排队就取消（不收费）；已经在生成的取消不了，在后台接着等，做好了照样放回这条回答（反正要收钱）
+            withContext(NonCancellable) {
+                val id = taskId
+                val status = if (id == null) null else withTimeoutOrNull(15_000) { videos.cancel(p, id) }
+                when {
+                    id == null -> step(true) { it.copy(ok = false, note = "停了（还没提交，不收费）") }
+                    status == "CANCELED" || status == "FAILED" -> step(true) { it.copy(ok = false, note = "停了：任务还在排队，已经取消，不收费") }
+                    else -> {
+                        step(true) { it.copy(note = "停了，但千问那边已经开始生成，取消不了（只能取消排队中的），做完照样按秒收费；做好了会放回这条回答下面") }
+                        val res = VideoPick.resolutionFor(choice.model, v.resolution)
+                        val secs = VideoPick.durationFor(choice.model, duration)
+                        scope.launch(tag ?: kotlin.coroutines.EmptyCoroutineContext) {
+                            try {
+                                keep(videos.await(p, id, res, secs), "（点停止之后做完的）")
+                            } catch (e2: VideoGen.DownloadFailed) {
+                                bill(e2.seconds, e2.resolution)
+                                step(true) { it.copy(ok = false, note = "停了之后做完了（已按 ${e2.seconds} 秒收费），但是${e2.message}") }
+                            } catch (e2: Throwable) {
+                                step(true) { it.copy(ok = false, note = "停了之后没做成（不收费）：${friendlyError(e2)}") }
+                            }
+                        }
+                    }
+                }
+            }
             throw e
         } catch (e: VideoGen.DownloadFailed) {
             bill(e.seconds, e.resolution)

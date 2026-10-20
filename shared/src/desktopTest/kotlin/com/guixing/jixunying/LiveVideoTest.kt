@@ -3,6 +3,8 @@ package com.guixing.jixunying
 import com.guixing.jixunying.engine.Storage
 import com.guixing.jixunying.engine.VideoGen
 import com.guixing.jixunying.model.VideoPick
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import java.io.File
 import kotlin.test.Test
@@ -24,6 +26,21 @@ class LiveVideoTest {
         val secs = System.getenv("JXY_VIDEO_SECS")?.toIntOrNull() ?: 2
         val t0 = System.currentTimeMillis()
         val seen = mutableListOf<String>()
+        // JXY_VIDEO_CANCEL=1：提交后马上取消（还在排队就不收费），看真接口取消后任务变成什么状态
+        if (System.getenv("JXY_VIDEO_CANCEL") == "1") {
+            val gen = VideoGen({ null })
+            var id: String? = null
+            val job = launch { runCatching { gen.generate(p, model, "一只橘猫在窗台上伸懒腰", res, secs, "16:9", true, onTask = { id = it }) } }
+            while (id == null && job.isActive) delay(50)
+            job.cancel()
+            val taskId = id ?: run { println("没拿到任务编号"); return@runBlocking }
+            println("${(System.currentTimeMillis() - t0) / 1000.0} 秒拿到任务，马上取消")
+            val status = gen.cancel(p, taskId)
+            println("取消后任务状态：$status")
+            if (status != "CANCELED") runCatching { gen.await(p, taskId, res, secs) }
+                .onSuccess { println("取消不了，做完了：计费 ${it.seconds} 秒") }.onFailure { println("取消不了，后来：${it.message?.take(300)}") }
+            return@runBlocking
+        }
         runCatching {
             VideoGen({ null }).generate(p, model, "一只橘猫在窗台上伸懒腰，午后阳光，镜头缓慢推近，轻柔的环境声", res, secs, "16:9", true) { s ->
                 if (seen.lastOrNull() != s) { seen += s; println("${(System.currentTimeMillis() - t0) / 1000} 秒：$s") }

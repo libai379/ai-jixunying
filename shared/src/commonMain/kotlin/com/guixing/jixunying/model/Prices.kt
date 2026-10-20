@@ -55,7 +55,8 @@ object Prices {
     /** 做视频：每秒的价格，按模型名后面的档位（「wan3.0-video 480P」）挑；没写档位按最低一档。 */
     private fun videoPrice(model: String, byRes: Map<String, Double>, note: String = ""): ModelPrice {
         val res = model.substringAfterLast(' ', "").uppercase()
-        return ModelPrice("CNY", perSecond = byRes[res] ?: byRes.values.first(), note = note)
+        return ModelPrice("CNY", perSecond = byRes[res] ?: byRes.values.first(),
+            note = listOf(note, "按阿里云百炼官方价估，实际以千问AI平台账单为准").filter { it.isNotBlank() }.joinToString("；"))
     }
     private val FREE = ModelPrice("CNY", listOf(t(0.0, 0.0, 0.0)), perImage = 0.0, note = "免费")
     private val FREE_IMAGE = ModelPrice("CNY", perImage = 0.0, note = "免费")

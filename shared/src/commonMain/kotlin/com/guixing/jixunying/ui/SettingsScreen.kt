@@ -989,6 +989,11 @@ private fun VideoSection(ctl: AppController, state: AppState) {
         Text((if (each != null) "按现在的设置，一段 $secs 秒大约 ${yuan(each)}" else "这个模型的价格没查到") +
             "（成功了才收费，失败不收）。花了多少在「花费」页能看到。",
             style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, modifier = Modifier.padding(top = 6.dp))
+        Text("实际扣多少以千问AI平台后台的账单为准：这里和「花费」页的价格是阿里云百炼官方的原价（千问AI平台自己的价格页读不到），" +
+            "百炼写的限时折扣、新用户免费秒数在千问AI平台上算不算查不到，所以这里算出来的可能比实际扣的多。" +
+            "点停止时，还在排队的任务会取消、不收费；已经开始生成的取消不了（千问只许取消排队中的），做完照样收费，视频还是会放回那条回答下面。" +
+            "实测提交后不到 3 秒就开始生成了，所以多数时候点停止已经来不及取消。",
+            style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, modifier = Modifier.padding(top = 4.dp))
     }
 }
 

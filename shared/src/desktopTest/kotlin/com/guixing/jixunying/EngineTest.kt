@@ -72,6 +72,10 @@ class EngineTest {
     /** 假的视频任务查了几次（第一次 RUNNING，之后 SUCCEEDED）。 */
     private val videoPolls = java.util.concurrent.atomic.AtomicInteger()
     private val mp4 = ByteArray(2048) { (it % 251).toByte() }
+    /** 排队中的假任务被取消了；生成中的假任务（取消不了）点停止以后放行做完。 */
+    private val vslowCanceled = java.util.concurrent.atomic.AtomicBoolean()
+    private val vrunRelease = java.util.concurrent.atomic.AtomicBoolean()
+    private val videoCancels = Collections.synchronizedList(mutableListOf<String>())
     private val kimiSearches = Collections.synchronizedList(mutableListOf<JsonObject>())
     // 假微信
     private val wxInbox = java.util.concurrent.ConcurrentLinkedQueue<String>()
@@ -339,7 +343,12 @@ class EngineTest {
                 // 做视频（千问AI平台 / 百炼，只有异步）：Key 是 fail-video 的任务做失败
                 post("/api/v1/services/aigc/video-generation/video-synthesis") {
                     imageRequests += "video:" + call.request.headers["X-DashScope-Async"] + ":" + call.receiveText()
-                    val id = if (call.request.headers["Authorization"] == "Bearer fail-video") "vbad" else "v1"
+                    val id = when (call.request.headers["Authorization"]) {
+                        "Bearer fail-video" -> "vbad"
+                        "Bearer slow-video" -> "vslow"
+                        "Bearer run-video" -> "vrun"
+                        else -> "v1"
+                    }
                     call.respondText("""{"request_id":"r","output":{"task_id":"$id","task_status":"PENDING"}}""", ContentType.Application.Json)
                 }
                 get("/api/v1/tasks/v1") {
@@ -351,6 +360,21 @@ class EngineTest {
                     call.respondText("""{"output":{"task_id":"vbad","task_status":"FAILED","code":"DataInspectionFailed","message":"Input data may contain inappropriate content."}}""", ContentType.Application.Json)
                 }
                 get("/vid/1.mp4") { call.respondBytes(mp4, ContentType.parse("video/mp4")) }
+                // 一直排队的任务：能取消（官方：只能取消 PENDING 的）
+                get("/api/v1/tasks/vslow") {
+                    call.respondText("""{"output":{"task_id":"vslow","task_status":"${if (vslowCanceled.get()) "CANCELED" else "PENDING"}"}}""", ContentType.Application.Json)
+                }
+                // 已经在生成的任务：取消不了，放行后做完
+                get("/api/v1/tasks/vrun") {
+                    if (!vrunRelease.get()) call.respondText("""{"output":{"task_id":"vrun","task_status":"RUNNING"}}""", ContentType.Application.Json)
+                    else call.respondText("""{"output":{"task_id":"vrun","task_status":"SUCCEEDED","video_url":"http://127.0.0.1:$port/vid/1.mp4"},"usage":{"output_video_duration":5.0}}""", ContentType.Application.Json)
+                }
+                post("/api/v1/tasks/{id}/cancel") {
+                    val id = call.parameters["id"]!!
+                    videoCancels += id
+                    if (id == "vslow") { vslowCanceled.set(true); call.respondText("""{"request_id":"r"}""", ContentType.Application.Json) }
+                    else call.respondText("""{"request_id":"r","code":"UnsupportedOperation","message":"task can not be canceled"}""", ContentType.Application.Json, HttpStatusCode.BadRequest)
+                }
                 get("/api/v1/tasks/t1") {
                     call.respondText("""{"output":{"task_id":"t1","task_status":"SUCCEEDED","choices":[{"message":{"content":[{"image":"http://127.0.0.1:$port/img/1.png"}]}}]}}""", ContentType.Application.Json)
                 }
@@ -1364,6 +1388,50 @@ class EngineTest {
         e.call(Command.SendMessage(conv, "你是谁"))
         waitIdle(e, conv, 3)
         assertTrue(requests.none { r -> (r["tools"] as? JsonArray)?.any { "generate_video" in it.toString() } == true })
+    }
+
+    /** 做视频时点停止：还在排队的取消掉、不收费；已经在生成的取消不了，后台接着等，做好了照样放回那条回答、照样记账。 */
+    @Test
+    fun stopWhileMakingVideo() = runBlocking {
+        System.setProperty("jxy.videoPollMs", "30")
+        val (e, ms) = engineWithMembers("小智")
+        e.call(Command.SaveProvider(ProviderConfig("pq", "qianwen", "千问AI平台（阿里）", "${base()}/compatible-mode/v1", "slow-video", listOf(ModelInfo("qwen3.8-max")))))
+        val conv = e.call(Command.CreateConversation(listOf(ms[0].id))).data
+        e.call(Command.UpdateConversation(e.state.conversation(conv)!!.copy(webSearch = false)))
+        fun ledgerVideos() = com.guixing.jixunying.engine.Ledger(File(dir, "usage")).since().count { it.kind == "video" }
+        suspend fun stepNote(want: (String) -> Boolean) = withTimeout(10_000) {
+            while (true) {
+                val n = e.store.messages.value[conv].orEmpty().lastOrNull { it.role == Role.AI }?.tools?.firstOrNull { it.kind == "video" }?.note
+                if (n != null && want(n)) return@withTimeout n
+                delay(30)
+            }
+            @Suppress("UNREACHABLE_CODE") ""
+        }
+
+        // 排队中点停止：取消掉，不收费
+        e.call(Command.SendMessage(conv, "做一段视频"))
+        stepNote { it == "排队中" }
+        e.call(Command.Stop(conv))
+        val canceled = stepNote { "取消" in it }
+        assertTrue("不收费" in canceled, canceled)
+        assertEquals(listOf("vslow"), videoCancels.toList())
+        assertEquals(0, ledgerVideos())
+
+        // 生成中点停止：取消不了；放行后后台做完，视频放回这条回答，按秒记账
+        e.call(Command.SaveProvider(e.state.provider("pq")!!.copy(apiKey = "run-video")))
+        e.call(Command.SendMessage(conv, "再做一段视频"))
+        stepNote { it == "生成中" }
+        e.call(Command.Stop(conv))
+        stepNote { "取消不了" in it }
+        assertEquals(listOf("vslow", "vrun"), videoCancels.toList())
+        vrunRelease.set(true)
+        val done = stepNote { "点停止之后做完的" in it }
+        assertTrue(done.startsWith("5 秒 · 480P"), done)
+        val msg = e.store.messages.value[conv]!!.last { it.role == Role.AI }
+        assertEquals("video/mp4", msg.attachments.single().mime)
+        assertContentEquals(mp4, e.fileBytes(msg.attachments.single().id))
+        withTimeout(5_000) { while (ledgerVideos() < 1) delay(30) }
+        assertEquals(5.0, com.guixing.jixunying.engine.Ledger(File(dir, "usage")).since().single { it.kind == "video" }.units)
     }
 
     @Test
