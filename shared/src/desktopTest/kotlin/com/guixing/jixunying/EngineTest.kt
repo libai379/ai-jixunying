@@ -1,5 +1,9 @@
 package com.guixing.jixunying
 
+import io.ktor.http.content.forEachPart
+import io.ktor.server.request.receiveMultipart
+import io.ktor.utils.io.readRemaining
+import kotlinx.io.readByteArray
 import com.guixing.jixunying.client.ConnState
 import com.guixing.jixunying.client.Hub
 import com.guixing.jixunying.engine.Addressing
@@ -76,6 +80,10 @@ class EngineTest {
     private val vslowCanceled = java.util.concurrent.atomic.AtomicBoolean()
     private val vrunRelease = java.util.concurrent.atomic.AtomicBoolean()
     private val videoCancels = Collections.synchronizedList(mutableListOf<String>())
+    /** 做视频带素材：提交时的 X-DashScope-OssResourceResolve、取上传凭证的请求、传到假 OSS 的表单（字段 + 文件名 / 类型 / 内容）。 */
+    private val videoOss = Collections.synchronizedList(mutableListOf<String>())
+    private val uploadPolicies = Collections.synchronizedList(mutableListOf<String>())
+    private val ossUploads = Collections.synchronizedList(mutableListOf<Pair<Map<String, String>, Triple<String, String, ByteArray>?>>())
     private val kimiSearches = Collections.synchronizedList(mutableListOf<JsonObject>())
     // 假微信
     private val wxInbox = java.util.concurrent.ConcurrentLinkedQueue<String>()
@@ -225,6 +233,21 @@ class EngineTest {
                                 chunk("""{"content":""}""", """"search_info":{"search_results":[{"index":2,"title":"第二","url":"https://q.example/2"},{"index":1,"title":"第一","url":"https://q.example/1"}]},""")
                                 say("千问答[1]。")
                             }
+                            // 带素材做视频（2026-10-21）：编辑对话里的视频、用电脑上的图当首帧、按文档做（文件名 / 路径写在用户的话里）
+                            hasTool("generate_video") && !sawTool && ("编辑视频" in latest || "首帧做视频" in latest || "按文档做视频" in latest) -> {
+                                val media = when {
+                                    "编辑视频" in latest -> listOf("reference_video" to "片段.mp4", "reference_image" to "猫.png")
+                                    "首帧做视频" in latest -> listOf("first_frame" to latest.substringAfter("首帧做视频").trim())
+                                    else -> listOf("file" to "说明.txt")
+                                }
+                                val args = JsonObject(mapOf("prompt" to JsonPrimitive("编辑视频：改成黏土风格"),
+                                    "media" to JsonArray(media.map { (u, s) -> JsonObject(mapOf("use" to JsonPrimitive(u), "source" to JsonPrimitive(s))) })))
+                                val fn = JsonObject(mapOf("name" to JsonPrimitive("generate_video"), "arguments" to JsonPrimitive(args.toString())))
+                                chunk(JsonObject(mapOf("tool_calls" to JsonArray(listOf(JsonObject(mapOf("index" to JsonPrimitive(0), "id" to JsonPrimitive("vid_m"),
+                                    "type" to JsonPrimitive("function"), "function" to fn)))))).toString())
+                                write("data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n")
+                            }
+                            toolTexts.any { "素材不合要求" in it || "找不到素材" in it || "手机上发起的" in it } -> say("素材不行。")
                             // 聊天里要视频：先调 generate_video，做好了再说话
                             hasTool("generate_video") && latest.contains("视频") && !sawTool -> {
                                 chunk("""{"tool_calls":[{"index":0,"id":"vid_1","type":"function","function":{"name":"generate_video","arguments":"{\"prompt\":\"海边日落\",\"duration\":\"3\"}"}}]}""")
@@ -343,13 +366,53 @@ class EngineTest {
                 // 做视频（千问AI平台 / 百炼，只有异步）：Key 是 fail-video 的任务做失败
                 post("/api/v1/services/aigc/video-generation/video-synthesis") {
                     imageRequests += "video:" + call.request.headers["X-DashScope-Async"] + ":" + call.receiveText()
+                    videoOss += call.request.headers["X-DashScope-OssResourceResolve"].orEmpty()
                     val id = when (call.request.headers["Authorization"]) {
                         "Bearer fail-video" -> "vbad"
                         "Bearer slow-video" -> "vslow"
                         "Bearer run-video" -> "vrun"
+                        "Bearer media-video" -> "vmedia"
                         else -> "v1"
                     }
                     call.respondText("""{"request_id":"r","output":{"task_id":"$id","task_status":"PENDING"}}""", ContentType.Application.Json)
+                }
+                // 带输入视频的万相 3.0：usage.duration = 输入 + 输出
+                get("/api/v1/tasks/vmedia") {
+                    call.respondText("""{"output":{"task_id":"vmedia","task_status":"SUCCEEDED","video_url":"http://127.0.0.1:$port/vid/1.mp4"},"usage":{"duration":5.0,"input_video_duration":2.0,"output_video_duration":3.0,"video_count":1}}""",
+                        ContentType.Application.Json)
+                }
+                // 免费临时存储：先取凭证（官方是 GET + action=getPolicy&model=…），再按凭证把表单传到 upload_host
+                get("/api/v1/uploads") {
+                    uploadPolicies += call.request.queryParameters["action"] + ":" + call.request.queryParameters["model"] + ":" + call.request.headers["Authorization"]
+                    call.respondText("""{"request_id":"r","data":{"policy":"POL","signature":"SIG","upload_dir":"dashscope-instant/u1/2026-10-21/x","upload_host":"http://127.0.0.1:$port/oss-upload",
+                        |"expire_in_seconds":300,"max_file_size_mb":100,"capacity_limit_mb":999,"oss_access_key_id":"AK","x_oss_object_acl":"private","x_oss_forbid_overwrite":"true"}}""".trimMargin(),
+                        ContentType.Application.Json)
+                }
+                post("/oss-upload") {
+                    // 像真 OSS 那样把表单拆开（教训 69：只在原文里找关键字测不出拼错的 multipart）
+                    val fields = linkedMapOf<String, String>()
+                    var file: Triple<String, String, ByteArray>? = null
+                    call.receiveMultipart().forEachPart { part ->
+                        when (part) {
+                            is io.ktor.http.content.PartData.FormItem -> fields[part.name!!] = part.value
+                            is io.ktor.http.content.PartData.FileItem -> file = Triple(part.originalFileName.orEmpty(), part.contentType.toString(),
+                                part.provider().readRemaining().readByteArray())
+                            else -> Unit
+                        }
+                        part.dispose()
+                    }
+                    ossUploads += fields to file
+                    call.respondText("", status = HttpStatusCode.OK)
+                }
+                // MiniMax V2 做视频（海螺 H3）
+                post("/v2/video_generation") {
+                    imageRequests += "mmvideo:" + call.receiveText()
+                    call.respondText("""{"task_id":"mm1","base_resp":{"status_code":0,"status_msg":"success"}}""", ContentType.Application.Json)
+                }
+                get("/v2/query/video_generation/mm1") {
+                    call.respondText("""{"task":{"id":"mm1","model":"MiniMax-H3-Max","status":"succeeded","content":{"url":"http://127.0.0.1:$port/vid/1.mp4"},"resolution":"480P","duration":5,
+                        |"usage":{"total_seconds":7,"input_seconds":2,"output_seconds":5,"input_image_count":3},"ratio":"16:9","task_type":"generation","modality":"video"}}""".trimMargin(),
+                        ContentType.Application.Json)
                 }
                 get("/api/v1/tasks/v1") {
                     if (videoPolls.incrementAndGet() == 1) call.respondText("""{"output":{"task_id":"v1","task_status":"RUNNING"}}""", ContentType.Application.Json)
@@ -1432,6 +1495,171 @@ class EngineTest {
         assertContentEquals(mp4, e.fileBytes(msg.attachments.single().id))
         withTimeout(5_000) { while (ledgerVideos() < 1) delay(30) }
         assertEquals(5.0, com.guixing.jixunying.engine.Ledger(File(dir, "usage")).since().single { it.kind == "video" }.units)
+    }
+
+    private suspend fun uploadAtt(e: Engine, name: String, mime: String, bytes: ByteArray): com.guixing.jixunying.model.Attachment {
+        val r = e.call(Command.UploadFile(name, mime, Base64.getEncoder().encodeToString(bytes)))
+        assertTrue(r.ok, r.message)
+        return AppJson.decodeFromString(com.guixing.jixunying.model.Attachment.serializer(), r.data!!)
+    }
+
+    /** 最近一次请求里最后一条消息（工具结果）的文字。 */
+    private fun lastToolText() = requests.last()["messages"]!!.jsonArray.last().jsonObject["content"]!!.jsonPrimitive.content
+
+    /**
+     * 带素材做视频（万相 3.0，2026-10-21）：对话里的视频 + 图片当参考，先取凭证再传假 OSS（按官方表单字段），
+     * 提交时用 oss:// 地址并加 X-DashScope-OssResourceResolve；设置里选的模型只能文生视频时自动改用 wan3.0-video；
+     * 带视频的默认智能时长、比例 adaptive；按「输入 + 输出」秒数记账。
+     */
+    @Test
+    fun videoWithMaterials() = runBlocking {
+        System.setProperty("jxy.videoPollMs", "30")
+        val (e, ms) = engineWithMembers("小智")
+        e.call(Command.SaveProvider(ProviderConfig("pq", "qianwen", "千问AI平台（阿里）", "${base()}/compatible-mode/v1", "media-video", listOf(ModelInfo("qwen3.8-max")))))
+        e.call(Command.SaveSettings(e.state.settings.copy(videoGen = e.state.settings.videoGen.copy(modelId = "wan2.7-t2v"))))
+        val conv = e.call(Command.CreateConversation(listOf(ms[0].id))).data
+        e.call(Command.UpdateConversation(e.state.conversation(conv)!!.copy(webSearch = false)))
+        val clip = VideoMediaTest.tinyMp4(2.0)
+        val vid = uploadAtt(e, "片段.mp4", "video/mp4", clip)
+        val cat = uploadAtt(e, "猫.png", "image/png", png)
+        e.call(Command.SendMessage(conv, "看看这两个", listOf(vid.id, cat.id)))
+        waitIdle(e, conv, 1)
+        e.call(Command.SendMessage(conv, "编辑视频，改成黏土风格"))
+        waitIdle(e, conv, 2)
+        val ai = e.store.messages.value[conv]!!.last { it.role == Role.AI }
+        assertEquals("做好了。", ai.content, ai.error)
+        // 两份素材按顺序传：先取凭证（模型名要和调用的一样），再传表单
+        assertEquals(listOf("getPolicy:wan3.0-video:Bearer media-video", "getPolicy:wan3.0-video:Bearer media-video"), uploadPolicies.toList())
+        assertEquals(2, ossUploads.size)
+        val (f0, file0) = ossUploads[0]
+        assertEquals(listOf("OSSAccessKeyId", "Signature", "policy", "x-oss-object-acl", "x-oss-forbid-overwrite", "key", "success_action_status"), f0.keys.toList())
+        assertEquals("AK", f0["OSSAccessKeyId"]); assertEquals("SIG", f0["Signature"]); assertEquals("POL", f0["policy"])
+        assertEquals("private", f0["x-oss-object-acl"]); assertEquals("true", f0["x-oss-forbid-overwrite"]); assertEquals("200", f0["success_action_status"])
+        val key0 = f0["key"]!!
+        assertTrue(key0.startsWith("dashscope-instant/u1/2026-10-21/x/jxy_") && key0.endsWith(".mp4"), key0)
+        assertEquals(key0.substringAfterLast('/'), file0!!.first)
+        assertEquals("video/mp4", file0.second)
+        assertContentEquals(clip, file0.third)
+        assertEquals("image/png", ossUploads[1].second!!.second)
+        assertContentEquals(png, ossUploads[1].second!!.third)
+        // 提交：wan3.0-video（设置里的 wan2.7 收不了素材）、media 按顺序是 oss:// 地址、智能时长、自适应比例、加了解析 oss 的请求头
+        val sent = Json.parseToJsonElement(imageRequests.last { it.startsWith("video:") }.substringAfter("video:enable:")).jsonObject
+        assertEquals("wan3.0-video", sent["model"]!!.jsonPrimitive.content)
+        val media = sent["input"]!!.jsonObject["media"]!!.jsonArray.map { it.jsonObject }
+        assertEquals(listOf("reference_video", "reference_image"), media.map { it["type"]!!.jsonPrimitive.content })
+        assertEquals(listOf("oss://$key0", "oss://" + ossUploads[1].first["key"]), media.map { it["url"]!!.jsonPrimitive.content })
+        val params = sent["parameters"]!!.jsonObject
+        assertEquals(-1, params["duration"]!!.jsonPrimitive.content.toInt())
+        assertEquals("adaptive", params["ratio"]!!.jsonPrimitive.content)
+        assertEquals("enable", videoOss.last())
+        // 工具结果说了换模型；步骤上写了素材、输入视频也计费
+        val toolText = lastToolText()
+        assertTrue("改用 wan3.0-video" in toolText, toolText)
+        val step = ai.tools.single { it.kind == "video" }
+        assertTrue("参考视频：片段.mp4" in step.input && "参考图：猫.png" in step.input, step.input)
+        assertTrue(step.note.startsWith("3 秒 · 480P · wan3.0-video") && "输入视频 2 秒也计费" in step.note, step.note)
+        // 记账：输入 2 + 输出 3 = 5 秒，同一个单价
+        val rec = com.guixing.jixunying.engine.Ledger(File(dir, "usage")).since().single { it.kind == "video" }
+        assertEquals("wan3.0-video 480P", rec.model)
+        assertEquals(5.0, rec.units)
+
+        // 找不到的素材：不提交，告诉模型对话里有哪些
+        val before = imageRequests.count { it.startsWith("video:") }
+        e.call(Command.SendMessage(conv, "首帧做视频 没有这个.png"))
+        waitIdle(e, conv, 3)
+        assertEquals("素材不行。", e.store.messages.value[conv]!!.last { it.role == Role.AI }.content)
+        val notFound = lastToolText()
+        assertTrue("找不到素材" in notFound && "片段.mp4" in notFound, notFound)
+        assertEquals(before, imageRequests.count { it.startsWith("video:") })
+        Unit
+    }
+
+    /**
+     * MiniMax 海螺 H3（2026-10-21）：只有 MiniMax 中国版的 Key 时也能做视频（默认 H3-Max）；电脑上的图当首帧，转成 data: URI 放进 content；
+     * 输出秒数、输入视频秒数、超出免费张数的图分三行记账；文档素材 MiniMax 收不了，本地就挡住；手机发起的不许读电脑上收录范围外的文件。
+     */
+    @Test
+    fun minimaxVideo() = runBlocking {
+        System.setProperty("jxy.videoPollMs", "30")
+        val (e, ms) = engineWithMembers("小智")
+        e.call(Command.SaveProvider(ProviderConfig("pm", "minimax", "MiniMax 中国版", "${base()}/mm/v1", "mm-key", listOf(ModelInfo("MiniMax-M3")))))
+        val conv = e.call(Command.CreateConversation(listOf(ms[0].id))).data
+        e.call(Command.UpdateConversation(e.state.conversation(conv)!!.copy(webSearch = false)))
+        val pic = File(dir, "外面的图.png").apply { writeBytes(png) }
+        e.call(Command.SendMessage(conv, "首帧做视频 ${pic.absolutePath}"))
+        waitIdle(e, conv, 1)
+        val ai = e.store.messages.value[conv]!!.last { it.role == Role.AI }
+        assertEquals("做好了。", ai.content, ai.error)
+        val sent = Json.parseToJsonElement(imageRequests.single { it.startsWith("mmvideo:") }.removePrefix("mmvideo:")).jsonObject
+        assertEquals("MiniMax-H3-Max", sent["model"]!!.jsonPrimitive.content)
+        val content = sent["content"]!!.jsonArray.map { it.jsonObject }
+        assertEquals("text", content[0]["type"]!!.jsonPrimitive.content)
+        assertEquals("image_url", content[1]["type"]!!.jsonPrimitive.content)
+        assertEquals("first_frame", content[1]["role"]!!.jsonPrimitive.content)
+        assertEquals("data:image/png;base64,$pngB64", content[1]["image_url"]!!.jsonObject["url"]!!.jsonPrimitive.content)
+        assertEquals("480P", sent["resolution"]!!.jsonPrimitive.content)
+        assertEquals(5, sent["duration"]!!.jsonPrimitive.content.toInt())
+        assertEquals("adaptive", sent["ratio"]!!.jsonPrimitive.content, "首尾帧时恒为 adaptive")
+        assertEquals("false", sent["aigc_watermark"]!!.jsonPrimitive.content)
+        assertContentEquals(mp4, e.fileBytes(ai.attachments.single().id))
+        val recs = com.guixing.jixunying.engine.Ledger(File(dir, "usage")).since().filter { it.kind == "video" }
+        fun price(m: String) = com.guixing.jixunying.model.Prices.of("minimax", m)
+        val out = recs.single { it.model == "MiniMax-H3-Max 480P" }
+        assertEquals(5.0, out.units); assertEquals(1.65, com.guixing.jixunying.model.Prices.cost(out, price(out.model))!!, 1e-9)
+        val inp = recs.single { it.model == "MiniMax-H3-Max 480P 输入视频" }
+        assertEquals(2.0, inp.units); assertEquals(0.74, com.guixing.jixunying.model.Prices.cost(inp, price(inp.model))!!, 1e-9)
+        val img = recs.single { it.model == "MiniMax-H3-Max 图片" }
+        assertEquals(1, img.images, "3 张里 2 张免费"); assertEquals(0.5, com.guixing.jixunying.model.Prices.cost(img, price(img.model))!!, 1e-9)
+
+        // 文档：MiniMax 收不了，又没有千问 / 百炼可换：本地挡住，不提交
+        val doc = uploadAtt(e, "说明.txt", "text/plain", "一段说明".toByteArray())
+        e.call(Command.SendMessage(conv, "附件", listOf(doc.id)))
+        waitIdle(e, conv, 2)
+        e.call(Command.SendMessage(conv, "按文档做视频"))
+        waitIdle(e, conv, 3)
+        val refused = lastToolText()
+        assertTrue("收不了文档" in refused, refused)
+        assertEquals(1, imageRequests.count { it.startsWith("mmvideo:") })
+
+        // 手机发起的：电脑上收录范围外的图不许读
+        e.call(Command.SendMessage(conv, "首帧做视频 ${pic.absolutePath}", fromPhone = true))
+        waitIdle(e, conv, 4)
+        val phone = lastToolText()
+        assertTrue("手机上发起的" in phone, phone)
+        assertEquals(1, imageRequests.count { it.startsWith("mmvideo:") })
+        Unit
+    }
+
+    /** 「直接做视频」：不经过 AI（对话里没有成员也行），一张图当首帧，回答是「视频助手」发的；重做用同一条消息的素材。 */
+    @Test
+    fun directVideo() = runBlocking {
+        System.setProperty("jxy.videoPollMs", "30")
+        val (e, _) = engineWithMembers()
+        e.call(Command.SaveProvider(ProviderConfig("pq", "qianwen", "千问AI平台（阿里）", "${base()}/compatible-mode/v1", "k", listOf(ModelInfo("qwen3.8-max")))))
+        val conv = e.call(Command.CreateConversation(emptyList())).data
+        val cat = uploadAtt(e, "猫.png", "image/png", png)
+        requests.clear()
+        e.call(Command.SendMessage(conv, "让猫跑起来", listOf(cat.id), makeVideo = true))
+        waitIdle(e, conv, 1)
+        val ai = e.store.messages.value[conv]!!.last { it.role == Role.AI }
+        assertEquals("tool:video", ai.senderId)
+        assertEquals(MsgStatus.DONE, ai.status, ai.error)
+        assertTrue(ai.content.startsWith("按描述做好了"), ai.content)
+        assertEquals("video/mp4", ai.attachments.single().mime)
+        assertTrue(requests.isEmpty(), "不经过聊天模型")
+        val sent = Json.parseToJsonElement(imageRequests.last { it.startsWith("video:") }.substringAfter("video:enable:")).jsonObject
+        assertEquals("让猫跑起来", sent["input"]!!.jsonObject["prompt"]!!.jsonPrimitive.content)
+        val media = sent["input"]!!.jsonObject["media"]!!.jsonArray.single().jsonObject
+        assertEquals("first_frame", media["type"]!!.jsonPrimitive.content)
+        assertTrue(media["url"]!!.jsonPrimitive.content.startsWith("oss://"))
+        // 重做：同一条消息、同样的素材再做一次
+        e.call(Command.Regenerate(conv, ai.id))
+        waitIdle(e, conv, 1)
+        val again = e.store.messages.value[conv]!!.last { it.role == Role.AI }
+        assertTrue(again.id != ai.id && again.senderId == "tool:video" && again.status == MsgStatus.DONE, again.toString())
+        assertEquals("first_frame", Json.parseToJsonElement(imageRequests.last { it.startsWith("video:") }.substringAfter("video:enable:"))
+            .jsonObject["input"]!!.jsonObject["media"]!!.jsonArray.single().jsonObject["type"]!!.jsonPrimitive.content)
+        Unit
     }
 
     @Test

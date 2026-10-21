@@ -54,9 +54,22 @@ object Prices {
     private fun perSec(price: Double, note: String = "") = ModelPrice("CNY", perSecond = price, note = note)
     /** 做视频：每秒的价格，按模型名后面的档位（「wan3.0-video 480P」）挑；没写档位按最低一档。 */
     private fun videoPrice(model: String, byRes: Map<String, Double>, note: String = ""): ModelPrice {
-        val res = model.substringAfterLast(' ', "").uppercase()
+        val res = model.split(' ').getOrNull(1).orEmpty().uppercase()
         return ModelPrice("CNY", perSecond = byRes[res] ?: byRes.values.first(),
             note = listOf(note, "按阿里云百炼官方价估，实际以千问AI平台账单为准").filter { it.isNotBlank() }.joinToString("；"))
+    }
+    /** MiniMax 做视频：「MiniMax-H3-Max 480P」输出、「… 480P 输入视频」、「MiniMax-H3-Max 图片」超出免费张数的图（m 已经是小写）。 */
+    private fun minimaxVideo(m: String): ModelPrice {
+        val max = m.startsWith("minimax-h3-max")
+        if (m.endsWith(" 图片")) return img(if (max) 0.5 else 0.2, note = if (max) "超出 2 张免费的部分" else "超出 5 张免费的部分")
+        val res = m.split(' ').getOrNull(1).orEmpty().uppercase()
+        val input = m.endsWith(" 输入视频")
+        val price = when {
+            max && input -> if (res == "768P") 0.97 else 0.37
+            max -> if (res == "768P") 0.5 else 0.33
+            else -> if (res == "2K") 0.8 else 0.5
+        }
+        return perSec(price, if (input) "输入的参考视频按秒" else "")
     }
     private val FREE = ModelPrice("CNY", listOf(t(0.0, 0.0, 0.0)), perImage = 0.0, note = "免费")
     private val FREE_IMAGE = ModelPrice("CNY", perImage = 0.0, note = "免费")
@@ -90,6 +103,9 @@ object Prices {
                 m.startsWith("speech-2.8-hd") -> if (global) null else chars(3.5, "1 个汉字算 2 个字符")
                 m.startsWith("speech-2.8-turbo") -> if (global) null else chars(2.0, "1 个汉字算 2 个字符")
                 m.startsWith("asr-1.0") -> if (global) null else hourly(2.5)
+                // 做视频（2026-10-21 platform.minimaxi.com 价格页「视频」原文）：输出按秒；输入视频按秒（价按输出档位）；
+                // 图片 H3 5 张以内免费、超出 0.20 元/张，H3-Max 2 张以内免费、超出 0.50 元/张；音频免费。记账时三样分开记（VideoPick.billingModel）
+                m.startsWith("minimax-h3") -> if (global) null else minimaxVideo(m)
                 m.startsWith("minimax-m3.1") -> null
                 // M3 输入超过 512k 整次按长上下文价；国内价已含官方「永久五折」
                 m.startsWith("minimax-m3") -> if (global) ModelPrice("USD", listOf(t(0.30, 0.06, 1.20, 512_000), t(0.60, 0.12, 2.40)))

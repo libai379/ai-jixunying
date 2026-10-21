@@ -118,6 +118,7 @@ import kotlinx.coroutines.launch
 
 private const val PAINTER = "tool:image"
 private const val CHAIR = "tool:chair"
+private const val VIDEOMAKER = "tool:video"
 
 @Composable
 fun ChatScreen(ctl: AppController, convId: String, wide: Boolean, openDrawer: () -> Unit) {
@@ -321,6 +322,7 @@ private fun AiMessage(ctl: AppController, state: AppState, m: Message,
                       onStance: (String) -> Unit = {}) {
     val member = state.member(m.senderId)
     val painter = m.senderId == PAINTER
+    val videoMaker = m.senderId == VIDEOMAKER
     val chair = m.senderId == CHAIR
     val review = m.stage == "review"
     // 会审的互评默认折叠（四份互评很长），点一下展开
@@ -331,12 +333,13 @@ private fun AiMessage(ctl: AppController, state: AppState, m: Message,
 
     Row(Modifier.fillMaxWidth()) {
         if (painter) MemberAvatar(null, 34.dp, emoji = "🎨", color = 0xFFEC4899)
+        else if (videoMaker) MemberAvatar(null, 34.dp, emoji = "🎬", color = 0xFF7C3AED)
         else if (chair) MemberAvatar(null, 34.dp, emoji = "⚖️", color = 0xFF0F766E)
         else MemberAvatar(member, 34.dp)
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(if (painter) "画图助手" else if (chair) "会审主席" else member?.name ?: "已移除的成员", style = MaterialTheme.typography.titleSmall)
+                Text(if (painter) "画图助手" else if (videoMaker) "视频助手" else if (chair) "会审主席" else member?.name ?: "已移除的成员", style = MaterialTheme.typography.titleSmall)
                 Spacer(Modifier.width(8.dp))
                 if (review) { Pill(if (folded) "互评 · 点开看" else "互评", MaterialTheme.colorScheme.secondary) { folded = !folded }; Spacer(Modifier.width(6.dp)) }
                 if (chair) { Pill("会审汇总", Ext.c.success); Spacer(Modifier.width(6.dp)) }
@@ -372,7 +375,7 @@ private fun AiMessage(ctl: AppController, state: AppState, m: Message,
             if (m.status == MsgStatus.STOPPED) Text("（已停止）", style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle, modifier = Modifier.padding(top = 4.dp))
             if (sources.isNotEmpty() && m.status != MsgStatus.STREAMING) SourcesRow(sources)
             if (m.status != MsgStatus.STREAMING && !folded) MessageActions(ctl, m, alignEnd = false, canRegenerate = !review && !chair,
-                export = state.settings.office.exportButtons && !painter && body.isNotBlank() && m.status == MsgStatus.DONE, body = body)
+                export = state.settings.office.exportButtons && !painter && !videoMaker && body.isNotBlank() && m.status == MsgStatus.DONE, body = body)
         }
     }
 }
@@ -930,6 +933,8 @@ private fun Composer(ctl: AppController, state: AppState, conv: Conversation, ru
     val scope = rememberCoroutineScope()
     var text by remember(conv.id) { mutableStateOf(TextFieldValue("")) }
     var drawMode by remember(conv.id) { mutableStateOf(false) }
+    // 「直接做视频」：不经过 AI，直接把写的话当视频描述，附上的图 / 视频 / 文件当素材（2026-10-21）
+    var videoMode by remember(conv.id) { mutableStateOf(false) }
     var showFolders by remember(conv.id) { mutableStateOf(false) }
     if (showFolders) ChatFoldersDialog(ctl, conv) { showFolders = false }
     val pending = remember(conv.id) { mutableStateListOf<PendingFile>() }
@@ -1091,11 +1096,12 @@ private fun Composer(ctl: AppController, state: AppState, conv: Conversation, ru
         val ids = pending.mapNotNull { it.att?.id }
         val paths = pending.filter { it.local }.map { it.path }
         if (text.text.isBlank() && ids.isEmpty() && paths.isEmpty()) return
-        ctl.run(Command.SendMessage(conv.id, text.text, ids, paths = paths, drawImage = drawMode))
+        ctl.run(Command.SendMessage(conv.id, text.text, ids, paths = paths, drawImage = drawMode && !videoMode, makeVideo = videoMode))
         text = TextFieldValue("")
         pending.clear()
-        // 「直接画图」只管这一条，发完回到正常聊天
+        // 「直接画图」「直接做视频」只管这一条，发完回到正常聊天
         drawMode = false
+        videoMode = false
     }
 
     Column(Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 14.dp, top = 4.dp), horizontalAlignment = Alignment.CenterHorizontally) {
@@ -1134,7 +1140,7 @@ private fun Composer(ctl: AppController, state: AppState, conv: Conversation, ru
             Surface(
                 shape = RoundedCornerShape(22.dp),
                 color = MaterialTheme.colorScheme.surface,
-                border = BorderStroke(1.dp, if (drawMode) MaterialTheme.colorScheme.secondary else Ext.c.border),
+                border = BorderStroke(1.dp, if (drawMode || videoMode) MaterialTheme.colorScheme.secondary else Ext.c.border),
                 shadowElevation = 3.dp,
             ) {
                 Column(Modifier.padding(start = 14.dp, end = 10.dp, top = 10.dp, bottom = 8.dp)) {
@@ -1142,6 +1148,7 @@ private fun Composer(ctl: AppController, state: AppState, conv: Conversation, ru
                     Box(Modifier.fillMaxWidth().heightIn(min = 26.dp, max = 200.dp)) {
                         if (text.text.isEmpty()) Text(
                             when {
+                                videoMode -> "直接做视频：描述画面和动作，比如「一只橘猫在窗台上伸懒腰，阳光洒进来」；附上的图片当首帧（两张是首尾帧），附上的视频按描述改或接长，附上的文档按内容做（按秒收费，发完回到聊天）"
                                 drawMode -> "直接画图：描述画面，比如「水墨风格的江南小镇，清晨薄雾」（只画这一张，发完回到聊天）"
                                 members.size > 1 -> if (platform.isDesktop) "发消息…  喊名字或 @名字 点名回答，Enter 发送，Shift+Enter 换行" else "发消息…  喊名字或 @ 点名"
                                 else -> if (platform.isDesktop) "发消息，可以附图片和文档…  Enter 发送，Shift+Enter 换行" else "发消息，可以附图片和文档"
@@ -1203,7 +1210,11 @@ private fun Composer(ctl: AppController, state: AppState, conv: Conversation, ru
                             ctl.run(Command.UpdateConversation(conv.copy(webSearch = !conv.webSearch)))
                         }
                         Spacer(Modifier.width(6.dp))
-                        ToggleChip("直接画图", Icons.Rounded.Brush, drawMode) { drawMode = !drawMode }
+                        ToggleChip(if (platform.isDesktop) "直接画图" else "画图", Icons.Rounded.Brush, drawMode) { drawMode = !drawMode; if (drawMode) videoMode = false }
+                        if (state.settings.videoGen.enabled && com.guixing.jixunying.model.VideoPick.candidates(state.providers).isNotEmpty()) {
+                            Spacer(Modifier.width(6.dp))
+                            ToggleChip(if (platform.isDesktop) "直接做视频" else "视频", Icons.Rounded.Movie, videoMode) { videoMode = !videoMode; if (videoMode) drawMode = false }
+                        }
                         // 2026-10-17 对话栏 = Chat + Cowork：AI 改文件要不要先问（电脑上才有；手机上改不了，PhoneGate 也会保留电脑上的）
                         if (platform.isDesktop && !ctl.remoteMode) {
                             Spacer(Modifier.width(6.dp))
@@ -1251,13 +1262,13 @@ private fun Composer(ctl: AppController, state: AppState, conv: Conversation, ru
                         val canSend = (text.text.isNotBlank() || pending.any { it.att != null || it.local }) && uploading == 0
                         Box(
                             Modifier.size(36.dp).clip(CircleShape)
-                                .background(if (canSend) (if (drawMode) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary) else MaterialTheme.colorScheme.surfaceContainerHighest)
+                                .background(if (canSend) (if (drawMode || videoMode) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary) else MaterialTheme.colorScheme.surfaceContainerHighest)
                                 .clickable(enabled = canSend) { send() },
                             contentAlignment = Alignment.Center,
                         ) {
                             Icon(
-                                if (drawMode) Icons.Rounded.Brush else Icons.Rounded.ArrowUpward,
-                                if (drawMode) "画图" else "发送", Modifier.size(19.dp),
+                                if (videoMode) Icons.Rounded.Movie else if (drawMode) Icons.Rounded.Brush else Icons.Rounded.ArrowUpward,
+                                if (videoMode) "做视频" else if (drawMode) "画图" else "发送", Modifier.size(19.dp),
                                 tint = if (canSend) MaterialTheme.colorScheme.onPrimary else Ext.c.subtle,
                             )
                         }

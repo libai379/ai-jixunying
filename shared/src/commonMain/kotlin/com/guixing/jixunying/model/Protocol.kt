@@ -150,6 +150,8 @@ sealed interface Command {
         val fromPhone: Boolean = false,
         /** true 时不走聊天模型，直接把文字当画图提示词。 */
         val drawImage: Boolean = false,
+        /** true 时不走聊天模型，直接把文字当视频描述，附上的图 / 视频 / 音频 / 文档当素材（2026-10-21）。 */
+        val makeVideo: Boolean = false,
     ) : Command
     @Serializable data class Stop(val convId: String) : Command
     @Serializable data class DeleteMessage(val convId: String, val messageId: String) : Command

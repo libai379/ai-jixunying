@@ -21,6 +21,7 @@ import com.guixing.jixunying.model.Event
 import com.guixing.jixunying.model.HistoryHit
 import com.guixing.jixunying.model.ImageChoice
 import com.guixing.jixunying.model.ImagePick
+import com.guixing.jixunying.model.VideoMediaUse
 import com.guixing.jixunying.model.VideoPick
 import com.guixing.jixunying.model.JudgePick
 import com.guixing.jixunying.model.Member
@@ -75,6 +76,8 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.add
@@ -94,6 +97,8 @@ import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
 const val PAINTER_ID = "tool:image"
+/** 「直接做视频」的回答（不经过 AI）。 */
+const val VIDEO_ID = "tool:video"
 /** 会审模式里写汇总的「主席」（用裁判模型，不是成员）。 */
 const val CHAIR_ID = "tool:chair"
 /** Code 栏的回答（编码循环里的模型，不是成员）。 */
@@ -1383,13 +1388,14 @@ class Engine(
         var conv = state.conversation(c.convId) ?: return CommandResult(false, "对话不存在")
         if (c.text.isBlank() && c.attachmentIds.isEmpty() && c.paths.isEmpty()) return CommandResult(false, "空消息")
         // @ 了（或者开头直接喊了）不在这个对话里的成员：直接拉进来让他回答（以前会悄悄换成别人答）
-        val invited = if (c.drawImage) emptyList() else outsidersCalled(c.text, conv)
+        val direct = c.drawImage || c.makeVideo
+        val invited = if (direct) emptyList() else outsidersCalled(c.text, conv)
         if (invited.isNotEmpty()) {
             updateState { s -> s.copy(conversations = s.conversations.map { if (it.id == conv.id) it.copy(memberIds = it.memberIds + invited.map { m -> m.id }) else it }) }
             conv = state.conversation(conv.id) ?: return CommandResult(false, "对话不存在")
             emit(Event.Notice("已把「${invited.joinToString("、") { it.name }}」拉进这个对话"))
         }
-        if (!c.drawImage && conv.memberIds.isEmpty()) return CommandResult(false, "这个对话还没有 AI 成员，点右上角加几位")
+        if (!direct && conv.memberIds.isEmpty()) return CommandResult(false, "这个对话还没有 AI 成员，点右上角加几位")
         val atts = c.attachmentIds.mapNotNull { storage.fileMeta(it) }
         // 2026-10-17：电脑上拖进来的文件 / 文件夹：路径写进消息，这个对话的 AI 读它不用再问
         val paths = c.paths.map { it.trim() }.filter { it.isNotEmpty() && !it.startsWith("\\\\") && File(it).exists() }.distinct()
@@ -1400,7 +1406,8 @@ class Engine(
         addMessage(userMsg)
         touchConversation(conv.id, c.text.ifBlank { atts.firstOrNull()?.name ?: paths.firstOrNull()?.let { File(it).name }.orEmpty() })
         launchFor(conv.id) { withContext(if (c.fromPhone) PhoneTurn() else kotlin.coroutines.EmptyCoroutineContext) {
-            if (c.drawImage) drawDirect(conv.id, userMsg) else {
+            if (c.makeVideo) videoDirect(conv.id, userMsg, c.text.trim(), paths)
+            else if (c.drawImage) drawDirect(conv.id, userMsg) else {
                 runTurn(conv.id, userMsg)
                 // 答完以后在后台：聊天太长就压缩，攒够了就挑出值得长期记住的
                 scope.launch { afterTurn(conv.id) }
@@ -2524,6 +2531,14 @@ class Engine(
         launchFor(convId) { withContext(if (fromPhone) PhoneTurn() else kotlin.coroutines.EmptyCoroutineContext) {
             if (old.senderId == PAINTER_ID) {
                 prev?.takeIf { it.role == Role.USER }?.let { drawDirect(convId, it) }
+            } else if (old.senderId == VIDEO_ID) {
+                // 重做：用那条消息的原话（去掉附上路径那一段），附件照旧当素材；当时拖进来的路径在原话后面列着，也带上
+                prev?.takeIf { it.role == Role.USER }?.let { u ->
+                    val marker = "附上的文件 / 文件夹（在这台电脑上"
+                    val text = u.content.substringBefore(marker).trim()
+                    val paths = if (marker in u.content) u.content.substringAfter(marker).lines().filter { it.startsWith("- ") }.map { it.removePrefix("- ").trim() } else emptyList()
+                    videoDirect(convId, u, text, paths)
+                }
             } else {
                 val m = state.member(old.senderId) ?: return@withContext
                 reply(convId, m, cutoffId = prev?.id, independent = false, calledBy = null)
@@ -2601,58 +2616,146 @@ class Engine(
     }
 
     /**
-     * 做一段视频（generate_video）：进度写在这一步上（排队中 / 生成中 / 下载中），做好了挂成「AI 做的文件」（点开用系统播放器放，
+     * 「直接做视频」：不经过 AI，把用户写的话当视频描述，这条消息附上的东西当素材（2026-10-21，照「直接画图」）。
+     * 素材怎么用按最常见的猜：只有 1 张图 = 首帧，2 张 = 首尾帧；有视频 / 音频 / 文档时图片都当参考图，视频当参考视频（描述里写「改成」就是编辑、写「延长」就是接长），
+     * 音频当参考音频，文档当文档素材。别的用法（比如多张图都当首帧以外的参考）在聊天里跟 AI 说。
+     */
+    private suspend fun videoDirect(convId: String, userMsg: Message, text: String, paths: List<String>) {
+        val msg = Message(newId(), convId, Role.AI, VIDEO_ID, status = MsgStatus.STREAMING, createdAt = now(), modelLabel = "做视频")
+        addMessage(msg)
+        try {
+            // 素材：消息里的附件（按名字）+ 拖进来的电脑文件（按路径，文件夹不算）
+            val sources = userMsg.attachments.map { it.name to it.mime.ifBlank { VideoMedia.mimeOf(it.name) } } +
+                paths.filter { File(it).isFile }.map { it to VideoMedia.mimeOf(it) }
+            val uses = guessVideoUses(sources.map { it.second to it.first })
+            val args = buildJsonObject {
+                put("prompt", text.ifBlank { "让画面自然地动起来" })
+                val media = sources.zip(uses).mapNotNull { (s, use) -> use?.let { it to s.first } }
+                if (media.isNotEmpty()) putJsonArray("media") {
+                    media.forEach { (use, source) -> add(buildJsonObject { put("use", use); put("source", source) }) }
+                }
+            }
+            val r = withContext(UsageTag(UsageKinds.VIDEO, convId = convId)) { makeVideo(convId, msg.id, args) }
+            val ok = r.startsWith("视频做好了（") && "收费），但是" !in r
+            val sw = Regex("。(.+?)，要告诉用户").find(r)?.groupValues?.get(1)
+            updateMessage(convId, msg.id) {
+                if (ok) it.copy(content = "按描述做好了，点开就能播放。" + (sw?.let { s -> "\n\n$s。" } ?: ""), status = MsgStatus.DONE)
+                else if (it.attachments.isNotEmpty()) it.copy(content = r.substringBefore("。请如实告诉用户"), status = MsgStatus.DONE)
+                else it.copy(status = MsgStatus.ERROR, error = r.removeSuffix("请告诉用户。").removeSuffix("请如实告诉用户。").removeSuffix("请按要求改了再调，或者如实告诉用户。").trim())
+            }
+        } catch (e: CancellationException) {
+            withContext(NonCancellable) { updateMessage(convId, msg.id) { it.copy(status = MsgStatus.STOPPED) } }
+            throw e
+        } catch (e: Throwable) {
+            updateMessage(convId, msg.id) { it.copy(status = MsgStatus.ERROR, error = friendlyError(e)) }
+        }
+    }
+
+    /** 「直接做视频」按附件的类型猜用途（mime 到 名字）：见 videoDirect。不认识的类型（比如压缩包）不当素材。 */
+    private fun guessVideoUses(items: List<Pair<String, String>>): List<String?> {
+        val kinds = items.map { (mime, name) ->
+            val ext = name.substringAfterLast('.', "").lowercase()
+            when {
+                mime.startsWith("image/") -> "image"
+                mime.startsWith("video/") -> "video"
+                mime.startsWith("audio/") -> "audio"
+                ext in VideoMedia.docExts -> "doc"
+                else -> null
+            }
+        }
+        val images = kinds.count { it == "image" }
+        val framesOk = kinds.none { it == "video" || it == "audio" || it == "doc" } && images in 1..2
+        var seen = 0
+        return kinds.map { k ->
+            when (k) {
+                "image" -> if (framesOk) (if (seen++ == 0) VideoMediaUse.FIRST else VideoMediaUse.LAST) else VideoMediaUse.IMAGE
+                "video" -> VideoMediaUse.VIDEO
+                "audio" -> VideoMediaUse.AUDIO
+                "doc" -> VideoMediaUse.FILE
+                else -> null
+            }
+        }
+    }
+
+    /**
+     * 做一段视频（generate_video）：进度写在这一步上（传素材 / 排队中 / 生成中 / 下载中），做好了挂成「AI 做的文件」（点开用系统播放器放，
      * 手机遥控时先取过来，微信里发回去）。按成功生成的秒数记账，做好了只是下载失败的也记。
+     * 素材（media）：这个对话里的图 / 视频 / 文件（按名字）、电脑上的文件（路径，读的规矩和 read_document 一样）、公开网址；
+     * 设置里选的模型收不了这些素材时自动换能收的（VideoPick.resolve），发之前本地先查一遍（VideoMedia.check）。
      */
     private suspend fun makeVideo(convId: String, msgId: String, args: JsonObject): String {
         val prompt = args.str("prompt").orEmpty().ifBlank { return "参数错误：缺少 prompt" }
-        val choice = VideoPick.resolve(state) ?: return "做视频没开，或者没有能用的服务商（要千问AI平台或阿里百炼的 Key）。请告诉用户到 设置 → 画图和视频 里看看。"
-        val p = state.provider(choice.providerId) ?: return "做视频的服务商不见了"
         val v = state.settings.videoGen
-        val duration = args.str("duration")?.trim()?.filter { it.isDigit() }?.toIntOrNull() ?: v.duration
-        val ratio = args.str("ratio")?.trim()?.takeIf { it.isNotEmpty() } ?: v.ratio
+        if (VideoPick.resolve(state) == null) return "做视频没开，或者没有能用的服务商（要千问AI平台、阿里百炼或 MiniMax 中国版的 Key）。请告诉用户到 设置 → 画图和视频 里看看。"
+        val wanted = videoMediaArgs(args["media"]).getOrElse { return "参数错误：${it.message}" }
+        val inputs = mutableListOf<VideoInput>()
+        for ((use, source) in wanted) inputs += videoInput(convId, msgId, use, source).getOrElse { return it.message.orEmpty() }
+        val choice = VideoPick.resolve(state, inputs.map { it.use }.toSet()) ?: return "做视频的服务商不见了"
+        val p = state.provider(choice.providerId) ?: return "做视频的服务商不见了"
+        val hasVideoIn = inputs.any { it.use == VideoMediaUse.VIDEO }
+        // 时长：AI 说了就用；带视频的万相默认「智能时长」（官方建议编辑 / 延长用 -1）；其余用设置里的
+        val askedSecs = args.str("duration")?.trim()?.takeIf { it.isNotEmpty() }?.let { s -> if (s.startsWith("-")) -1 else s.filter { it.isDigit() }.toIntOrNull() }
+        val duration = askedSecs ?: if (hasVideoIn && choice.model.vendor == VideoPick.DASHSCOPE) -1 else v.duration
+        // 比例：带素材时默认按素材自适应
+        val ratio = args.str("ratio")?.trim()?.takeIf { it.isNotEmpty() } ?: if (inputs.isNotEmpty()) "adaptive" else v.ratio
+        VideoMedia.check(choice.model, inputs, duration)?.let { return "素材不合要求，没提交（不收费）：$it。请按要求改了再调，或者如实告诉用户。" }
         val stepId = newId()
         fun step(persist: Boolean = false, f: (ToolStep) -> ToolStep) =
             updateMessage(convId, msgId, persist) { m -> m.copy(tools = m.tools.map { if (it.id == stepId) f(it) else it }) }
-        updateMessage(convId, msgId, persist = false) { it.copy(tools = it.tools + ToolStep("video", prompt.take(200), id = stepId, note = "提交中")) }
+        val what = inputs.joinToString("；") { "${VideoMediaUse.label(it.use)}：${it.name}" }
+        updateMessage(convId, msgId, persist = false) {
+            it.copy(tools = it.tools + ToolStep("video", (prompt.take(200) + if (what.isEmpty()) "" else "\n素材 · $what").take(600), id = stepId, note = "提交中"))
+        }
         val tag = currentCoroutineContext()[UsageTag]
-        fun bill(seconds: Double, res: String) = recordUsage(p, VideoPick.billingModel(choice.model.id, res), Usage(), UsageKinds.VIDEO, tag,
-            units = seconds, unit = com.guixing.jixunying.model.SpeechUnits.SECOND)
-        /** 做好了：记账、挂到这条回答上，返回「几秒 · 档位 · 模型」。 */
+        /** 记账：万相「输入视频 + 输出视频」同一个单价，记一行；MiniMax 输出、输入视频、超出免费张数的图单价不同，分开记。 */
+        fun bill(u: VideoGen.Usage, res: String) {
+            val sec = com.guixing.jixunying.model.SpeechUnits.SECOND
+            if (choice.model.vendor != VideoPick.MINIMAX) {
+                recordUsage(p, VideoPick.billingModel(choice.model.id, res), Usage(), UsageKinds.VIDEO, tag, units = u.total, unit = sec)
+                return
+            }
+            recordUsage(p, VideoPick.billingModel(choice.model.id, res), Usage(), UsageKinds.VIDEO, tag, units = u.output, unit = sec)
+            if (u.input > 0) recordUsage(p, VideoPick.billingModel(choice.model.id, res, "输入视频"), Usage(), UsageKinds.VIDEO, tag, units = u.input, unit = sec)
+            val extra = u.images - VideoPick.freeImages(choice.model.id)
+            if (extra > 0) recordUsage(p, VideoPick.billingModel(choice.model.id, res, "图片"), Usage(), UsageKinds.VIDEO, tag, images = extra)
+        }
+        /** 做好了：记账、挂到这条回答上，返回「几秒 · 档位 · 模型」（带输入视频的写明另算了几秒）。 */
         fun keep(r: VideoGen.Result, extra: String = ""): String {
-            bill(r.seconds, r.resolution)
-            val secs = if (r.seconds % 1.0 == 0.0) r.seconds.toInt().toString() else "%.1f".format(r.seconds)
-            val note = "$secs 秒 · ${r.resolution} · ${choice.model.id}"
+            bill(r.usage, r.resolution)
+            val inPart = if (r.usage.input > 0) "（输入视频 ${VideoMedia.fmt(r.usage.input)} 秒也计费）" else ""
+            val note = "${VideoMedia.fmt(r.seconds)} 秒 · ${r.resolution} · ${choice.model.id}$inPart"
             val name = "视频_${System.currentTimeMillis() % 1_000_000}.mp4"
             val att = Attachment(newId(), name, "video/mp4", r.bytes.size.toLong(), AttachmentKind.DOCUMENT, note = note,
                 generated = true, savedPath = saveOfficeCopy(name, r.bytes))
             storage.putFile(att, r.bytes, null)
             updateMessage(convId, msgId) { m -> m.copy(attachments = m.attachments + att, tools = m.tools.map { if (it.id == stepId) it.copy(note = note + extra) else it }) }
-            return note
+            return "$note，文件名 $name"
         }
         var taskId: String? = null
         return try {
-            val r = videos.generate(p, choice.model.id, prompt, v.resolution, duration, ratio, v.audio, onTask = { taskId = it }) { s -> step { it.copy(note = s) } }
+            val r = videos.generate(p, choice.model.id, prompt, v.resolution, duration, ratio, v.audio, inputs, onTask = { taskId = it }) { s -> step { it.copy(note = s) } }
             val note = keep(r)
-            "视频做好了（$note），已经显示给用户，点一下就能播放。简单说一句就行，不用再描述画面。"
+            val sw = if (choice.switched.isEmpty()) "" else "。${choice.switched}，要告诉用户"
+            "视频做好了（$note）$sw。已经显示给用户，点一下就能播放。简单说一句就行，不用再描述画面。"
         } catch (e: CancellationException) {
             // 用户点了停止：还在排队就取消（不收费）；已经在生成的取消不了，在后台接着等，做好了照样放回这条回答（反正要收钱）
             withContext(NonCancellable) {
                 val id = taskId
-                val status = if (id == null) null else withTimeoutOrNull(15_000) { videos.cancel(p, id) }
+                val status = if (id == null) null else withTimeoutOrNull(15_000) { videos.cancel(p, choice.model.id, id) }
                 when {
                     id == null -> step(true) { it.copy(ok = false, note = "停了（还没提交，不收费）") }
                     status == "CANCELED" || status == "FAILED" -> step(true) { it.copy(ok = false, note = "停了：任务还在排队，已经取消，不收费") }
                     else -> {
-                        step(true) { it.copy(note = "停了，但千问那边已经开始生成，取消不了（只能取消排队中的），做完照样按秒收费；做好了会放回这条回答下面") }
+                        step(true) { it.copy(note = "停了，但${choice.providerName}那边已经开始生成，取消不了（只能取消排队中的），做完照样按秒收费；做好了会放回这条回答下面") }
                         val res = VideoPick.resolutionFor(choice.model, v.resolution)
-                        val secs = VideoPick.durationFor(choice.model, duration)
+                        val secs = if (duration < 0) -1 else VideoPick.durationFor(choice.model, duration)
+                        val images = inputs.count { it.use in setOf(VideoMediaUse.FIRST, VideoMediaUse.LAST, VideoMediaUse.IMAGE) }
                         scope.launch(tag ?: kotlin.coroutines.EmptyCoroutineContext) {
                             try {
-                                keep(videos.await(p, id, res, secs), "（点停止之后做完的）")
+                                keep(videos.await(p, choice.model.id, id, res, secs, images), "（点停止之后做完的）")
                             } catch (e2: VideoGen.DownloadFailed) {
-                                bill(e2.seconds, e2.resolution)
-                                step(true) { it.copy(ok = false, note = "停了之后做完了（已按 ${e2.seconds} 秒收费），但是${e2.message}") }
+                                bill(e2.usage, e2.resolution)
+                                step(true) { it.copy(ok = false, note = "停了之后做完了（已按 ${VideoMedia.fmt(e2.seconds)} 秒收费），但是${e2.message}") }
                             } catch (e2: Throwable) {
                                 step(true) { it.copy(ok = false, note = "停了之后没做成（不收费）：${friendlyError(e2)}") }
                             }
@@ -2662,13 +2765,68 @@ class Engine(
             }
             throw e
         } catch (e: VideoGen.DownloadFailed) {
-            bill(e.seconds, e.resolution)
+            bill(e.usage, e.resolution)
             step(true) { it.copy(ok = false, note = e.message.orEmpty()) }
-            "视频做好了（已按 ${e.seconds} 秒收费），但是${e.message}。请如实告诉用户。"
+            "视频做好了（已按 ${VideoMedia.fmt(e.seconds)} 秒收费），但是${e.message}。请如实告诉用户。"
         } catch (e: Throwable) {
             step(true) { it.copy(ok = false, note = friendlyError(e)) }
             "做视频失败：${friendlyError(e)}。请告诉用户。"
         }
+    }
+
+    /**
+     * generate_video 的 media 参数：[{"use": "first_frame", "source": "图片_123.png"}, …]。
+     * 有的模型会把数组写成字符串，也认；use 也认中文（首帧、尾帧、参考图、参考视频、参考音频、文档、网页）。
+     */
+    private fun videoMediaArgs(raw: JsonElement?): Result<List<Pair<String, String>>> = runCatching {
+        if (raw == null || raw is JsonNull) return@runCatching emptyList()
+        val arr = when (raw) {
+            is JsonArray -> raw
+            is JsonPrimitive -> raw.content.trim().takeIf { it.isNotEmpty() }?.let { Json.parse(it) as? JsonArray ?: error("media 要是数组") } ?: return@runCatching emptyList()
+            else -> error("media 要是数组")
+        }
+        arr.map { el ->
+            val o = el as? JsonObject ?: error("media 里每一项要写成 {\"use\": 用途, \"source\": 来源}")
+            val rawUse = (o.str("use") ?: o.str("type") ?: o.str("role")).orEmpty().trim()
+            val use = VideoMediaUse.all.firstOrNull { it.equals(rawUse, ignoreCase = true) || VideoMediaUse.label(it) == rawUse }
+                ?: error("不认识的用途「$rawUse」，只能是 ${VideoMediaUse.all.joinToString("、")}")
+            val source = (o.str("source") ?: o.str("url") ?: o.str("name") ?: o.str("path")).orEmpty().trim()
+            if (source.isEmpty()) error("「${VideoMediaUse.label(use)}」没给来源（对话里的文件名、电脑上的路径或网址）")
+            use to source
+        }
+    }
+
+    /**
+     * 找一份素材：http(s) 网址原样交给服务端；对话里的附件按名字找（从新到旧，图片_xxx.png、视频_xxx.mp4、用户贴进来的）；
+     * 再不然当成电脑上的路径（读的规矩和 read_document 一样：微信、手机发起的不许读收录范围外的）。
+     * 失败时 Result 里的 message 就是回给模型的话。
+     */
+    private suspend fun videoInput(convId: String, msgId: String, use: String, source: String): Result<VideoInput> {
+        fun fail(s: String) = Result.failure<VideoInput>(IllegalArgumentException(s))
+        if (source.startsWith("http://", true) || source.startsWith("https://", true))
+            return Result.success(VideoInput(use, source.substringAfterLast('/').substringBefore('?').ifEmpty { source }, VideoMedia.mimeOf(source.substringBefore('?')), url = source))
+        if (use == VideoMediaUse.LINK) return fail("网页素材要给公开网址（http / https 开头），「$source」不是。")
+        val name = source.substringAfterLast('/').substringAfterLast('\\')
+        val att = messages(convId).asReversed().asSequence().flatMap { it.attachments.asSequence() }
+            .firstOrNull { it.name.equals(source, true) || it.name.equals(name, true) }
+        if (att != null) {
+            val bytes = withContext(Dispatchers.IO) { storage.fileBytes(att.id) } ?: return fail("对话里的《${att.name}》文件不见了，没法当素材。")
+            val mime = att.mime.takeIf { it.isNotBlank() && it != "application/octet-stream" } ?: VideoMedia.mimeOf(att.name)
+            return Result.success(VideoInput(use, att.name, mime, bytes, seconds = VideoMedia.durationOf(att.name, mime, bytes)))
+        }
+        val f = File(source)
+        if (!f.isAbsolute || !f.isFile) {
+            val names = messages(convId).flatMap { it.attachments }.map { it.name }.distinct().takeLast(20)
+            return fail("找不到素材「$source」：不是这个对话里的文件名，也不是电脑上存在的完整路径。" +
+                (if (names.isEmpty()) "这个对话里还没有图片、视频或文件。" else "这个对话里有：${names.joinToString("、")}。") +
+                "电脑上的文件可以先用 find_files / list_folder 找到完整路径。")
+        }
+        askToRead(convId, msgId, f)?.let { return fail(it) }
+        if (f.length() > 100L * 1024 * 1024) return fail("${f.name} 太大（${f.length() / 1024 / 1024} MB），素材单个最大 100 MB。")
+        val bytes = withContext(Dispatchers.IO) { f.readBytes() }
+        val mime = VideoMedia.mimeOf(f.name)
+        updateMessage(convId, msgId, persist = false) { it.copy(tools = it.tools + ToolStep("doc", "读了素材《${f.name}》")) }
+        return Result.success(VideoInput(use, f.name, mime, bytes, seconds = VideoMedia.durationOf(f.name, mime, bytes)))
     }
 
     private suspend fun paint(target: Pair<ProviderConfig, String>, prompt: String, size: String? = null): Pair<Attachment, String?> {
@@ -2904,11 +3062,34 @@ class Engine(
         }
         if (video) {
             val v = state.settings.videoGen
-            fn("generate_video", "根据文字描述做一段短视频（按秒收费，比画图贵；要一到几分钟），做好后会显示给用户、点开就能播放。只在用户明确要视频时用。",
+            val dashscope = VideoPick.candidates(state.providers).any { VideoPick.vendorOf(it) == VideoPick.DASHSCOPE }
+            fn("generate_video", "做一段短视频（按秒收费，比画图贵；要一到几分钟），做好后会显示给用户、点开就能播放。只在用户明确要视频时用。" +
+                "可以只用文字描述，也可以带素材（media）：用图片当首帧 / 首尾帧（图生视频）；用图、视频、音频当参考（参考生视频，提示词里用「图1」「视频1」「音频1」按顺序指代）；" +
+                "给一段视频 + 提示词写明「编辑视频 / 去掉 / 替换 / 改成……」就是视频编辑，写明「向后延长 / 续写……」就是视频延长" +
+                (if (dashscope) "；给一个文档（docx、pdf、pptx、xlsx、txt、md 等）或一个公开网页，按里面的内容做视频" else "") +
+                "。首帧 / 尾帧不能和参考类混用。带输入视频的按「输入秒数 + 输出秒数」收费，比直接生成贵。程序会按素材自动挑能用的模型。",
                 buildJsonObject {
-                    put("prompt", prop("视频内容描述：主体、动作、场景、镜头运动、光线、风格、声音，越具体越好"))
-                    put("duration", prop("可选，秒数。用户没说就不填（默认 ${v.duration} 秒）"))
-                    put("ratio", prop("可选，画面比例：16:9、9:16、1:1、4:3、3:4。用户没说就不填（默认 ${v.ratio}）"))
+                    put("prompt", prop("视频内容描述：主体、动作、场景、镜头运动、光线、风格、声音，越具体越好；编辑、延长时写清要怎么改、往哪边延长"))
+                    put("duration", prop("可选，要做的秒数。用户没说就不填（默认 ${v.duration} 秒；带视频素材时默认智能时长，自动配合原视频）"))
+                    put("ratio", prop("可选，画面比例：16:9、9:16、1:1、4:3、3:4、21:9，带素材时还可以 adaptive（跟素材一样）。用户没说就不填"))
+                    put("media", buildJsonObject {
+                        put("type", "array")
+                        put("description", "可选，素材，按顺序。来源可以是这个对话里的文件名（AI 画的图片_xxx.png、做的视频_xxx.mp4、用户贴进来的文件）、" +
+                            "电脑上文件的完整路径（不知道在哪就先用 find_files / list_folder 找），或者 http(s) 网址")
+                        putJsonObject("items") {
+                            put("type", "object")
+                            putJsonObject("properties") {
+                                put("use", buildJsonObject {
+                                    put("type", "string")
+                                    put("description", "用途：first_frame 首帧、last_frame 尾帧、reference_image 参考图、reference_video 参考视频（也用于编辑、延长）、" +
+                                        "reference_audio 参考音频" + if (dashscope) "、file 文档、link 网页" else "")
+                                    putJsonArray("enum") { (if (dashscope) VideoMediaUse.all else VideoMediaUse.all - setOf(VideoMediaUse.FILE, VideoMediaUse.LINK)).forEach { add(it) } }
+                                })
+                                put("source", prop("文件名、完整路径或网址"))
+                            }
+                            putJsonArray("required") { add("use"); add("source") }
+                        }
+                    })
                 }, listOf("prompt"))
         }
         if (memory) {

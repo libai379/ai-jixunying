@@ -925,25 +925,30 @@ private fun ImagePage(ctl: AppController, state: AppState) {
 }
 
 /**
- * 做视频（2026-10-20）：千问AI平台 / 阿里百炼的视频模型。按秒收费，所以默认最便宜的一档（wan3.0-video、480P、5 秒），
- * 每个选项旁边写清这样一段大约多少钱。
+ * 做视频（2026-10-20 千问AI平台 / 阿里百炼，10-21 加 MiniMax 海螺 H3）：按秒收费，所以默认最便宜的一档（wan3.0-video、480P、5 秒），
+ * 每个选项旁边写清这样一段大约多少钱。模型只列有 Key 的那几家的；选了别家的模型，「用哪家」跟着换。
  */
 @Composable
 private fun VideoSection(ctl: AppController, state: AppState) {
     val v = state.settings.videoGen
     fun save(f: (com.guixing.jixunying.model.VideoGenSettings) -> com.guixing.jixunying.model.VideoGenSettings) = ctl.updateSettings { it.copy(videoGen = f(it.videoGen)) }
     val providers = remember(state.providers) { VideoPick.candidates(state.providers) }
-    val m = VideoPick.model(v.modelId)
+    val models = remember(state.providers) { VideoPick.modelsFor(state.providers) }
+    // 现在实际用的：和引擎一样按 VideoPick.resolve 算（设置里的模型和服务商不是一家时用那家的默认模型）
+    val choice = VideoPick.resolve(state.copy(settings = state.settings.copy(videoGen = v.copy(enabled = true))))
+    val m = choice?.model ?: VideoPick.model(v.modelId)
     val res = VideoPick.resolutionFor(m, v.resolution)
     val secs = VideoPick.durationFor(m, v.duration)
-    fun perSec(model: String, r: String) = Prices.of("qwen", VideoPick.billingModel(model, r), state.settings.costs.overrides)?.perSecond
+    fun perSec(vm: com.guixing.jixunying.model.VideoModel, r: String, extra: String = "") =
+        Prices.of(VideoPick.pricePlatform(vm), VideoPick.billingModel(vm.id, r, extra), state.settings.costs.overrides)?.perSecond
     SectionCard {
-        SwitchRow("让 AI 做视频", "在对话里说「做一段……的视频」，AI 会调用视频模型，做好了点开就能播放。按秒收费，做一段要一到几分钟。", v.enabled) { on ->
+        SwitchRow("让 AI 做视频", "在对话里说「做一段……的视频」，AI 会调用视频模型，做好了点开就能播放。也能拿对话里的图、视频、文件，或者电脑上的文件当素材" +
+            "（让图片动起来、照着参考做、改一段视频、把视频接长、按文档做视频）。按秒收费，做一段要一到几分钟。", v.enabled) { on ->
             save { it.copy(enabled = on) }
         }
         if (providers.isEmpty()) {
             Spacer(Modifier.height(6.dp))
-            Text("要先在「模型服务」里添加千问AI平台或阿里百炼并填 Key（和聊天、画图用同一个 Key）。",
+            Text("要先在「模型服务」里添加千问AI平台、阿里百炼或 MiniMax 中国版并填 Key（和聊天、画图用同一个 Key）。",
                 style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
             return@SectionCard
         }
@@ -951,17 +956,24 @@ private fun VideoSection(ctl: AppController, state: AppState) {
         if (providers.size > 1) {
             Spacer(Modifier.height(8.dp))
             FieldLabel("用哪家")
-            val cur = providers.firstOrNull { it.id == v.providerId } ?: providers.first()
+            val cur = providers.firstOrNull { it.id == choice?.providerId } ?: providers.first()
             providers.forEach { p ->
-                RadioRow(p.id == cur.id, p.name, null) { save { it.copy(providerId = p.id) } }
+                RadioRow(p.id == cur.id, p.name, null) {
+                    val vendor = VideoPick.vendorOf(p)
+                    save { it.copy(providerId = p.id, modelId = if (VideoPick.model(it.modelId).vendor == vendor) it.modelId else VideoPick.defaultFor(vendor!!).id) }
+                }
             }
         }
         Spacer(Modifier.height(8.dp))
-        FieldLabel("视频模型", "价格是阿里云百炼官方价（每秒），千问AI平台按同样的价算")
-        VideoPick.models.forEach { vm ->
+        FieldLabel("视频模型", "千问 / 百炼的价格是阿里云百炼官方价（每秒），千问AI平台按同样的价算；MiniMax 是它官网价格页的刊例价")
+        models.forEach { vm ->
             val r = VideoPick.resolutionFor(vm, v.resolution)
-            val price = perSec(vm.id, r)?.let { " · $r 每秒 ${it} 元" }.orEmpty()
-            RadioRow(vm.id == m.id, vm.id, vm.label + price + if (vm.minSec < vm.maxSec) " · ${vm.minSec}–${vm.maxSec} 秒" else "") { save { it.copy(modelId = vm.id) } }
+            val price = perSec(vm, r)?.let { " · $r 每秒 ${it} 元" }.orEmpty()
+            RadioRow(vm.id == m.id, vm.id, vm.label + price + if (vm.minSec < vm.maxSec) " · ${vm.minSec}–${vm.maxSec} 秒" else "") {
+                val p = providers.firstOrNull { it.id == choice?.providerId }?.takeIf { VideoPick.vendorOf(it) == vm.vendor }
+                    ?: providers.first { VideoPick.vendorOf(it) == vm.vendor }
+                save { it.copy(modelId = vm.id, providerId = p.id) }
+            }
         }
         Spacer(Modifier.height(8.dp))
         FieldLabel("清晰度")
@@ -970,14 +982,14 @@ private fun VideoSection(ctl: AppController, state: AppState) {
                 Box(Modifier.padding(end = 6.dp, bottom = 6.dp)) { ToggleChip(r, Icons.Rounded.Brush, res == r) { save { it.copy(resolution = r) } } }
             }
         }
-        FieldLabel("默认时长", "AI 也可以按你说的改")
+        FieldLabel("默认时长", "AI 也可以按你说的改；带视频素材（编辑、接长）时万相默认智能时长")
         FlowRowCompat {
-            (listOf(2, 3, 5, 8, 10, 15, 30).filter { it in m.minSec..m.maxSec }.ifEmpty { listOf(m.minSec) }).forEach { s ->
+            (listOf(2, 3, 4, 5, 8, 10, 15, 30).filter { it in m.minSec..m.maxSec }.ifEmpty { listOf(m.minSec) }).forEach { s ->
                 Box(Modifier.padding(end = 6.dp, bottom = 6.dp)) { ToggleChip("$s 秒", Icons.Rounded.Brush, secs == s) { save { it.copy(duration = s) } } }
             }
         }
         if (!m.bySize) {
-            FieldLabel("默认画面比例", "AI 也可以按你说的改")
+            FieldLabel("默认画面比例", "AI 也可以按你说的改；带素材时默认跟素材一样")
             FlowRowCompat {
                 m.ratios.forEach { r ->
                     Box(Modifier.padding(end = 6.dp, bottom = 6.dp)) { ToggleChip(r, Icons.Rounded.Brush, VideoPick.ratioFor(m, v.ratio) == r) { save { it.copy(ratio = r) } } }
@@ -985,14 +997,26 @@ private fun VideoSection(ctl: AppController, state: AppState) {
             }
         }
         if (m.audioSwitch) SwitchRow("带声音", "关掉就是无声视频，价格一样", v.audio) { on -> save { it.copy(audio = on) } }
-        val each = perSec(m.id, res)?.let { it * secs }
+        val each = perSec(m, res)?.let { it * secs }
         Text((if (each != null) "按现在的设置，一段 $secs 秒大约 ${yuan(each)}" else "这个模型的价格没查到") +
             "（成功了才收费，失败不收）。花了多少在「花费」页能看到。",
             style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, modifier = Modifier.padding(top = 6.dp))
-        Text("实际扣多少以千问AI平台后台的账单为准：这里和「花费」页的价格是阿里云百炼官方的原价（千问AI平台自己的价格页读不到），" +
-            "百炼写的限时折扣、新用户免费秒数在千问AI平台上算不算查不到，所以这里算出来的可能比实际扣的多。" +
-            "点停止时，还在排队的任务会取消、不收费；已经开始生成的取消不了（千问只许取消排队中的），做完照样收费，视频还是会放回那条回答下面。" +
-            "实测提交后不到 3 秒就开始生成了，所以多数时候点停止已经来不及取消。",
+        Text(when {
+            m.media.isEmpty() -> "这个模型只能用文字做视频。AI 带素材（图片、视频、文档）时会自动改用能收素材的模型（${models.filter { it.media.isNotEmpty() }.joinToString("、") { it.id }.ifEmpty { "现在没有" }}），并告诉你。"
+            m.vendor == VideoPick.MINIMAX -> "素材：首帧 / 尾帧，或者参考图（最多 9 张）、参考视频（最多 3 段，共 15 秒）、参考音频（最多 3 段，共 15 秒）。" +
+                "收费 = 输出秒数 × 每秒价 + 输入视频秒数 × 每秒 ${perSec(m, res, "输入视频") ?: "?"} 元；图片 ${VideoPick.freeImages(m.id)} 张以内免费，多的每张 " +
+                "${Prices.of("minimax", VideoPick.billingModel(m.id, res, "图片"), state.settings.costs.overrides)?.perImage ?: "?"} 元；音频免费。" +
+                "MiniMax 不能按文档 / 网页做视频，要这个时自动改用万相 3.0（有千问 / 百炼的 Key 才行）。"
+            else -> "素材：首帧 / 首尾帧，或者参考图（最多 10 张）、参考视频（最多 5 段，共 15 秒）、参考音频（最多 5 段，共 15 秒），文档或网页（各 1 个）。" +
+                "带视频的（编辑、接长、参考视频）按「输入视频秒数 + 输出秒数」收费，单价一样，所以比直接做贵；输入 + 输出最长 30 秒。" +
+                "电脑上的素材先传到千问的免费临时存储（48 小时后自动删）再交给模型。"
+        }, style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, modifier = Modifier.padding(top = 4.dp))
+        Text(if (m.vendor == VideoPick.MINIMAX)
+                "实际扣多少以 MiniMax 后台的账单为准。点停止时，还在排队的任务会取消、不收费；已经开始生成的取消不了，做完照样收费，视频还是会放回那条回答下面。"
+            else "实际扣多少以千问AI平台后台的账单为准：这里和「花费」页的价格是阿里云百炼官方的原价（千问AI平台自己的价格页读不到），" +
+                "百炼写的限时折扣、新用户免费秒数在千问AI平台上算不算查不到，所以这里算出来的可能比实际扣的多。" +
+                "点停止时，还在排队的任务会取消、不收费；已经开始生成的取消不了（千问只许取消排队中的），做完照样收费，视频还是会放回那条回答下面。" +
+                "实测提交后不到 3 秒就开始生成了，所以多数时候点停止已经来不及取消。",
             style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, modifier = Modifier.padding(top = 4.dp))
     }
 }
