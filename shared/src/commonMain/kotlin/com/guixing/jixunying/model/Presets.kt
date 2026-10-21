@@ -211,7 +211,7 @@ object MemberTemplates {
 }
 
 /** 显示用的版本号（和 androidApp 的 versionName、desktopApp 的 packageVersion 一起改）。 */
-const val APP_VERSION = "1.9.0"
+const val APP_VERSION = "1.10.0"
 
 /** 开发者署名（关于页、安装包的「发布者」；用户 2026-10-14 定）。desktopApp 的 vendor 一起改。 */
 const val APP_DEVELOPER = "癸星科技"
