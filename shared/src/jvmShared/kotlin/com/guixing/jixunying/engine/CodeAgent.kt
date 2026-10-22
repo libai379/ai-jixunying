@@ -701,7 +701,8 @@ class CodeAgent(private val host: CodeHost) {
             val url = if (shrunk != null) "data:image/jpeg;base64," + java.util.Base64.getEncoder().encodeToString(shrunk)
                 else "data:${DocExtract.imageMime(file.name, "")};base64," + java.util.Base64.getEncoder().encodeToString(bytes)
             seen += rel to url
-            record(convId, msgId, asked, ToolStep("read", rel, id = host.newId(), output = "（图片，已发给模型看）", ok = true))
+            val kept = withContext(Dispatchers.IO) { host.keepImage(file) }
+            record(convId, msgId, asked, ToolStep("read", rel, id = host.newId(), output = "（图片，已发给模型看）", ok = true, image = kept))
             return "$rel 是图片，已经附在下一条消息里给你看。"
         }
         if (ext in DOC_EXT) {
@@ -1441,6 +1442,15 @@ class CodeAgent(private val host: CodeHost) {
         }
     }
 
+    /** 它读的是图片：存一份缩小副本挂在步骤上给用户看（2026-10-22，以前读图那一步是空的）。网络路径不碰。 */
+    private suspend fun claudeImage(u: ClaudeCli.ToolUse, guard: CodeGuard?): String {
+        val raw = u.input.str("file_path").orEmpty()
+        if (raw.substringAfterLast('.', "").lowercase() !in IMAGE_EXT || raw.startsWith("\\\\") || raw.startsWith("//")) return ""
+        // 有 guard 就只认它的结果（它挡掉网络路径、设备名、数据流），别绕过去
+        val f = (if (guard != null) guard.resolve(raw) else File(raw).takeIf { it.isAbsolute }) ?: return ""
+        return withContext(Dispatchers.IO) { host.keepImage(f) }
+    }
+
     /** 它用完一个工具：补上结果；改文件的算出差异、挂上能撤销的改动。 */
     private suspend fun claudeToolResult(convId: String, msgId: String, ev: ClaudeCli.ToolResult,
                                          uses: MutableMap<String, ClaudeCli.ToolUse>, steps: MutableMap<String, ExtStep>) {
@@ -1451,8 +1461,9 @@ class CodeAgent(private val host: CodeHost) {
             // 没来问就做了的（读文件、查找、只读的命令），或者它自己拦下的：补记一步
             val u = use ?: return
             val guard = guardOf(convId)
+            val img = if (u.name == "Read" && !ev.isError) claudeImage(u, guard) else ""
             addStep(convId, msgId, ToolStep(claudeKind(u.name), claudeInput(u, guard), id = host.newId(), ok = !ev.isError,
-                output = uiText(ev.text), note = if (ev.isError) "没成功" else if (u.sub) "子代理做的" else ""))
+                output = uiText(ev.text), note = if (ev.isError) "没成功" else if (u.sub) "子代理做的" else "", image = img))
             return
         }
         val file = ext.file
@@ -1933,4 +1944,6 @@ interface CodeHost {
     fun stopBackground(convId: String, id: String) {}
     /** 「自动」档的检查（engine/AutoJudge）：返回 null = 放行，文字 = 拦下的理由（要问用户）。 */
     suspend fun autoCheck(convId: String, request: String, action: String): String? = "这台设备没有检查员"
+    /** 2026-10-22：AI 看过的图存一份缩小副本，返回附件编号（存不了返回空），步骤上挂着给用户看。 */
+    fun keepImage(file: File): String = ""
 }

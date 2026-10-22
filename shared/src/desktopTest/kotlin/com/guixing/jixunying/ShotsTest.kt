@@ -274,6 +274,16 @@ class ShotsTest {
         val made = Attachment("a3", "租房合同补充条款.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", madeDoc.bytes.size.toLong(),
             AttachmentKind.DOCUMENT, textChars = madeDoc.text.length, note = madeDoc.summary, generated = true)
         st.putFile(made, madeDoc.bytes, madeDoc.text)
+        // 2026-10-22：Code 里 AI 看过的手机截图（竖图），画几块色块看比例对不对
+        val shotImg = java.awt.image.BufferedImage(540, 1170, java.awt.image.BufferedImage.TYPE_INT_RGB).apply {
+            val g = createGraphics()
+            g.color = java.awt.Color(0xF4, 0xF1, 0xEA); g.fillRect(0, 0, 540, 1170)
+            g.color = java.awt.Color(0x1F, 0x3B, 0x2D); g.fillRoundRect(30, 120, 480, 300, 40, 40)
+            g.color = java.awt.Color.WHITE; g.fillRoundRect(30, 470, 480, 140, 30, 30); g.fillRoundRect(30, 640, 480, 140, 30, 30)
+            g.dispose()
+        }
+        val shotBytes = java.io.ByteArrayOutputStream().also { javax.imageio.ImageIO.write(shotImg, "png", it) }.toByteArray()
+        st.putFile(Attachment("a5", "01-home.png", "image/png", shotBytes.size.toLong(), AttachmentKind.IMAGE, note = "Code 栏里 AI 看过的图"), shotBytes, null)
         st.saveMessages("c14", listOf(
             Message("u14", "c14", Role.USER, USER_ID, "把这个文件夹里的需求整理成一份清单，放到 G:\\资料\\清单.md\n\n附上的文件 / 文件夹（在这台电脑上，可以直接用 list_folder / read_document 读）：\n- G:\\八字五行人格分析app开发", createdAt = now - 60_000),
             Message("r14", "c14", Role.AI, "ma", "先看了文件夹里的需求文档，又把 README 里的错字改了。清单要写到 G 盘资料文件夹，那里不在这个对话的文件夹里，等你点一下。",
@@ -462,6 +472,8 @@ class ShotsTest {
                 createdAt = now - 10_000, modelLabel = "Claude Code（Opus）",
                 tools = listOf(ToolStep("read", "src/index.html", id = "s150", output = "<h1>Hello</h1>"),
                     ToolStep("run", "git status", id = "s151", output = "On branch main"),
+                    // 2026-10-22：它看过的截图（步骤上挂一份副本，默认展开）
+                    ToolStep("read", "C:\\Users\\me\\AppData\\Local\\Temp\\shots\\01-home.png", id = "s153", image = "a5"),
                     ToolStep("edit", "src/index.html", id = "s152", approval = "waiting", note = "改这个文件",
                         output = "--- a/src/index.html\n+++ b/src/index.html\n@@ -3,1 +3,1 @@\n-<h1>Hello</h1>\n+<h1>欢迎</h1>"))),
         ))
@@ -582,6 +594,7 @@ class ShotsTest {
         // 2026-10-19 多角色派活：工作区里的「团队」一节（窗口拉高看全）
         shoot("desktop-code-team", 1280, 1500, 1f, hub, desktop, "code:c11#path")
         shoot("desktop-code-claude", 1280, 820, 1f, hub, desktop, "code:c15")
+        shoot("desktop-code-claude-tall", 1280, 1400, 1f, hub, desktop, "code:c15")
         shoot("desktop-code-claude-workspace", 1280, 900, 1f, hub, desktop, "code:c15#path")
         shoot("desktop-settings-code-tall", 1280, 1900, 1f, hub, desktop, "settings:CODE")
         shoot("desktop-code-diff", 1280, 820, 1f, hub, desktop, "code:c8#diff")

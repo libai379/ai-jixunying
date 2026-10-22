@@ -222,6 +222,18 @@ class Engine(
         override fun updateCode(convId: String, transform: (CodeSpec) -> CodeSpec) = updateCodeSpec(convId, transform)
         override suspend fun webSearch(query: String) = runSearch(query, mutableListOf())
         override suspend fun autoCheck(convId: String, request: String, action: String) = autoVerdict(convId, request, action)
+        override fun keepImage(file: File): String = runCatching {
+            if (!file.isFile || file.length() > 30L * 1024 * 1024) return@runCatching ""
+            val bytes = file.readBytes()
+            // 缩到长边 1280、四百来 KB：看得清界面截图，又不撑大数据目录；缩不了的小图原样存
+            val small = shrinkImageToJpeg(bytes, 1280, 400_000)
+            if (small == null && bytes.size > 2_000_000) return@runCatching ""
+            val id = newId()
+            val name = file.nameWithoutExtension + if (small != null) ".jpg" else "." + file.extension.lowercase()
+            storage.putFile(Attachment(id, name, if (small != null) "image/jpeg" else DocExtract.imageMime(file.name, ""),
+                (small ?: bytes).size.toLong(), AttachmentKind.IMAGE, note = "Code 栏里 AI 看过的图"), small ?: bytes, null)
+            id
+        }.getOrDefault("")
         override suspend fun mcpToolDefs() = mcpTools().map { (n, _, t) -> Triple(n, "（外部工具 ${t.name}）" + t.description, t.inputSchema) }
         override suspend fun mcpCall(name: String, args: JsonObject): String {
             val (_, c, t) = mcpTools().firstOrNull { it.first == name } ?: return "没有这个外部工具：$name"
@@ -885,7 +897,8 @@ class Engine(
         }
         is Command.DeleteConversation -> {
             stop(c.id)
-            val atts = snapshot(c.id).flatMap { m -> m.attachments.map { it.id } }
+            // 步骤上挂的「AI 看过的图」（2026-10-22）也是附件文件，一起删
+            val atts = snapshot(c.id).flatMap { m -> m.attachments.map { it.id } + m.tools.mapNotNull { it.image.ifBlank { null } } }
             convs.remove(c.id)
             storage.deleteConversation(c.id, atts)
             // Code 会话的改动备份（<数据目录>/code/<对话 id>/）跟着会话一起删，别留在盘上白占地方

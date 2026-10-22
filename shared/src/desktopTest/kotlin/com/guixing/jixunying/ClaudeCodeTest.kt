@@ -82,6 +82,20 @@ class ClaudeCodeTest {
 
     private fun runs() = argsLog.readLines(Charsets.UTF_8).filter { it.isNotBlank() }
 
+    /** 2026-10-22：它读了一张图（工作区外面的截图，像试用记账本时读 %TEMP% 里的模拟器截图）——步骤上挂一份副本给用户看。 */
+    @Test
+    fun imageItReadIsKeptOnTheStep() = runBlocking {
+        if (!hasPython()) { println("没有 python，跳过"); return@runBlocking }
+        javax.imageio.ImageIO.write(java.awt.image.BufferedImage(40, 30, java.awt.image.BufferedImage.TYPE_INT_RGB), "png", File(dir, "shot.png"))
+        val e = engine()
+        val conv = claudeConv(e, CodeMode.ACCEPT_EDITS)
+        e.call(Command.CodeSend(conv, "看截图"))
+        awaitDone(e, conv)
+        val step = ai(e, conv)!!.tools.single { it.kind == "read" }
+        assertTrue(step.image.isNotBlank(), "挂了图：$step")
+        assertTrue(File(dir, "data/files/${step.image}").isFile, "副本存进了附件文件夹")
+    }
+
     @Test
     fun manualAsksForWriteAndCommandThenUndo() = runBlocking {
         if (!hasPython()) { println("没有 python，跳过"); return@runBlocking }
@@ -316,6 +330,11 @@ while True:
         result(tid, 'hi' if r.get('behavior') == 'allow' else r.get('message', ''), r.get('behavior') != 'allow')
         say('做完了。')
         done('做完了。')
+    elif '看截图' in task:
+        shot = os.path.join(os.path.dirname(os.getcwd()), 'shot.png')
+        free('Read', {'file_path': shot}, '')
+        say('看了截图。')
+        done('看了截图。')
     elif '计划' in task:
         tid, r = ask('ExitPlanMode', {'plan': '第一步：看代码\n第二步：改'})
         result(tid, r.get('message', ''), True)

@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -100,6 +101,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.guixing.jixunying.model.AppState
+import com.guixing.jixunying.model.Attachment
+import com.guixing.jixunying.model.AttachmentKind
 import com.guixing.jixunying.model.CodeMode
 import com.guixing.jixunying.model.CodeModels
 import com.guixing.jixunying.model.CodePhone
@@ -885,7 +888,8 @@ private fun CodeToolStep(ctl: AppController, msg: Message, t: ToolStep, canAct: 
     // 这台设备上动不了（手机本机、或者电脑上没开「允许手机用 Code 栏」）时只能看
     val readonly = !canAct
     val waiting = t.approval == "waiting"
-    var open by remember(t.id) { mutableStateOf(false) }
+    // AI 看过的图默认展开（它会说「上面这几张截图」，用户得一眼看到）
+    var open by remember(t.id) { mutableStateOf(t.image.isNotBlank()) }
     val expanded = open || waiting
     val (icon, label) = codeStepLine(t)
     val tint = when {
@@ -930,6 +934,8 @@ private fun CodeToolStep(ctl: AppController, msg: Message, t: ToolStep, canAct: 
                         if (waiting) Text(if (readonly) "这处改动在等你批准：" else "要改这个文件：", style = MaterialTheme.typography.labelMedium, color = Ext.c.warning)
                         if (t.output.isNotBlank()) ScrollPane { DiffLines(t.output) }
                     }
+                    // AI 看过的图（2026-10-22）：缩略图，点开看大图
+                    t.image.isNotBlank() -> StepImage(ctl, t)
                     // 读文件 / 列目录 / 查找：看结果
                     else -> if (t.output.isNotBlank()) MonoBox(t.output)
                 }
@@ -972,6 +978,25 @@ private fun CodeToolStep(ctl: AppController, msg: Message, t: ToolStep, canAct: 
             }
         }
     }
+}
+
+/** AI 看过的那张图：存的缩小副本（步骤上的 image），手机遥控时也取得到；点一下看大图。 */
+@Composable
+private fun StepImage(ctl: AppController, t: ToolStep) {
+    val img = rememberImage(ctl, t.image)
+    var big by remember(t.image) { mutableStateOf(false) }
+    if (img == null) Box(Modifier.size(120.dp).clip(RoundedCornerShape(10.dp)).background(MaterialTheme.colorScheme.surfaceVariant), contentAlignment = Alignment.Center) {
+        CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+    } else {
+        // 按原图比例撑满 420 见方的框：横图宽 420，竖图（手机截图）高 420；太小的图也放大到看得见
+        val ratio = img.width.coerceAtLeast(1).toFloat() / img.height.coerceAtLeast(1)
+        androidx.compose.foundation.Image(img, t.input,
+            Modifier.widthIn(max = 420.dp).heightIn(max = 420.dp).aspectRatio(ratio, matchHeightConstraintsFirst = ratio < 1f)
+                .clip(RoundedCornerShape(10.dp)).border(1.dp, Ext.c.border, RoundedCornerShape(10.dp)).clickable { big = true },
+            contentScale = androidx.compose.ui.layout.ContentScale.Fit)
+    }
+    if (big) ImagePreview(ctl, Attachment(t.image, t.input.substringAfterLast('\\').substringAfterLast('/'), "image/jpeg", 0, AttachmentKind.IMAGE,
+        note = "AI 看过的图：${t.input}")) { big = false }
 }
 
 /** 一行摘要：做了什么 + 这条的结果。 */

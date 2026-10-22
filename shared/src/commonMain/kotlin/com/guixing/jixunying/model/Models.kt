@@ -461,6 +461,11 @@ data class ToolStep(
      */
     val scopeDir: String = "",
     val prefix: String = "",
+    /**
+     * 2026-10-22：AI 看过的那张图存的一份缩小副本（附件编号，和聊天附件同一个文件夹）。试用时 Claude Code 截了四张图说「上面四张截图」，
+     * 界面上读图那一步却是空的；原图常在临时目录里会被清掉，所以存一份。空 = 不是图。
+     */
+    val image: String = "",
 )
 
 @Serializable

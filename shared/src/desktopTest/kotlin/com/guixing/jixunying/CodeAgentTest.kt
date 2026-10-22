@@ -834,6 +834,14 @@ class CodeAgentTest {
         awaitStatus(e, conv, MsgStatus.DONE, minAi = n)
         val sent = requests.last()["messages"].toString()
         assertTrue("read_file 读到的图片" in sent && "data:image" in sent, sent.takeLast(400))
+        // 2026-10-22：模型看过的图在步骤上存一份，用户也看得到；看不了图的那次不存
+        val img = aiOf(e, conv)!!.tools.single { it.kind == "read" }.image
+        assertTrue(img.isNotBlank(), "读图那一步挂了图")
+        assertTrue(File(dir, "files/$img").isFile, "副本存进了附件文件夹")
+        assertTrue(listOf(e, conv).first { it.role == Role.AI }.tools.single { it.kind == "read" }.image.isBlank(), "看不了图的那次不存")
+        // 删会话时这份副本跟着删
+        assertTrue(e.call(Command.DeleteConversation(conv)).ok)
+        assertFalse(File(dir, "files/$img").exists(), "删会话后副本也删了")
     }
 
     /** 批准命令时选「同样开头不再问」：同样开头的直接跑；拼起来的命令照样问。 */

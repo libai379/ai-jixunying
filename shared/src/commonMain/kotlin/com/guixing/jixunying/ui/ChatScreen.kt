@@ -846,7 +846,7 @@ fun docColor(ext: String) = when (ext) {
 }
 
 @Composable
-private fun ImagePreview(ctl: AppController, a: Attachment, onClose: () -> Unit) {
+internal fun ImagePreview(ctl: AppController, a: Attachment, onClose: () -> Unit) {
     val platform = LocalPlatform.current
     val scope = rememberCoroutineScope()
     val img = rememberImage(ctl, a.id)
