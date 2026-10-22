@@ -590,6 +590,12 @@ class ShotsTest {
             // 手机上这一页是只读的（Code 栏只能在电脑上跑）
             "settings-code" to "settings:CODE")
         for ((name, start) in narrow) shoot("phone-$name", 824, 1784, 2f, hub, phone, start)
+        // 2026-10-22 用户手机截图：输入框下面那一排按钮太多，发送键被挤到边上。收进「+」以后：「+」菜单打开、画图模式开着（手机 412 和 360 宽、电脑）
+        shoot("phone-chat-plus", 824, 1784, 2f, hub, phone, "conv:c1#plus")
+        shoot("phone-chat-draw", 824, 1784, 2f, hub, phone, "conv:c1#draw")
+        shoot("phone-chat-draw-360", 720, 1560, 2f, hub, phone, "conv:c1#draw")
+        shoot("desktop-chat-plus", 1280, 820, 1f, hub, desktop, "conv:c1#plus")
+        shoot("desktop-chat-draw", 1280, 820, 1f, hub, desktop, "conv:c1#draw")
 
         // 语音（1.7.0）：读出来的按钮、正在读、「合成中…」、输入框正在录音、手机上那一页
         val av = FakeAvPlatform(desktop)
