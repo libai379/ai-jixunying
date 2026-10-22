@@ -116,6 +116,9 @@ import com.guixing.jixunying.model.Role
 import com.guixing.jixunying.model.ToolStep
 import kotlinx.coroutines.launch
 
+/** 对话栏回答区和输入框最宽多少（2026-10-22 从 860 放宽；读文字为主，比 Code 栏的 1400 窄一些，一行不至于太长）。 */
+private val CHAT_MAX_WIDTH = 1000.dp
+
 private const val PAINTER = "tool:image"
 private const val CHAIR = "tool:chair"
 private const val VIDEOMAKER = "tool:video"
@@ -250,7 +253,7 @@ private fun MessageList(ctl: AppController, state: AppState, conv: Conversation,
     ) {
         item(key = "bottom") { Spacer(Modifier.height(24.dp)) }
         items(newestFirst, key = { it.id }) { m ->
-            Box(Modifier.widthIn(max = 860.dp).fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
+            Box(Modifier.widthIn(max = CHAT_MAX_WIDTH).fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
                 if (m.role == Role.USER) UserMessage(ctl, state, m) else AiMessage(ctl, state, m, stanceOf[m.id].orEmpty(), onStance)
             }
         }
@@ -1110,7 +1113,7 @@ private fun Composer(ctl: AppController, state: AppState, conv: Conversation, ru
     }
 
     Column(Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 14.dp, top = 4.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-        Column(Modifier.widthIn(max = 860.dp).fillMaxWidth()) {
+        Column(Modifier.widthIn(max = CHAT_MAX_WIDTH).fillMaxWidth()) {
             // 开头打「/」补全斜杠命令（2026-10-18，和 Code 栏一样）
             val slashAll = rememberSlashCommands(ctl, conv.id)
             val slashQ = slashQuery(text)

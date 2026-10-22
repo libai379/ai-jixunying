@@ -476,7 +476,12 @@ class ShotsTest {
         ))
         st.saveMessages("c15", listOf(
             Message("u15", "c15", Role.USER, USER_ID, "把首页标题改成「欢迎」", createdAt = now - 20_000),
-            Message("r15", "c15", Role.AI, "tool:code", "先看了首页文件，标题在第 3 行。", status = MsgStatus.STREAMING,
+            // 2026-10-22：带长文字列的表格（像试用记账本时的 bug 清单），看列宽是不是按内容分的
+            Message("r15", "c15", Role.AI, "tool:code", "先看了首页文件，标题在第 3 行。顺带列一下看到的问题：\n\n" +
+                "| # | 是什么、怎么触发 | 影响 | 测试 |\n|---|---|---|---|\n" +
+                "| 1 | 固定费用按模板里的日子入账（比如 1 号），银行几天后（比如 5 号）才扣款。自动记账只查「同一天同额」，两笔对不上，房租就记了两遍。 | **重复记**，而且是大额 | `b1_recurringRent` |\n" +
+                "| 2 | 一条通知里有好几个金额时只取第一个：「原价¥25，实付¥18」会记成 25。 | 记错金额 | `b6_firstAmount` |",
+                status = MsgStatus.STREAMING,
                 createdAt = now - 10_000, modelLabel = "Claude Code（Opus）",
                 tools = listOf(ToolStep("read", "src/index.html", id = "s150", output = "<h1>Hello</h1>"),
                     ToolStep("run", "git status", id = "s151", output = "On branch main"),

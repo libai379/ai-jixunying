@@ -6,6 +6,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -208,22 +209,38 @@ fun MarkdownText(text: String, modifier: Modifier = Modifier, sources: List<Sear
 @Composable
 private fun TableBlock(t: Block.Table, sources: List<SearchSource>, body: TextStyle) {
     val cols = maxOf(t.header.size, t.rows.maxOfOrNull { it.size } ?: 0)
-    Box(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())) {
-        Column(Modifier.border(1.dp, Ext.c.border, RoundedCornerShape(10.dp)).clip(RoundedCornerShape(10.dp))) {
-            Row(Modifier.background(MaterialTheme.colorScheme.surfaceVariant)) {
-                for (c in 0 until cols) Text(inline(t.header.getOrElse(c) { "" }, sources), style = body.copy(fontWeight = FontWeight.SemiBold, fontSize = 14.sp),
-                    modifier = Modifier.width(160.dp).padding(horizontal = 12.dp, vertical = 8.dp))
-            }
-            t.rows.forEach { r ->
-                HorizontalDivider(color = Ext.c.border)
-                Row {
-                    for (c in 0 until cols) Text(inline(r.getOrElse(c) { "" }, sources), style = body.copy(fontSize = 14.sp),
-                        modifier = Modifier.width(160.dp).padding(horizontal = 12.dp, vertical = 8.dp))
+    // 每列按内容长短分宽度（2026-10-22：以前每列写死 160，长文字那列被挤成每行五六个字，序号列却空一大块）。
+    // 估一格多宽：中文一个字约 14、英文数字约 7.5（14sp），加左右边距 24；一列最窄 56、最宽 520（再长就折行）
+    val want = remember(t, cols) {
+        (0 until cols).map { c ->
+            val cells = listOf(t.header.getOrElse(c) { "" }) + t.rows.map { it.getOrElse(c) { "" } }
+            (cells.maxOf { cellWidth(it) } + 24f).coerceIn(56f, 520f)
+        }
+    }
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+        val avail = maxWidth.value
+        // 放得下就按估的宽度；放不下按比例缩到一屏宽（每列至少 56），列实在太多才横着拖
+        val widths = if (want.sum() <= avail) want else want.map { (it * avail / want.sum()).coerceAtLeast(56f) }
+        Box(Modifier.horizontalScroll(rememberScrollState())) {
+            Column(Modifier.border(1.dp, Ext.c.border, RoundedCornerShape(10.dp)).clip(RoundedCornerShape(10.dp))) {
+                Row(Modifier.background(MaterialTheme.colorScheme.surfaceVariant)) {
+                    for (c in 0 until cols) Text(inline(t.header.getOrElse(c) { "" }, sources), style = body.copy(fontWeight = FontWeight.SemiBold, fontSize = 14.sp),
+                        modifier = Modifier.width(widths[c].dp).padding(horizontal = 12.dp, vertical = 8.dp))
+                }
+                t.rows.forEach { r ->
+                    HorizontalDivider(color = Ext.c.border)
+                    Row {
+                        for (c in 0 until cols) Text(inline(r.getOrElse(c) { "" }, sources), style = body.copy(fontSize = 14.sp),
+                            modifier = Modifier.width(widths[c].dp).padding(horizontal = 12.dp, vertical = 8.dp))
+                    }
                 }
             }
         }
     }
 }
+
+/** 一格文字大概多宽（dp，14sp 字号）：中日韩文字和全角标点约 14，其余约 7.5。只用来分列宽，不求准。 */
+internal fun cellWidth(s: String): Float = s.sumOf { ch -> if (ch.code >= 0x2E80) 14.0 else 7.5 }.toFloat()
 
 @Composable
 fun CodeBlock(lang: String, code: String) {

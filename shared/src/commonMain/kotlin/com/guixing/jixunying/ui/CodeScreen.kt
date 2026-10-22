@@ -124,6 +124,12 @@ import kotlinx.coroutines.launch
 private const val STEP_LINES = 80
 
 /**
+ * Code 栏回答区和输入框最宽多少（2026-10-22 用户：「注意现在的框，两边空太大」——以前写死 860，2560 宽的屏上一半是空的）。
+ * 看代码、差异、日志、表格要宽一点；窗口窄的时候照旧撑满。
+ */
+private val CODE_MAX_WIDTH = 1400.dp
+
+/**
  * Code 会话的主区域（docs/Code栏设计说明.md 第 1、6、11 节，2026-10-12 / 第二期 2026-10-13）。
  * 上面是会话名、文件夹、权限档和「停止」，中间按顺序显示说过的话和每一步工具，下面是输入框。
  * 第二期起手机上也能动手：手机遥控电脑、且电脑上打开了「允许手机用 Code 栏」时，发任务、停止、
@@ -790,7 +796,7 @@ private fun CodeMessageList(ctl: AppController, state: AppState, conv: Conversat
     ) {
         item(key = "bottom") { Spacer(Modifier.height(24.dp)) }
         items(newestFirst, key = { it.id }) { m ->
-            Box(Modifier.widthIn(max = 860.dp).fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
+            Box(Modifier.widthIn(max = CODE_MAX_WIDTH).fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
                 if (m.role == Role.USER) CodeUserMessage(ctl, m) else CodeAiMessage(ctl, state, m, canAct, onDiff)
             }
         }
@@ -1215,7 +1221,9 @@ private fun ChangesDialog(ctl: AppController, conv: Conversation, messageId: Str
     val current = changes.firstOrNull { it.id == picked }
     BoxWithConstraints {
         val side = maxWidth >= 640.dp
-        AppDialog("这次改了 ${changes.size} 个文件", onClose, width = if (side) 1000.dp else 560.dp, actions = {
+        // 宽屏、高屏上跟着窗口变大（2026-10-22：以前固定 1000 宽、430 高，长代码行被截掉）
+        val paneHeight = (maxHeight * 0.6f).coerceIn(430.dp, 900.dp)
+        AppDialog("这次改了 ${changes.size} 个文件", onClose, width = if (side) (maxWidth * 0.86f).coerceIn(1000.dp, 1600.dp) else 560.dp, actions = {
             if (confirmRevert) {
                 TextButton({ confirmRevert = false }) { Text("取消") }
                 Button({
@@ -1259,7 +1267,7 @@ private fun ChangesDialog(ctl: AppController, conv: Conversation, messageId: Str
                         modifier = Modifier.padding(bottom = 8.dp))
                 }
                 if (side) {
-                    Row(Modifier.fillMaxWidth().height(430.dp)) {
+                    Row(Modifier.fillMaxWidth().height(paneHeight)) {
                         Column(Modifier.width(260.dp).fillMaxSize().verticalScroll(rememberScrollState()).padding(end = 10.dp)) {
                             changes.forEach { c ->
                                 ChangeFileRow(c, stat(c), picked == c.id, readonly) { picked = c.id; confirmReject = "" }
@@ -1605,7 +1613,7 @@ private fun CodeComposer(ctl: AppController, conv: Conversation, running: Boolea
     val slashHits = if (slashQ == null) emptyList() else slashAll.filter { it.name.startsWith(slashQ, ignoreCase = true) || slashQ in it.name }
     fun pickSlash(item: SlashItem) { val t = expandSlash(item, ""); text = TextFieldValue(t, TextRange(t.length)) }
     Column(Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 14.dp, top = 4.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-        Column(Modifier.widthIn(max = 860.dp).fillMaxWidth()) {
+        Column(Modifier.widthIn(max = CODE_MAX_WIDTH).fillMaxWidth()) {
             if (fileQuery != null) FileSuggestList(fileHits) { text = insertAt(text, it) }
             if (slashQ != null) SlashList(slashHits) { pickSlash(it) }
             Surface(shape = RoundedCornerShape(22.dp), color = MaterialTheme.colorScheme.surface, border = BorderStroke(1.dp, Ext.c.border), shadowElevation = 3.dp) {
