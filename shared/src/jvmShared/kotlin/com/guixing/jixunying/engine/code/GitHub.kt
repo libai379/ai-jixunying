@@ -73,8 +73,8 @@ class GitHub(private val runner: CodeRunner, private val shell: String, private 
     /** 开 PR：标题、说明用提交记录自动填（gh pr create --fill）。 */
     suspend fun pr(dir: File): Result = run(gh("pr create --fill"), dir, 300)
 
-    /** 还不是仓库的：git init、提交、在 GitHub 上建仓库并上传。 */
-    suspend fun create(dir: File, name: String, private: Boolean, message: String): Result {
+    /** 还不是仓库的先 git init，再提交——只在本地，不传 GitHub（2026-10-22：以前没远端时只能去 GitHub 建仓库）。 */
+    suspend fun initLocal(dir: File, message: String): Result {
         val out = StringBuilder()
         if (!(run("git rev-parse --is-inside-work-tree", dir, 30).text.contains("true"))) {
             val init = run("git init -b main", dir)
@@ -82,6 +82,14 @@ class GitHub(private val runner: CodeRunner, private val shell: String, private 
             if (!init.ok) return Result(false, out.toString())
         }
         val c = commit(dir, message)
+        out.appendLine(c.text)
+        return Result(c.ok, out.toString().trim())
+    }
+
+    /** 还不是仓库的：git init、提交、在 GitHub 上建仓库并上传。 */
+    suspend fun create(dir: File, name: String, private: Boolean, message: String): Result {
+        val out = StringBuilder()
+        val c = initLocal(dir, message)
         out.appendLine(c.text)
         if (!c.ok) return Result(false, out.toString())
         val safe = name.trim().replace(Regex("[^A-Za-z0-9._-]"), "-").trim('-').ifBlank { "my-project" }

@@ -271,10 +271,11 @@ private fun CodeTopBar(ctl: AppController, state: AppState, conv: Conversation, 
                     .clickable { showGit = true }.padding(horizontal = 9.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Icon(Icons.Rounded.CloudUpload, "上传到 GitHub", Modifier.size(15.dp), tint = MaterialTheme.colorScheme.primary)
+                Icon(Icons.Rounded.CloudUpload, "提交和上传", Modifier.size(15.dp), tint = MaterialTheme.colorScheme.primary)
                 if (wide) {
                     Spacer(Modifier.width(4.dp))
-                    Text("上传", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    // 2026-10-22 叫「提交」：没远端时主要是在本地提交，有远端弹窗里照样能推送、开 PR
+                    Text("提交", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
             Spacer(Modifier.width(8.dp))
@@ -446,8 +447,11 @@ private fun TerminalPanel(ctl: AppController, conv: Conversation, spec: CodeSpec
 }
 
 /**
- * 上传到 GitHub（2026-10-18，用户：「能不能连接 github，开发完帮忙上传」；engine/code/GitHub）。
- * 是仓库、有远端：提交并推送 / 推送并开 PR。不是仓库或没有远端：在 GitHub 上建仓库并上传（默认私有）。
+ * 提交和上传（2026-10-18，用户：「能不能连接 github，开发完帮忙上传」；engine/code/GitHub）。
+ * 是仓库、有远端：提交并推送 / 推送并开 PR / 只提交。没有远端：先给「只在本地提交」，传 GitHub 是下面的次要选项。
+ * 不是仓库：「在本地建仓库并提交」，或者在 GitHub 上建仓库并上传（默认私有）。
+ * 2026-10-22 试用记账本时改的：以前没远端只能去 GitHub 建仓库；默认仓库名是独立副本的编号（5a5f0291）；
+ * 默认提交说明是被截断的会话标题。现在说明默认空着，另给「让 AI 写说明并提交」（它看改动写，试用时写得很好）。
  * 结果原样显示在下面（出错能看到 git / gh 说了什么）。
  */
 @Composable
@@ -456,8 +460,9 @@ private fun GitDialog(ctl: AppController, conv: Conversation, spec: CodeSpec, on
     var reload by remember { mutableStateOf(0) }
     var busy by remember { mutableStateOf(false) }
     var output by remember { mutableStateOf("") }
-    var message by remember { mutableStateOf(if (conv.title == "新对话") "" else conv.title) }
-    var name by remember { mutableStateOf(folderName(spec.folder)) }
+    var message by remember { mutableStateOf("") }
+    // GitHub 仓库名只能用英文、数字、- _ .：独立副本用主仓库的文件夹名，中文名过滤完是空的就让用户自己填
+    var name by remember { mutableStateOf(folderName(spec.worktreeOf.ifBlank { spec.folder }).replace(Regex("[^A-Za-z0-9._-]"), "-").trim('-', '.')) }
     var private by remember { mutableStateOf(true) }
     LaunchedEffect(reload) {
         val r = ctl.backend.call(Command.CodeGit(conv.id, "repo"))
@@ -473,10 +478,15 @@ private fun GitDialog(ctl: AppController, conv: Conversation, spec: CodeSpec, on
             reload++
         }
     }
+    /** 交给这个会话的 AI：它看改动写说明、只在本地提交（和自己敲 git 一样会显示在对话里）。 */
+    fun aiCommit() {
+        ctl.run(Command.CodeSend(conv.id, "把现在没提交的改动提交到当前分支：只在本地提交，不推送、不建远端仓库；提交说明按改动内容写（中文，第一行一句话概括）。"),
+            okText = null, quiet = true) { onClose() }
+    }
     val i = info
     val isRepo = i?.get("repo") == "true"
     val remote = i?.get("remote").orEmpty()
-    AppDialog("上传到 GitHub", onClose, width = 600.dp, actions = { Button(onClose) { Text("好了") } }) {
+    AppDialog(if (isRepo && remote.isNotBlank()) "提交和上传" else "提交", onClose, width = 600.dp, actions = { Button(onClose) { Text("好了") } }) {
         Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState())) {
             when {
                 i == null -> Text("正在看项目的 Git 状态…", style = MaterialTheme.typography.bodyMedium, color = Ext.c.subtle)
@@ -488,27 +498,37 @@ private fun GitDialog(ctl: AppController, conv: Conversation, spec: CodeSpec, on
                         else "有 ${changes.size} 个文件改过、还没提交：", style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle, modifier = Modifier.padding(top = 4.dp))
                     if (changes.isNotEmpty()) MonoBox(changes.take(30).joinToString("\n") + if (changes.size > 30) "\n…还有 ${changes.size - 30} 个" else "")
                 }
-                else -> Text("这个文件夹还不是 Git 仓库。可以在 GitHub 上建一个仓库，把现在的文件传上去。",
+                else -> Text("这个文件夹还不是 Git 仓库：可以只在本地建一个仓库把现在的文件提交进去，也可以在 GitHub 上建仓库传上去。",
                     style = MaterialTheme.typography.bodyMedium)
             }
             Spacer(Modifier.height(10.dp))
-            FieldLabel("这次提交写什么", "空着就写「更新」")
+            FieldLabel("这次提交写什么", "空着就写「更新」；不想自己写就让 AI 写")
             AppTextField(message, { message = it }, placeholder = "比如：登录页加上记住密码")
             Spacer(Modifier.height(10.dp))
+            if (i != null) FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                when {
+                    !isRepo -> Button({ go("init") }, enabled = !busy) { Text("在本地建仓库并提交") }
+                    remote.isBlank() -> Button({ go("commit") }, enabled = !busy) { Text("只在本地提交") }
+                    else -> {
+                        Button({ go("commit_push") }, enabled = !busy) { Text("提交并推送") }
+                        OutlinedButton({ go("pr") }, enabled = !busy) { Text("推送并开 PR") }
+                        TextButton({ go("commit") }, enabled = !busy) { Text("只提交") }
+                    }
+                }
+                if (isRepo) OutlinedButton({ aiCommit() }, enabled = !busy) { Text("让 AI 写说明并提交") }
+            }
             if (i != null && (!isRepo || remote.isBlank())) {
+                Spacer(Modifier.height(14.dp))
+                HorizontalDivider(color = Ext.c.border)
+                Spacer(Modifier.height(10.dp))
+                Text("要传到 GitHub（会把代码传上去，默认私有）：", style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
                 FieldLabel("GitHub 上的仓库名", "只能用英文、数字、- _ .")
-                AppTextField(name, { name = it })
+                AppTextField(name, { name = it }, placeholder = "比如：my-app")
                 Row(Modifier.clickable { private = !private }.padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                     androidx.compose.material3.Checkbox(private, { private = it })
                     Text("私有仓库（只有你能看）", style = MaterialTheme.typography.bodyMedium)
                 }
-                Button({ go("create") }, enabled = !busy) { Text("在 GitHub 上建仓库并上传") }
-            } else if (i != null) {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button({ go("commit_push") }, enabled = !busy) { Text("提交并推送") }
-                    OutlinedButton({ go("pr") }, enabled = !busy) { Text("推送并开 PR") }
-                    TextButton({ go("commit") }, enabled = !busy) { Text("只提交") }
-                }
+                OutlinedButton({ go("create") }, enabled = !busy && name.isNotBlank()) { Text("在 GitHub 上建仓库并上传") }
             }
             if (output.isNotBlank()) {
                 Spacer(Modifier.height(10.dp))

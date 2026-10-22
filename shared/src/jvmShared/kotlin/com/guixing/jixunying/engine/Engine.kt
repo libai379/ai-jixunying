@@ -1251,7 +1251,10 @@ class Engine(
                     Regex("https://github\\.com/\\S+/pull/\\d+").find(p.text)?.value?.let { u -> updateCodeSpec(c.convId) { it.copy(prUrl = u) } }
                     CommandResult(p.ok, if (p.ok) "PR 开好了：" + (Regex("https://\\S+").find(p.text)?.value ?: "") else p.text.take(300), data = listOf(a.text, b.text, p.text).distinct().joinToString("\n"))
                 }
-                "create" -> gh.create(dir, c.name.ifBlank { dir.name }, c.private, c.message).let {
+                // 2026-10-22：还不是仓库的，只在本地建仓库并提交，不传 GitHub
+                "init" -> gh.initLocal(dir, c.message).let { CommandResult(it.ok, if (it.ok) "建好本地仓库并提交了" else it.text.take(300), data = it.text) }
+                // 名字空着：独立副本用主仓库的文件夹名（以前用了副本的编号，比如 5a5f0291）
+                "create" -> gh.create(dir, c.name.ifBlank { File(spec.worktreeOf.ifBlank { spec.folder }).name }, c.private, c.message).let {
                     CommandResult(it.ok, if (it.ok) "GitHub 上建好仓库并上传了：" + (Regex("https://github\\.com/\\S+").find(it.text)?.value ?: "") else it.text.take(300), data = it.text)
                 }
                 else -> CommandResult(false, "不认识的操作：${c.op}")

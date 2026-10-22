@@ -437,6 +437,11 @@ class ShotsTest {
         // 用户按了停止的那条（c9）：最后一条回答是 STOPPED，侧栏的状态要写「停下了」
         File(root, "旧项目").mkdirs()
         File(root, "旧项目/README.md").writeText("# 旧项目\n", Charsets.UTF_8)
+        // 2026-10-22「提交」弹窗：旧项目是没有远端的仓库，有一处没提交的改动（我的项目不是仓库）
+        fun git(vararg a: String) = ProcessBuilder(listOf("git") + a).directory(File(root, "旧项目")).redirectErrorStream(true).start().waitFor()
+        git("init", "-b", "main"); git("config", "user.email", "t@t"); git("config", "user.name", "t")
+        git("add", "-A"); git("commit", "-m", "第一次")
+        File(root, "旧项目/README.md").appendText("跑法：python main.py\n", Charsets.UTF_8)
         File(root, "code/c9").mkdirs()
         File(root, "code/c9/s91.orig").writeText("旧的 README 内容\n", Charsets.UTF_8)
         st.saveMessages("c9", listOf(
@@ -480,16 +485,19 @@ class ShotsTest {
         // 备份攒过头（1 GB 以上，设置 → Code 栏 顶上要提醒）：写一个稀疏文件占位，不真占盘
         java.io.RandomAccessFile(File(root, "code/c8/big.orig"), "rw").use { it.setLength(1_100_000_000L) }
         val e = Engine(Storage(root))
+        // 「提交」弹窗要真查 git 状态（2026-10-22）
+        e.codeRunner = com.guixing.jixunying.engine.code.CodeShell()
         e.weixin = com.guixing.jixunying.engine.WeixinBridge(e, File(root, "weixin"))
         e.rescanDocs()
         repeat(100) { if (e.state.docs.count < 3 || e.state.docs.scanning) Thread.sleep(50) }
         return e
     }
 
-    private fun shoot(name: String, w: Int, h: Int, density: Float, hub: Hub, platform: Platform, start: String?) {
+    /** frames：要等后台查东西的（比如提交弹窗查 git 状态）多渲染几帧，每帧约 60 毫秒。 */
+    private fun shoot(name: String, w: Int, h: Int, density: Float, hub: Hub, platform: Platform, start: String?, frames: Int = 14) {
         val scene = ImageComposeScene(w, h, Density(density)) { App(hub, platform, start) }
         var img: org.jetbrains.skia.Image? = null
-        for (i in 0 until 14) {
+        for (i in 0 until frames) {
             img = scene.render(i * 120_000_000L)
             Thread.sleep(60)
         }
@@ -595,6 +603,8 @@ class ShotsTest {
         shoot("desktop-code-team", 1280, 1500, 1f, hub, desktop, "code:c11#path")
         shoot("desktop-code-claude", 1280, 820, 1f, hub, desktop, "code:c15")
         shoot("desktop-code-claude-tall", 1280, 1400, 1f, hub, desktop, "code:c15")
+        shoot("desktop-code-git-local", 1280, 900, 1f, hub, desktop, "code:c9#git", frames = 120)
+        shoot("desktop-code-git-norepo", 1280, 900, 1f, hub, desktop, "code:c8#git", frames = 120)
         shoot("desktop-code-claude-workspace", 1280, 900, 1f, hub, desktop, "code:c15#path")
         shoot("desktop-settings-code-tall", 1280, 1900, 1f, hub, desktop, "settings:CODE")
         shoot("desktop-code-diff", 1280, 820, 1f, hub, desktop, "code:c8#diff")

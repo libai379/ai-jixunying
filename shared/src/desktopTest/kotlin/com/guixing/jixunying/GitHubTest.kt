@@ -62,6 +62,36 @@ class GitHubTest {
         assertEquals(null, com.guixing.jixunying.engine.code.PhoneGate.check(Command.CodeGit(conv, "repo"), on).refusal)
     }
 
+    /**
+     * 2026-10-22（试用记账本时发现以前没远端只能去 GitHub 建仓库）：还不是仓库的能在本地建仓库并提交；
+     * 有仓库、没远端的能只在本地提交；都不碰 GitHub、不加远端。手机上不许。
+     */
+    @Test
+    fun commitLocallyWithoutRemote() = runBlocking<Unit> {
+        val proj = File(tmp, "local").apply { mkdirs() }
+        File(proj, "a.txt").writeText("hello\n")
+        val e = Engine(Storage(File(tmp, "data2")))
+        e.codeRunner = com.guixing.jixunying.engine.code.CodeShell()
+        e.call(Command.SaveProvider(ProviderConfig("p1", "custom", "假", "http://127.0.0.1:9/v1", "sk", listOf(ModelInfo("m")))))
+        e.call(Command.SaveSettings(e.state.settings.copy(proxy = "")))
+        val conv = e.call(Command.CodeCreate(proj.absolutePath, "p1", "m", CodeMode.MANUAL)).data
+
+        assertTrue("\"repo\":\"false\"" in e.call(Command.CodeGit(conv, "repo")).data)
+        val r = e.call(Command.CodeGit(conv, "init", "第一次提交"))
+        assertTrue(r.ok, r.message + "\n" + r.data)
+        assertTrue("第一次提交" in git(proj, "log", "--oneline"), git(proj, "log", "--oneline"))
+        assertEquals("", git(proj, "remote").trim(), "没加远端")
+
+        File(proj, "b.txt").writeText("x\n")
+        val st = e.call(Command.CodeGit(conv, "repo")).data
+        assertTrue("\"remote\":\"\"" in st && "b.txt" in st, st)
+        assertTrue(e.call(Command.CodeGit(conv, "commit", "第二次")).ok)
+        assertTrue("第二次" in git(proj, "log", "--oneline"))
+
+        val on = e.state.copy(settings = e.state.settings.copy(code = e.state.settings.code.copy(allowPhone = true)))
+        assertNotNull(com.guixing.jixunying.engine.code.PhoneGate.check(Command.CodeGit(conv, "init"), on).refusal)
+    }
+
     /** 2026-10-18 独立副本：git worktree 到 .claude/worktrees/，新分支；主仓库 status 干净；删会话清掉副本、分支留着。 */
     @Test
     fun worktreeSessionIsIsolated() = runBlocking {
