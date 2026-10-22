@@ -211,6 +211,9 @@ class ShotsTest {
                         com.guixing.jixunying.model.TeamSeat("review", "pd", "deepseek-flash")))),
             Conversation("c12", "跑测试", emptyList(), createdAt = now - 150_000, updatedAt = now - 4_000,
                 code = com.guixing.jixunying.model.CodeSpec(File(root, "我的项目").absolutePath, "pd", "deepseek-flash")),
+            // 2026-10-22：做了两步、正在想下一步（没在等批准）：最下面要有「还在做…（已经 N 秒）」
+            Conversation("c16", "还在做的会话", emptyList(), createdAt = now - 100_000, updatedAt = now - 2_000,
+                code = com.guixing.jixunying.model.CodeSpec(File(root, "我的项目").absolutePath, com.guixing.jixunying.model.CodeSpec.CLAUDE_CODE, "")),
             // 2026-10-18 外部 Claude Code：交给用户自己的 Claude Code（订阅）做，改文件在等批准
             Conversation("c15", "交给 Claude Code", emptyList(), createdAt = now - 120_000, updatedAt = now - 3_000,
                 code = com.guixing.jixunying.model.CodeSpec(File(root, "我的项目").absolutePath, com.guixing.jixunying.model.CodeSpec.CLAUDE_CODE, "opus",
@@ -474,6 +477,12 @@ class ShotsTest {
                         "--basetemp=C:\\Users\\me\\AppData\\Local\\Temp\\pytest-of-me\\run-42 -k \"parse and not slow\"", id = "s121", approval = "waiting",
                         prefix = "python -m pytest", note = "自动检查拦下：要写到工作区外面的临时目录，先问一下"))),
         ))
+        st.saveMessages("c16", listOf(
+            Message("u16", "c16", Role.USER, USER_ID, "把单元测试跑一遍，看看有没有坏的", createdAt = now - 80_000),
+            Message("r16", "c16", Role.AI, "tool:code", "", status = MsgStatus.STREAMING, createdAt = now - 75_000, modelLabel = "Claude Code",
+                tools = listOf(ToolStep("read", "README.md", id = "s160", output = "# 我的项目"),
+                    ToolStep("run", "python -m pytest -q", id = "s161", output = "12 passed in 3.2s"))),
+        ))
         st.saveMessages("c15", listOf(
             Message("u15", "c15", Role.USER, USER_ID, "把首页标题改成「欢迎」", createdAt = now - 20_000),
             // 2026-10-22：带长文字列的表格（像试用记账本时的 bug 清单），看列宽是不是按内容分的
@@ -613,6 +622,7 @@ class ShotsTest {
         shoot("desktop-code-claude-tall", 1280, 1400, 1f, hub, desktop, "code:c15")
         shoot("desktop-code-git-local", 1280, 900, 1f, hub, desktop, "code:c9#git", frames = 120)
         shoot("desktop-code-git-norepo", 1280, 900, 1f, hub, desktop, "code:c8#git", frames = 120)
+        shoot("desktop-code-working", 1280, 820, 1f, hub, desktop, "code:c16")
         shoot("desktop-code-claude-workspace", 1280, 900, 1f, hub, desktop, "code:c15#path")
         shoot("desktop-settings-code-tall", 1280, 1900, 1f, hub, desktop, "settings:CODE")
         shoot("desktop-code-diff", 1280, 820, 1f, hub, desktop, "code:c8#diff")

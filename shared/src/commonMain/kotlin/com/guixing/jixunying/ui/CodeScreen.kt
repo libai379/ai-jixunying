@@ -888,7 +888,9 @@ private fun CodeAiMessage(ctl: AppController, state: AppState, m: Message, canAc
             m.tools.filter { it.kind != "todo" }.forEach { CodeToolStep(ctl, m, it, canAct) }
             if (reasoning.isNotEmpty()) CodeReasoning(reasoning, streaming = m.status == MsgStatus.STREAMING && body.isEmpty())
             if (body.isNotBlank()) SelectionContainer { MarkdownText(body) }
-            if (m.status == MsgStatus.STREAMING && body.isEmpty() && reasoning.isEmpty() && m.tools.isEmpty()) CodeThinking()
+            // 还在跑、又没在等批准：最下面一直有一行在跳（2026-10-22：以前有了步骤就不显示，两步之间想一分多钟，看不出是在想还是卡住了）
+            if (m.status == MsgStatus.STREAMING && m.tools.none { it.approval == "waiting" })
+                CodeThinking(m.createdAt, started = m.tools.isNotEmpty() || body.isNotEmpty() || reasoning.isNotEmpty())
             if (changes.isNotEmpty()) ChangesBar(changes) { onDiff(m.id) }
             if (m.status == MsgStatus.ERROR) CodeErrorBox(ctl, m.error)
             if (m.status == MsgStatus.STOPPED) Text("（已停止）", style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle, modifier = Modifier.padding(top = 4.dp))
@@ -901,12 +903,17 @@ private fun CodeAiMessage(ctl: AppController, state: AppState, m: Message, canAc
     }
 }
 
+/** 转圈 + 用了多久（每秒跳一下）：还没动手写「正在想…」，做了几步以后写「还在做…」。 */
 @Composable
-private fun CodeThinking() {
+private fun CodeThinking(since: Long, started: Boolean) {
+    var now by remember { mutableStateOf(nowMillis()) }
+    LaunchedEffect(since) { while (true) { now = nowMillis(); kotlinx.coroutines.delay(1_000) } }
+    val sec = ((now - since) / 1000).coerceAtLeast(0)
+    val took = if (sec < 60) "$sec 秒" else "${sec / 60} 分 ${(sec % 60).toString().padStart(2, '0')} 秒"
     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 6.dp)) {
         CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
         Spacer(Modifier.width(8.dp))
-        Text("正在想…", style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
+        Text((if (started) "还在做…" else "正在想…") + "（已经 $took）", style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
     }
 }
 
