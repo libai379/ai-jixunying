@@ -500,8 +500,12 @@ class ShotsTest {
                     ToolStep("edit", "src/index.html", id = "s152", approval = "waiting", note = "改这个文件",
                         output = "--- a/src/index.html\n+++ b/src/index.html\n@@ -3,1 +3,1 @@\n-<h1>Hello</h1>\n+<h1>欢迎</h1>"))),
         ))
-        // 备份攒过头（1 GB 以上，设置 → Code 栏 顶上要提醒）：写一个稀疏文件占位，不真占盘
-        java.io.RandomAccessFile(File(root, "code/c8/big.orig"), "rw").use { it.setLength(1_100_000_000L) }
+        // 备份攒过头（1 GB 以上，设置 → Code 栏 顶上要提醒）：写一个稀疏文件占位，不真占盘。
+        // 2026-10-22：以前用 RandomAccessFile.setLength，NTFS 上不是稀疏文件，每次真占 1 GB 的 C 盘；要 CREATE_NEW + SPARSE 才是
+        val big = File(root, "code/c8/big.orig").toPath()
+        java.nio.file.Files.deleteIfExists(big)
+        java.nio.file.Files.newByteChannel(big, java.nio.file.StandardOpenOption.CREATE_NEW, java.nio.file.StandardOpenOption.WRITE,
+            java.nio.file.StandardOpenOption.SPARSE).use { it.position(1_100_000_000L - 1).write(java.nio.ByteBuffer.wrap(byteArrayOf(0))) }
         val e = Engine(Storage(root))
         // 「提交」弹窗要真查 git 状态（2026-10-22）
         e.codeRunner = com.guixing.jixunying.engine.code.CodeShell()
@@ -509,6 +513,16 @@ class ShotsTest {
         e.rescanDocs()
         repeat(100) { if (e.state.docs.count < 3 || e.state.docs.scanning) Thread.sleep(50) }
         return e
+    }
+
+    /** 测试用的临时文件夹：登记下来，测试结束（过没过都算）由 cleanTmp 删掉。以前只在最后一行删，断言失败就留在 C 盘（10-22 攒了 9.2 GB）。 */
+    private val tmps = mutableListOf<File>()
+    private fun tempDir(prefix: String) = kotlin.io.path.createTempDirectory(prefix).toFile().also { tmps += it }
+
+    @kotlin.test.AfterTest
+    fun cleanTmp() {
+        tmps.forEach { it.deleteRecursively() }
+        tmps.clear()
     }
 
     /** frames：要等后台查东西的（比如提交弹窗查 git 状态）多渲染几帧，每帧约 60 毫秒。 */
@@ -554,7 +568,7 @@ class ShotsTest {
      */
     @Test
     fun phoneComposerFits() {
-        val tmp = kotlin.io.path.createTempDirectory("jxy-fit").toFile()
+        val tmp = tempDir("jxy-fit")
         val hub = Hub(seed(File(tmp, "data"), File(tmp, "文档").apply { mkdirs() }))
         // 真手机能录音，话筒也在那一排
         val phone = FakeAvPlatform(PhonePlatform())
@@ -652,7 +666,7 @@ class ShotsTest {
     fun scrollShots() {
         val dir = out ?: return
         dir.mkdirs()
-        val tmp = kotlin.io.path.createTempDirectory("jxy-scroll").toFile()
+        val tmp = tempDir("jxy-scroll")
         val hub = Hub(seed(File(tmp, "data"), File(tmp, "文档").apply { mkdirs() }))
         val desktop = DesktopPlatform(fileLog = false) { null }
         // 侧栏位置（1280×820）：绳子剪几段 299、租房合同 349、聊了很久的对话 579；聊天区中间 (800, 400)
@@ -672,7 +686,7 @@ class ShotsTest {
     fun shots() {
         val dir = out ?: return
         dir.mkdirs()
-        val tmp = kotlin.io.path.createTempDirectory("jxy-shots").toFile()
+        val tmp = tempDir("jxy-shots")
         val docs = File(tmp, "文档").apply { mkdirs() }
         File(docs, "周报.txt").writeText("项目周报：本周完成登录页改版，下周灰度测试，预算 3.5 万元。", Charsets.UTF_8)
         File(docs, "租房合同.md").writeText("# 房屋租赁合同\n月租金 4800 元，押金两个月。", Charsets.UTF_8)
