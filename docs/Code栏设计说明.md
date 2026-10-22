@@ -258,3 +258,24 @@
 6. 显示：它们说的话进回答正文（团队角色收起来交回主控）；Codex 的 reasoning 进推理过程；跑的命令、读写文件、搜索各记一步（Codex 的命令去掉外面那层 powershell -Command）；Gemini 自己记思路的 update_topic 不显示；Codex 不致命的 error 条目记成一步「提示」。报错取出里面那层 message（Codex 的报错是一整段 JSON），没登录、额度用完各给一句怎么办。
 7. 和 Claude Code 不一样的地方：中间不能拦——手动档也只能整张单子问一次；改工作区外面的文件我们比对不到（Codex 的沙箱只许写工作区，Gemini auto_edit 能不能写外面没实测，未确认）；同一时间别的角色（自己的模型）也在改文件时，它的改动会同时记在两边（都能撤销，撤销到同一个原样）。
 8. 测试：AgentCliTest 五条（两家的输出解析和启动参数、快照比对、Codex 接受编辑改建删并撤销、Gemini 手动档先问、计划档只读 + 报错 + 手机不交），假 codex / gemini 是 python 脚本，照实测格式输出；TeamTest.cliAgentsAsRoles（开发 Gemini、审查 Codex 只读）。LiveAgentTest（设 JXY_LIVE_AGENT=codex,gemini）用本机真的 Codex、Gemini 修一个写错的 add：10-20 两家都通过（Codex 56 秒、Gemini 34 秒），改动比对出来、撤销回原样。
+
+## 18 Claude Code 当总指挥（2026-10-22 用户：「能不能一个 Claude Code 统领所有AI 所有 agent，完成自动化工作流」「我看了你说的，你来觉得怎么做，全权交给你处理」）
+
+方向（10-22 定，长期记忆和当前任务里也记了）：两套并存。Claude Code 当总指挥和主力；自己的 agent 当工人（给 DeepSeek 等便宜模型干体力活）和备胎（Claude 额度满、断网、在手机上）；不再追平 Claude Code 已有的功能，力气放在它没有的：多家 AI 协作、看得清每个 AI 在干嘛、权限和撤销、花费、手机遥控、自动化流程。
+
+1. 用法：Code 会话的模型选 Claude Code，再在「工作区 → 团队」给开发 / 审查 / 测试选脑子（自己加的模型、Codex、Gemini、另一个 Claude Code）。组了队的 Claude Code 会话就是总指挥；不组队和以前一样。以前界面上写「主控是 Claude Code 时不能派活」（CodeScreen.kt 团队那一节），改掉；Codex / Gemini 当主控仍不能组队（它们也能接 MCP，没核对）。
+2. 怎么接：MCP 的 Streamable HTTP（规范 https://modelcontextprotocol.io/specification/2025-06-18/basic/transports ；Claude Code 的接法 https://code.claude.com/docs/en/mcp ）。
+   - 电脑端在本机 127.0.0.1 随便一个空端口起一个 HTTP 服务（JDK 自带的 com.sun.net.httpserver，引擎在两端共用，所以服务放在 desktopMain，引擎经接口拿端口；打包的运行时加 jdk.httpserver 模块）。路径 /mcp：POST 收 JSON-RPC；通知回 202 不带内容；请求回 application/json；GET 回 405（不开推送流）；DELETE 回 200。
+   - 每次把任务交给组了队的 Claude Code：生成一个随机口令，写一份临时的 MCP 配置（mcpServers.jxy：type http、url、headers 里 Authorization: Bearer 口令、timeout 1800000），用 --mcp-config 交给 claude；这一轮做完口令作废、配置删掉。
+   - 安全（规范原文要求）：只认口令对的请求（不对回 401）；有 Origin 头且不是本机的回 403（防网页借浏览器打本机端口）。
+3. 给它的工具（Claude Code 里叫 mcp__jxy__…）：
+   - assign_task(role, task, name?)：把一张任务单派给团队里的一个角色，马上返回编号（T1、T2…），角色在后台干；一次可以派几张同时干。
+   - wait_task(ids?, seconds?)：等这些编号做完（不写就等全部），最多等 600 秒；做完的交回角色的结果，没做完的写还在做、做了多久，可以接着等。
+   - list_tasks：这一轮派过的单子和状态。
+   官方原文：服务器条目的 timeout 至少 1000 时，Claude Code 判空闲超时不会早于它（HTTP 默认空闲 5 分钟就断）；所以 timeout 设 30 分钟，wait_task 一次最多等 10 分钟。
+4. 角色怎么跑：和第 16 节一样走 assign——自己的模型走 subAgent、Claude Code 走 claudeWorker（新开会话）、Codex / Gemini 走 agentWorker；步子都记在总指挥这条回答上，要批准的照样弹，权限照这个会话的档。总指挥调这几个工具不用批准（mcp__jxy__ 开头的直接放行）；角色干活该问的照问。
+5. 给总指挥的说明（附加说明文件 --append-system-prompt-file 里加一段）：团队里有谁、各用什么脑子；用 assign_task 派、wait_task 收；角色的每一步用户都看得见。只讲清楚怎么用，不加限制词（用户 10-08 的规矩）。
+6. 结束和停止：总指挥这一轮结束时还有没收的单子，停掉，回答里写明哪几张没等结果；用户点停止，总指挥和所有角色一起停（角色在总指挥这一轮的协程里跑）。
+7. 手机：手机发起的任务不给这几个工具（Claude Code 只在电脑上，角色要批准的也在电脑上）。
+8. 测试：CommanderTest——MCP 服务（口令错 401、Origin 不对 403、GET 405、通知 202、initialize / tools/list / tools/call）；假 claude（python）照 --mcp-config 调我们的服务：派开发（假模型改文件）→ 等结果 → 汇报。LiveCommanderTest（JXY_LIVE_COMMANDER=数据文件夹）：真 Claude Code 当总指挥、开发 deepseek-flash，修一个写错的 add。
+9. 下一步（这一节先不做）：流程模板（开发 → 审查 → 测试 → 没过就修 → 提交，一条龙自己转）；角色干完自动把差异摘要交回总指挥；手机上看总指挥和各角色的进度。
