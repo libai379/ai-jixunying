@@ -75,6 +75,9 @@ class CodeAgent(private val host: CodeHost) {
     private val runs = ConcurrentHashMap<String, Run>()
     private val waitings = ConcurrentHashMap<String, Waiting>()
 
+    /** Claude Code 当总指挥时它调的派活工具（第 18 节）；电脑端的本机 MCP 服务也拿这个处理请求。 */
+    val commander = com.guixing.jixunying.engine.code.Commander()
+
     /** 手机发起的任务（消息编号）：这些任务里读工作区外的文件照旧要问（2026-10-17，电脑上发起的读不问）。 */
     private val phoneTasks = ConcurrentHashMap.newKeySet<String>()
 
@@ -249,13 +252,17 @@ class CodeAgent(private val host: CodeHost) {
      */
     private suspend fun assign(convId: String, msgId: String, tc: ToolCall, spec: CodeSpec, backup: CodeBackup): String {
         val args = runCatching { Json.parseToJsonElement(tc.arguments.ifBlank { "{}" }).jsonObject }.getOrNull() ?: JsonObject(emptyMap())
-        val role = args.str("role").orEmpty().trim()
         val task = args.str("task").orEmpty().ifBlank { return "参数错误：缺少 task" }
+        return assignRole(convId, msgId, args.str("role").orEmpty().trim(), task, args.str("name").orEmpty(), spec, backup)
+    }
+
+    /** 派一张任务单给团队里的一个角色（自己的主控用 assign_task 调；Claude Code 当总指挥时经本机 MCP 调，第 18 节）。 */
+    private suspend fun assignRole(convId: String, msgId: String, role: String, task: String, name: String, spec: CodeSpec, backup: CodeBackup): String {
         val cur = host.state.conversation(convId)?.code ?: spec
         val seat = cur.seat(role) ?: return "团队里没有「${TeamSeat.label(role)}」这个角色。现在有：" +
             cur.team.joinToString("、") { "${it.role}（${TeamSeat.label(it.role)}）" }.ifEmpty { "（没有，自己做）" }
         val label = TeamSeat.label(role)
-        val brief = args.str("name").orEmpty().ifBlank { task.lineSequence().first().take(16) }
+        val brief = name.ifBlank { task.lineSequence().first().take(16) }
         val intro = roleIntro(role)
         if (seat.isClaudeCode) return claudeWorker(convId, msgId, seat, "$label：$brief", "$intro\n\n$task", role == "review", cur, backup)
         if (seat.isAgent) return agentWorker(convId, msgId, seat, "$label：$brief", "$intro\n\n$task", role == "review")
@@ -1067,24 +1074,48 @@ class CodeAgent(private val host: CodeHost) {
             return
         }
         val backup = host.backupOf(convId)
-        // 自定义指令写进临时文件给它（--append-system-prompt-file），不放在命令行里
+        // 组了队、电脑上发起、本机 MCP 服务起来了：这一轮它是总指挥（第 18 节），派活工具经 --mcp-config 给它
+        val port = host.commanderPort()
+        val commanding = spec.team.isNotEmpty() && port != null && kotlin.coroutines.coroutineContext[PhoneTask] == null
+        // 自定义指令、总指挥的说明写进临时文件给它（--append-system-prompt-file），不放在命令行里
         val custom = listOf(settings.personal.instructions.trim(), settings.personal.codeInstructions.trim()).filter { it.isNotEmpty() }
-        val instr = if (custom.isEmpty()) null else withContext(Dispatchers.IO) {
-            File.createTempFile("jxy-claude-", ".md").apply { writeText("用户的自定义指令：\n\n" + custom.joinToString("\n\n"), Charsets.UTF_8) }
+        val parts = buildList {
+            if (custom.isNotEmpty()) add("用户的自定义指令：\n\n" + custom.joinToString("\n\n"))
+            if (commanding) add(commanderIntro(spec))
         }
+        val instr = if (parts.isEmpty()) null else withContext(Dispatchers.IO) {
+            File.createTempFile("jxy-claude-", ".md").apply { writeText(parts.joinToString("\n\n"), Charsets.UTF_8) }
+        }
+        var mcp: File? = null
         try {
-            var r = claudeRound(convId, msg.id, task, spec, exe, spec.externalSession, instr, backup)
-            var usage = r.usage
-            if (r.stale) {
-                // 接不上以前的会话（Claude Code 那边清掉了）：开个新的，前面的对话带过去
-                host.updateCode(convId) { it.copy(externalSession = "") }
-                r = claudeRound(convId, msg.id, task, spec, exe, "", instr, backup)
-                usage = Usage(usage.prompt + r.usage.prompt, usage.completion + r.usage.completion, usage.cached + r.usage.cached, usage.millis + r.usage.millis)
-            }
-            val err = r.error
-            host.updateMessage(convId, msg.id) {
-                if (err != null) it.copy(status = MsgStatus.ERROR, error = err, usage = usage)
-                else it.copy(content = it.content.trim(), status = MsgStatus.DONE, usage = usage)
+            // 角色在这一轮的协程里跑：用户点停止、这一轮结束，角色跟着停
+            kotlinx.coroutines.coroutineScope {
+                val session = if (!commanding) null else commander.open(this, spec.team.map { it.role to seatLabel(it) }) { role, t, name ->
+                    assignRole(convId, msg.id, role, t, name, host.state.conversation(convId)?.code ?: spec, backup)
+                }
+                try {
+                    if (session != null) mcp = withContext(Dispatchers.IO) {
+                        File.createTempFile("jxy-mcp-", ".json").apply { writeText(com.guixing.jixunying.engine.code.Commander.config(port!!, session.token), Charsets.UTF_8) }
+                    }
+                    var r = claudeRound(convId, msg.id, task, spec, exe, spec.externalSession, instr, backup, mcp = mcp)
+                    var usage = r.usage
+                    if (r.stale) {
+                        // 接不上以前的会话（Claude Code 那边清掉了）：开个新的，前面的对话带过去
+                        host.updateCode(convId) { it.copy(externalSession = "") }
+                        r = claudeRound(convId, msg.id, task, spec, exe, "", instr, backup, mcp = mcp)
+                        usage = Usage(usage.prompt + r.usage.prompt, usage.completion + r.usage.completion, usage.cached + r.usage.cached, usage.millis + r.usage.millis)
+                    }
+                    // 它没等结果就收尾了的单子：停掉，回答里写明
+                    val left = session?.let { commander.close(it.token) }.orEmpty()
+                    val tail = if (left.isEmpty()) "" else "\n\n（" + left.joinToString("、") { "${it.id} ${TeamSeat.label(it.role)}：${it.name}" } + " 没等到结果这一轮就结束了，已经停下。）"
+                    val err = r.error
+                    host.updateMessage(convId, msg.id) {
+                        if (err != null) it.copy(status = MsgStatus.ERROR, error = err, usage = usage)
+                        else it.copy(content = (it.content.trim() + tail).trim(), status = MsgStatus.DONE, usage = usage)
+                    }
+                } finally {
+                    session?.let { commander.close(it.token) }
+                }
             }
         } catch (e: CancellationException) {
             withContext(NonCancellable) { host.updateMessage(convId, msg.id) { it.copy(status = MsgStatus.STOPPED) } }
@@ -1093,19 +1124,37 @@ class CodeAgent(private val host: CodeHost) {
             host.updateMessage(convId, msg.id) { it.copy(status = MsgStatus.ERROR, error = host.friendlyError(e)) }
         } finally {
             instr?.delete()
+            mcp?.delete()
         }
     }
+
+    /** 团队里一个角色给总指挥看的说明：哪个角色、用什么脑子。 */
+    private fun seatLabel(s: TeamSeat): String = TeamSeat.label(s.role) + "（" + when {
+        s.isClaudeCode -> "Claude Code" + s.modelId.takeIf { it.isNotBlank() }?.let { " " + CodeSpec.claudeModelLabel(it) }.orEmpty()
+        s.isAgent -> CodeSpec.agentLabel(s.providerId, s.modelId)
+        else -> (host.state.provider(s.providerId)?.name?.let { "$it · " } ?: "") + s.modelId
+    } + "）"
+
+    /**
+     * 给总指挥的说明（第 18 节第 5 条）：团队里有谁、怎么派怎么收。只讲清楚怎么用，不加限制词（用户 10-08 的规矩）。
+     */
+    private fun commanderIntro(spec: CodeSpec): String =
+        "你是这个会话的总指挥：除了自己动手，还可以把活派给团队里的角色，它们用各自的模型在同一个项目里干活。\n" +
+            "团队：" + spec.team.joinToString("；") { "${it.role} = ${seatLabel(it)}" } + "。\n" +
+            "派活用 mcp__jxy__assign_task（role 填上面的 dev / review / test，task 写清楚要做什么、交回什么），它马上返回编号，角色在后台干；" +
+            "可以连着派几张同时干。用 mcp__jxy__wait_task 等结果（一次最多等 ${com.guixing.jixunying.engine.code.Commander.MAX_WAIT} 秒，没做完就接着等），" +
+            "mcp__jxy__list_tasks 看状态。角色的每一步、改的每个文件用户在界面上都看得见，也能拒绝；审查角色只看不改。"
 
     /**
      * 开一个 claude 进程把这条任务做完（含任务钩子没过时多改的一轮）。
      * worker 不为空 = 它是团队里的一个角色（2026-10-19）：任务文字用 worker 的，不记会话编号、不跑任务钩子，说的话收进 worker.out。
      */
     private suspend fun claudeRound(convId: String, msgId: String, task: Message?, spec: CodeSpec, exe: File, resume: String,
-                                    instr: File?, backup: CodeBackup, worker: ClaudeWorker? = null): ClaudeRound {
+                                    instr: File?, backup: CodeBackup, worker: ClaudeWorker? = null, mcp: File? = null): ClaudeRound {
         val settings = host.state.settings
         val cur = host.state.conversation(convId)?.code ?: spec
         val cmd = ClaudeCli.launcher(exe) + ClaudeCli.args(worker?.modelId ?: cur.modelId, worker?.readOnly == true || cur.mode == CodeMode.PLAN, resume,
-            cur.extraPaths.filter { File(it).isDirectory }, instr)
+            cur.extraPaths.filter { File(it).isDirectory }, instr, mcp)
         val proc = withContext(Dispatchers.IO) {
             runCatching { ClaudeProcess(cmd, File(cur.folder), ClaudeCli.env(System.getenv(), settings.proxy)) }
         }.getOrElse { return ClaudeRound("启动不了 Claude Code（${exe.absolutePath}）：${it.message}") }
@@ -1460,6 +1509,10 @@ class CodeAgent(private val host: CodeHost) {
                     output = uiText(ev.input.str("prompt").orEmpty()), note = "在做"))
                 steps[ev.id] = ExtStep(stepId)
             }
+            // 它内部加载工具的准备动作（2.1.308 里 MCP 工具要先用 ToolSearch 加载；10-22 真跑时显示成一串原始 JSON），不记
+            "ToolSearch" -> steps[ev.id] = ExtStep("", closed = true)
+            // 当总指挥时调我们的派活工具（第 18 节）：角色干活自己会记一步「开发：… 开始干活 / 做完了」，这里不再重复记
+            else -> if (ev.name.startsWith(JXY_TOOL)) steps[ev.id] = ExtStep("", closed = true)
         }
     }
 
@@ -1580,6 +1633,8 @@ class CodeAgent(private val host: CodeHost) {
                 return allow()
             }
             "WebFetch", "WebSearch" -> return allow()
+            // 总指挥调我们自己的派活工具（第 18 节）：不用批准；角色干活该问的照问
+            in JXY_TOOLS -> { steps[ev.toolUseId] = ExtStep("", closed = true); return allow() }
             "ExitPlanMode" -> {
                 // 计划档：计划给用户看，不动手；用户把档切走再说「照计划做」
                 addStep(convId, msgId, ToolStep("plan", "计划", id = stepId, ok = true, output = uiText(input.str("plan").orEmpty()),
@@ -1898,6 +1953,9 @@ class CodeAgent(private val host: CodeHost) {
         private const val MAX_DOC_BYTES = 50L * 1024 * 1024
         private val IMAGE_EXT = setOf("png", "jpg", "jpeg", "webp", "gif", "bmp")
         private val DOC_EXT = setOf("pdf", "docx", "xlsx", "pptx", "doc", "xls", "ppt")
+        /** 总指挥的派活工具在 Claude Code 里的名字（服务名 jxy，见 Commander.config）。 */
+        private const val JXY_TOOL = "mcp__jxy__"
+        private val JXY_TOOLS = setOf("mcp__jxy__assign_task", "mcp__jxy__wait_task", "mcp__jxy__list_tasks")
         private const val LIST_MAX = 200
         private const val FIND_MAX = 200
         private const val FIND_SCAN_MAX = 50_000
@@ -1967,4 +2025,6 @@ interface CodeHost {
     suspend fun autoCheck(convId: String, request: String, action: String): String? = "这台设备没有检查员"
     /** 2026-10-22：AI 看过的图存一份缩小副本，返回附件编号（存不了返回空），步骤上挂着给用户看。 */
     fun keepImage(file: File): String = ""
+    /** 2026-10-22：本机 MCP 服务的端口（电脑端才有，Claude Code 当总指挥时把派活工具经它给 Claude Code，第 18 节）；没有就不当总指挥。 */
+    fun commanderPort(): Int? = null
 }

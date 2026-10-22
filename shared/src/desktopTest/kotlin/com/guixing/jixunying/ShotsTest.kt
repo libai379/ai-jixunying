@@ -624,6 +624,8 @@ class ShotsTest {
         shoot("desktop-code-git-norepo", 1280, 900, 1f, hub, desktop, "code:c8#git", frames = 120)
         shoot("desktop-code-working", 1280, 820, 1f, hub, desktop, "code:c16")
         shoot("desktop-code-claude-workspace", 1280, 900, 1f, hub, desktop, "code:c15#path")
+        // 2026-10-22：主控是 Claude Code 也能组队（总指挥，第 18 节）：团队那一节要能选
+        shoot("desktop-code-claude-team", 1280, 1700, 1f, hub, desktop, "code:c15#path")
         shoot("desktop-settings-code-tall", 1280, 1900, 1f, hub, desktop, "settings:CODE")
         shoot("desktop-code-diff", 1280, 820, 1f, hub, desktop, "code:c8#diff")
         shoot("desktop-code-new", 1280, 820, 1f, hub, desktop, "newcode")

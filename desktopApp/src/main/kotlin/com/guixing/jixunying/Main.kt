@@ -23,6 +23,11 @@ fun main() {
     val engine = Engine(storage)
     // Code 栏跑命令的执行器（安全核心在 engine/code/CodeShell.kt）：只在电脑上有，手机上是空的（手机不在本机跑命令）
     engine.codeRunner = com.guixing.jixunying.engine.code.CodeShell()
+    // Claude Code 当总指挥时把派活工具给它的本机 MCP 服务（只听 127.0.0.1，每轮一个口令；docs/Code栏设计说明.md 第 18 节）。
+    // 起不来（端口、少模块）就不当总指挥，别的照常
+    runCatching { com.guixing.jixunying.engine.DesktopMcpServer(engine.commander) }
+        .onSuccess { engine.mcpPort = it.port; storage.log("JxyMcp", "本机 MCP 服务在 127.0.0.1:${it.port}（Claude Code 当总指挥用）") }
+        .onFailure { storage.log("JxyMcp", "本机 MCP 服务没起来，这次不当总指挥：$it") }
     // 联机服务：连公共中转，手机在哪儿都能连进来
     val relay = RelayHost(engine)
     engine.onRelaySettingsChanged = { Thread { relay.restart() }.start() }

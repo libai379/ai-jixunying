@@ -175,7 +175,7 @@ object ClaudeCli {
      * 由我们按这个会话的档（手动 / 接受编辑 / 自动 / 全部放开）决定，改之前照样备份，能在回答里撤销。
      * 用户的话、自定义指令都不放在参数里（经 cmd.exe 转一手会被引号、特殊字符弄坏）：话走标准输入，指令写进文件。
      */
-    fun args(model: String, plan: Boolean, resume: String, addDirs: List<String>, instructionsFile: File?): List<String> = buildList {
+    fun args(model: String, plan: Boolean, resume: String, addDirs: List<String>, instructionsFile: File?, mcpConfig: File? = null): List<String> = buildList {
         addAll(listOf("-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--permission-prompt-tool", "stdio"))
         // 它的选择题弹窗在这里接不住：让它直接用文字问
         addAll(listOf("--disallowedTools", "AskUserQuestion"))
@@ -184,6 +184,8 @@ object ClaudeCli {
         if (resume.isNotBlank()) addAll(listOf("--resume", resume.trim()))
         for (d in addDirs) addAll(listOf("--add-dir", d))
         if (instructionsFile != null) addAll(listOf("--append-system-prompt-file", instructionsFile.absolutePath))
+        // 当总指挥（第 18 节）：本机 MCP 服务的配置（用户自己配的 MCP 照样加载，不用 --strict-mcp-config）
+        if (mcpConfig != null) addAll(listOf("--mcp-config", mcpConfig.absolutePath))
     }
 
     /**

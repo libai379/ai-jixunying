@@ -200,6 +200,15 @@ class Engine(
     var codeRunner: com.guixing.jixunying.engine.code.CodeRunner? = null
 
     /**
+     * 本机 MCP 服务的端口（2026-10-22，Claude Code 当总指挥，docs/Code栏设计说明.md 第 18 节）。
+     * 电脑上由 Main.kt 起 DesktopMcpServer（JDK 自带的 HTTP 服务，安卓没有）后填上；null = 不当总指挥。
+     */
+    @Volatile var mcpPort: Int? = null
+
+    /** 总指挥的派活工具（本机 MCP 服务拿它处理请求）。 */
+    val commander: com.guixing.jixunying.engine.code.Commander get() = codeAgent.commander
+
+    /**
      * Code 栏的编码循环（engine/CodeAgent.kt，docs/Code栏设计说明.md 第 3、11 节）：上面几条 Code 指令由 Engine 转给它，循环本身在它里面跑。
      * 这里把引擎的几样能力交给它（消息怎么存、怎么推给界面、改前的备份放哪），循环那边不直接翻引擎内部。
      */
@@ -222,6 +231,7 @@ class Engine(
         override fun updateCode(convId: String, transform: (CodeSpec) -> CodeSpec) = updateCodeSpec(convId, transform)
         override suspend fun webSearch(query: String) = runSearch(query, mutableListOf())
         override suspend fun autoCheck(convId: String, request: String, action: String) = autoVerdict(convId, request, action)
+        override fun commanderPort(): Int? = mcpPort
         override fun keepImage(file: File): String = runCatching {
             if (!file.isFile || file.length() > 30L * 1024 * 1024) return@runCatching ""
             val bytes = file.readBytes()

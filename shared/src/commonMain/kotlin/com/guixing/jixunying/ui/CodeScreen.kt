@@ -679,14 +679,18 @@ private fun WorkspaceDialog(ctl: AppController, conv: Conversation, spec: CodeSp
 
 /**
  * 团队（2026-10-19，多角色派活，设计说明第 16 节）：上面选的模型当主控，开发 / 审查 / 测试各选一个脑子（或者不用）。
- * 主控是 Claude Code 时不能派活（它调不了我们的 assign_task），只显示说明。
+ * 2026-10-22 起主控是 Claude Code 也能组队：它是总指挥，派活工具经本机 MCP 给它（第 18 节）；Codex / Gemini 当主控还不能组队。
  */
 @Composable
 private fun TeamSection(ctl: AppController, conv: Conversation, spec: CodeSpec, canEdit: Boolean,
                         options: List<Pair<ProviderConfig, ModelInfo>>) {
-    FieldLabel("团队", if (spec.team.isEmpty()) "不组队就是一个 AI 从头做到尾" else "上面选的模型当主控，拆好活派给下面的角色")
-    if (spec.isAgent) {
-        Text("主控是 ${CodeSpec.agentName(spec.providerId)} 时不能派活给团队（它用的是自己的工具）。要组队，主控换成自己加的模型。",
+    FieldLabel("团队", when {
+        spec.team.isEmpty() -> "不组队就是一个 AI 从头做到尾"
+        spec.isClaudeCode -> "Claude Code 当总指挥，拆好活派给下面的角色（只在电脑上发的任务里）"
+        else -> "上面选的模型当主控，拆好活派给下面的角色"
+    })
+    if (spec.isAgent && !spec.isClaudeCode) {
+        Text("主控是 ${CodeSpec.agentName(spec.providerId)} 时不能派活给团队（它用的是自己的工具）。要组队，主控换成 Claude Code 或者自己加的模型。",
             style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
         return
     }
