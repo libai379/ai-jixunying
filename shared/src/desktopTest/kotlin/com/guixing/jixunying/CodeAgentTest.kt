@@ -1134,4 +1134,26 @@ class CodeAgentTest {
         val log = File(dir, "logs/jxy.log").readText()
         assertTrue("JxySave" in log, "存盘失败记了日志：$log")
     }
+
+    /** 2026-10-22：用户在界面上拒绝了一处改动，下一条任务开头告诉 AI（试用时 Claude Code 只能猜是不是存盘出错）；只说一次。 */
+    @Test
+    fun rejectedChangeIsToldToTheModelOnce() = runBlocking {
+        val e = engine()
+        val conv = codeConv(e, CodeMode.ACCEPT_EDITS)
+        sendTask(e, conv, "改两处")
+        awaitStatus(e, conv, MsgStatus.DONE)
+        val ch = aiOf(e, conv)!!.tools.mapNotNull { it.change }.single { it.path == "a.txt" }
+        assertTrue(e.call(Command.CodeReview(conv, ch.id, false)).ok)
+        assertEquals("greeting world\n", File(project, "a.txt").readText().replace("\r\n", "\n"), "拒绝后恢复了")
+
+        var n = sendTask(e, conv, "随便说一句")
+        awaitStatus(e, conv, MsgStatus.DONE, minAi = n)
+        val first = requests.last()["messages"].toString()
+        assertTrue("用户在界面上拒绝了" in first && "a.txt" in first, first.takeLast(600))
+        assertEquals("随便说一句", listOf(e, conv).last { it.role == Role.USER }.content, "界面上还是用户原话")
+
+        n = sendTask(e, conv, "再说一句")
+        awaitStatus(e, conv, MsgStatus.DONE, minAi = n)
+        assertFalse("用户在界面上拒绝了" in requests.last()["messages"].toString(), "同一处只说一次")
+    }
 }

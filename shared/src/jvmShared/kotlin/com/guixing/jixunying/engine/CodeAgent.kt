@@ -133,9 +133,12 @@ class CodeAgent(private val host: CodeHost) {
 
     // ———————————————— 编码循环 ————————————————
 
-    private suspend fun loop(convId: String, task: Message) {
+    private suspend fun loop(convId: String, original: Message) {
         val spec = host.state.conversation(convId)?.code ?: return
-        currentTask[convId] = task.content
+        currentTask[convId] = original.content
+        // 用户在界面上拒绝过、还没告诉 AI 的改动，补在这条任务后面（用户的话留在最前面；只发给 AI，界面上还是用户原话）
+        val note = rejectedNote(convId)
+        val task = if (note.isBlank()) original else original.copy(content = original.content + "\n\n" + note)
         // 2026-10-18：交给外部 Claude Code（用户自己的订阅）
         if (spec.isClaudeCode) return loopClaude(convId, task, spec)
         // 2026-10-20：交给本机的 Codex / Gemini CLI
@@ -432,7 +435,8 @@ class CodeAgent(private val host: CodeHost) {
         for (m in picked) {
             val role = if (m.role == Role.USER) "user" else "assistant"
             // 以前回答里的 <think>…</think>（MiniMax 写在正文里）不再发回去，白占 token（10-12 真模型测试看到的；聊天那边也这么做）
-            var text = if (role == "assistant") m.content.replace(THINK, "").trim() else m.content
+            // 这一条任务用传进来的文字（前面可能加了「用户拒绝了哪些改动」的说明，2026-10-22），不用记录里存的原话
+            var text = if (role == "assistant") m.content.replace(THINK, "").trim() else if (m.id == task.id) task.content else m.content
             var images = emptyList<String>()
             if (role == "user" && m.attachments.isNotEmpty()) {
                 val (more, imgs) = host.attachmentParts(m, latest = m.id == task.id, vision = vision)
@@ -1388,6 +1392,23 @@ class CodeAgent(private val host: CodeHost) {
             t.isEmpty() -> "$name 出错了，没说原因"
             else -> "$name 报错：${t.take(800)}"
         }
+    }
+
+    /**
+     * 用户在界面上拒绝 / 撤销过、还没告诉 AI 的改动（2026-10-22：试用记账本时拒绝了一个文件，下一条任务里 Claude Code 不知道，
+     * 只能停下来问「是你有意改的，还是存盘出错带回了旧文件」）。写成一段说明补在任务后面，并记下已经说过，每处只说一次。
+     */
+    private fun rejectedNote(convId: String): String {
+        val fresh = host.messagesOf(convId).filter { m -> m.role == Role.AI && m.tools.any { it.change?.let { c -> c.review == "rejected" && !c.toldAi } == true } }
+        if (fresh.isEmpty()) return ""
+        val paths = fresh.flatMap { m -> m.tools.mapNotNull { it.change }.filter { it.review == "rejected" && !it.toldAi }.map { it.path } }.distinct()
+        fresh.forEach { m ->
+            host.updateMessage(convId, m.id) { msg ->
+                msg.copy(tools = msg.tools.map { t -> t.change?.takeIf { it.review == "rejected" && !it.toldAi }?.let { t.copy(change = it.copy(toldAi = true)) } ?: t })
+            }
+        }
+        return "（另外说一下：用户在界面上拒绝了你之前对下面这些文件的改动，文件已经恢复成改之前的样子。这是用户有意的，别再改回去，除非这次任务要你改：\n" +
+            paths.joinToString("\n") { "- $it" } + "）"
     }
 
     /** 给 Claude Code 的这条任务：正文 + 附件（文档抽出的文字、图片）；新开的会话把前面的对话带上。vision = false：不带图片（Codex / Gemini）。 */

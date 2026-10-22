@@ -151,6 +151,8 @@ data class FileChange(
     val created: Boolean = false,
     /** "" 没处理 / "accepted" 接受了 / "rejected" 拒绝了。 */
     val review: String = "",
+    /** 2026-10-22：拒绝了这处改动这件事已经在后面某条任务开头告诉过 AI 了（每处只说一次）。 */
+    val toldAi: Boolean = false,
 )
 
 /**
