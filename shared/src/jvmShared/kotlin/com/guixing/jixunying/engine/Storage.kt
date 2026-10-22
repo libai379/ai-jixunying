@@ -29,10 +29,41 @@ class Storage(val root: File) {
         fileDir.mkdirs()
     }
 
+    /**
+     * 先写 .tmp 再改名覆盖。Windows 上目标文件被别的程序开着（杀毒、索引、同步盘、别的程序在读）时改名会失败，
+     * 2026-10-22 实测一次就把正在跑的 Code 任务判成了出错：等一会儿再试，一共一秒多；还不行才抛给调用的（Engine.save 兜住）。
+     */
     private fun writeAtomic(target: File, text: String) {
         val tmp = File(target.parentFile, target.name + ".tmp")
         tmp.writeText(text, Charsets.UTF_8)
-        Files.move(tmp.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
+        var wait = 20L
+        while (true) {
+            try {
+                Files.move(tmp.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
+                return
+            } catch (e: java.nio.file.FileSystemException) {
+                if (wait > 700) throw e
+                Thread.sleep(wait)
+                wait *= 2
+            }
+        }
+    }
+
+    private val logLock = Any()
+
+    /**
+     * 引擎的诊断日志（2026-10-22：Code 任务出错、存盘失败以前一行都不记，事后查不了）。
+     * 和界面层 DesktopPlatform.log 写同一个文件 <数据目录>\logs\jxy.log，同样超过 2MB 从头写；不写 Key、不写文件内容。
+     */
+    fun log(tag: String, text: String) {
+        runCatching {
+            val dir = File(root, "logs").apply { mkdirs() }
+            val f = File(dir, "jxy.log")
+            synchronized(logLock) {
+                if (f.length() > 2L * 1024 * 1024) f.writeText("")
+                f.appendText("${java.time.LocalDateTime.now().toString().take(19)} [$tag] ${text.replace("\n", " ⏎ ")}\n", Charsets.UTF_8)
+            }
+        }
     }
 
     private fun quarantine(f: File, e: Throwable) {

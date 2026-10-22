@@ -287,7 +287,7 @@ class Engine(
         // 以前重复导入留下的同一个服务商 / 同一位成员，启动时合并掉
         val (deduped, memberMap, removed) = ConfigMerge.dedupe(s)
         if (removed > 0) s = deduped
-        if (s != state) { state = s; storage.saveState(s) }
+        if (s != state) { state = s; persistState(s) }
         if (memberMap.isNotEmpty()) remapSenders(memberMap)
         emit(Event.State(state))
         storage.brokenNotes.forEach { emit(Event.Notice(it, error = true)) }
@@ -402,7 +402,7 @@ class Engine(
     private fun updateState(transform: (AppState) -> AppState): AppState {
         val s = synchronized(stateLock) {
             state = transform(state)
-            storage.saveState(state)
+            persistState(state)
             state
         }
         emit(Event.State(s))
@@ -610,7 +610,42 @@ class Engine(
 
     private fun snapshot(convId: String): List<Message> = messages(convId).let { synchronized(it) { it.toList() } }
 
-    private fun save(convId: String) = storage.saveMessages(convId, snapshot(convId))
+    /**
+     * 存盘失败（文件被别的程序占着、磁盘满……）不让正在跑的任务跟着出错（2026-10-22 实测一次就把 Code 任务判死了）：
+     * 内存里的记录是全的，记一笔日志、一分钟内最多提示一次，两秒后自动再存（存的是那时最新的全部）。
+     */
+    private fun save(convId: String) {
+        try {
+            storage.saveMessages(convId, snapshot(convId))
+        } catch (e: Exception) {
+            saveFailed("这个会话的记录", e, "conv:$convId") { save(convId) }
+        }
+    }
+
+    private fun persistState(s: AppState) {
+        try {
+            storage.saveState(s)
+        } catch (e: Exception) {
+            saveFailed("设置和会话列表", e, "state") { synchronized(stateLock) { persistState(state) } }
+        }
+    }
+
+    private val resaving: MutableSet<String> = ConcurrentHashMap.newKeySet()
+    @Volatile private var lastSaveNotice = 0L
+
+    private fun saveFailed(what: String, e: Exception, key: String, retry: () -> Unit) {
+        val why = if (e is java.nio.file.FileSystemException) "文件被别的程序占着（杀毒、同步盘、正在打开它的程序都可能）" else (e.message ?: e.toString()).take(120)
+        storage.log("JxySave", "$what 没存上（$key）：$e")
+        if (now() - lastSaveNotice > 60_000) {
+            lastSaveNotice = now()
+            emit(Event.Notice("$what 刚才没存上：$why。内容都还在，过一会儿会自动再存。", error = true))
+        }
+        if (resaving.add(key)) scope.launch {
+            kotlinx.coroutines.delay(2_000)
+            resaving.remove(key)
+            retry()
+        }
+    }
 
     private fun addMessage(m: Message) {
         val list = messages(m.convId)
@@ -621,11 +656,15 @@ class Engine(
 
     private fun updateMessage(convId: String, id: String, persist: Boolean = true, transform: (Message) -> Message): Message? {
         val list = messages(convId)
+        var before: MsgStatus? = null
         val updated = synchronized(list) {
             val i = list.indexOfFirst { it.id == id }
             if (i < 0) return null
+            before = list[i].status
             transform(list[i]).also { list[i] = it }
         }
+        // 任务出错记一行日志（2026-10-22：以前只在界面红框里，事后查不了）
+        if (updated.status == MsgStatus.ERROR && before != MsgStatus.ERROR) storage.log("JxyTask", "$convId ${updated.senderId} 出错：${updated.error.take(500)}")
         emit(Event.MessageUpsert(updated))
         if (persist) save(convId)
         return updated
@@ -4078,6 +4117,8 @@ class Engine(
     private fun friendlyErrorRaw(e: Throwable, p: ProviderConfig?): String {
         if (e is ImageDownloadFailed) return "图片画好了，但下载失败（这张已经扣费）：${e.body.take(200)}"
         if (e is SpeechDownloadFailed) return "声音合成好了，但下载失败（这次已经扣费）：${e.body.take(200)}"
+        // 以前红框里直接是「…json.tmp -> …json」这种原始异常，看不懂（2026-10-22）
+        if (e is java.nio.file.FileSystemException) return "读写文件没成功：${e.file ?: ""} 被别的程序占着，或者没有权限（${e.reason ?: e.javaClass.simpleName}）。等一下再试一次。"
         if (e is ApiException) {
             val body = e.body.take(300)
             val lower = body.lowercase()

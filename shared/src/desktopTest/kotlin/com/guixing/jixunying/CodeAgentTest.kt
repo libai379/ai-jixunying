@@ -13,6 +13,7 @@ import com.guixing.jixunying.model.MsgStatus
 import com.guixing.jixunying.model.PairingCode
 import com.guixing.jixunying.model.ProviderConfig
 import com.guixing.jixunying.model.RelaySettings
+import com.guixing.jixunying.model.Message
 import com.guixing.jixunying.model.Role
 import com.guixing.jixunying.model.ToolStep
 import com.guixing.jixunying.relay.RelayHost
@@ -1086,5 +1087,43 @@ class CodeAgentTest {
 
     private fun assertContentEqualsString(expected: ByteArray, actual: ByteArray, message: String) {
         assertTrue(expected.contentEquals(actual), message)
+    }
+
+    // ———————————————— 2026-10-22：存盘时文件被别的程序占着 ————————————————
+    // 记账本试用时，别的程序正开着会话文件，改名覆盖失败，正在跑的 Code 任务就被判成了「出错」。
+    // Java 的 FileInputStream 在 Windows 上打开时不带「允许删除」，正好模拟别的程序开着它。
+
+    /** 短时间占着：存盘自己等一会儿再试，不报错。 */
+    @Test
+    fun saveRetriesWhenFileBrieflyLocked() {
+        val s = Storage(File(dir, "data-retry"))
+        val m = Message("m1", "c1", Role.USER, "u", "第一版", createdAt = 1)
+        s.saveMessages("c1", listOf(m))
+        val f = File(dir, "data-retry/convs/c1.json")
+        val lock = java.io.FileInputStream(f)
+        val release = kotlin.concurrent.thread { Thread.sleep(300); lock.close() }
+        s.saveMessages("c1", listOf(m.copy(content = "第二版")))
+        release.join()
+        assertTrue("第二版" in f.readText(), "放开以后存上了：${f.readText().take(200)}")
+    }
+
+    /** 占得比重试还久：任务照样做完，不判成出错；放开后盘上自动补存成最后的样子，日志里有记录。 */
+    @Test
+    fun lockedConvFileDoesNotKillTask() = runBlocking {
+        val e = engine()
+        val conv = codeConv(e, CodeMode.ACCEPT_EDITS)
+        sendTask(e, conv, "随便说一句")
+        awaitStatus(e, conv, MsgStatus.DONE)
+        val f = File(dir, "convs/$conv.json")
+        assertTrue(f.isFile)
+        val lock = java.io.FileInputStream(f)
+        val release = kotlin.concurrent.thread { Thread.sleep(3_500); lock.close() }
+        val n = sendTask(e, conv, "改两处")
+        awaitStatus(e, conv, MsgStatus.DONE, minAi = n)
+        assertEquals("hello world\n", File(project, "a.txt").readText().replace("\r\n", "\n"), "任务真的做完了")
+        release.join()
+        await(10_000) { "两处都改了" in f.readText() && "\"DONE\"" in f.readText().substringAfterLast("两处都改了") }
+        val log = File(dir, "logs/jxy.log").readText()
+        assertTrue("JxySave" in log, "存盘失败记了日志：$log")
     }
 }
