@@ -189,6 +189,9 @@ fun AppDialog(
     content: @Composable ColumnScope.() -> Unit,
 ) {
     Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+     // 内容区最高跟着窗口走：窗口高度的 72%，不低于 620（2026-10-22：以前写死 620，大屏上弹窗下面空一大块，工作区弹窗的团队要滚才看得到）
+     androidx.compose.foundation.layout.BoxWithConstraints {
+      val contentCap = if (maxHeight == Dp.Infinity) 620.dp else (maxHeight * 0.72f).coerceAtLeast(620.dp)
       Column(Modifier.widthIn(max = width).fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
         Surface(
             Modifier.fillMaxWidth().padding(16.dp),
@@ -205,15 +208,16 @@ fun AppDialog(
                     }
                 }
                 Spacer(Modifier.size(10.dp))
-                // 内容区：最高 620，但窗口矮的时候先让出标题和底下按钮的位置、剩下的才给内容（weight，不占满）。
+                // 内容区：最高 contentCap，但窗口矮的时候先让出标题和底下按钮的位置、剩下的才给内容（weight，不占满）。
                 // 以前固定 620，窗口矮（用户 10-14 截图：新建 Code 会话）时「建好」被挤到窗口外面，只看得见右上角的叉
-                Column(Modifier.weight(1f, fill = false).heightIn(max = 620.dp)) { content() }
+                Column(Modifier.weight(1f, fill = false).heightIn(max = contentCap)) { content() }
                 Row(Modifier.fillMaxWidth().padding(top = 16.dp), horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.End), verticalAlignment = Alignment.CenterVertically, content = actions)
             }
         }
         // 弹窗打开时提示条显示在弹窗下方（同一层），不会被挡住
         androidx.compose.material3.SnackbarHost(LocalSnackbar.current)
       }
+     }
     }
 }
 
