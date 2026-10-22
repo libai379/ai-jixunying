@@ -195,7 +195,13 @@ class CodeSessionTest {
         // 这一版的界面（schema = 3）能改回来
         assertTrue(e.call(Command.SaveSettings(s.copy(schema = 3, code = CodeSettings(shell = "powershell")))).ok)
         assertEquals("powershell", e.state.settings.code.shell)
-        assertEquals(6, Settings.SCHEMA, "1.7.0 加了语音和按意思搜（5），10-17 加了个性化（6）")
+        // 10-22 的液态玻璃开关：电脑上关了，10-17 的手机（schema = 6）不认识它、发来默认的「开」，电脑上保留「关」；这一版能改
+        assertTrue(e.call(Command.SaveSettings(e.state.settings.copy(schema = Settings.SCHEMA, glass = false))).ok)
+        assertTrue(e.call(Command.SaveSettings(e.state.settings.copy(schema = 6, glass = true))).ok)
+        assertEquals(false, e.state.settings.glass, "旧版手机冲不掉电脑上的液态玻璃开关")
+        assertTrue(e.call(Command.SaveSettings(e.state.settings.copy(schema = Settings.SCHEMA, glass = true))).ok)
+        assertEquals(true, e.state.settings.glass)
+        assertEquals(7, Settings.SCHEMA, "1.7.0 加了语音和按意思搜（5），10-17 加了个性化（6），10-22 加了液态玻璃开关（7）")
     }
 
     @Test

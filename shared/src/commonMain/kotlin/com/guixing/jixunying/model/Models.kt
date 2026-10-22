@@ -249,6 +249,8 @@ data class Settings(
     val semantic: SemanticSettings = SemanticSettings(),
     /** 个性化（2026-10-17，学 WorkBuddy 的 设置 → 个性化 → 自定义指令）：用户自己写的、每次都要照着做的指令。 */
     val personal: PersonalSettings = PersonalSettings(),
+    /** 液态玻璃界面（2026-10-22，docs/界面换装说明.md）：关掉就是原来的纯色界面。 */
+    val glass: Boolean = true,
     /**
      * 发设置的这一端认得哪一版设置。旧版手机不认识这个字段，发来的就是 0；
      * 电脑看到 0 就保留旧版不认识的那几项（不然手机一改设置就把电脑上的冲回默认值）。
@@ -258,10 +260,11 @@ data class Settings(
     companion object {
         /**
          * 1 = 1.4.0 加了裁判和 AI 核实；2 = 1.5.0 加了 office（Word / Excel）；3 = 1.6.0 加了 code（Code 栏）；
-         * 4 = 1.7.0 加了 speech（语音）；5 = 1.7.0 加了 semantic（按意思搜）；6 = 2026-10-17 加了 personal（自定义指令）。
+         * 4 = 1.7.0 加了 speech（语音）；5 = 1.7.0 加了 semantic（按意思搜）；6 = 2026-10-17 加了 personal（自定义指令）；
+         * 7 = 2026-10-22 加了 glass（液态玻璃界面）。
          * 以后再加旧版不认识的设置项，就加一，并在 SaveSettings 里保留。
          */
-        const val SCHEMA = 6
+        const val SCHEMA = 7
     }
 }
 

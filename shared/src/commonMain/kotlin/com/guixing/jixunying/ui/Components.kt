@@ -30,6 +30,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -109,11 +111,13 @@ fun ToggleChip(label: String, icon: ImageVector, checked: Boolean, onToggle: () 
 
 @Composable
 fun SectionCard(modifier: Modifier = Modifier, padding: PaddingValues = PaddingValues(16.dp), content: @Composable ColumnScope.() -> Unit) {
+    // 液态玻璃开着时（2026-10-22）：半透明底 + 细亮边，透出后面的壁纸。不做真折射：设置页能滚，每张卡每帧重画着色器手机上会卡
+    val glass = com.guixing.jixunying.ui.glass.LocalGlass.current
     Surface(
         modifier.fillMaxWidth(),
         shape = MaterialTheme.shapes.medium,
-        color = MaterialTheme.colorScheme.surface,
-        border = BorderStroke(1.dp, Ext.c.border),
+        color = if (glass.on) MaterialTheme.colorScheme.surface.copy(alpha = if (glass.dark) 0.62f else 0.72f) else MaterialTheme.colorScheme.surface,
+        border = BorderStroke(1.dp, if (glass.on) androidx.compose.ui.graphics.Color.White.copy(alpha = if (glass.dark) 0.08f else 0.6f) else Ext.c.border),
     ) {
         Column(Modifier.padding(padding), content = content)
     }
@@ -175,7 +179,7 @@ fun SwitchRow(title: String, desc: String? = null, checked: Boolean, onChange: (
             Text(title, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
             if (desc != null) Text(desc, style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
         }
-        Switch(checked, onChange)
+        AppSwitch(checked, onChange)
     }
 }
 
@@ -193,9 +197,23 @@ fun AppDialog(
      androidx.compose.foundation.layout.BoxWithConstraints {
       val contentCap = if (maxHeight == Dp.Infinity) 620.dp else (maxHeight * 0.72f).coerceAtLeast(620.dp)
       Column(Modifier.widthIn(max = width).fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
-        Surface(
-            Modifier.fillMaxWidth().padding(16.dp),
+        // 液态玻璃（2026-10-22，docs/界面换装说明.md）：弹窗是另一个窗口，不采样主窗口的壁纸，自己画一份当采样源；
+        // 出现时弹簧放大 + 淡入。弹窗里的开关、按钮经 LocalGlass 拿到的也是这一份
+        val env = com.guixing.jixunying.ui.glass.LocalGlass.current
+        val dialogBackdrop = if (env.on) com.guixing.jixunying.ui.glass.rememberWallpaperBackdrop(env.dark) else null
+        val appear = remember { androidx.compose.animation.core.Animatable(if (env.on) 0f else 1f) }
+        LaunchedEffect(Unit) { appear.animateTo(1f, com.guixing.jixunying.ui.glass.Springs.pop()) }
+        CompositionLocalProvider(com.guixing.jixunying.ui.glass.LocalGlass provides
+            com.guixing.jixunying.ui.glass.GlassEnv(dialogBackdrop, env.on, env.dark)) {
+        GlassSurface(
             shape = RoundedCornerShape(22.dp),
+            modifier = Modifier.fillMaxWidth().padding(16.dp).graphicsLayer {
+                val v = appear.value
+                scaleX = 0.92f + 0.08f * v
+                scaleY = 0.92f + 0.08f * v
+                alpha = v.coerceIn(0f, 1f)
+            },
+            style = com.guixing.jixunying.ui.glass.GlassStyle.Panel,
             color = MaterialTheme.colorScheme.surface,
             tonalElevation = 2.dp,
             shadowElevation = 12.dp,
@@ -213,6 +231,7 @@ fun AppDialog(
                 Column(Modifier.weight(1f, fill = false).heightIn(max = contentCap)) { content() }
                 Row(Modifier.fillMaxWidth().padding(top = 16.dp), horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.End), verticalAlignment = Alignment.CenterVertically, content = actions)
             }
+        }
         }
         // 弹窗打开时提示条显示在弹窗下方（同一层），不会被挡住
         androidx.compose.material3.SnackbarHost(LocalSnackbar.current)

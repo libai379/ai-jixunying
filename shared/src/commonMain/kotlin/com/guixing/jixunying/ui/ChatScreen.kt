@@ -1162,7 +1162,7 @@ private fun Composer(ctl: AppController, state: AppState, conv: Conversation, ru
                     }
                 }
             }
-            Surface(
+            GlassSurface(
                 shape = RoundedCornerShape(22.dp),
                 color = MaterialTheme.colorScheme.surface,
                 border = BorderStroke(1.dp, if (drawMode || videoMode) MaterialTheme.colorScheme.secondary else Ext.c.border),
@@ -1316,18 +1316,15 @@ private fun Composer(ctl: AppController, state: AppState, conv: Conversation, ru
                             Spacer(Modifier.width(8.dp))
                         }
                         val canSend = (text.text.isNotBlank() || pending.any { it.att != null || it.local }) && uploading == 0
-                        Box(
-                            Modifier.size(36.dp).clip(CircleShape)
-                                .background(if (canSend) (if (drawMode || videoMode) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary) else MaterialTheme.colorScheme.surfaceContainerHighest)
-                                .clickable(enabled = canSend) { send() },
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            Icon(
-                                if (videoMode) Icons.Rounded.Movie else if (drawMode) Icons.Rounded.Brush else Icons.Rounded.ArrowUpward,
-                                if (videoMode) "做视频" else if (drawMode) "画图" else "发送", Modifier.size(19.dp),
-                                tint = if (canSend) MaterialTheme.colorScheme.onPrimary else Ext.c.subtle,
-                            )
-                        }
+                        // 液态发送键（2026-10-22）：按下跟手形变、弹回；关了玻璃就是原来的实心圆
+                        GlassRoundButton(
+                            if (videoMode) Icons.Rounded.Movie else if (drawMode) Icons.Rounded.Brush else Icons.Rounded.ArrowUpward,
+                            if (videoMode) "做视频" else if (drawMode) "画图" else "发送",
+                            enabled = canSend,
+                            color = if (drawMode || videoMode) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary,
+                            onColor = MaterialTheme.colorScheme.onPrimary,
+                            onClick = { send() },
+                        )
                     }
                 }
             }

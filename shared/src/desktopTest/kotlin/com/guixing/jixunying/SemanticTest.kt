@@ -871,7 +871,7 @@ class SemanticTest {
         val e = engine("zhipu")
         val s = e.state.settings
         assertTrue(e.call(Command.SaveSettings(s.copy(semantic = SemanticSettings(historyOn = true, docsOn = true, providerId = "p-zhipu", model = "embedding-3")))).ok)
-        assertEquals(6, Settings.SCHEMA, "1.7.0 加了语音和按意思搜（5），10-17 加了个性化（6）")
+        assertEquals(7, Settings.SCHEMA, "1.7.0 加了语音和按意思搜（5），10-17 加了个性化（6），10-22 加了液态玻璃开关（7）")
         assertTrue(e.state.settings.semantic.historyOn)
 
         // 只认到语音设置的版本（schema = 4，开发中间版）不认识这块，发来的是默认值：电脑上改过的要保留

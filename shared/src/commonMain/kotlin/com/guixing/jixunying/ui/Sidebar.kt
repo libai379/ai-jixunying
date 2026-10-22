@@ -1,5 +1,7 @@
 package com.guixing.jixunying.ui
 
+import com.guixing.jixunying.ui.glass.glass
+
 import androidx.compose.foundation.background
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material.icons.rounded.Tune
@@ -108,7 +110,12 @@ fun Sidebar(ctl: AppController, modifier: Modifier, onNavigate: () -> Unit) {
     // 列表 → 最底下一行「花费」「设置」。原来在底下的「连接电脑 / 手机联机」收进了设备下拉。
     val code = ctl.sidebarTab == SidebarTab.CODE
     val codeAccess = CodeUi.access(LocalPlatform.current.isDesktop, ctl.remoteMode, state.settings.code.allowPhone)
-    Column(modifier.background(Ext.c.sidebar)) {
+    // 液态玻璃（2026-10-22）：浮在壁纸上的一块圆角玻璃（电脑上留出边距；手机抽屉贴边，只右边圆角）
+    val glassOn = com.guixing.jixunying.ui.glass.LocalGlass.current.on
+    val panelShape = if (isDesktopHere) RoundedCornerShape(22.dp) else RoundedCornerShape(topEnd = 22.dp, bottomEnd = 22.dp)
+    Column(modifier
+        .then(if (glassOn && isDesktopHere) Modifier.padding(start = 10.dp, top = 10.dp, bottom = 10.dp) else Modifier)
+        .glass(if (glassOn) panelShape else androidx.compose.ui.graphics.RectangleShape, com.guixing.jixunying.ui.glass.GlassStyle.Panel, fallback = Ext.c.sidebar)) {
         Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
             // 接焦点用的空点（什么都不画）：手机上抽屉一拉开，系统把焦点交给侧栏里第一个能拿焦点的东西，
             // 落在标签、下拉、「+」上都会显出一块灰色的焦点底色；让它落在这里
@@ -197,9 +204,12 @@ private fun SidebarTabs(tab: SidebarTab, onPick: (SidebarTab) -> Unit) {
 /** 搜索框下面那三张小卡片之一：图标、名字、一行状态（原来侧栏底下的「我的文档」「立场档案」「AI 成员」）。 */
 @Composable
 private fun RowScope.QuickCard(icon: androidx.compose.ui.graphics.vector.ImageVector, title: String, sub: String, dot: Color? = null, onClick: () -> Unit) {
+    // 按下弹簧缩一下（2026-10-22）；玻璃上底色半透明
+    val press = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
     Column(
-        Modifier.weight(1f).clip(RoundedCornerShape(14.dp)).background(MaterialTheme.colorScheme.surface)
-            .clickable(onClick = onClick).padding(horizontal = 10.dp, vertical = 10.dp),
+        Modifier.weight(1f).springPress(press).clip(RoundedCornerShape(14.dp)).background(cardFill())
+            .clickable(interactionSource = press, indication = androidx.compose.foundation.LocalIndication.current, onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 10.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Icon(icon, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -336,7 +346,7 @@ private fun CodeSessionRow(ctl: AppController, state: AppState, c: Conversation,
     val status = codeStatus(messages)
     Row(
         Modifier.fillMaxWidth().padding(vertical = 1.dp).clip(RoundedCornerShape(10.dp))
-            .background(if (selected) Ext.c.sidebarSelected else Color.Transparent)
+            .background(animatedSelection(selected))
             .clickable(onClick = onClick).padding(start = 8.dp, top = 7.dp, bottom = 7.dp, end = 2.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -466,7 +476,7 @@ private fun ConversationRow(ctl: AppController, state: AppState, c: Conversation
     val members = c.memberIds.mapNotNull { state.member(it) }
     Row(
         Modifier.fillMaxWidth().padding(vertical = 1.dp).clip(RoundedCornerShape(10.dp))
-            .background(if (selected) Ext.c.sidebarSelected else Color.Transparent)
+            .background(animatedSelection(selected))
             .clickable(onClick = onClick).padding(start = 8.dp, top = 7.dp, bottom = 7.dp, end = 2.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {

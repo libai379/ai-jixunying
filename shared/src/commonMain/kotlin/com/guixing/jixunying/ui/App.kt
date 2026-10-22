@@ -1,5 +1,7 @@
 package com.guixing.jixunying.ui
 
+import androidx.compose.ui.graphics.luminance
+
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -326,8 +328,17 @@ fun App(hub: Hub, platform: Platform, debugStart: String? = null) {
                         if (!backend.store.hasMessages(it.id)) ctl.run(Command.LoadMessages(it.id))
                     }
                 }
+                // 液态玻璃（2026-10-22，docs/界面换装说明.md）：壁纸在最底下、和界面是兄弟（不能是界面的上层，安卓上会原生崩溃），
+                // 界面里的玻璃面经 LocalGlass 采样它；设置里关掉就是原来的纯色
+                val glassOn = state.settings.glass
+                val dark = MaterialTheme.colorScheme.background.luminance() < 0.5f
+                val wallpaper = com.kashif_e.backdrop.backdrops.rememberLayerBackdrop()
                 Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
-                    MainLayout(ctl)
+                    if (glassOn) com.guixing.jixunying.ui.glass.GlassWallpaper(wallpaper, dark, Modifier.matchParentSize())
+                    CompositionLocalProvider(com.guixing.jixunying.ui.glass.LocalGlass provides
+                        com.guixing.jixunying.ui.glass.GlassEnv(if (glassOn) wallpaper else null, glassOn, dark)) {
+                        MainLayout(ctl)
+                    }
                     // 开发截图用：-Djxy.start=…#toast 打开就弹一条提示，看它挡不挡东西
                     LaunchedEffect(Unit) { if (ctl.debugDialog == "toast") snackbar.showSnackbar("改文件先问我", duration = SnackbarDuration.Indefinite) }
                     // 提示条（2026-10-17 用户截图：「很挡视野」）：以前在底下、又宽又大，正好压住输入框；
@@ -370,7 +381,8 @@ private fun MainLayout(ctl: AppController) {
         if (wide) {
             Row(Modifier.fillMaxSize()) {
                 Sidebar(ctl, Modifier.width(272.dp).fillMaxHeight(), onNavigate = {})
-                VerticalDivider(color = Ext.c.border)
+                // 液态玻璃时侧栏是浮着的一块，不要分隔线
+                if (!com.guixing.jixunying.ui.glass.LocalGlass.current.on) VerticalDivider(color = Ext.c.border)
                 Box(Modifier.weight(1f).fillMaxHeight()) { MainContent(ctl, wide = true, openDrawer = {}) }
             }
         } else {
@@ -388,7 +400,7 @@ private fun MainLayout(ctl: AppController) {
             ModalNavigationDrawer(
                 drawerState = drawer,
                 drawerContent = {
-                    ModalDrawerSheet(Modifier.width(300.dp), drawerContainerColor = Ext.c.sidebar) {
+                    ModalDrawerSheet(Modifier.width(300.dp), drawerContainerColor = if (com.guixing.jixunying.ui.glass.LocalGlass.current.on) androidx.compose.ui.graphics.Color.Transparent else Ext.c.sidebar) {
                         Sidebar(ctl, Modifier.fillMaxSize(), onNavigate = { scope.launch { drawer.close() } })
                     }
                 },

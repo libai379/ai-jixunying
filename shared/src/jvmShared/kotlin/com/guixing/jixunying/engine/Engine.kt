@@ -838,8 +838,10 @@ class Engine(
                 val semantic = if (c.settings.schema >= 5) c.settings.semantic else s.settings.semantic
                 // 2026-10-17 以前的不认识个性化（自定义指令）
                 val personal = if (c.settings.schema >= 6) c.settings.personal else s.settings.personal
+                // 2026-10-22 以前的不认识液态玻璃开关
+                val glass = if (c.settings.schema >= 7) c.settings.glass else s.settings.glass
                 s.copy(settings = c.settings.copy(search = c.settings.search.copy(apiKeys = keys), costs = s.settings.costs, memory = memory, office = office, code = code,
-                    speech = speechSettings, semantic = semantic, personal = personal, schema = Settings.SCHEMA))
+                    speech = speechSettings, semantic = semantic, personal = personal, glass = glass, schema = Settings.SCHEMA))
             }
             if (before.enabled != state.settings.relay.enabled || before.brokers != state.settings.relay.brokers) onRelaySettingsChanged?.invoke()
             // 关掉了的后台活不会再跑，它以前的出错提示也就不会「成功一次自己消失」：直接清掉

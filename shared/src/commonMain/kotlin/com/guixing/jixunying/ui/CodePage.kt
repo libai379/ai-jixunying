@@ -242,7 +242,7 @@ fun CodePage(ctl: AppController, state: AppState) {
                         Text(m.name, style = MaterialTheme.typography.bodyMedium)
                         Text(m.command, style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, maxLines = 1)
                     }
-                    androidx.compose.material3.Switch(m.enabled, { v -> set { s -> s.copy(mcpServers = s.mcpServers.map { if (it == m) it.copy(enabled = v) else it }) } })
+                    AppSwitch(m.enabled, { v -> set { s -> s.copy(mcpServers = s.mcpServers.map { if (it == m) it.copy(enabled = v) else it }) } })
                     TextButton({ set { s -> s.copy(mcpServers = s.mcpServers - m) } }) { Text("删掉", color = MaterialTheme.colorScheme.error) }
                 }
             }

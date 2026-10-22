@@ -769,7 +769,7 @@ private fun TeamSection(ctl: AppController, conv: Conversation, spec: CodeSpec, 
                 else -> "开发 → 审查 / 测试 → 没过就改（最多 ${CodeSpec.FLOW_ROUNDS} 轮）→ 提交，程序自己转"
             }, style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
         }
-        androidx.compose.material3.Switch(on && ready, { v ->
+        AppSwitch(on && ready, { v ->
             ctl.run(Command.CodeSetFlow(conv.id, if (v) CodeSpec.FLOW_DEV else ""), okText = if (v) "一条龙开了" else "一条龙关了")
         }, enabled = canEdit && ready)
     }
@@ -1674,7 +1674,7 @@ private fun CodeComposer(ctl: AppController, conv: Conversation, running: Boolea
                 if (fileQuery != null) FileSuggestList(fileHits) { text = insertAt(text, it) }
                 if (slashQ != null) SlashList(slashHits) { pickSlash(it) }
             }
-            Surface(shape = RoundedCornerShape(22.dp), color = MaterialTheme.colorScheme.surface, border = BorderStroke(1.dp, Ext.c.border), shadowElevation = 3.dp) {
+            GlassSurface(shape = RoundedCornerShape(22.dp), color = MaterialTheme.colorScheme.surface, border = BorderStroke(1.dp, Ext.c.border), shadowElevation = 3.dp) {
                 Column(Modifier.padding(start = 14.dp, end = 10.dp, top = 10.dp, bottom = 8.dp)) {
                     PendingStrip(ctl, pending)
                     // 写字的地方最后量：下面那一排（发送键）先排，窗口矮时它让位、里面能滑
@@ -1718,13 +1718,11 @@ private fun CodeComposer(ctl: AppController, conv: Conversation, running: Boolea
                         }
                         val canSend = (text.text.isNotBlank() || pending.any { it.att != null || it.local }) && uploading == 0
                         Box(
-                            Modifier.size(36.dp).clip(CircleShape)
-                                .background(if (canSend) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceContainerHighest)
-                                .clickable(enabled = canSend) { send() },
-                            contentAlignment = Alignment.Center,
+                            Modifier, contentAlignment = Alignment.Center,
                         ) {
-                            Icon(Icons.Rounded.ArrowUpward, "发送", Modifier.size(19.dp),
-                                tint = if (canSend) MaterialTheme.colorScheme.onPrimary else Ext.c.subtle)
+                            // 液态发送键（2026-10-22），和对话页同一个
+                            GlassRoundButton(Icons.Rounded.ArrowUpward, "发送", enabled = canSend, color = MaterialTheme.colorScheme.primary,
+                                onColor = MaterialTheme.colorScheme.onPrimary, onClick = { send() })
                         }
                     }
                 }

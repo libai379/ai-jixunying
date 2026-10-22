@@ -206,7 +206,7 @@ private fun tabSummary(t: SettingsTab, s: AppState, ctl: AppController): String 
     SettingsTab.CODE -> shellLabel(s.settings.code.shell) + if (s.settings.code.allowPhone) " · 手机能用" else " · 手机不能用"
     SettingsTab.WEIXIN -> if (!s.weixinCapable) "在电脑上设置" else if (s.weixin.bound) "已绑定" else "未绑定"
     SettingsTab.DEVICES -> if (ctl.hub.remote.value != null) "已配对" else if (s.devices.isNotEmpty()) "${s.devices.size} 台" else "未配对"
-    SettingsTab.APPEARANCE -> listOf("跟随系统", "浅色", "深色").getOrElse(s.settings.darkMode) { "" }
+    SettingsTab.APPEARANCE -> listOf("跟随系统", "浅色", "深色").getOrElse(s.settings.darkMode) { "" } + if (s.settings.glass) " · 液态玻璃" else ""
     SettingsTab.ABOUT -> com.guixing.jixunying.model.APP_VERSION
 }
 
@@ -297,7 +297,7 @@ private fun ProvidersPage(ctl: AppController, state: AppState) {
                     Text(if (p.enabled) "启用" else "已停用", style = MaterialTheme.typography.labelSmall,
                         color = if (p.enabled) Ext.c.subtle else MaterialTheme.colorScheme.error)
                     Spacer(Modifier.width(6.dp))
-                    Switch(p.enabled, { ctl.run(Command.SaveProvider(p.copy(enabled = it)), if (it) "已启用「${p.name}」" else "已停用「${p.name}」：它的成员先不回答") })
+                    AppSwitch(p.enabled, { ctl.run(Command.SaveProvider(p.copy(enabled = it)), if (it) "已启用「${p.name}」" else "已停用「${p.name}」：它的成员先不回答") })
                     IconButton(onClick = { editing = p }) { Icon(Icons.Rounded.Edit, "编辑", Modifier.size(18.dp)) }
                 }
             }
@@ -1056,6 +1056,9 @@ private fun AppearancePage(ctl: AppController, state: AppState) {
                 }
             }
         }
+        // 液态玻璃（2026-10-22，docs/界面换装说明.md）
+        SwitchRow("液态玻璃", "侧栏、输入框、弹窗、开关、发送键用癸星科技那套玻璃和弹簧动画；关掉就是原来的纯色界面",
+            s.glass) { v -> ctl.updateSettings { it.copy(glass = v) } }
         Spacer(Modifier.height(10.dp))
         var proxy by remember { mutableStateOf(s.proxy) }
         AutoSave(proxy, s.proxy) { v -> ctl.updateSettings { it.copy(proxy = v.trim()) } }

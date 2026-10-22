@@ -17,6 +17,7 @@ cmp-runtime = { module = "org.jetbrains.compose.runtime:runtime", version.ref = 
 cmp-foundation = { module = "org.jetbrains.compose.foundation:foundation", version.ref = "cmp" }
 cmp-ui = { module = "org.jetbrains.compose.ui:ui", version.ref = "cmp" }
 cmp-material3 = { module = "org.jetbrains.compose.material3:material3", version.ref = "cmp-material3" }
+backdrop = "io.github.kashif-mehmood-km:backdrop:0.0.1-alpha02"
 cmp-icons = { module = "org.jetbrains.compose.material:material-icons-extended", version = "1.7.3" }
 ktor-client-core = { module = "io.ktor:ktor-client-core", version.ref = "ktor" }
 ktor-client-okhttp = { module = "io.ktor:ktor-client-okhttp", version.ref = "ktor" }
