@@ -9,8 +9,13 @@ import io.ktor.client.request.parameter
 import io.ktor.client.request.post
 import io.ktor.client.request.setBody
 import io.ktor.client.statement.bodyAsText
+import io.ktor.client.request.forms.FormDataContent
 import io.ktor.http.ContentType
+import io.ktor.http.Parameters
 import io.ktor.http.contentType
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
@@ -31,7 +36,7 @@ class WebSearch(private val proxy: () -> String?) {
             throw IllegalStateException("搜索引擎 ${engineName(s.engine)} 还没填 Key，请到 设置→联网搜索 填写，或换回免费的必应")
         }
         return when (s.engine) {
-            SearchEngine.BING_FREE -> bing(query, n, px).ifEmpty { duck(query, n, proxy()) }
+            SearchEngine.BING_FREE -> free(query, n, px)
             SearchEngine.BOCHA -> bocha(query, n, key, px)
             SearchEngine.TAVILY -> tavily(query, n, key, px)
             SearchEngine.ZHIPU -> zhipu(query, n, key, px)
@@ -52,10 +57,24 @@ class WebSearch(private val proxy: () -> String?) {
         }.filter { it.url.startsWith("http") }
     }
 
+    /**
+     * 免费搜索：必应和 DuckDuckGo 一起搜，按和搜索词对得上的程度挑。
+     * 2026-10-21 实测：不带登录的必应对中文题常返回完全无关的结果（搜珠峰高度出来工商银行股票、二手车），
+     * 不是空的，所以以前「必应没结果才换 DuckDuckGo」永远换不过去；cn.bing.com/search 还会被跳回首页、一条没有。
+     */
+    private suspend fun free(q: String, n: Int, px: String?): List<SearchSource> = coroutineScope {
+        // 国内不走代理时 DuckDuckGo 连不上（手机常这样），各给 12 秒，不让一边拖住
+        val b = async { withTimeoutOrNull(12_000) { runCatching { bing(q, n, px) }.getOrNull() }.orEmpty() }
+        val d = async { withTimeoutOrNull(12_000) { duck(q, n, proxy()) }.orEmpty() }
+        Relevance.pick(q, listOf(d.await(), b.await()), n)
+    }
+
     private suspend fun bing(q: String, n: Int, px: String?): List<SearchSource> {
-        val html = Http.client(px).get("https://cn.bing.com/search") {
+        // www + mkt=zh-CN：不带 mkt 时链接是 bing.com/ck/a 跳转，cn.bing.com 会被跳回首页
+        val html = Http.client(px).get("https://www.bing.com/search") {
             parameter("q", q)
             parameter("count", n + 4)
+            parameter("mkt", "zh-CN")
             header("User-Agent", Http.UA)
             header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.6")
         }.bodyAsText()
@@ -76,9 +95,12 @@ class WebSearch(private val proxy: () -> String?) {
     }
 
     private suspend fun duck(q: String, n: Int, px: String?): List<SearchSource> = runCatching {
-        val html = Http.client(px).get("https://html.duckduckgo.com/html/") {
-            parameter("q", q)
+        // 2026-10-21 实测：GET 回 202 拦截页、一条没有；照网页表单 POST 才有结果
+        val html = Http.client(px).post("https://html.duckduckgo.com/html/") {
+            setBody(FormDataContent(Parameters.build { append("q", q); append("kl", "cn-zh") }))
             header("User-Agent", Http.UA)
+            header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+            header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.6")
         }.bodyAsText()
         val links = Regex("""class="result__a"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)</a>""").findAll(html).toList()
         val snips = Regex("""class="result__snippet"[^>]*>([\s\S]*?)</a>""").findAll(html).toList()
@@ -163,6 +185,37 @@ class WebSearch(private val proxy: () -> String?) {
             SearchEngine.ZHIPU -> "智谱 Web Search"
             SearchEngine.BRAVE -> "Brave Search"
         }
+    }
+}
+
+/** 搜索结果和搜索词对不对得上：英文数字按词、中文按相邻两字，算搜索词里有几成出现在标题或摘要里。 */
+object Relevance {
+    private fun terms(q: String): Set<String> {
+        val out = mutableSetOf<String>()
+        Regex("""[A-Za-z0-9][A-Za-z0-9.+#-]*""").findAll(q).forEach { if (it.value.length >= 2) out += it.value.lowercase() }
+        Regex("""[一-鿿]+""").findAll(q).forEach { m ->
+            val s = m.value
+            if (s.length == 1) out += s else for (i in 0 until s.length - 1) out += s.substring(i, i + 2)
+        }
+        return out
+    }
+
+    fun score(q: String, s: SearchSource): Double {
+        val t = terms(q)
+        if (t.isEmpty()) return 1.0
+        val text = (s.title + " " + s.snippet).lowercase()
+        return t.count { it in text }.toDouble() / t.size
+    }
+
+    /** 几个引擎的结果按顺序轮流取、同一网址只留一个，扔掉对不上的（不到两成）；按分数从高到低。 */
+    fun pick(q: String, lists: List<List<SearchSource>>, n: Int, min: Double = 0.2): List<SearchSource> {
+        val seen = mutableSetOf<String>()
+        val merged = mutableListOf<Pair<SearchSource, Double>>()
+        for (i in 0 until (lists.maxOfOrNull { it.size } ?: 0)) for (l in lists) {
+            val s = l.getOrNull(i) ?: continue
+            if (seen.add(s.url.trimEnd('/'))) merged += s to score(q, s)
+        }
+        return merged.filter { it.second >= min }.sortedByDescending { it.second }.take(n).map { it.first }
     }
 }
 

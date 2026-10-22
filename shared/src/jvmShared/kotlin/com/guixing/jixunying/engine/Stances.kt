@@ -257,14 +257,16 @@ object StanceJudge {
             appendLine("输出 JSON：")
             appendLine("{")
             appendLine("  \"verdict\": \"A\" 或 \"none\"（都不对）或 \"open\"（没有对错，观点题）或 \"unclear\"（判断不了），")
-            appendLine("  \"reason\": \"一句话理由（80 字以内）\"")
+            appendLine("  \"reason\": \"一句话理由（80 字以内）\",")
+            appendLine("  \"sources\": [理由用到的搜索结果编号，没用到就空着]")
             appendLine("}")
         }
 
         return PromptResult(prompt, anon)
     }
 
-    data class VerifyResult(val verdict: String, val reason: String)
+    /** cited：裁判说理由用到的搜索结果编号（从 1 起）。 */
+    data class VerifyResult(val verdict: String, val reason: String, val cited: List<Int> = emptyList())
 
     /** 读裁判的结论。verdict 只认这道题的立场 key（大小写都行）、none、open、unclear；别的（「A对」「成员甲」）当看不懂，返回 null。 */
     fun parseVerify(raw: String, keys: Collection<String>, anon: Anon? = null): VerifyResult? {
@@ -277,7 +279,8 @@ object StanceJudge {
             "unclear", "?" -> StanceTopic.UNCLEAR
             else -> keys.firstOrNull { it.equals(verdict, ignoreCase = true) } ?: return null
         }
-        return VerifyResult(finalVerdict, anon?.back(reason) ?: reason)
+        val cited = (o["sources"] as? JsonArray).orEmpty().mapNotNull { (it as? JsonPrimitive)?.let { p -> p.intOrNull ?: p.contentOrNull?.filter(Char::isDigit)?.toIntOrNull() } }.distinct()
+        return VerifyResult(finalVerdict, anon?.back(reason) ?: reason, cited)
     }
 
     /** 长消息只留开头和结尾（结论常在两头）。 */

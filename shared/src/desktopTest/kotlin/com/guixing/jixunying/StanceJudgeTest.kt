@@ -105,6 +105,21 @@ class StanceJudgeTest {
         assertEquals(StanceTopic.UNCLEAR, StanceJudge.parseVerify("""{"verdict":"unclear","reason":""}""", keys)!!.verdict)
         assertNull(StanceJudge.parseVerify("""{"verdict":"A对","reason":""}""", keys), "不是立场 key 的当看不懂")
         assertNull(StanceJudge.parseVerify("""{"verdict":"C","reason":""}""", keys), "这道题没有 C")
+        assertEquals(listOf(2, 3), StanceJudge.parseVerify("""{"verdict":"A","reason":"","sources":[2,"3",2]}""", keys)!!.cited)
+        assertEquals(emptyList(), StanceJudge.parseVerify("""{"verdict":"A","reason":""}""", keys)!!.cited, "没写用了哪条就一条出处都不挂")
+    }
+
+    /** 2026-10-21 真搜到的：必应对「珠峰高度」给工商银行股票、雅虎，DuckDuckGo 给对题的。对不上的要扔掉。 */
+    @Test
+    fun searchDropsUnrelatedResults() {
+        fun s(t: String, u: String, snip: String = "") = com.guixing.jixunying.model.SearchSource(t, u, snip)
+        val q = "珠穆朗玛峰 最新 官方 测量 高度 8848.86 2020"
+        val bing = listOf(s("XD工商银 (601398)_最新价格_行情_走势图—东方财富网", "https://quote.eastmoney.com/sh601398.html"), s("雅虎是如何没落的? - 知乎", "https://www.zhihu.com/question/267846388"))
+        val duck = listOf(s("测量珠峰高度 攀登科技高峰!珠穆朗玛峰最新高程公布", "https://news.cctv.com/2020/12/09/a.shtml", "2020年12月8日，珠穆朗玛峰最新高程8848.86米"))
+        val got = com.guixing.jixunying.engine.Relevance.pick(q, listOf(duck, bing), 6)
+        assertEquals(listOf("https://news.cctv.com/2020/12/09/a.shtml"), got.map { it.url })
+        val py = com.guixing.jixunying.engine.Relevance.pick("Python 3 round(2.5) bankers rounding", listOf(listOf(s("Python 3.15.0 文档", "https://docs.python.org/zh-cn/"), s("Welcome to Python.org", "https://www.python.org/"), s("Python 3.15.0 文档", "https://docs.python.org/zh-cn"))), 6)
+        assertEquals(2, py.size, "英文题配中文标题照样认、同一网址只留一个")
     }
 
     @Test

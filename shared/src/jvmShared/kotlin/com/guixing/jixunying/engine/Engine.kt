@@ -2401,8 +2401,10 @@ class Engine(
                         if (query != "搜索参数错误") {
                             val sr = runCatching { search.search(query, state.settings.search) }.getOrNull()
                             if (sr != null && sr.isNotEmpty()) {
-                                sources = sr
-                                sr.joinToString("\n\n") { "${it.title}\n${it.url}\n${it.snippet}" }
+                                // 几次搜索接着编号，裁判在 sources 里报用了哪几条
+                                val from = sources.size
+                                sources = sources + sr
+                                sr.withIndex().joinToString("\n\n") { (i, s) -> "[${from + i + 1}] ${s.title}\n${s.url}\n${s.snippet}" }
                             } else "搜索失败"
                         } else query
                     } else "未知工具"
@@ -2424,7 +2426,8 @@ class Engine(
                 stanceBook[i] = stanceBook[i].copy(
                     aiVerdict = verdict.verdict,
                     aiReason = verdict.reason,
-                    aiSources = sources,
+                    // 只存裁判说用到的；以前把搜到的全挂上，必应乱给的结果也当成了出处
+                    aiSources = verdict.cited.mapNotNull { sources.getOrNull(it - 1) },
                     updatedAt = now()
                 )
             }
