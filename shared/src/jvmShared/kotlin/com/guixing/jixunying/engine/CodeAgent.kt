@@ -264,13 +264,23 @@ class CodeAgent(private val host: CodeHost) {
         val label = TeamSeat.label(role)
         val brief = name.ifBlank { task.lineSequence().first().take(16) }
         val intro = roleIntro(role)
-        if (seat.isClaudeCode) return claudeWorker(convId, msgId, seat, "$label：$brief", "$intro\n\n$task", role == "review", cur, backup)
-        if (seat.isAgent) return agentWorker(convId, msgId, seat, "$label：$brief", "$intro\n\n$task", role == "review")
-        val p = host.state.provider(seat.providerId)
-        providerProblem(p)?.let { return "「$label」的模型用不了：$it。跟用户说一声，或者自己做。" }
-        val vision = p!!.models.firstOrNull { it.id == seat.modelId }?.vision == true
-        return subAgent(convId, msgId, task, "$label：$brief", p, seat.modelId, cur, backup, vision, intro,
-            readOnly = role == "review", who = "「$label」（${seat.modelId}）")
+        // 2026-10-22（第 18 节第 9 条第 2 样）：角色改了哪些文件由程序记下来，接在它交回的话后面，不靠它自己说
+        val changes = RoleChanges()
+        val said = withContext(changes) {
+            if (seat.isClaudeCode) return@withContext claudeWorker(convId, msgId, seat, "$label：$brief", "$intro\n\n$task", role == "review", cur, backup)
+            if (seat.isAgent) return@withContext agentWorker(convId, msgId, seat, "$label：$brief", "$intro\n\n$task", role == "review")
+            val p = host.state.provider(seat.providerId)
+            providerProblem(p)?.let { return@withContext "「$label」的模型用不了：$it。跟用户说一声，或者自己做。" }
+            val vision = p!!.models.firstOrNull { it.id == seat.modelId }?.vision == true
+            subAgent(convId, msgId, task, "$label：$brief", p, seat.modelId, cur, backup, vision, intro,
+                readOnly = role == "review", who = "「$label」（${seat.modelId}）")
+        }
+        return said + changes.summary()
+    }
+
+    /** 改了一个文件：在团队角色的单子里跑时，记到这张单子的改动摘要上（RoleChanges）。 */
+    private suspend fun noteChange(change: FileChange) {
+        kotlin.coroutines.coroutineContext[RoleChanges]?.add(change)
     }
 
     /** 给角色的开场话：它是谁、交回什么（不加限制词，讲清楚活就行）。 */
@@ -957,6 +967,7 @@ class CodeAgent(private val host: CodeHost) {
         }
         val change = FileChange(stepId, rel, diff.added, diff.removed, created = created)
         setStep(convId, msgId, stepId) { it.copy(ok = true, output = uiText(diff.text), change = change) }
+        noteChange(change)
         return "写好了：$rel（${if (created) "新建" else "重写"}，+${diff.added} −${diff.removed}）" + afterEditHook(convId, msgId, file)
     }
 
@@ -993,6 +1004,7 @@ class CodeAgent(private val host: CodeHost) {
         }
         val change = FileChange(stepId, rel, diff.added, diff.removed, created = created)
         setStep(convId, msgId, stepId) { it.copy(ok = true, output = uiText(diff.text), change = change) }
+        noteChange(change)
         return "改好了：$rel（+${diff.added} −${diff.removed}）" + afterEditHook(convId, msgId, file)
     }
 
@@ -1411,6 +1423,7 @@ class CodeAgent(private val host: CodeHost) {
             if (c.tooBig) {
                 addStep(convId, msgId, ToolStep(kind, rel, id = stepId, ok = true,
                     note = "$name ${if (c.deleted) "删掉" else "改"}了这个文件（超过 ${Snapshot.MAX_FILE / 1024 / 1024}MB，没留原样，撤销不了）"))
+                kotlin.coroutines.coroutineContext[RoleChanges]?.addBig(rel)
                 continue
             }
             val now = if (c.deleted) ByteArray(0) else withContext(Dispatchers.IO) { runCatching { c.file.readBytes() }.getOrNull() } ?: continue
@@ -1423,9 +1436,10 @@ class CodeAgent(private val host: CodeHost) {
                 !c.existed -> "$name 新建了这个文件"
                 else -> "$name 改了这个文件"
             }
+            val change = FileChange(stepId, rel, diff?.added ?: 0, diff?.removed ?: 0, created = !c.existed)
             addStep(convId, msgId, ToolStep(kind, rel, id = stepId, ok = true,
-                output = uiText(diff?.text ?: "（不是 UTF-8 文本，不显示差异；拒绝照样能恢复原样）"), note = note,
-                change = FileChange(stepId, rel, diff?.added ?: 0, diff?.removed ?: 0, created = !c.existed)))
+                output = uiText(diff?.text ?: "（不是 UTF-8 文本，不显示差异；拒绝照样能恢复原样）"), note = note, change = change))
+            kotlin.coroutines.coroutineContext[RoleChanges]?.add(change, deleted = c.deleted)
             if (hooks && !c.deleted) afterEditHook(convId, msgId, c.file)
         }
         if (!snap.complete) addStep(convId, msgId, ToolStep("run", "比对改动", id = host.newId(), ok = false,
@@ -1560,6 +1574,7 @@ class CodeAgent(private val host: CodeHost) {
         val diff = CodeDiff.make(ext.rel, ext.before, now)
         val change = FileChange(ext.stepId, ext.rel, diff.added, diff.removed, created = ext.created)
         setStep(convId, msgId, ext.stepId) { it.copy(ok = true, output = uiText(diff.text), change = change) }
+        noteChange(change)
         afterEditHook(convId, msgId, file)
     }
 

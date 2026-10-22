@@ -169,6 +169,9 @@ class TeamTest {
         assertTrue(m.tools.any { it.change != null && it.change!!.path == "a.txt" }, "开发的改动挂在这条回答上，能撤销")
         val last = requests.last { model(it) == "code-model" }["messages"].toString()
         assertTrue("DEV_DONE" in last && "REVIEW_OK" in last, "两个角色的结果都交回主控")
+        // 改动摘要由程序记、接在角色的话后面（第 18 节第 9 条第 2 样）：开发改了 a.txt，审查硬写被拒 = 没改
+        assertTrue("【程序记的改动】改了 1 个文件" in last && "a.txt +1 −1" in last, last)
+        assertTrue("这张单子没有改文件" in last, "审查那张单子写明没改文件")
     }
 
     /** 角色交给 Claude Code：每张单子一个新会话（不 --resume）、审查用 plan 档；它说的话交回主控，不进回答正文。 */
@@ -219,6 +222,7 @@ class TeamTest {
         assertTrue("【你的团队】" in main && "Gemini CLI · 默认" in main, main)
         val last = requests.last()["messages"].toString()
         assertTrue("Gemini CLI · 默认「开发：改问候」交回的结果" in last && "我来改。" in last, last)
+        assertTrue("【程序记的改动】" in last, "Codex / Gemini 比对出来的改动也接在后面：$last")
         assertEquals(listOf("开发：改问候", "审查：审一下刚才的改动"), m.tools.filter { it.kind == "agent" }.map { it.input })
     }
 
