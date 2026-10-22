@@ -149,7 +149,7 @@ fun SettingsScreen(ctl: AppController, tab: SettingsTab, wide: Boolean, openDraw
     } else if (ctl.settingsHome) {
         // 手机：先是一张列表（和系统设置一样），每项带当前状态；以前是一排要横着滑的标签，找不到在哪
         Column(Modifier.fillMaxSize()) {
-            Row(Modifier.fillMaxWidth().height(56.dp).padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+            Row(Modifier.fillMaxWidth().heightIn(min = 56.dp).padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                 IconButton(onClick = openDrawer) { Icon(Icons.Rounded.Menu, "菜单") }
                 Text("设置", style = MaterialTheme.typography.titleMedium)
             }
@@ -176,7 +176,7 @@ fun SettingsScreen(ctl: AppController, tab: SettingsTab, wide: Boolean, openDraw
         }
     } else {
         Column(Modifier.fillMaxSize()) {
-            Row(Modifier.fillMaxWidth().height(56.dp).padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+            Row(Modifier.fillMaxWidth().heightIn(min = 56.dp).padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                 IconButton(onClick = { ctl.settingsHome = true }) { Icon(Icons.AutoMirrored.Rounded.ArrowBack, "返回设置") }
                 Text(tabTitle(tab, LocalPlatform.current.isDesktop), style = MaterialTheme.typography.titleMedium)
             }

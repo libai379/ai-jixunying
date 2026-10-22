@@ -84,7 +84,7 @@
 - 打包安卓：./gradlew :androidApp:assembleDebug（用专用签名）
 - 给用户打开桌面版：先 :desktopApp:createDistributable，把 desktopApp/build/compose/binaries/main/app/ai-jixunying 复制到 G:\DevCache\ai-jixunying-app 再运行（直接运行 build 目录里的会占住文件，下次打包失败）
 - 渲染：Main.kt 默认 skiko.renderApi=OPENGL（DirectX 在用户电脑上会让字闪，见教训库 26）。用户正在用的窗口只截图，不要模拟鼠标键盘
-- 检查界面（不碰用户屏幕）：JXY_SHOTS=G:/DevCache/shots ./gradlew :shared:desktopTest --tests "*ShotsTest*" --rerun，电脑和手机尺寸、各页面、弹窗、深色模式都画成 PNG。要加场景就在 ShotsTest 里加一行，App 的 debugStart 支持 settings:标签名#弹窗、conv:对话编号#convsettings、conv:对话编号#stances、conv:对话编号#plus（输入框「+」菜单打开）、conv:对话编号#draw（直接画图开着）、docs、stances、settingshome、newchat
+- 检查界面（不碰用户屏幕）：JXY_SHOTS=G:/DevCache/shots ./gradlew :shared:desktopTest --tests "*ShotsTest*" --rerun，电脑和手机尺寸、各页面、弹窗、深色模式都画成 PNG。要加场景就在 ShotsTest 里加一行，App 的 debugStart 支持 settings:标签名#弹窗、conv:对话编号#convsettings、conv:对话编号#stances、conv:对话编号#plus（输入框「+」菜单打开）、conv:对话编号#draw（直接画图开着）、conv:对话编号#longdraft（输入框里一大段草稿；# 后面能用 + 叠几个，比如 #longdraft+draw）、docs、stances、settingshome、newchat
 - 开发者署名（用户 2026-10-14 定）：「癸星」「癸星科技」两个都能用，现在关于页和电脑安装包的发布者 / 版权用的是「癸星科技」（model/Presets.kt 的 APP_DEVELOPER、desktopApp 的 vendor / copyright），不用再改。安卓签名证书里的 O=guixing、包名 com.guixing.jixunying 不动（改了手机没法覆盖安装）。
 - 版本号规则（2026-10-12 定，用户说「1.5.0 会规范三个数字的含义」，按我的提议没反对）：主.次.修。
   - 主：旧版和新版不再互通（联机协议、数据格式不兼容），或者整体改版，才加；次、修归零。

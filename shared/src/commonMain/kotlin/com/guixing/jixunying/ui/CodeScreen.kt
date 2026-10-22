@@ -167,15 +167,20 @@ fun CodeScreen(ctl: AppController, convId: String, wide: Boolean, openDrawer: ()
         if (files.isEmpty()) ctl.toast("没认出拖进来的是什么（不是文件、图片，也不是路径）")
         else ctl.composerInbox = convId to Incoming(files = files)
     }) {
-        Column(Modifier.fillMaxSize()) {
-            CodeTopBar(ctl, state, conv, spec, wide, openDrawer, running, access)
-            if (spec.prUrl.isNotBlank() && platform.isDesktop && !ctl.remoteMode) CiBar(ctl, conv, spec)
-            Box(Modifier.weight(1f).fillMaxWidth()) {
-                CodeMessageList(ctl, state, conv, messages, access.canAct) { diffMessage = it }
+        // 窗口矮（横屏、键盘弹出、分屏）时和对话栏一样：输入框收紧，特别矮时顶栏先收起来（2026-10-22）
+        BoxWithConstraints(Modifier.fillMaxSize()) {
+            val h = maxHeight
+            val short = h < 420.dp
+            Column(Modifier.fillMaxSize()) {
+                if (h >= 240.dp) CodeTopBar(ctl, state, conv, spec, wide, openDrawer, running, access)
+                if (spec.prUrl.isNotBlank() && platform.isDesktop && !ctl.remoteMode) CiBar(ctl, conv, spec)
+                Box(Modifier.weight(1f).fillMaxWidth()) {
+                    CodeMessageList(ctl, state, conv, messages, access.canAct) { diffMessage = it }
+                }
+                if (ctl.codeTerminalOpen && access.canAct && platform.isDesktop && !ctl.remoteMode) TerminalPanel(ctl, conv, spec)
+                BackgroundBar(ctl, conv)
+                if (access.canAct) CodeComposer(ctl, conv, running, short = short, maxText = (h * 0.3f).coerceIn(48.dp, 200.dp)) else CodeBottomNote(access)
             }
-            if (ctl.codeTerminalOpen && access.canAct && platform.isDesktop && !ctl.remoteMode) TerminalPanel(ctl, conv, spec)
-            BackgroundBar(ctl, conv)
-            if (access.canAct) CodeComposer(ctl, conv, running) else CodeBottomNote(access)
         }
         if (dragging) Box(
             Modifier.fillMaxSize().padding(12.dp).clip(RoundedCornerShape(16.dp)).background(MaterialTheme.colorScheme.primary.copy(alpha = 0.08f))
@@ -217,7 +222,7 @@ private fun CodeTopBar(ctl: AppController, state: AppState, conv: Conversation, 
     LaunchedEffect(Unit) { if (ctl.debugDialog == "path") showPath = true }
     val subtitle = (if (wide) spec.folder else folderName(spec.folder)) +
         if (spec.isAgent) " · " + CodeSpec.agentLabel(spec.providerId, spec.modelId) else (provider?.let { " · ${it.name}" } ?: "") + " · ${spec.modelId}"
-    Row(Modifier.fillMaxWidth().height(60.dp).padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+    Row(Modifier.fillMaxWidth().heightIn(min = 60.dp).padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
         if (!wide) IconButton(onClick = openDrawer) { Icon(Icons.Rounded.Menu, "菜单") }
         Column(Modifier.weight(1f).padding(start = 6.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1549,7 +1554,7 @@ private fun SmallCodeAction(icon: ImageVector, desc: String, onClick: () -> Unit
  * 图片发给能看图的模型；文档抽出文字一起发；电脑上的文件还把原路径告诉模型（并加进工作区，读不用再问）。
  */
 @Composable
-private fun CodeComposer(ctl: AppController, conv: Conversation, running: Boolean) {
+private fun CodeComposer(ctl: AppController, conv: Conversation, running: Boolean, short: Boolean = false, maxText: androidx.compose.ui.unit.Dp = 200.dp) {
     val platform = LocalPlatform.current
     val scope = rememberCoroutineScope()
     var text by remember(conv.id) { mutableStateOf(TextFieldValue("")) }
@@ -1623,14 +1628,18 @@ private fun CodeComposer(ctl: AppController, conv: Conversation, running: Boolea
     val slashQ = slashQuery(text)
     val slashHits = if (slashQ == null) emptyList() else slashAll.filter { it.name.startsWith(slashQ, ignoreCase = true) || slashQ in it.name }
     fun pickSlash(item: SlashItem) { val t = expandSlash(item, ""); text = TextFieldValue(t, TextRange(t.length)) }
-    Column(Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 14.dp, top = 4.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+    Column(Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = if (short) 6.dp else 14.dp, top = if (short) 2.dp else 4.dp), horizontalAlignment = Alignment.CenterHorizontally) {
         Column(Modifier.widthIn(max = CODE_MAX_WIDTH).fillMaxWidth()) {
-            if (fileQuery != null) FileSuggestList(fileHits) { text = insertAt(text, it) }
-            if (slashQ != null) SlashList(slashHits) { pickSlash(it) }
+            // 候选列表窗口矮时让位：只占输入框排完剩下的高度，放不下就滑（2026-10-22，和对话栏一样）
+            Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState())) {
+                if (fileQuery != null) FileSuggestList(fileHits) { text = insertAt(text, it) }
+                if (slashQ != null) SlashList(slashHits) { pickSlash(it) }
+            }
             Surface(shape = RoundedCornerShape(22.dp), color = MaterialTheme.colorScheme.surface, border = BorderStroke(1.dp, Ext.c.border), shadowElevation = 3.dp) {
                 Column(Modifier.padding(start = 14.dp, end = 10.dp, top = 10.dp, bottom = 8.dp)) {
                     PendingStrip(ctl, pending)
-                    Box(Modifier.fillMaxWidth().heightIn(min = 26.dp, max = 200.dp)) {
+                    // 写字的地方最后量：下面那一排（发送键）先排，窗口矮时它让位、里面能滑
+                    Box(Modifier.weight(1f, fill = false).fillMaxWidth().heightIn(min = 26.dp, max = maxText)) {
                         if (text.text.isEmpty()) Text(
                             if (platform.isDesktop) "说一句要它做什么，可以拖文件、Ctrl+V 贴截图…  Enter 发送，Shift+Enter 换行" else "说一句要它做什么…",
                             style = MaterialTheme.typography.bodyLarge, color = Ext.c.subtle, maxLines = 1, overflow = TextOverflow.Ellipsis,
@@ -1659,13 +1668,15 @@ private fun CodeComposer(ctl: AppController, conv: Conversation, running: Boolea
                     }
                     Spacer(Modifier.height(8.dp))
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        ComposerIcon(Icons.Rounded.AttachFile, if (platform.isDesktop) "附件（代码、图片、PDF、Word、Excel…；也可以把文件拖进来，或者 Ctrl+V 粘贴截图）" else "附件") { pick(false) }
-                        ComposerIcon(Icons.Rounded.Image, "图片") { pick(true) }
-                        Spacer(Modifier.width(6.dp))
-                        if (running) {
-                            Text("上一条还在做，这条会排在后面", style = MaterialTheme.typography.labelSmall, color = Ext.c.warning)
+                        // 左边一组只占剩下的宽度，发送键先排、永远是完整大小（2026-10-22，和对话栏一样；以前「上一条还在做」那行字在窄屏、大字体下会把发送键挤没）
+                        Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
+                            ComposerIcon(Icons.Rounded.AttachFile, if (platform.isDesktop) "附件（代码、图片、PDF、Word、Excel…；也可以把文件拖进来，或者 Ctrl+V 粘贴截图）" else "附件") { pick(false) }
+                            ComposerIcon(Icons.Rounded.Image, "图片") { pick(true) }
+                            Spacer(Modifier.width(6.dp))
+                            if (running) {
+                                Text("上一条还在做，这条会排在后面", style = MaterialTheme.typography.labelSmall, color = Ext.c.warning, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                            }
                         }
-                        Spacer(Modifier.weight(1f))
                         val canSend = (text.text.isNotBlank() || pending.any { it.att != null || it.local }) && uploading == 0
                         Box(
                             Modifier.size(36.dp).clip(CircleShape)
@@ -1679,7 +1690,7 @@ private fun CodeComposer(ctl: AppController, conv: Conversation, running: Boolea
                     }
                 }
             }
-            Text(
+            if (!short) Text(
                 "电脑上的文件都能读；改工作区外面的会先问你（全部放开就不问），改过的都能撤销。" + when {
                     ctl.remoteMode -> "这个会话在电脑上跑。"
                     platform.isDesktop -> "命令在这台电脑上跑。"
@@ -1701,7 +1712,7 @@ fun CodeEmptyScreen(ctl: AppController, wide: Boolean, openDrawer: () -> Unit) {
     val access = CodeUi.access(LocalPlatform.current.isDesktop, ctl.remoteMode, state.settings.code.allowPhone)
     val codeConvs = state.conversations.filter { it.isCode }
     Column(Modifier.fillMaxSize()) {
-        Row(Modifier.fillMaxWidth().height(60.dp).padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.fillMaxWidth().heightIn(min = 60.dp).padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
             if (!wide) IconButton(onClick = openDrawer) { Icon(Icons.Rounded.Menu, "菜单") }
             Text("Code", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(start = 6.dp))
         }

@@ -104,6 +104,8 @@ class AppController(
     var settingsTab by mutableStateOf<SettingsTab?>(null)
     var showNewChat by mutableStateOf(false)
     var debugDialog = ""
+    /** 截图、尺寸测试用：#后面能用 + 叠几个开关（比如 conv:c14#longdraft+draw）。 */
+    fun debug(flag: String) = flag in debugDialog.split('+')
 
     /** 手机正在遥控电脑。 */
     val remoteMode: Boolean get() = backend !== hub.local

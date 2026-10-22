@@ -8,6 +8,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -82,7 +83,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.key.Key
@@ -152,13 +155,20 @@ fun ChatScreen(ctl: AppController, convId: String, wide: Boolean, openDrawer: ()
         if (files.isEmpty()) ctl.toast("没认出拖进来的是什么（不是文件、图片，也不是路径）")
         else ctl.composerInbox = convId to Incoming(files = files)
     }) {
-        Column(Modifier.fillMaxSize()) {
-            ChatTopBar(state, conv, wide, openDrawer, onStances = if (conv.stanceTopics > 0) ({ stanceDialog = "" }) else null) { showConvSettings = true }
-            Box(Modifier.weight(1f).fillMaxWidth()) {
-                MessageList(ctl, state, conv, messages, topics) { stanceDialog = it }
+        // 横屏、键盘弹出、分屏时窗口很矮（2026-10-22 用户：「需要兼容大多数手机的屏幕比例才行」）：
+        // 矮（不到 420dp）时输入框收紧、不显示底下那行提示；特别矮（不到 240dp，横屏又开着键盘）时顶栏先收起来，保住输入框和发送键
+        BoxWithConstraints(Modifier.fillMaxSize()) {
+            val h = maxHeight
+            val short = h < 420.dp
+            Column(Modifier.fillMaxSize()) {
+                if (h >= 240.dp) ChatTopBar(state, conv, wide, openDrawer, onStances = if (conv.stanceTopics > 0) ({ stanceDialog = "" }) else null) { showConvSettings = true }
+                Box(Modifier.weight(1f).fillMaxWidth()) {
+                    MessageList(ctl, state, conv, messages, topics) { stanceDialog = it }
+                }
+                BackgroundBar(ctl, conv)
+                Composer(ctl, state, conv, running = messages.any { it.status == MsgStatus.STREAMING }, short = short,
+                    maxText = (h * 0.3f).coerceIn(48.dp, 200.dp))
             }
-            BackgroundBar(ctl, conv)
-            Composer(ctl, state, conv, running = messages.any { it.status == MsgStatus.STREAMING })
         }
         if (dragging) Box(
             Modifier.fillMaxSize().padding(12.dp).clip(RoundedCornerShape(16.dp)).background(MaterialTheme.colorScheme.primary.copy(alpha = 0.08f))
@@ -175,8 +185,9 @@ fun ChatScreen(ctl: AppController, convId: String, wide: Boolean, openDrawer: ()
 @Composable
 private fun ChatTopBar(state: AppState, conv: Conversation, wide: Boolean, openDrawer: () -> Unit, onStances: (() -> Unit)?, onSettings: () -> Unit) {
     val members = conv.memberIds.mapNotNull { state.member(it) }
+    // 至少 60 高，系统字体调大时跟着长高（2026-10-22：以前写死 60，200% 字体时副标题掉出顶栏、压到消息上）
     Row(
-        Modifier.fillMaxWidth().height(60.dp).padding(horizontal = 12.dp),
+        Modifier.fillMaxWidth().heightIn(min = 60.dp).padding(horizontal = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         if (!wide) IconButton(onClick = openDrawer) { Icon(Icons.Rounded.Menu, "菜单") }
@@ -936,12 +947,14 @@ internal fun PendingStrip(ctl: AppController, pending: androidx.compose.runtime.
     }
 }
 
+/** short：窗口矮（横屏、键盘弹出、分屏），边距收紧、不显示底下的提示；maxText：输入框最多长多高。 */
 @Composable
-private fun Composer(ctl: AppController, state: AppState, conv: Conversation, running: Boolean) {
+private fun Composer(ctl: AppController, state: AppState, conv: Conversation, running: Boolean, short: Boolean = false, maxText: androidx.compose.ui.unit.Dp = 200.dp) {
     val platform = LocalPlatform.current
     val scope = rememberCoroutineScope()
-    var text by remember(conv.id) { mutableStateOf(TextFieldValue("")) }
-    var drawMode by remember(conv.id) { mutableStateOf(ctl.debugDialog == "draw") }
+    // 尺寸测试：#longdraft 先放一段很长的草稿（看矮窗口里发送键还在不在）
+    var text by remember(conv.id) { mutableStateOf(TextFieldValue(if (ctl.debug("longdraft")) (1..12).joinToString("\n") { "第 $it 行草稿，写得很长的时候输入框会长高" } else "")) }
+    var drawMode by remember(conv.id) { mutableStateOf(ctl.debug("draw")) }
     // 「直接做视频」：不经过 AI，直接把写的话当视频描述，附上的图 / 视频 / 文件当素材（2026-10-21）
     var videoMode by remember(conv.id) { mutableStateOf(false) }
     var showFolders by remember(conv.id) { mutableStateOf(false) }
@@ -1113,33 +1126,36 @@ private fun Composer(ctl: AppController, state: AppState, conv: Conversation, ru
         videoMode = false
     }
 
-    Column(Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 14.dp, top = 4.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+    Column(Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = if (short) 6.dp else 14.dp, top = if (short) 2.dp else 4.dp), horizontalAlignment = Alignment.CenterHorizontally) {
         Column(Modifier.widthIn(max = CHAT_MAX_WIDTH).fillMaxWidth()) {
             // 开头打「/」补全斜杠命令（2026-10-18，和 Code 栏一样）
             val slashAll = rememberSlashCommands(ctl, conv.id)
             val slashQ = slashQuery(text)
             val slashHits = if (slashQ == null) emptyList() else slashAll.filter { it.name.startsWith(slashQ, ignoreCase = true) || slashQ in it.name }
-            if (slashQ != null) SlashList(slashHits) { val t = expandSlash(it, ""); text = TextFieldValue(t, TextRange(t.length)) }
             // 打「@」时拖进来的文件夹里的文件也列出来（2026-10-18，和 Code 栏一样）
             val fileQuery = if (conv.grantedPaths.isNotEmpty()) atQuery(text) else null
             val fileHits = rememberFileSuggestions(ctl, conv.id, fileQuery)
-            if (fileQuery != null && fileHits.isNotEmpty() && (suggestions.isEmpty() || fileQuery.length >= 2)) FileSuggestList(fileHits) { text = insertAt(text, it) }
-            if (suggestions.isNotEmpty()) {
-                Surface(shape = RoundedCornerShape(12.dp), border = BorderStroke(1.dp, Ext.c.border), shadowElevation = 6.dp, modifier = Modifier.padding(bottom = 6.dp).widthIn(max = 320.dp)) {
-                    Column(Modifier.padding(4.dp)) {
-                        suggestions.take(8).forEach { (name, m) ->
-                            Row(
-                                Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).clickable { insertMention(name) }.padding(horizontal = 8.dp, vertical = 6.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                if (m != null) MemberAvatar(m, 24.dp) else MemberAvatar(null, 24.dp, emoji = "👥")
-                                Spacer(Modifier.width(8.dp))
-                                Text(name, style = MaterialTheme.typography.bodyMedium)
-                                if (m != null) {
-                                    Spacer(Modifier.width(6.dp))
-                                    val outside = m.id !in conv.memberIds
-                                    Text(if (outside) "不在这个对话里，@ 了会拉进来" else m.modelId, style = MaterialTheme.typography.labelSmall,
-                                        color = if (outside) Ext.c.warning else Ext.c.subtle, maxLines = 1)
+            // 候选列表（/ 命令、@ 文件、@ 成员）在输入框上面；窗口矮时让位：只占输入框排完剩下的高度，放不下就滑（2026-10-22）
+            Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState())) {
+                if (slashQ != null) SlashList(slashHits) { val t = expandSlash(it, ""); text = TextFieldValue(t, TextRange(t.length)) }
+                if (fileQuery != null && fileHits.isNotEmpty() && (suggestions.isEmpty() || fileQuery.length >= 2)) FileSuggestList(fileHits) { text = insertAt(text, it) }
+                if (suggestions.isNotEmpty()) {
+                    Surface(shape = RoundedCornerShape(12.dp), border = BorderStroke(1.dp, Ext.c.border), shadowElevation = 6.dp, modifier = Modifier.padding(bottom = 6.dp).widthIn(max = 320.dp)) {
+                        Column(Modifier.padding(4.dp)) {
+                            suggestions.take(8).forEach { (name, m) ->
+                                Row(
+                                    Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).clickable { insertMention(name) }.padding(horizontal = 8.dp, vertical = 6.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    if (m != null) MemberAvatar(m, 24.dp) else MemberAvatar(null, 24.dp, emoji = "👥")
+                                    Spacer(Modifier.width(8.dp))
+                                    Text(name, style = MaterialTheme.typography.bodyMedium)
+                                    if (m != null) {
+                                        Spacer(Modifier.width(6.dp))
+                                        val outside = m.id !in conv.memberIds
+                                        Text(if (outside) "不在这个对话里，@ 了会拉进来" else m.modelId, style = MaterialTheme.typography.labelSmall,
+                                            color = if (outside) Ext.c.warning else Ext.c.subtle, maxLines = 1)
+                                    }
                                 }
                             }
                         }
@@ -1154,7 +1170,8 @@ private fun Composer(ctl: AppController, state: AppState, conv: Conversation, ru
             ) {
                 Column(Modifier.padding(start = 14.dp, end = 10.dp, top = 10.dp, bottom = 8.dp)) {
                     PendingStrip(ctl, pending)
-                    Box(Modifier.fillMaxWidth().heightIn(min = 26.dp, max = 200.dp)) {
+                    // 写字的地方最后量：下面那一排（发送键）先排，窗口矮时它让位、里面能滑
+                    Box(Modifier.weight(1f, fill = false).fillMaxWidth().heightIn(min = 26.dp, max = maxText)) {
                         if (text.text.isEmpty()) Text(
                             when {
                                 videoMode -> "直接做视频：描述画面和动作，比如「一只橘猫在窗台上伸懒腰，阳光洒进来」；附上的图片当首帧（两张是首尾帧），附上的视频按描述改或接长，附上的文档按内容做（按秒收费，发完回到聊天）"
@@ -1191,100 +1208,110 @@ private fun Composer(ctl: AppController, state: AppState, conv: Conversation, ru
                         // 2026-10-22 用户发手机截图（发送键被挤到最右边没位置）：「必须得这么多按钮吗？能不能整理一下，合并一下」。
                         // 不常点的（图片、文件、@、直接画图、直接做视频、文件夹）收进「+」；外面只留联网、话筒、电脑上的「动手」权限，和正开着的模式标签
                         val videoOn = state.settings.videoGen.enabled && com.guixing.jixunying.model.VideoPick.candidates(state.providers).isNotEmpty()
-                        Box {
-                            var plus by remember { mutableStateOf(ctl.debugDialog == "plus") }
-                            ComposerIcon(Icons.Rounded.Add, "图片、文件、@ 成员、直接画图、直接做视频") { plus = true }
-                            androidx.compose.material3.DropdownMenu(plus, { plus = false }) {
-                                PlusItem(Icons.Rounded.Image, "图片", "给 AI 看图") { plus = false; pick(true) }
-                                PlusItem(Icons.Rounded.AttachFile, "文件",
-                                    if (platform.isDesktop) "PDF、Word、Excel、代码…；也能拖进来" else "PDF、Word、Excel、PPT、代码…") { plus = false; pick(false) }
-                                if (state.members.size > 1) PlusItem(Icons.Rounded.AlternateEmail, "@ 成员", "点名谁来答；不在这个对话里的会被拉进来") {
-                                    plus = false
-                                    text = TextFieldValue(text.text + (if (text.text.isEmpty() || text.text.endsWith(" ")) "@" else " @"), TextRange(Int.MAX_VALUE))
-                                }
-                                PlusItem(Icons.Rounded.Brush, "直接画图", "不经过 AI，写的话当画面描述，只画这一张", checked = drawMode) {
-                                    plus = false; drawMode = !drawMode; if (drawMode) videoMode = false
-                                }
-                                if (videoOn) PlusItem(Icons.Rounded.Movie, "直接做视频", "写的话当视频描述；附图当首帧，按秒收费", checked = videoMode) {
-                                    plus = false; videoMode = !videoMode; if (videoMode) drawMode = false
-                                }
-                                // 这个对话里 AI 直接改、不用问的文件夹（拖进来的、选了「不再问」的），和 Code 栏的「工作区」一样能加能移出
-                                if (platform.isDesktop && !ctl.remoteMode) PlusItem(Icons.Rounded.FolderOpen,
-                                    if (conv.grantedPaths.isEmpty()) "文件夹" else "文件夹（${conv.grantedPaths.size} 个）", "AI 直接改、不用再问的文件夹") { plus = false; showFolders = true }
-                            }
-                        }
-                        // 联网：电脑上带字；手机上窄，只留图标（开着时高亮）
-                        if (platform.isDesktop) {
-                            Spacer(Modifier.width(4.dp))
-                            ToggleChip("联网", Icons.Rounded.Language, conv.webSearch) {
-                                ctl.run(Command.UpdateConversation(conv.copy(webSearch = !conv.webSearch)))
-                            }
-                            Spacer(Modifier.width(4.dp))
-                        } else ToggleIcon(Icons.Rounded.Language, if (conv.webSearch) "联网：开着（点一下关）" else "联网：关着（点一下开）", conv.webSearch) {
-                            ctl.run(Command.UpdateConversation(conv.copy(webSearch = !conv.webSearch)), okText = if (conv.webSearch) "联网关了" else "联网开了")
-                        }
-                        // 听写：点一下开始录，再点一下停下，认出来的字填进输入框（不直接发）
-                        if (platform.canRecord) when {
-                            recognizing -> Row(Modifier.padding(horizontal = 5.dp), verticalAlignment = Alignment.CenterVertically) {
-                                CircularProgressIndicator(Modifier.size(13.dp), strokeWidth = 2.dp)
-                                Spacer(Modifier.width(5.dp))
-                                Text("识别中…", style = MaterialTheme.typography.labelMedium, color = Ext.c.subtle)
-                            }
-                            recording -> Row(
-                                Modifier.clip(RoundedCornerShape(50))
-                                    .background(MaterialTheme.colorScheme.error.copy(alpha = 0.12f))
-                                    .border(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.45f), RoundedCornerShape(50))
-                                    .clickable { stopRec() }.padding(horizontal = 9.dp, vertical = 5.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                Icon(Icons.Rounded.Mic, "停下并变成文字", Modifier.size(15.dp), tint = MaterialTheme.colorScheme.error)
-                                Spacer(Modifier.width(4.dp))
-                                Text("${recSec / 60}:${(recSec % 60).toString().padStart(2, '0')}",
-                                    style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.error)
-                            }
-                            else -> ComposerIcon(Icons.Rounded.Mic, "说一段话，变成文字填进输入框（最多 5 分钟，再点一下停下）") { startRec() }
-                        }
-                        // 2026-10-17 对话栏 = Chat + Cowork：AI 改文件要不要先问（电脑上才有；手机上改不了，PhoneGate 也会保留电脑上的）
-                        if (platform.isDesktop && !ctl.remoteMode) {
-                            Spacer(Modifier.width(4.dp))
-                            // 动手（改别处的文件、删、跑命令）问不问：照 Claude 的权限菜单做成一个小菜单
+                        // 左边这一组只占剩下的宽度，放不下就横着滑；右边的停止和发送先排、永远是完整大小。
+                        // 10-22 用户：「需要兼容大多数手机的屏幕比例才行」——手机最窄 320dp、分屏窗口最窄 220dp、系统字体最大 200%（安卓规范，见 docs/参考资料.md「手机屏幕尺寸」）
+                        val tools = rememberScrollState()
+                        Row(Modifier.weight(1f).fadeEnd(tools).horizontalScroll(tools), verticalAlignment = Alignment.CenterVertically) {
                             Box {
-                                var menu by remember { mutableStateOf(false) }
-                                val label = when { conv.fileOpen -> "全部放开"; conv.fileAuto -> "自动"; else -> "动手先问我" }
-                                ToggleChip(label, Icons.Rounded.Edit, conv.fileOpen || conv.fileAuto) { menu = true }
-                                androidx.compose.material3.DropdownMenu(menu, { menu = false }) {
-                                    listOf(
-                                        Triple("自动", "检查员看过没问题的直接做，拿不准的再问你", conv.copy(fileAuto = true, fileOpen = false)),
-                                        Triple("动手先问我", "改别处的文件、删东西、跑命令之前都问你（拖进来的文件夹里照样直接改）", conv.copy(fileAuto = false, fileOpen = false)),
-                                        Triple("全部放开", "都不问；只有危险命令问一次，改之前照样备份能撤销", conv.copy(fileAuto = false, fileOpen = true)),
-                                    ).forEach { (name, desc, next) ->
-                                        androidx.compose.material3.DropdownMenuItem(
-                                            text = {
-                                                Column {
-                                                    Text(name + if (name == label) "  ✓" else "", style = MaterialTheme.typography.bodyMedium)
-                                                    Text(desc, style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
-                                                }
-                                            },
-                                            onClick = { menu = false; if (name != label) ctl.run(Command.UpdateConversation(next), okText = name) },
-                                        )
+                                var plus by remember { mutableStateOf(ctl.debug("plus")) }
+                                ComposerIcon(Icons.Rounded.Add, "图片、文件、@ 成员、直接画图、直接做视频") { plus = true }
+                                androidx.compose.material3.DropdownMenu(plus, { plus = false }) {
+                                    PlusItem(Icons.Rounded.Image, "图片", "给 AI 看图") { plus = false; pick(true) }
+                                    PlusItem(Icons.Rounded.AttachFile, "文件",
+                                        if (platform.isDesktop) "PDF、Word、Excel、代码…；也能拖进来" else "PDF、Word、Excel、PPT、代码…") { plus = false; pick(false) }
+                                    if (state.members.size > 1) PlusItem(Icons.Rounded.AlternateEmail, "@ 成员", "点名谁来答；不在这个对话里的会被拉进来") {
+                                        plus = false
+                                        text = TextFieldValue(text.text + (if (text.text.isEmpty() || text.text.endsWith(" ")) "@" else " @"), TextRange(Int.MAX_VALUE))
+                                    }
+                                    PlusItem(Icons.Rounded.Brush, "直接画图", "不经过 AI，写的话当画面描述，只画这一张", checked = drawMode) {
+                                        plus = false; drawMode = !drawMode; if (drawMode) videoMode = false
+                                    }
+                                    if (videoOn) PlusItem(Icons.Rounded.Movie, "直接做视频", "写的话当视频描述；附图当首帧，按秒收费", checked = videoMode) {
+                                        plus = false; videoMode = !videoMode; if (videoMode) drawMode = false
+                                    }
+                                    // 这个对话里 AI 直接改、不用问的文件夹（拖进来的、选了「不再问」的），和 Code 栏的「工作区」一样能加能移出
+                                    if (platform.isDesktop && !ctl.remoteMode) PlusItem(Icons.Rounded.FolderOpen,
+                                        if (conv.grantedPaths.isEmpty()) "文件夹" else "文件夹（${conv.grantedPaths.size} 个）", "AI 直接改、不用再问的文件夹") { plus = false; showFolders = true }
+                                }
+                            }
+                            // 联网：电脑上带字；手机上窄，只留图标（开着时高亮）
+                            if (platform.isDesktop) {
+                                Spacer(Modifier.width(4.dp))
+                                ToggleChip("联网", Icons.Rounded.Language, conv.webSearch) {
+                                    ctl.run(Command.UpdateConversation(conv.copy(webSearch = !conv.webSearch)))
+                                }
+                                Spacer(Modifier.width(4.dp))
+                            } else ToggleIcon(Icons.Rounded.Language, if (conv.webSearch) "联网：开着（点一下关）" else "联网：关着（点一下开）", conv.webSearch) {
+                                ctl.run(Command.UpdateConversation(conv.copy(webSearch = !conv.webSearch)), okText = if (conv.webSearch) "联网关了" else "联网开了")
+                            }
+                            // 听写：点一下开始录，再点一下停下，认出来的字填进输入框（不直接发）
+                            if (platform.canRecord) when {
+                                recognizing -> Row(Modifier.padding(horizontal = 5.dp), verticalAlignment = Alignment.CenterVertically) {
+                                    CircularProgressIndicator(Modifier.size(13.dp), strokeWidth = 2.dp)
+                                    Spacer(Modifier.width(5.dp))
+                                    Text("识别中…", style = MaterialTheme.typography.labelMedium, color = Ext.c.subtle)
+                                }
+                                recording -> Row(
+                                    Modifier.clip(RoundedCornerShape(50))
+                                        .background(MaterialTheme.colorScheme.error.copy(alpha = 0.12f))
+                                        .border(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.45f), RoundedCornerShape(50))
+                                        .clickable { stopRec() }.padding(horizontal = 9.dp, vertical = 5.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Icon(Icons.Rounded.Mic, "停下并变成文字", Modifier.size(15.dp), tint = MaterialTheme.colorScheme.error)
+                                    Spacer(Modifier.width(4.dp))
+                                    Text("${recSec / 60}:${(recSec % 60).toString().padStart(2, '0')}",
+                                        style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.error)
+                                }
+                                else -> ComposerIcon(Icons.Rounded.Mic, "说一段话，变成文字填进输入框（最多 5 分钟，再点一下停下）") { startRec() }
+                            }
+                            // 2026-10-17 对话栏 = Chat + Cowork：AI 改文件要不要先问（电脑上才有；手机上改不了，PhoneGate 也会保留电脑上的）
+                            if (platform.isDesktop && !ctl.remoteMode) {
+                                Spacer(Modifier.width(4.dp))
+                                // 动手（改别处的文件、删、跑命令）问不问：照 Claude 的权限菜单做成一个小菜单
+                                Box {
+                                    var menu by remember { mutableStateOf(false) }
+                                    val label = when { conv.fileOpen -> "全部放开"; conv.fileAuto -> "自动"; else -> "动手先问我" }
+                                    ToggleChip(label, Icons.Rounded.Edit, conv.fileOpen || conv.fileAuto) { menu = true }
+                                    androidx.compose.material3.DropdownMenu(menu, { menu = false }) {
+                                        listOf(
+                                            Triple("自动", "检查员看过没问题的直接做，拿不准的再问你", conv.copy(fileAuto = true, fileOpen = false)),
+                                            Triple("动手先问我", "改别处的文件、删东西、跑命令之前都问你（拖进来的文件夹里照样直接改）", conv.copy(fileAuto = false, fileOpen = false)),
+                                            Triple("全部放开", "都不问；只有危险命令问一次，改之前照样备份能撤销", conv.copy(fileAuto = false, fileOpen = true)),
+                                        ).forEach { (name, desc, next) ->
+                                            androidx.compose.material3.DropdownMenuItem(
+                                                text = {
+                                                    Column {
+                                                        Text(name + if (name == label) "  ✓" else "", style = MaterialTheme.typography.bodyMedium)
+                                                        Text(desc, style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
+                                                    }
+                                                },
+                                                onClick = { menu = false; if (name != label) ctl.run(Command.UpdateConversation(next), okText = name) },
+                                            )
+                                        }
                                     }
                                 }
                             }
+                            // 正开着「直接画图 / 直接做视频」：外面挂个小标签，点一下退出（以前只有输入框边框变色，不显眼）
+                            if (drawMode) { Spacer(Modifier.width(6.dp)); ModeChip(if (platform.isDesktop) "直接画图" else "画图", Icons.Rounded.Brush) { drawMode = false } }
+                            if (videoMode) { Spacer(Modifier.width(6.dp)); ModeChip(if (platform.isDesktop) "直接做视频" else "视频", Icons.Rounded.Movie) { videoMode = false } }
                         }
-                        // 正开着「直接画图 / 直接做视频」：外面挂个小标签，点一下退出（以前只有输入框边框变色，不显眼）
-                        if (drawMode) { Spacer(Modifier.width(6.dp)); ModeChip(if (platform.isDesktop) "直接画图" else "画图", Icons.Rounded.Brush) { drawMode = false } }
-                        if (videoMode) { Spacer(Modifier.width(6.dp)); ModeChip(if (platform.isDesktop) "直接做视频" else "视频", Icons.Rounded.Movie) { videoMode = false } }
-                        Spacer(Modifier.weight(1f))
                         // 有回答 / 画图在进行时，停止按钮单独放在发送键旁边，不挡着发新消息
                         if (running) {
-                            Row(
+                            // 手机上只留图标（圆的，和发送键一样大），把位置让给左边那组；电脑上照旧带字（2026-10-22）
+                            if (platform.isDesktop) Row(
                                 Modifier.clip(RoundedCornerShape(50)).border(1.dp, Ext.c.border, RoundedCornerShape(50))
                                     .clickable { ctl.run(Command.Stop(conv.id)) }.padding(horizontal = 10.dp, vertical = 6.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
                                 Icon(Icons.Rounded.Stop, null, Modifier.size(15.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
                                 Spacer(Modifier.width(3.dp))
-                                Text("停止", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Text("停止", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, softWrap = false)
+                            } else Box(
+                                Modifier.size(36.dp).clip(CircleShape).border(1.dp, Ext.c.border, CircleShape).clickable { ctl.run(Command.Stop(conv.id)) },
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Icon(Icons.Rounded.Stop, "停止", Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
                             Spacer(Modifier.width(8.dp))
                         }
@@ -1304,7 +1331,7 @@ private fun Composer(ctl: AppController, state: AppState, conv: Conversation, ru
                     }
                 }
             }
-            Text(
+            if (!short) Text(
                 "AI 也会出错，重要信息请核实。" + when {
                     ctl.remoteMode -> "这个对话在电脑上运行和保存。"
                     platform.isDesktop -> "聊天记录只存在这台电脑上。"
@@ -1323,6 +1350,20 @@ internal fun ComposerIcon(icon: androidx.compose.ui.graphics.vector.ImageVector,
         Icon(icon, desc, Modifier.size(19.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
+
+/** 横着能滑、右边还有东西没露出来时，右边缘淡出一截，看得出后面还有（2026-10-22，输入框那一排放不下时）。 */
+private fun Modifier.fadeEnd(scroll: androidx.compose.foundation.ScrollState): Modifier = this
+    .graphicsLayer { compositingStrategy = androidx.compose.ui.graphics.CompositingStrategy.Offscreen }
+    .drawWithContent {
+        drawContent()
+        if (scroll.canScrollForward) {
+            val w = 24.dp.toPx()
+            drawRect(
+                androidx.compose.ui.graphics.Brush.horizontalGradient(listOf(Color.Transparent, Color.Black), startX = size.width - w, endX = size.width),
+                blendMode = androidx.compose.ui.graphics.BlendMode.DstOut,
+            )
+        }
+    }
 
 /** 「+」菜单里的一项：图标、名字、一行说明；checked = 这个模式正开着（打个勾）。 */
 @Composable
@@ -1362,7 +1403,7 @@ private fun ModeChip(label: String, icon: androidx.compose.ui.graphics.vector.Im
     ) {
         Icon(icon, null, Modifier.size(14.dp), tint = c)
         Spacer(Modifier.width(4.dp))
-        Text(label, style = MaterialTheme.typography.labelMedium, color = c)
+        Text(label, style = MaterialTheme.typography.labelMedium, color = c, maxLines = 1, softWrap = false)
         Spacer(Modifier.width(2.dp))
         Icon(Icons.Rounded.Close, "退出$label", Modifier.size(14.dp), tint = c)
     }

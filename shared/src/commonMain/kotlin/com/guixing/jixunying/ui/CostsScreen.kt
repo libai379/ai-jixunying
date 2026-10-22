@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -85,7 +86,7 @@ fun CostsScreen(ctl: AppController, wide: Boolean, openDrawer: () -> Unit) {
     var editing by remember { mutableStateOf<CostLine?>(null) }
 
     Column(Modifier.fillMaxSize()) {
-        if (!wide) Row(Modifier.fillMaxWidth().height(56.dp).padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+        if (!wide) Row(Modifier.fillMaxWidth().heightIn(min = 56.dp).padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = openDrawer) { Icon(Icons.Rounded.Menu, "菜单") }
             Text("花费", style = MaterialTheme.typography.titleMedium)
         }

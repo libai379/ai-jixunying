@@ -4,6 +4,7 @@ import androidx.compose.ui.ImageComposeScene
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.toComposeImageBitmap
 import androidx.compose.ui.unit.Density
+import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.pointer.PointerButton
 import androidx.compose.ui.input.pointer.PointerButtons
@@ -539,6 +540,111 @@ class ShotsTest {
         }
         File(out, "$name.png").writeBytes(scene.render(t).encodeToData(EncodedImageFormat.PNG)!!.bytes)
         scene.close()
+    }
+
+    /**
+     * 输入框在各种手机屏幕上都放得下（2026-10-22 用户：「需要兼容大多数手机的屏幕比例才行」）。
+     * 范围按安卓规范定，资料见 docs/参考资料.md「手机屏幕尺寸和系统字体」：
+     * - 宽：全屏最窄 320dp（CDD 7.1.1.3），分屏窗口最窄 220dp（CDD 3.8.14），大屏手机调小显示大小到 480dp 左右，折叠屏内屏 840dp；
+     * - 高：竖屏 20:9；键盘弹出后剩 280～390dp；横屏 296dp；横屏又开着键盘剩 150～190dp；分屏又开着键盘 200dp；
+     * - 字体：系统字体最大 200%（这里线性放大，比安卓的非线性更大，是最坏情况）。
+     * 看的是：发送键整个在窗口里、没被压小；那一排有停止键时它也整个在、在发送键左边；「+」完整；写字的地方没被压没（至少 16dp，空着时一行在 100% 字体下是 19dp）；
+     * 左边的按钮不盖到停止和发送上（横着滑出去、被裁掉的部分不算）。
+     * 平时就跑（不用 JXY_SHOTS）；设了 JXY_SHOTS 时把最极端的几种画成 fit-*.png。
+     */
+    @Test
+    fun phoneComposerFits() {
+        val tmp = kotlin.io.path.createTempDirectory("jxy-fit").toFile()
+        val hub = Hub(seed(File(tmp, "data"), File(tmp, "文档").apply { mkdirs() }))
+        // 真手机能录音，话筒也在那一排
+        val phone = FakeAvPlatform(PhonePlatform())
+        val desktop = DesktopPlatform(fileLog = false) { null }
+        val fonts = listOf(1f, 1.5f, 2f)
+        val problems = mutableListOf<String>()
+        var cases = 0
+        // 竖屏：c1 群聊；c14 有一条正在回答（出「停止」）；#draw 直接画图开着；#record 正在录音
+        val tall = listOf("conv:c1", "conv:c1#draw", "conv:c14", "conv:c14#draw", "conv:c14#record")
+        for (wDp in listOf(220, 320, 360, 412, 480, 840)) for (font in fonts) for (start in tall) {
+            if (fitCase(hub, phone, wDp, if (wDp >= 600) wDp * 6 / 5 else wDp * 20 / 9, font, start, problems)) cases++
+        }
+        // 矮窗口：键盘弹出、横屏、横屏又开着键盘（915 宽是大屏手机横过来，带侧栏）、分屏又开着键盘；输入框里写了很长的草稿
+        val short = listOf(320 to 280, 360 to 330, 412 to 390, 569 to 296, 640 to 150, 915 to 190, 220 to 200)
+        for ((wDp, hDp) in short) for (font in fonts) for (start in listOf("conv:c1#longdraft", "conv:c14#longdraft+draw", "conv:c14#record")) {
+            if (fitCase(hub, phone, wDp, hDp, font, start, problems)) cases++
+        }
+        // Code 栏的输入框（手机遥控时也是这一个，这里用电脑的台面）：c16 正在跑，出「上一条还在做」那行字
+        for ((wDp, hDp) in listOf(320 to 711, 360 to 800, 412 to 915, 360 to 330, 640 to 150)) for (font in fonts) for (start in listOf("code:c16", "code:c8")) {
+            if (fitCase(hub, desktop, wDp, hDp, font, start, problems, plus = false)) cases++
+        }
+        kotlin.test.assertTrue(problems.isEmpty(), "量了 $cases 种，${problems.size} 处不对：\n" + problems.joinToString("\n"))
+        kotlin.test.assertEquals(6 * 3 * 5 + 7 * 3 * 3 + 5 * 3 * 2, cases)
+    }
+
+    /** 量一种尺寸：离屏画出来，从界面的语义树里找发送键、停止、「+」、写字的地方，不对的写进 problems。量完返回 true。 */
+    private fun fitCase(hub: Hub, platform: Platform, wDp: Int, hDp: Int, font: Float, start: String, problems: MutableList<String>, plus: Boolean = true): Boolean {
+        val d = 2f
+        val w = wDp * d
+        val h = hDp * d
+        val name = "${wDp}×${hDp}dp、字体 ${(font * 100).toInt()}%、$start"
+        val sendNames = setOf("发送", "画图", "做视频")
+        val scene = ImageComposeScene(w.toInt(), h.toInt(), Density(d, font)) { App(hub, platform, start) }
+        try {
+            fun nodes(): List<androidx.compose.ui.semantics.SemanticsNode> {
+                val all = mutableListOf<androidx.compose.ui.semantics.SemanticsNode>()
+                fun walk(n: androidx.compose.ui.semantics.SemanticsNode) { all += n; n.children.forEach { walk(it) } }
+                scene.semanticsOwners.forEach { walk(it.rootSemanticsNode) }
+                return all
+            }
+            fun descs(n: androidx.compose.ui.semantics.SemanticsNode) =
+                n.config.getOrNull(androidx.compose.ui.semantics.SemanticsProperties.ContentDescription).orEmpty()
+            fun texts(n: androidx.compose.ui.semantics.SemanticsNode) =
+                n.config.getOrNull(androidx.compose.ui.semantics.SemanticsProperties.Text).orEmpty().map { it.text }
+            fun label(n: androidx.compose.ui.semantics.SemanticsNode) = (descs(n) + texts(n)).joinToString("/").take(30)
+            // 等对话打开、输入框出来，再多画几帧让草稿、录音、画图这些状态落定
+            var frame = 0L
+            var img = scene.render(0)
+            while (frame < 60 && nodes().none { n -> descs(n).any { it in sendNames } }) { frame++; img = scene.render(frame * 120_000_000L); Thread.sleep(20) }
+            repeat(4) { frame++; img = scene.render(frame * 120_000_000L); Thread.sleep(20) }
+            val all = nodes()
+            val clickable = all.filter { it.config.contains(androidx.compose.ui.semantics.SemanticsActions.OnClick) }
+            val sends = all.filter { n -> descs(n).any { it in sendNames } }
+            if (sends.size != 1) { problems += "$name：找到 ${sends.size} 个发送键"; return false }
+            val send = sends[0].boundsInRoot
+            if (send.width < 36 * d - 1 || send.height < 36 * d - 1) problems += "$name：发送键被压小（${send.width / d}×${send.height / d}dp）"
+            if (send.left < 0 || send.right > w || send.top < 0 || send.bottom > h) problems += "$name：发送键出了窗口（${send.left / d},${send.top / d}～${send.right / d},${send.bottom / d}dp）"
+            // 只认和发送键在同一排的停止（Code 栏顶上也有停止，不算）
+            val stops = clickable.filter { ("停止" in texts(it) || "停止" in descs(it)) && it.boundsInRoot.center.y in send.top..send.bottom }
+            if (start.startsWith("conv:c14") != (stops.size == 1)) problems += "$name：那一排找到 ${stops.size} 个停止键"
+            stops.forEach { s ->
+                val b = s.boundsInRoot
+                if (b.left < 0 || b.right > send.left + 0.5f) problems += "$name：停止键不在发送键左边、或出了窗口（${b.left / d}～${b.right / d}dp）"
+                if (b.height < 24 * d) problems += "$name：停止键被压扁（高 ${b.height / d}dp）"
+            }
+            if (plus) {
+                val p = all.filter { n -> descs(n).any { it.startsWith("图片、文件") } }
+                if (p.size != 1 || p[0].boundsInRoot.width < 32 * d - 1 || p[0].boundsInRoot.left < 0) problems += "$name：「+」看不全"
+            }
+            val fields = all.filter { it.config.contains(androidx.compose.ui.semantics.SemanticsActions.SetText) }
+            if (fields.none { it.boundsInRoot.height >= 16 * d && it.boundsInRoot.bottom <= send.top + 1 }) problems += "$name：写字的地方被压没了（${fields.map { it.boundsInRoot.height / d }}dp）"
+            // 左边的按钮不能盖到停止、发送上（它们的上级容器不算）
+            val guarded = sends + stops
+            val ancestors = guarded.flatMap { g -> generateSequence(g.parent) { it.parent }.map { it.id }.toList() }.toSet()
+            for (n in clickable) {
+                if (n.id in ancestors || guarded.any { it.id == n.id }) continue
+                for (g in guarded) {
+                    val i = n.boundsInRoot.intersect(g.boundsInRoot)
+                    if (i.width > 1 && i.height > 1) problems += "$name：${label(n)} 盖到了 ${label(g)} 上"
+                }
+            }
+            if (out != null && font == 2f && (wDp <= 320 || hDp <= 200)) {
+                out.mkdirs()
+                File(out, "fit-${wDp}x$hDp-${start.replace(':', '-').replace('#', '-').replace('+', '-')}.png")
+                    .writeBytes(img.encodeToData(EncodedImageFormat.PNG)!!.bytes)
+            }
+            return true
+        } finally {
+            scene.close()
+        }
     }
 
     /** 打开对话停在哪：要停在最新一条的最后一行（10-10 用户报：每次打开都在最上面）。 */
