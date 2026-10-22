@@ -77,7 +77,15 @@ data class CodeSpec(
      * 每个角色一个脑子（自己加的模型，或者 Claude Code）。空 = 不组队，和以前一样。只能在电脑上改（PhoneGate）。
      */
     val team: List<TeamSeat> = emptyList(),
+    /**
+     * 流程模板（2026-10-22，设计说明第 19 节）：""= 不用；FLOW_DEV = 一条龙（开发 → 审查 / 测试 → 没过就改 → 提交，程序来转）。
+     * 字符串不做枚举：旧版手机不认识新值也读不坏。只能在电脑上改（PhoneGate）。
+     */
+    val flow: String = "",
 ) {
+    /** 一条龙开着、而且组了开发和至少一个审查 / 测试（少了就照原来的做法）。 */
+    val flowOn: Boolean get() = flow == FLOW_DEV && seat("dev") != null && (seat("review") != null || seat("test") != null)
+
     /** 这个会话交给外部 Claude Code（用户自己装、自己登录的官方 claude，走用户自己的订阅）。 */
     val isClaudeCode: Boolean get() = providerId == CLAUDE_CODE
 
@@ -90,6 +98,10 @@ data class CodeSpec(
     fun seat(role: String): TeamSeat? = team.firstOrNull { it.role == role }
 
     companion object {
+        /** 流程模板「一条龙」（第 19 节）；最多转几轮。 */
+        const val FLOW_DEV = "devflow"
+        const val FLOW_ROUNDS = 3
+
         /** providerId 填这个 = 用外部 Claude Code；modelId 是给它的 --model（空 = 它自己的默认，或者 opus / sonnet / haiku）。 */
         const val CLAUDE_CODE = "claude-code"
         /** 界面上给选的几个（它认这些别名，指向各自最新的模型）。 */

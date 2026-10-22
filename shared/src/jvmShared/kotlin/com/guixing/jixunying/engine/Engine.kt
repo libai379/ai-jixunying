@@ -232,6 +232,8 @@ class Engine(
         override suspend fun webSearch(query: String) = runSearch(query, mutableListOf())
         override suspend fun autoCheck(convId: String, request: String, action: String) = autoVerdict(convId, request, action)
         override fun commanderPort(): Int? = mcpPort
+        override suspend fun commitLocal(dir: File, message: String): Pair<Boolean, String> =
+            gitHub()?.commit(dir, message)?.let { it.ok to it.text } ?: (false to "这台设备不能跑 git")
         override fun keepImage(file: File): String = runCatching {
             if (!file.isFile || file.length() > 30L * 1024 * 1024) return@runCatching ""
             val bytes = file.readBytes()
@@ -1044,6 +1046,15 @@ class Engine(
             val others = spec.team.filter { it.role != c.role }
             val team = (others + listOfNotNull(seat)).sortedBy { s -> TeamSeat.ROLES.indexOfFirst { it.first == s.role } }
             updateCodeSpec(conv.id) { it.copy(team = team) }
+            CommandResult()
+        }
+        is Command.CodeSetFlow -> {
+            val conv = state.conversation(c.convId) ?: return CommandResult(false, "对话不存在")
+            val spec = conv.code ?: return CommandResult(false, "这不是 Code 会话")
+            if (c.flow.isNotEmpty() && c.flow != CodeSpec.FLOW_DEV) return CommandResult(false, "没有这个流程：${c.flow}")
+            if (c.flow.isNotEmpty() && (spec.seat("dev") == null || (spec.seat("review") == null && spec.seat("test") == null)))
+                return CommandResult(false, "一条龙要先在团队里选好开发，再选审查或测试（至少一个）")
+            updateCodeSpec(conv.id) { it.copy(flow = c.flow) }
             CommandResult()
         }
         is Command.CodeSetMode -> {

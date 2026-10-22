@@ -734,6 +734,23 @@ private fun TeamSection(ctl: AppController, conv: Conversation, spec: CodeSpec, 
             }
         }
     }
+    // 一条龙（2026-10-22，设计说明第 19 节）：程序按「开发 → 审查 / 测试 → 没过就改 → 提交」转
+    val ready = spec.seat("dev") != null && (spec.seat("review") != null || spec.seat("test") != null)
+    val on = spec.flow == CodeSpec.FLOW_DEV
+    Spacer(Modifier.height(8.dp))
+    Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text("一条龙", style = MaterialTheme.typography.bodyMedium)
+            Text(when {
+                !ready -> "先选好开发，再选审查或测试，就能让程序自己转：开发 → 审查 / 测试 → 没过就改（最多 ${CodeSpec.FLOW_ROUNDS} 轮）→ 提交"
+                on -> "开着：每条任务由程序转，上面的模型不参与；都过了在独立副本里本地提交"
+                else -> "开发 → 审查 / 测试 → 没过就改（最多 ${CodeSpec.FLOW_ROUNDS} 轮）→ 提交，程序自己转"
+            }, style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
+        }
+        androidx.compose.material3.Switch(on && ready, { v ->
+            ctl.run(Command.CodeSetFlow(conv.id, if (v) CodeSpec.FLOW_DEV else ""), okText = if (v) "一条龙开了" else "一条龙关了")
+        }, enabled = canEdit && ready)
+    }
 }
 
 /**

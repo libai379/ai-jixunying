@@ -142,6 +142,8 @@ class CodeAgent(private val host: CodeHost) {
         // 用户在界面上拒绝过、还没告诉 AI 的改动，补在这条任务后面（用户的话留在最前面；只发给 AI，界面上还是用户原话）
         val note = rejectedNote(convId)
         val task = if (note.isBlank()) original else original.copy(content = original.content + "\n\n" + note)
+        // 2026-10-22：一条龙开着，由程序按流程派给团队（第 19 节），上面选的模型不参与
+        if (spec.flowOn) return loopFlow(convId, task, spec)
         // 2026-10-18：交给外部 Claude Code（用户自己的订阅）
         if (spec.isClaudeCode) return loopClaude(convId, task, spec)
         // 2026-10-20：交给本机的 Codex / Gemini CLI
@@ -257,13 +259,15 @@ class CodeAgent(private val host: CodeHost) {
     }
 
     /** 派一张任务单给团队里的一个角色（自己的主控用 assign_task 调；Claude Code 当总指挥时经本机 MCP 调，第 18 节）。 */
-    private suspend fun assignRole(convId: String, msgId: String, role: String, task: String, name: String, spec: CodeSpec, backup: CodeBackup): String {
+    private suspend fun assignRole(convId: String, msgId: String, role: String, task: String, name: String, spec: CodeSpec, backup: CodeBackup,
+                                   flow: Boolean = false): String {
         val cur = host.state.conversation(convId)?.code ?: spec
         val seat = cur.seat(role) ?: return "团队里没有「${TeamSeat.label(role)}」这个角色。现在有：" +
             cur.team.joinToString("、") { "${it.role}（${TeamSeat.label(it.role)}）" }.ifEmpty { "（没有，自己做）" }
         val label = TeamSeat.label(role)
         val brief = name.ifBlank { task.lineSequence().first().take(16) }
-        val intro = roleIntro(role)
+        // 一条龙里审查、测试要交回结论（第 19 节第 3 条：这是交回的格式）
+        val intro = roleIntro(role) + if (flow && role != "dev") "最后单独一行写「结论：通过」或者「结论：没过」。" else ""
         // 2026-10-22（第 18 节第 9 条第 2 样）：角色改了哪些文件由程序记下来，接在它交回的话后面，不靠它自己说
         val changes = RoleChanges()
         val said = withContext(changes) {
@@ -1140,6 +1144,98 @@ class CodeAgent(private val host: CodeHost) {
         }
     }
 
+    /**
+     * 一条龙（2026-10-22，设计说明第 19 节）：程序按流程转——开发 → 审查和测试同时看 → 有没过的把意见交回开发 → 都过了提交。
+     * 最多 FLOW_ROUNDS 轮；没写结论、开发出错就停下写明，不当成过了。角色都走 assignRole（步子、批准、改动摘要和平时一样）。
+     */
+    private suspend fun loopFlow(convId: String, task: Message, spec: CodeSpec) {
+        val msg = Message(host.newId(), convId, Role.AI, CODE_ID, status = MsgStatus.STREAMING, createdAt = host.now(), modelLabel = "一条龙")
+        host.addMessage(msg)
+        val backup = host.backupOf(convId)
+        val report = StringBuilder()
+        try {
+            val context = recentContext(convId, task)
+            var feedback = ""
+            var passed = 0
+            var stoppedWhy = ""
+            for (round in 1..CodeSpec.FLOW_ROUNDS) {
+                val cur = host.state.conversation(convId)?.code ?: spec
+                val devTask = buildString {
+                    append("用户的任务：\n").append(task.content)
+                    if (context.isNotBlank()) append("\n\n这个会话前面的对话（参考）：\n").append(context)
+                    if (feedback.isNotBlank()) append("\n\n上一轮审查 / 测试没过，意见如下，按意见改：\n").append(feedback)
+                }
+                val dev = assignRole(convId, msg.id, "dev", devTask, "第 $round 轮", cur, backup, flow = true)
+                report.append("第 ").append(round).append(" 轮\n- 开发：").append(brief(dev)).append('\n')
+                if (FLOW_DEV_FAILED.any { it in dev.take(300) }) { stoppedWhy = "开发这一步没做成，停下了"; break }
+                val checkers = listOf("review", "test").filter { cur.seat(it) != null }
+                val results = kotlinx.coroutines.coroutineScope {
+                    checkers.map { role ->
+                        async {
+                            val what = if (role == "review") "审查这一轮的改动" else "按这个任务测一下这一轮的改动"
+                            role to assignRole(convId, msg.id, role, "用户的任务：\n${task.content}\n\n开发交回的：\n$dev\n\n请$what。",
+                                "第 $round 轮", cur, backup, flow = true)
+                        }
+                    }.map { it.await() }
+                }
+                val verdicts = results.map { (role, text) -> Triple(role, text, flowVerdict(text)) }
+                verdicts.forEach { (role, text, v) ->
+                    report.append("- ").append(TeamSeat.label(role)).append("：")
+                        .append(when (v) { true -> "通过"; false -> "没过"; null -> "没给结论" }).append("。").append(brief(text)).append('\n')
+                }
+                verdicts.firstOrNull { it.third == null }?.let { stoppedWhy = "「${TeamSeat.label(it.first)}」没给结论，状态不确定，停下了"; break }
+                if (verdicts.all { it.third == true }) { passed = round; break }
+                feedback = verdicts.filter { it.third == false }
+                    .joinToString("\n\n") { "【${TeamSeat.label(it.first)}】\n" + it.second }.take(FLOW_FEEDBACK_LIMIT)
+            }
+            report.append('\n')
+            when {
+                passed > 0 -> report.append("第 ").append(passed).append(" 轮都过了。").append(flowCommit(convId, msg.id, task, passed))
+                stoppedWhy.isNotEmpty() -> report.append(stoppedWhy).append("。")
+                else -> report.append("转了 ${CodeSpec.FLOW_ROUNDS} 轮还没过，停下了；最后一轮的意见在上面，改动没提交。")
+            }
+            host.updateMessage(convId, msg.id) { it.copy(content = report.toString().trim(), status = MsgStatus.DONE) }
+        } catch (e: CancellationException) {
+            withContext(NonCancellable) { host.updateMessage(convId, msg.id) { it.copy(content = report.toString().trim(), status = MsgStatus.STOPPED) } }
+            throw e
+        } catch (e: Throwable) {
+            host.updateMessage(convId, msg.id) { it.copy(content = report.toString().trim(), status = MsgStatus.ERROR, error = host.friendlyError(e)) }
+        }
+    }
+
+    /** 一条龙都过了：独立副本里本地提交（手动档先问），否则写明为什么没提交（第 19 节第 5 条）。 */
+    private suspend fun flowCommit(convId: String, msgId: String, task: Message, round: Int): String {
+        val cur = host.state.conversation(convId)?.code ?: return ""
+        if (cur.worktreeOf.isBlank()) return "改动留在工作区没提交：不是独立副本，怕把你别的改动一起提交。"
+        val message = task.content.lineSequence().firstOrNull { it.isNotBlank() }.orEmpty().trim().take(60) + "（一条龙第 $round 轮通过）"
+        val step = ToolStep("run", "git commit（本地提交）", id = host.newId(), ok = true, note = "都过了，在独立副本里提交：$message")
+        if (shouldAsk(convId, false, cur.mode == CodeMode.MANUAL || cur.mode == CodeMode.PLAN, step, "本地提交：$message")) {
+            if (!waitApproval(convId, msgId, step)) return "你没让提交，改动留在独立副本里。"
+        } else addStep(convId, msgId, step)
+        val (ok, out) = host.commitLocal(File(cur.folder), message)
+        setStep(convId, msgId, step.id) { it.copy(ok = ok, output = uiText(out), note = if (ok) it.note else "没提交成：" + out.take(200)) }
+        return if (ok) "已在独立副本（分支 ${cur.worktreeBranch}）本地提交，没推送。" else "提交没成：${out.take(200)}"
+    }
+
+    /** 这个会话前面最近的几条对话（不含这一条任务），给一条龙的开发当参考。 */
+    private fun recentContext(convId: String, task: Message): String {
+        val before = host.messagesOf(convId).takeWhile { it.id != task.id }
+            .filter { it.role != Role.SYSTEM && it.status != MsgStatus.STREAMING && it.content.isNotBlank() }
+        val out = ArrayDeque<String>()
+        var used = 0
+        for (m in before.asReversed()) {
+            val line = (if (m.role == Role.USER) "用户：" else "AI：") + m.content.replace(THINK, "").trim().take(2000)
+            if (used + line.length > FLOW_CONTEXT_LIMIT) break
+            used += line.length
+            out.addFirst(line)
+        }
+        return out.joinToString("\n\n")
+    }
+
+    /** 交回的话里的第一句（去掉「…交回的结果：」那行），回答正文里一轮一行用。 */
+    private fun brief(text: String): String =
+        text.lineSequence().map { it.trim() }.filter { it.isNotEmpty() && !it.endsWith("交回的结果：") }.firstOrNull().orEmpty().take(80)
+
     /** 团队里一个角色给总指挥看的说明：哪个角色、用什么脑子。 */
     private fun seatLabel(s: TeamSeat): String = TeamSeat.label(s.role) + "（" + when {
         s.isClaudeCode -> "Claude Code" + s.modelId.takeIf { it.isNotBlank() }?.let { " " + CodeSpec.claudeModelLabel(it) }.orEmpty()
@@ -1959,6 +2055,14 @@ class CodeAgent(private val host: CodeHost) {
         private const val RESULT_LIMIT = 12_000
         /** 界面上一步显示的内容最长多少字。 */
         private const val UI_TEXT_LIMIT = 20_000
+        /** 一条龙（第 19 节）：给开发的前面对话最多多少字、交回开发的意见最多多少字；开发交回的话开头有这些就是没做成。 */
+        private const val FLOW_CONTEXT_LIMIT = 6000
+        private const val FLOW_FEEDBACK_LIMIT = 12_000
+        private val FLOW_DEV_FAILED = listOf("出错了：", "的模型用不了：", "没找到 Claude Code", "手机发来的任务不交给")
+        private val VERDICT = Regex("结论\\s*[:：]\\s*[*_`「【]*\\s*(通过|没过)")
+
+        /** 认交回的话里最后一个「结论：通过 / 没过」；没写返回 null（第 19 节第 4 条）。 */
+        internal fun flowVerdict(text: String): Boolean? = VERDICT.findAll(text).lastOrNull()?.groupValues?.get(1)?.let { it == "通过" }
         /** 每个项目说明文件（CLAUDE.md 等）最多放多少字进系统说明。 */
         private const val MAX_NOTE = 30_000
         /** 单个文件多大就不读了。 */
@@ -2042,4 +2146,6 @@ interface CodeHost {
     fun keepImage(file: File): String = ""
     /** 2026-10-22：本机 MCP 服务的端口（电脑端才有，Claude Code 当总指挥时把派活工具经它给 Claude Code，第 18 节）；没有就不当总指挥。 */
     fun commanderPort(): Int? = null
+    /** 2026-10-22：一条龙都过了，在本地提交（git add -A + commit，不推送，第 19 节第 5 条）：返回（成没成，git 的输出）。 */
+    suspend fun commitLocal(dir: File, message: String): Pair<Boolean, String> = false to "这台设备不能跑 git"
 }
