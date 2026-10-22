@@ -221,7 +221,8 @@ private fun CodeTopBar(ctl: AppController, state: AppState, conv: Conversation, 
     // 开发截图用：-Djxy.start=code:会话编号#path 直接把这个弹窗打开
     LaunchedEffect(Unit) { if (ctl.debugDialog == "path") showPath = true }
     val subtitle = (if (wide) spec.folder else folderName(spec.folder)) +
-        if (spec.isAgent) " · " + CodeSpec.agentLabel(spec.providerId, spec.modelId) else (provider?.let { " · ${it.name}" } ?: "") + " · ${spec.modelId}"
+        (if (spec.isAgent) " · " + CodeSpec.agentLabel(spec.providerId, spec.modelId) else (provider?.let { " · ${it.name}" } ?: "") + " · ${spec.modelId}") +
+        (if (spec.isClaudeCode && spec.effort.isNotEmpty()) " · ${spec.effort}" else "")
     Row(Modifier.fillMaxWidth().heightIn(min = 60.dp).padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
         if (!wide) IconButton(onClick = openDrawer) { Icon(Icons.Rounded.Menu, "菜单") }
         Column(Modifier.weight(1f).padding(start = 6.dp)) {
@@ -607,6 +608,27 @@ private fun WorkspaceDialog(ctl: AppController, conv: Conversation, spec: CodeSp
                     ) {
                         RadioButton(on, null, enabled = canEdit)
                         Text(label, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                }
+            }
+            // 思考强度（2026-10-22）：照官方 --effort 的档，外加 ultracode；空 = 它自己的默认
+            if (spec.isClaudeCode) {
+                var effortOpen by remember { mutableStateOf(false) }
+                Row(Modifier.fillMaxWidth().padding(start = 8.dp, top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("思考强度", style = MaterialTheme.typography.bodyMedium)
+                        Text("越往下想得越深、越慢、越费额度；团队里的 Claude Code 也用这一档", style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
+                    }
+                    Box {
+                        TextButton({ effortOpen = true }, enabled = canEdit) { Text(CodeSpec.effortLabel(spec.effort), maxLines = 1, overflow = TextOverflow.Ellipsis) }
+                        androidx.compose.material3.DropdownMenu(effortOpen, { effortOpen = false }) {
+                            CodeSpec.EFFORTS.forEach { (id, label) ->
+                                androidx.compose.material3.DropdownMenuItem({ Text(label) }, {
+                                    effortOpen = false
+                                    ctl.run(Command.CodeSetEffort(conv.id, id), okText = "思考强度：$label")
+                                })
+                            }
+                        }
                     }
                 }
             }

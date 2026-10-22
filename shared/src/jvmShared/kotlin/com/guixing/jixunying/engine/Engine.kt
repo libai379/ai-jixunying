@@ -1057,6 +1057,13 @@ class Engine(
             updateCodeSpec(conv.id) { it.copy(flow = c.flow) }
             CommandResult()
         }
+        is Command.CodeSetEffort -> {
+            val conv = state.conversation(c.convId) ?: return CommandResult(false, "对话不存在")
+            if (conv.code == null) return CommandResult(false, "这不是 Code 会话")
+            if (CodeSpec.EFFORTS.none { it.first == c.effort }) return CommandResult(false, "没有这一档：${c.effort}")
+            updateCodeSpec(conv.id) { it.copy(effort = c.effort) }
+            CommandResult()
+        }
         is Command.CodeSetMode -> {
             val conv = state.conversation(c.convId) ?: return CommandResult(false, "对话不存在")
             val spec = conv.code ?: return CommandResult(false, "这不是 Code 会话")

@@ -82,6 +82,11 @@ data class CodeSpec(
      * 字符串不做枚举：旧版手机不认识新值也读不坏。只能在电脑上改（PhoneGate）。
      */
     val flow: String = "",
+    /**
+     * Claude Code 的思考强度（2026-10-22 用户：「用 --effort 传给它，档位照官方……还有一个 ultracode，都加上。可以自己选」）：
+     * 空 = 不传，用它自己的默认（官方：Opus 5.5 / Sonnet 5.5 / Haiku 5.5 是 medium）；其余原样交给 --effort。团队里的 Claude Code 角色也用这一档。
+     */
+    val effort: String = "",
 ) {
     /** 一条龙开着、而且组了开发和至少一个审查 / 测试（少了就照原来的做法）。 */
     val flowOn: Boolean get() = flow == FLOW_DEV && seat("dev") != null && (seat("review") != null || seat("test") != null)
@@ -101,6 +106,22 @@ data class CodeSpec(
         /** 流程模板「一条龙」（第 19 节）；最多转几轮。 */
         const val FLOW_DEV = "devflow"
         const val FLOW_ROUNDS = 3
+
+        /**
+         * --effort 能给的档（官方 https://code.claude.com/docs/en/model-config ）：low / medium / high / xhigh / max 是思考强度；
+         * ultracode 是 Claude Code 自己的设置，官方原文：「launch with `claude --effort ultracode`, which starts the session at `xhigh` effort with ultracode on」
+         * （要 2.1.203 以上；模型不支持 xhigh 或关了工作流时它自己退回）。模型不支持某档时它退到支持的最高一档（官方原文）。
+         */
+        val EFFORTS = listOf(
+            "" to "默认（官方：medium）",
+            "low" to "low · 最快",
+            "medium" to "medium",
+            "high" to "high",
+            "xhigh" to "xhigh",
+            "max" to "max · 想得最深",
+            "ultracode" to "ultracode · xhigh + 动态工作流",
+        )
+        fun effortLabel(id: String) = EFFORTS.firstOrNull { it.first == id }?.second ?: id
 
         /** providerId 填这个 = 用外部 Claude Code；modelId 是给它的 --model（空 = 它自己的默认，或者 opus / sonnet / haiku）。 */
         const val CLAUDE_CODE = "claude-code"

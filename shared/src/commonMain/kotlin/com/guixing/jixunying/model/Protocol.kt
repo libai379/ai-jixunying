@@ -54,6 +54,8 @@ sealed interface Command {
     @Serializable data class CodeSetTeam(val convId: String, val role: String, val providerId: String = "", val modelId: String = "") : Command
     /** 流程模板（2026-10-22，第 19 节）：flow 填 CodeSpec.FLOW_DEV 打开一条龙，空 = 关掉。只能在电脑上改（PhoneGate）。 */
     @Serializable data class CodeSetFlow(val convId: String, val flow: String = "") : Command
+    /** Claude Code 的思考强度（2026-10-22）：effort 是 CodeSpec.EFFORTS 里的一个，空 = 它自己的默认。 */
+    @Serializable data class CodeSetEffort(val convId: String, val effort: String = "") : Command
     /**
      * Code 栏连 GitHub（2026-10-18，engine/code/GitHub）：op =
      * "repo" 看项目的 Git 状态（data 是 JSON：repo / branch / changes / remote / ahead）；"commit" 提交全部改动；

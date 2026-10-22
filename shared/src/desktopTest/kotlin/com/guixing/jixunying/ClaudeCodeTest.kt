@@ -147,6 +147,13 @@ class ClaudeCodeTest {
         val second = runs()[1]
         assertTrue("--resume fake-session-1" in second, "第二条任务接着上次的会话：$second")
         assertFalse("--model" in second, "没选模型就不带 --model")
+        assertFalse("--effort" in second, "没选思考强度就不带 --effort")
+        // 思考强度（2026-10-22）：选了就原样交给 --effort，ultracode 也一样；不认识的档不收
+        assertFalse(e.call(Command.CodeSetEffort(conv, "huge")).ok)
+        assertTrue(e.call(Command.CodeSetEffort(conv, "ultracode")).ok)
+        e.call(Command.CodeSend(conv, "只读"))
+        awaitDone(e, conv, count = 3)
+        assertTrue("--effort ultracode" in runs()[2], runs()[2])
         Unit
     }
 

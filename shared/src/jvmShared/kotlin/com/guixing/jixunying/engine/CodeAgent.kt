@@ -1262,7 +1262,7 @@ class CodeAgent(private val host: CodeHost) {
         val settings = host.state.settings
         val cur = host.state.conversation(convId)?.code ?: spec
         val cmd = ClaudeCli.launcher(exe) + ClaudeCli.args(worker?.modelId ?: cur.modelId, worker?.readOnly == true || cur.mode == CodeMode.PLAN, resume,
-            cur.extraPaths.filter { File(it).isDirectory }, instr, mcp)
+            cur.extraPaths.filter { File(it).isDirectory }, instr, mcp, effort = cur.effort)
         val proc = withContext(Dispatchers.IO) {
             runCatching { ClaudeProcess(cmd, File(cur.folder), ClaudeCli.env(System.getenv(), settings.proxy)) }
         }.getOrElse { return ClaudeRound("启动不了 Claude Code（${exe.absolutePath}）：${it.message}") }

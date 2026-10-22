@@ -291,3 +291,12 @@
 6. 显示：每一步就是原来的角色步骤（「开发：第 1 轮」「审查：第 1 轮」……），回答正文由程序写：每轮谁说了什么结论、最后过没过、提交了没有、提交编号。点停止，正在干的角色一起停。
 7. 手机：手机发起的任务照样能走一条龙（角色的手机规矩照旧：Codex / Gemini 不接手机发起的单子，第 17 节第 5 条）；开关只能在电脑上改。
 8. 测试：FlowTest——假模型当开发 / 审查 / 测试：第 1 轮审查没过、第 2 轮都过、独立副本里提交；没写结论就停；不是独立副本不提交。
+
+## 20 Claude Code 的思考强度（2026-10-22 用户：「用 --effort 传给它，档位照官方：low、medium、high、xhigh、max。还有一个ultracode，都加上。可以自己选。」）
+
+起因：用户觉得 Code 栏里的 Claude Code「跟原生不像一个模型」。查了：模型一样（会话记录 237 条都是 claude-opus-5-5），我们没传 --effort（官方：Opus 5.5 默认 medium）；那次显得笨主要是会话里带着「别碰手机」的旧指令和全局红线（编年史 10-22）。
+
+1. 工作区 → 模型 选了 Claude Code 时多一行「思考强度」：默认（不传，官方 medium）、low、medium、high、xhigh、max、ultracode。存在 CodeSpec.effort，Command.CodeSetEffort 改（手机遥控时和其它 Code 写操作一样要电脑开了「允许手机用」）；会话标题下面的那行带上档位。
+2. 原样交给 --effort（ClaudeCli.args）。官方原文（https://code.claude.com/docs/en/model-config ）：Opus 5.5 / Sonnet 5.5 / Haiku 5.5 都支持 low～max；「If you set a level the active model does not support, Claude Code falls back to the highest supported level at or below the one you set」；ultracode：「launch with `claude --effort ultracode`, which starts the session at `xhigh` effort with ultracode on」，要 2.1.203 以上。本机 claude 2.1.308 实测 -p --effort low、--effort ultracode 都正常回答。
+3. 团队里的 Claude Code 角色也用这个会话的档（它们走同一个 claudeRound）。Codex / Gemini 不管这一项。
+4. 测试：ClaudeCodeTest.acceptEditsWritesWithoutAskingAndResumes 加了：没选不带 --effort；选 ultracode 带 --effort ultracode；不认识的档不收。

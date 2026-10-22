@@ -105,7 +105,8 @@ object PhoneGate {
 
     private fun isCodeWrite(c: Command) = c is Command.CodeCreate || c is Command.CodeSend || c is Command.CodeStop ||
         c is Command.CodeDecide || c is Command.CodeSetMode || c is Command.CodeReview || c is Command.CodeRevertTask ||
-        c is Command.CodeSetAccess || c is Command.CodeSetProject || c is Command.CodeSetTeam || c is Command.CodeSetFlow
+        c is Command.CodeSetAccess || c is Command.CodeSetProject || c is Command.CodeSetTeam || c is Command.CodeSetFlow ||
+        c is Command.CodeSetEffort
 
     private fun refuse(c: Command, why: String) = Verdict(c, CommandResult(false, why))
 }
