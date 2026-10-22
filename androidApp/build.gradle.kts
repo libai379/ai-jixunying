@@ -19,8 +19,8 @@ android {
         applicationId = "com.guixing.jixunying"
         minSdk = 26
         targetSdk = 36
-        versionCode = 15
-        versionName = "1.10.1"
+        versionCode = 16
+        versionName = "1.11.0"
     }
     signingConfigs {
         if (keystoreProps.getProperty("storeFile") != null) {
