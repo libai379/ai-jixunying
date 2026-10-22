@@ -469,7 +469,10 @@ class ShotsTest {
             Message("r12", "c12", Role.AI, "tool:code", "", status = MsgStatus.STREAMING,
                 createdAt = now - 10_000, modelLabel = "deepseek-flash（DeepSeek 4.1 Flash）",
                 tools = listOf(ToolStep("todo", "待办", id = "s120", output = "[x] 找到测试命令\n[>] 跑测试\n[ ] 看失败的用例"),
-                    ToolStep("run", "python -m pytest -q", id = "s121", approval = "waiting", prefix = "python -m pytest"))),
+                    // 2026-10-22：长命令（像试用时起模拟器那条）整条换行显示，不再截成一行
+                    ToolStep("run", "python -m pytest -q tests/test_parser.py tests/test_ledger.py --maxfail=1 --durations=10 -p no:cacheprovider " +
+                        "--basetemp=C:\\Users\\me\\AppData\\Local\\Temp\\pytest-of-me\\run-42 -k \"parse and not slow\"", id = "s121", approval = "waiting",
+                        prefix = "python -m pytest", note = "自动检查拦下：要写到工作区外面的临时目录，先问一下"))),
         ))
         st.saveMessages("c15", listOf(
             Message("u15", "c15", Role.USER, USER_ID, "把首页标题改成「欢迎」", createdAt = now - 20_000),

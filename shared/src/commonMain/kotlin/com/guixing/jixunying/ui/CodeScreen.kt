@@ -655,7 +655,10 @@ private fun WorkspaceDialog(ctl: AppController, conv: Conversation, spec: CodeSp
                 Spacer(Modifier.height(12.dp))
                 FieldLabel("独立副本", "几个会话同时改同一个项目时，各用一份互不干扰（要是 Git 仓库）")
                 TextButton({
-                    ctl.run(Command.CodeCreate(spec.worktreeOf.ifBlank { spec.folder }, spec.providerId, spec.modelId, CodeMode.ACCEPT_EDITS, worktree = true), quiet = true) { r ->
+                    // 照原会话的档开（2026-10-22：以前写死「接受编辑」，「自动」丢了）；「全部放开」不跟过去
+                    ctl.run(Command.CodeCreate(spec.worktreeOf.ifBlank { spec.folder }, spec.providerId, spec.modelId,
+                        if (spec.mode == CodeMode.MANUAL || spec.mode == CodeMode.PLAN) spec.mode else CodeMode.ACCEPT_EDITS,
+                        worktree = true, auto = spec.autoMode), quiet = true) { r ->
                         if (r.ok) { onClose(); ctl.openConversation(r.data) } else ctl.toast(r.message.ifBlank { "开不了独立副本" })
                     }
                 }) { Text("用独立副本开一个新会话") }
@@ -946,7 +949,7 @@ private fun CodeToolStep(ctl: AppController, msg: Message, t: ToolStep, canAct: 
                     // 要跑的命令：等批准的时候也要看得见
                     t.kind == "run" -> {
                         if (waiting) Text(if (readonly) "这条命令在等你批准：" else "要跑这条命令：", style = MaterialTheme.typography.labelMedium, color = Ext.c.warning)
-                        MonoBox(t.input)
+                        MonoBox(t.input, wrap = true)
                         if (!waiting && t.output.isNotBlank()) MonoBox(t.output)
                     }
                     // 改文件：看差异
@@ -1462,10 +1465,16 @@ internal fun DiffLines(text: String, onLine: ((Int) -> Unit)? = null, marked: Se
 
 /** 等宽显示的一块内容（命令、命令输出、读到的文件、列目录、查找结果），太长的只给开头。 */
 @Composable
-private fun MonoBox(text: String) {
+private fun MonoBox(text: String, wrap: Boolean = false) {
     val lines = remember(text) { text.lines() }
     val shown = lines.take(STEP_LINES)
-    ScrollPane(Modifier.fillMaxWidth()) {
+    // wrap：要跑的命令自动换行、整条看得见（2026-10-22 试用时批准卡片上的命令截在「-ErrorAction S」，关键参数看不到就要做决定）
+    if (wrap) SelectionContainer {
+        Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).background(Ext.c.codeBg).padding(8.dp)) {
+            shown.forEach { Text(it.ifEmpty { " " }, fontFamily = FontFamily.Monospace, fontSize = 12.sp, lineHeight = 17.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant) }
+        }
+    } else ScrollPane(Modifier.fillMaxWidth()) {
         SelectionContainer {
             Column {
                 shown.forEach { Text(it.ifEmpty { " " }, fontFamily = FontFamily.Monospace, fontSize = 12.sp, lineHeight = 17.sp,

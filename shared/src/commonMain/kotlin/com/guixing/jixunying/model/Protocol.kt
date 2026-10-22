@@ -38,6 +38,8 @@ sealed interface Command {
         val fromPhone: Boolean = false,
         /** 2026-10-18：用这个仓库的独立副本（git worktree）开会话。手机上不许。 */
         val worktree: Boolean = false,
+        /** 2026-10-22：开「自动」档（独立副本照原会话的档开）。手机发来的不算。 */
+        val auto: Boolean = false,
     ) : Command
     /**
      * Code 栏：换这个会话的项目文件夹 / 模型（2026-10-17，新建不再先选，开起来以后随时换）。空字符串 = 这一样不换。

@@ -94,7 +94,7 @@ class GitHubTest {
 
     /** 2026-10-18 独立副本：git worktree 到 .claude/worktrees/，新分支；主仓库 status 干净；删会话清掉副本、分支留着。 */
     @Test
-    fun worktreeSessionIsIsolated() = runBlocking {
+    fun worktreeSessionIsIsolated() = runBlocking<Unit> {
         val proj = File(tmp, "wt").apply { mkdirs() }
         git(proj, "init", "-b", "main")
         git(proj, "config", "user.email", "t@t")
@@ -117,5 +117,10 @@ class GitHubTest {
         e.call(Command.DeleteConversation(r.data))
         assertTrue(!wt.exists(), "删会话清掉副本")
         assertTrue(spec.worktreeBranch in git(proj, "branch"), "分支留着")
+        // 2026-10-22：原会话是「自动」档，独立副本也开成自动（以前写死成接受编辑）；手机发来的不开自动
+        val auto = e.call(Command.CodeCreate(proj.absolutePath, "p1", "m", CodeMode.ACCEPT_EDITS, worktree = true, auto = true))
+        assertTrue(auto.ok, auto.message)
+        assertTrue(e.state.conversation(auto.data)!!.code!!.autoMode, "自动档跟过来了")
+        e.call(Command.DeleteConversation(auto.data))
     }
 }

@@ -973,9 +973,10 @@ class Engine(
                 memberIds = emptyList(),
                 createdAt = now(), updatedAt = now(),
                 code = CodeSpec(folder = workFolder.absolutePath, providerId = pick.first, modelId = pick.second, worktreeOf = wtOf, worktreeBranch = wtBranch,
-                    // 电脑上点「+」直接开的（没给文件夹）默认「自动」：照 Claude Code，auto 是新会话的默认档
+                    // 电脑上点「+」直接开的（没给文件夹）默认「自动」：照 Claude Code，auto 是新会话的默认档；
+                    // 独立副本开的照原会话的档（c.auto，2026-10-22：以前写死「接受编辑」、丢了自动）；手机上不许开自动
                     mode = if (c.folder.isBlank() && !c.fromPhone) CodeMode.ACCEPT_EDITS else c.mode,
-                    autoMode = c.folder.isBlank() && !c.fromPhone,
+                    autoMode = (c.folder.isBlank() || c.auto) && !c.fromPhone && c.mode != CodeMode.PLAN,
                     fromPhone = c.fromPhone, pcMode = if (c.fromPhone) null else c.mode),
             )
             convs[conv.id] = mutableListOf()
