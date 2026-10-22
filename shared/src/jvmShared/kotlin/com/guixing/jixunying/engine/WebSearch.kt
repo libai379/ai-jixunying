@@ -148,7 +148,7 @@ class WebSearch(private val proxy: () -> String?) {
         })
         return (o["search_result"] as? JsonArray).orEmpty().map { it.jsonObject }.map {
             SearchSource(it.str("title").orEmpty(), it.str("link").orEmpty(), it.str("content").orEmpty().take(500))
-        }
+        }.filter { it.url.startsWith("http") }.take(n) // 2026-10-21 实测：有时整批 link 是空的（没网址当不了出处）；count 传 6 也回过 29 条
     }
 
     private suspend fun brave(q: String, n: Int, key: String, px: String?): List<SearchSource> {

@@ -25,7 +25,12 @@ class LiveVerifyProbeTest {
         val tmp = kotlin.io.path.createTempDirectory("jxy-live-verify").toFile()
         try {
             File(src, "state.json").copyTo(File(tmp, "state.json"))
-            val state = Storage(tmp).loadState() ?: error("读不了 state.json")
+            val raw = Storage(tmp).loadState() ?: error("读不了 state.json")
+            // JXY_VERIFY_ENGINE=ZHIPU：用服务商里智谱的 Key 走智谱搜索（每次 1 分钱）
+            val state = if (System.getenv("JXY_VERIFY_ENGINE") == "ZHIPU") {
+                val k = raw.providers.first { it.presetId == "zhipu" && it.apiKey.isNotBlank() }.apiKey
+                raw.copy(settings = raw.settings.copy(search = raw.settings.search.copy(engine = com.guixing.jixunying.model.SearchEngine.ZHIPU, apiKeys = mapOf("ZHIPU" to k))))
+            } else raw
             val (p, model) = JudgePick.pick(state) ?: error("没有裁判模型")
             println("裁判：$model（${p.name}）；搜索引擎：${state.settings.search.engine}")
             val members = state.members.take(2)

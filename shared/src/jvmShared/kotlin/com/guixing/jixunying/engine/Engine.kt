@@ -2399,7 +2399,7 @@ class Engine(
                         val args = runCatching { AppJson.parseToJsonElement(tc.arguments).jsonObject }.getOrNull()
                         val query = args?.get("query")?.jsonPrimitive?.contentOrNull ?: "搜索参数错误"
                         if (query != "搜索参数错误") {
-                            val sr = runCatching { search.search(query, state.settings.search) }.getOrNull()
+                            val sr = runCatching { search.search(query, searchSettings()) }.getOrNull()
                             if (sr != null && sr.isNotEmpty()) {
                                 // 几次搜索接着编号，裁判在 sources 里报用了哪几条
                                 val from = sources.size
@@ -3755,6 +3755,14 @@ class Engine(
         const val EMBED_SAVE_MS = 20_000L
     }
 
+    /** 选了智谱搜索却没单独填 Key：用服务商里智谱开放平台的 Key（同一个账号，跟 Kimi 搜索一样不用再填）。 */
+    private fun searchSettings(): com.guixing.jixunying.model.SearchSettings {
+        val s = state.settings.search
+        if (s.engine != com.guixing.jixunying.model.SearchEngine.ZHIPU || s.apiKeys[s.engine.name].orEmpty().isNotBlank()) return s
+        val p = state.providers.firstOrNull { (it.presetId == "zhipu" || "open.bigmodel.cn" in it.baseUrl.lowercase()) && it.apiKey.isNotBlank() } ?: return s
+        return s.copy(apiKeys = s.apiKeys + (s.engine.name to p.apiKey))
+    }
+
     /** kimi 不为空：用这家 Kimi 的官方搜索接口；它出错就退回设置里的搜索引擎，并在步骤上注明。 */
     private suspend fun runSearch(query: String, sources: MutableList<SearchSource>, kimi: ProviderConfig? = null): Pair<ToolStep, List<SearchSource>> {
         var note = ""
@@ -3770,7 +3778,7 @@ class Engine(
             }
         }
         return try {
-            val res = search.search(query, state.settings.search)
+            val res = search.search(query, searchSettings())
             sources += res
             ToolStep("search", query, res, ok = true, note = note) to res
         } catch (e: CancellationException) {

@@ -790,9 +790,9 @@ private fun SearchPage(ctl: AppController, state: AppState) {
         HorizontalDivider(color = Ext.c.border, modifier = Modifier.padding(vertical = 10.dp))
         FieldLabel("搜索引擎")
         listOf(
-            SearchEngine.BING_FREE to "免费，不用 Key，国内直连。偶尔会被限流，结果质量一般",
+            SearchEngine.BING_FREE to "免费，不用 Key（必应 + DuckDuckGo 一起搜，对不上题的扔掉）。中文题经常搜不到，要稳用下面有 Key 的",
             SearchEngine.BOCHA to "推荐：国内正规搜索 API，中文结果质量好、稳定，按次计费很便宜（open.bochaai.com）",
-            SearchEngine.ZHIPU to "智谱的搜索 API，用智谱开放平台的 Key",
+            SearchEngine.ZHIPU to "智谱的搜索 API（基础版 search_std，官方价每次 1 分钱）。服务商里加了智谱开放平台的就不用再填 Key",
             SearchEngine.TAVILY to "海外 AI 搜索 API，每月有免费额度（tavily.com），一般要走代理",
             SearchEngine.BRAVE to "海外搜索 API，有免费额度（brave.com/search/api），要走代理",
         ).forEach { (e, desc) -> RadioRow(s.engine == e, engineLabel(e), desc) { set { it.copy(engine = e) } } }
@@ -802,7 +802,7 @@ private fun SearchPage(ctl: AppController, state: AppState) {
             androidx.compose.runtime.key(s.engine) {
                 var key by remember { mutableStateOf(s.apiKeys[s.engine.name].orEmpty()) }
                 AutoSave(key, s.apiKeys[s.engine.name].orEmpty()) { v -> set { it.copy(apiKeys = it.apiKeys + (s.engine.name to v.trim())) } }
-                FieldLabel("${engineLabel(s.engine)} 的 Key", "填好自动保存")
+                FieldLabel("${engineLabel(s.engine)} 的 Key", if (s.engine == SearchEngine.ZHIPU) "不填就用服务商里智谱开放平台的 Key" else "填好自动保存")
                 AppTextField(key, { key = it }, password = true)
             }
         }
