@@ -16,4 +16,12 @@ class DiffCommentTest {
         val t = DiffComment.task(listOf(DiffComment("x.kt", 11, "c", "要判断空值")))
         assertTrue("x.kt 第 11 行「c」：要判断空值" in t, t)
     }
+
+    /** 2026-10-22：差异窗口左边的行数从完整差异里数，文件头 +++ / --- 不算。 */
+    @Test
+    fun countsAddedAndRemovedLines() {
+        val diff = listOf("--- a/x.kt", "+++ b/x.kt", "@@ -10,3 +10,4 @@", " a", "-b", "+c", "+d", " e", "@@ -40,2 +41,1 @@", "-f", "-g", "+h").joinToString("\n")
+        assertEquals(3 to 3, com.guixing.jixunying.ui.CodeDiffText.count(diff))
+        assertEquals(0 to 0, com.guixing.jixunying.ui.CodeDiffText.count(""))
+    }
 }

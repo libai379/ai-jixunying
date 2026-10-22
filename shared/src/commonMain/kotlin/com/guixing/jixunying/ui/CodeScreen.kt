@@ -1175,6 +1175,9 @@ private fun ChangesDialog(ctl: AppController, conv: Conversation, messageId: Str
     val all by ctl.backend.store.messages.collectAsState()
     val msg = all[conv.id].orEmpty().firstOrNull { it.id == messageId } ?: return
     val changes = msg.tools.mapNotNull { it.change }.distinctBy { it.path }
+    // 同一个文件这条回答里可能改了好几次（试用记账本时 AutoCapture.kt 改了 7 次，列表只算了第一次「+6 −1」，git 是 +18 −8）：
+    // 行数从这个文件的完整差异里数（下面每个文件都要一份），没拿到之前先把几次的加起来顶着
+    val sums = remember(msg.tools) { msg.tools.mapNotNull { it.change }.groupBy { it.path }.mapValues { (_, l) -> l.sumOf { it.added } to l.sumOf { it.removed } } }
     // 还没处理的改动，它那一步的 output 里本来就存着同一段差异（写文件时算出来的），先拿来当内容：
     // 打开就能看见，不用先对着转圈；下面再问引擎要一次（看文件现在的样子），拿回来会盖掉。
     val diffs = remember(messageId) {
@@ -1191,14 +1194,16 @@ private fun ChangesDialog(ctl: AppController, conv: Conversation, messageId: Str
     var confirmRevert by remember(messageId) { mutableStateOf(false) }
     // 逐行评论（2026-10-18，开发补齐第 7 样）：点差异里的一行写评论，攒几条后「按评论再改」
     val comments = remember(messageId) { androidx.compose.runtime.mutableStateListOf<DiffComment>() }
-    // 看选中那个文件改了什么（拒绝 / 撤销之后文件变了，重新取一遍）
-    LaunchedEffect(picked, reload) {
-        if (picked.isBlank()) return@LaunchedEffect
-        ctl.run(Command.CodeDiff(conv.id, picked), quiet = true) { r ->
-            if (r.ok) { diffs[picked] = r.data; diffErr.remove(picked) }
-            else diffErr[picked] = r.message.ifBlank { "看不了这处改动" }
+    // 看每个文件改了什么（拒绝 / 撤销之后文件变了，重新取一遍）：左边的行数也从这里数
+    LaunchedEffect(messageId, reload) {
+        changes.forEach { c ->
+            ctl.run(Command.CodeDiff(conv.id, c.id), quiet = true) { r ->
+                if (r.ok) { diffs[c.id] = r.data; diffErr.remove(c.id) }
+                else diffErr[c.id] = r.message.ifBlank { "看不了这处改动" }
+            }
         }
     }
+    fun stat(c: FileChange): Pair<Int, Int> = diffs[c.id]?.let { CodeDiffText.count(it) } ?: sums[c.path] ?: (c.added to c.removed)
     fun review(id: String, accept: Boolean) {
         ctl.run(Command.CodeReview(conv.id, id, accept), quiet = true) { r ->
             if (!r.ok) ctl.toast(if (r.message.isBlank()) "没成功" else r.message)
@@ -1257,7 +1262,7 @@ private fun ChangesDialog(ctl: AppController, conv: Conversation, messageId: Str
                     Row(Modifier.fillMaxWidth().height(430.dp)) {
                         Column(Modifier.width(260.dp).fillMaxSize().verticalScroll(rememberScrollState()).padding(end = 10.dp)) {
                             changes.forEach { c ->
-                                ChangeFileRow(c, picked == c.id, readonly) { picked = c.id; confirmReject = "" }
+                                ChangeFileRow(c, stat(c), picked == c.id, readonly) { picked = c.id; confirmReject = "" }
                                 if (picked == c.id) {
                                     ChangeRowActions(c, readonly, onReject = { confirmReject = c.id }) { review(c.id, true) }
                                 }
@@ -1279,7 +1284,7 @@ private fun ChangesDialog(ctl: AppController, conv: Conversation, messageId: Str
                                     .clickable { picked = c.id; confirmReject = "" }.padding(horizontal = 8.dp, vertical = 5.dp)) {
                                     Text(folderName(c.path), style = MaterialTheme.typography.labelMedium,
                                         color = if (on) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface)
-                                    Text("+${c.added} −${c.removed}" + "  " + reviewLabel(c),
+                                    Text(stat(c).let { (a, r) -> "+$a −$r" } + "  " + reviewLabel(c),
                                         style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
                                 }
                             }
@@ -1308,7 +1313,7 @@ private fun Warn(text: String) {
 }
 
 @Composable
-private fun ChangeFileRow(c: FileChange, selected: Boolean, readonly: Boolean, onClick: () -> Unit) {
+private fun ChangeFileRow(c: FileChange, stat: Pair<Int, Int>, selected: Boolean, readonly: Boolean, onClick: () -> Unit) {
     Row(
         Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp))
             .background(if (selected) Ext.c.sidebarSelected else Color.Transparent)
@@ -1317,7 +1322,7 @@ private fun ChangeFileRow(c: FileChange, selected: Boolean, readonly: Boolean, o
     ) {
         Column(Modifier.weight(1f)) {
             Text(c.path, style = MaterialTheme.typography.labelMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text("+${c.added} −${c.removed}" + if (c.created) " · 新文件" else "",
+            Text("+${stat.first} −${stat.second}" + if (c.created) " · 新文件" else "",
                 style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
         }
         reviewPill(c)
@@ -1426,6 +1431,20 @@ private fun DiffPane(text: String?, error: String?, c: FileChange?, comments: an
             } else Text(if (comments.isEmpty()) "点差异里的一行可以写评论，攒几条后点「按评论再改」。" else "已写 ${comments.size} 条评论。",
                 style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, modifier = Modifier.padding(top = 6.dp))
         }
+    }
+}
+
+/** 从统一差异的文字里数加了几行、删了几行（文件头 +++ / --- 不算）。 */
+internal object CodeDiffText {
+    fun count(diff: String): Pair<Int, Int> {
+        var added = 0
+        var removed = 0
+        for (line in diff.lineSequence()) when {
+            line.startsWith("+++") || line.startsWith("---") -> {}
+            line.startsWith("+") -> added++
+            line.startsWith("-") -> removed++
+        }
+        return added to removed
     }
 }
 
