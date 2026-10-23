@@ -129,7 +129,9 @@ fun Sidebar(ctl: AppController, modifier: Modifier, onNavigate: () -> Unit) {
                 }
             }
             Row(Modifier.fillMaxWidth().padding(start = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                SidebarTabs(ctl.sidebarTab) { if (it != ctl.sidebarTab) { ctl.sidebarTab = it; query = "" } }
+                // 手机本机跑不了 Code 栏，不给这个标签（2026-10-23），切到电脑才有
+                val tabs = if (codeAccess == CodeAccess.NO_LOCAL) listOf(SidebarTab.CHAT) else SidebarTab.entries
+                SidebarTabs(tabs, ctl.sidebarTab) { if (it != ctl.sidebarTab) { ctl.sidebarTab = it; query = "" } }
                 Spacer(Modifier.weight(1f))
                 DeviceMenu(ctl, state, onNavigate)
             }
@@ -182,9 +184,9 @@ private fun memberNames(state: AppState, c: Conversation) = c.memberIds.mapNotNu
 
 /** 「对话 | Code」两个文字标签，选中的那个变主色、底下一道短横线。 */
 @Composable
-private fun SidebarTabs(tab: SidebarTab, onPick: (SidebarTab) -> Unit) {
+private fun SidebarTabs(tabs: List<SidebarTab>, tab: SidebarTab, onPick: (SidebarTab) -> Unit) {
     Row(verticalAlignment = Alignment.Bottom) {
-        SidebarTab.entries.forEach { t ->
+        tabs.forEach { t ->
             val on = t == tab
             Column(
                 Modifier.clip(RoundedCornerShape(8.dp)).clickable { onPick(t) }.padding(horizontal = 8.dp, vertical = 4.dp),

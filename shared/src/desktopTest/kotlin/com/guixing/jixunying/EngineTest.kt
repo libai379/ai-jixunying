@@ -516,6 +516,29 @@ class EngineTest {
         assertEquals(2, e2.store.messages.value[conv]!!.size)
     }
 
+    /** 2026-10-23：有过回答的旧对话，用户写的自定义指令原文再贴在最新那句话后面；新对话不贴（system 里已经有）。 */
+    @Test
+    fun oldChatGetsInstructionsNextToLatestMessage() = runBlocking {
+        val (e, ms) = engineWithMembers("小智")
+        val conv = e.call(Command.CreateConversation(listOf(ms[0].id))).data
+        e.call(Command.UpdateConversation(e.state.conversation(conv)!!.copy(webSearch = false)))
+        e.call(Command.SendMessage(conv, "第一句"))
+        waitIdle(e, conv, 1)
+        fun lastUser(req: JsonObject) = req["messages"]!!.jsonArray.last { it.jsonObject["role"]!!.jsonPrimitive.content == "user" }
+            .jsonObject["content"]!!.jsonPrimitive.content
+        assertEquals("【我】第一句", lastUser(requests.last()), "没有指令时不贴")
+        e.call(Command.SaveSettings(e.state.settings.copy(personal = e.state.settings.personal.copy(instructions = "回答用「报告老板：」开头"))))
+        e.call(Command.SendMessage(conv, "第二句"))
+        waitIdle(e, conv, 2)
+        assertEquals("【我】第二句\n\n（我在设置里写的自定义指令：回答用「报告老板：」开头）", lastUser(requests.last()))
+        val fresh = e.call(Command.CreateConversation(listOf(ms[0].id))).data
+        e.call(Command.UpdateConversation(e.state.conversation(fresh)!!.copy(webSearch = false)))
+        e.call(Command.SendMessage(fresh, "新对话第一句"))
+        waitIdle(e, fresh, 1)
+        assertEquals("【我】新对话第一句", lastUser(requests.last()), "新对话还没有回答，指令在 system 里就够了")
+        assertTrue("报告老板" in systemOf(requests.last()))
+    }
+
     @Test
     fun groupIndependentAnswersDoNotSeeEachOther() = runBlocking {
         val (e, ms) = engineWithMembers("甲", "乙")

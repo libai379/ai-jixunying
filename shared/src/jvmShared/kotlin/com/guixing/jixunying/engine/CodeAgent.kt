@@ -2009,7 +2009,7 @@ class CodeAgent(private val host: CodeHost) {
     // ———————————————— 零碎 ————————————————
 
     private suspend fun addStep(convId: String, msgId: String, step: ToolStep) {
-        host.updateMessage(convId, msgId) { it.copy(tools = it.tools + step) }
+        host.updateMessage(convId, msgId) { it.copy(tools = it.tools + if (step.textAt >= 0) step else step.copy(textAt = it.content.trimStart().length)) }
     }
 
     private fun setStep(convId: String, msgId: String, stepId: String, transform: (ToolStep) -> ToolStep) {

@@ -2985,6 +2985,7 @@ class Engine(
                 canMakeFiles = officeOn && useTools, canReadFiles = filesOn && useTools, canVideo = hasVideo && useTools)
             working += buildJsonObject { put("role", "system"); put("content", sys) }
             working += buildHistory(convId, member, cutoffId, excludeId = msg.id, vision = model.vision)
+            remindInstructions(working)
 
             val sources = mutableListOf<SearchSource>()
             if (wantSearch && !useTools) {
@@ -4051,6 +4052,29 @@ class Engine(
         val all = snapshot(convId)
         val end = cutoffId?.let { id -> all.indexOfFirst { it.id == id } + 1 }?.takeIf { it > 0 } ?: all.size
         return all.subList(0, end).lastOrNull { it.role == Role.USER }?.content.orEmpty()
+    }
+
+    /**
+     * 旧对话里也照新写的自定义指令做（2026-10-23 用户：「旧对话看不到我新更新的个性化」）。
+     * 指令本来就在 system 最后，但前面已经有一串没照指令写的回答时，模型会跟着自己以前的样子答：
+     * 真模型量过（LiveInstructionTest），阿智 GLM-5.3-Flash 在旧对话里 5 次有 3 次没照做、新对话 5 次全照做。
+     * 所以有过回答的对话，把用户自己写的指令原文再贴在最新一句话后面（不加别的要求）。
+     * 贴在用户那句话里、不另起一条 system：有的接口不认对话中间的 system。
+     */
+    private fun remindInstructions(working: MutableList<JsonObject>) {
+        val custom = state.settings.personal.instructions.trim()
+        if (custom.isEmpty() || working.none { it["role"]?.jsonPrimitive?.contentOrNull == "assistant" }) return
+        val i = working.indexOfLast { it["role"]?.jsonPrimitive?.contentOrNull == "user" }
+        if (i < 0) return
+        val note = "\n\n（我在设置里写的自定义指令：$custom）"
+        val m = working[i]
+        val content = m["content"]
+        val next = when {
+            content is JsonPrimitive -> JsonPrimitive(content.content + note)
+            content is JsonArray -> JsonArray(content + buildJsonObject { put("type", "text"); put("text", note.trim()) })
+            else -> return
+        }
+        working[i] = JsonObject(m + ("content" to next))
     }
 
     /**

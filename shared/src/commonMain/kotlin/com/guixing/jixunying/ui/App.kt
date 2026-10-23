@@ -415,6 +415,10 @@ private fun MainLayout(ctl: AppController) {
 private fun MainContent(ctl: AppController, wide: Boolean, openDrawer: () -> Unit) {
     val tab = ctl.settingsTab
     val state by ctl.backend.store.state.collectAsState()
+    // 手机在「本机」时没有 Code 栏（2026-10-23 用户：「手机为什么要留 code 页面，似乎没有用」）：本机跑不了，
+    // 侧栏只剩「对话」；从电脑切回本机时正停在 Code 栏的，回到对话
+    val noLocalCode = !LocalPlatform.current.isDesktop && !ctl.remoteMode
+    LaunchedEffect(noLocalCode) { if (noLocalCode && ctl.sidebarTab == SidebarTab.CODE) ctl.sidebarTab = SidebarTab.CHAT }
     androidx.compose.foundation.layout.Column(Modifier.fillMaxSize()) {
         if (ctl.remoteMode) RemoteBanner(ctl)
         Box(Modifier.weight(1f)) {

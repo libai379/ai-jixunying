@@ -261,3 +261,35 @@ object CodePhone {
     fun folders(s: AppState): List<String> =
         s.conversations.mapNotNull { it.code?.folder }.distinctBy { it.trimEnd('\\', '/').lowercase() }
 }
+
+/** Code 回答里按时间排的一段：AI 说的一段话，或者一步工具（2026-10-23，修补清单第 9 条）。 */
+sealed interface CodeEntry {
+    /** key 是这段话前面那一步的编号（开头那段是 start），列表据此认出同一段话。 */
+    data class Said(val text: String, val key: String) : CodeEntry
+    data class Step(val step: ToolStep) : CodeEntry
+}
+
+object CodeTimeline {
+    /**
+     * 把正文按每一步的 textAt 切开，插回步骤之间。textAt 量的是去掉开头空白后的长度，
+     * 所以正文开头的空白算进去（收尾时 trim 掉了也对得上）。没记 textAt 的旧步骤排在前面，话全接在后面（以前的样子）。
+     * 待办清单（todo）不在这里，界面放最上面。
+     */
+    fun build(content: String, tools: List<ToolStep>): List<CodeEntry> {
+        val lead = content.length - content.trimStart().length
+        val out = mutableListOf<CodeEntry>()
+        var pos = 0
+        var after = "start"
+        fun say(end: Int) {
+            if (end > pos) content.substring(pos, end).trim().takeIf { it.isNotEmpty() }?.let { out += CodeEntry.Said(it, after) }
+            pos = maxOf(pos, end)
+        }
+        tools.filter { it.kind != "todo" }.forEach { t ->
+            if (t.textAt >= 0) say((lead + t.textAt).coerceAtMost(content.length))
+            out += CodeEntry.Step(t)
+            if (t.textAt >= 0) after = t.id
+        }
+        say(content.length)
+        return out
+    }
+}

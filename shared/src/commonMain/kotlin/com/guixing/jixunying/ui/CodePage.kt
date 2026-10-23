@@ -271,10 +271,7 @@ fun CodePage(ctl: AppController, state: AppState) {
         Text("手机", style = MaterialTheme.typography.titleSmall)
         Spacer(Modifier.height(6.dp))
         if (editable) {
-            SwitchRow("允许手机用 Code 栏",
-                "关着时：手机经加密线路发来的 Code 指令（新建、发任务、批准、停止）电脑一律拒绝，只有看过程和差异放行。" +
-                    "手机用 Code 栏是第二期才做的；现在打开也只是让这些指令不被电脑拒绝，手机上的界面还是只读。",
-                c.allowPhone) { v -> set { it.copy(allowPhone = v) } }
+            SwitchRow("允许手机用 Code 栏", PHONE_CODE_NOTE, c.allowPhone) { v -> set { it.copy(allowPhone = v) } }
         } else {
             ReadOnlyRow("允许手机用 Code 栏", if (c.allowPhone) "已打开" else "已关闭")
         }
@@ -289,6 +286,13 @@ fun CodePage(ctl: AppController, state: AppState) {
         ReadOnlyRow("现在占了", if (!askBackup) "在电脑上看" else size?.let { sizeText(it) } ?: "正在算…")
     }
 }
+
+/**
+ * 「允许手机用 Code 栏」的说明：设置 → Code 栏 和 设置 → 手机联机 两处一样（2026-10-23 用户找不到这个开关，联机页也放一个）。
+ * 以前写的「手机上的界面还是只读」是第一期的话，第二期（10-13）起手机就能动手了。
+ */
+internal const val PHONE_CODE_NOTE = "打开后，手机侧栏顶上切到这台电脑，就能在 Code 栏发任务、停止、批准某一步、逐个文件接受或拒绝。" +
+    "「接受编辑」档（电脑上给这个会话选过的除外）和「撤销全部改动」只能在电脑上做。关着时手机只能看。"
 
 /** 填的是外壳程序自己的路径（不是 powershell / cmd 这两个内置的）。 */
 internal fun isCustomShell(shell: String): Boolean =

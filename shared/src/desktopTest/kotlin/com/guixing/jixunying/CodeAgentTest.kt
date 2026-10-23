@@ -367,6 +367,33 @@ class CodeAgentTest {
         assertFalse(change.created, "a.txt 本来就有")
         assertEquals("", change.review)
         assertEquals("allowed", ai.tools.first { it.id == step.id }.approval)
+        // 2026-10-23：每一步都记了开始时说到第几个字，「改完了。」排在步骤后面
+        assertTrue(ai.tools.all { it.textAt >= 0 }, ai.tools.toString())
+        assertEquals(com.guixing.jixunying.model.CodeEntry.Said("改完了。", ai.tools.last().id),
+            com.guixing.jixunying.model.CodeTimeline.build(ai.content, ai.tools).last())
+    }
+
+    @Test
+    fun timelinePutsWordsBetweenSteps() {
+        fun step(id: String, at: Int) = ToolStep("read", id, id = id, textAt = at)
+        val content = "\n先看看。\n\n要改这里。\n\n好了。"
+        // 开头的换行收尾时会被 trim 掉，textAt 量的是去掉开头空白后的长度，两种都要对得上
+        for (c in listOf(content, content.trim())) {
+            val t = com.guixing.jixunying.model.CodeTimeline.build(c, listOf(step("a", 4), step("b", 4), step("c", 11)))
+            assertEquals(listOf("说:先看看。", "步:a", "步:b", "说:要改这里。", "步:c", "说:好了。"), t.map {
+                when (it) {
+                    is com.guixing.jixunying.model.CodeEntry.Said -> "说:" + it.text
+                    is com.guixing.jixunying.model.CodeEntry.Step -> "步:" + it.step.id
+                }
+            })
+        }
+        // 旧消息没记 textAt：步骤在前、话在后（以前的样子）
+        val old = com.guixing.jixunying.model.CodeTimeline.build("好了。", listOf(ToolStep("read", "x", id = "x"), ToolStep("read", "y", id = "y")))
+        assertEquals(3, old.size)
+        assertEquals("好了。", (old.last() as com.guixing.jixunying.model.CodeEntry.Said).text)
+        // textAt 超出正文长度不崩：话都算在这一步之前
+        val over = com.guixing.jixunying.model.CodeTimeline.build("好了。", listOf(step("z", 99)))
+        assertEquals("好了。", (over.first() as com.guixing.jixunying.model.CodeEntry.Said).text)
     }
 
     @Test

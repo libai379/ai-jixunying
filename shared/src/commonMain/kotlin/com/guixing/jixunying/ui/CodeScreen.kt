@@ -41,6 +41,10 @@ import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.ExpandLess
 import androidx.compose.material.icons.rounded.ExpandMore
+import androidx.compose.material.icons.rounded.Check
+import androidx.compose.material.icons.rounded.Info
+import androidx.compose.material.icons.rounded.MoreHoriz
+import androidx.compose.material.icons.rounded.Security
 import androidx.compose.material.icons.rounded.FolderOpen
 import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.Terminal
@@ -103,7 +107,9 @@ import androidx.compose.ui.unit.sp
 import com.guixing.jixunying.model.AppState
 import com.guixing.jixunying.model.Attachment
 import com.guixing.jixunying.model.AttachmentKind
+import com.guixing.jixunying.model.CodeEntry
 import com.guixing.jixunying.model.CodeMode
+import com.guixing.jixunying.model.CodeTimeline
 import com.guixing.jixunying.model.CodeModels
 import com.guixing.jixunying.model.CodePhone
 import com.guixing.jixunying.model.CodeSpec
@@ -262,53 +268,17 @@ private fun CodeTopBar(ctl: AppController, state: AppState, conv: Conversation, 
             }
             Spacer(Modifier.width(10.dp))
         }
-        // 上传到 GitHub（2026-10-18）：电脑上才有
+        // 2026-10-23 用户：「整个 code 页面逻辑我没看懂」——顶上只留停止、权限档和「更多」；
+        // 工作区、终端、提交收进「更多」，另加「这一页怎么用」
         var showGit by remember(conv.id) { mutableStateOf(ctl.debugDialog == "git") }
-        if (LocalPlatform.current.isDesktop && !ctl.remoteMode) {
-            // 终端（2026-10-18，开发补齐第 2 样）：开关在会话之间共用
-            Row(
-                Modifier.clip(RoundedCornerShape(50)).border(1.dp, if (ctl.codeTerminalOpen) MaterialTheme.colorScheme.primary else Ext.c.border, RoundedCornerShape(50))
-                    .clickable { ctl.codeTerminalOpen = !ctl.codeTerminalOpen }.padding(horizontal = 9.dp, vertical = 6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Icon(Icons.Rounded.Terminal, "终端", Modifier.size(15.dp), tint = MaterialTheme.colorScheme.primary)
-                if (wide) {
-                    Spacer(Modifier.width(4.dp))
-                    Text("终端", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-            }
-            Spacer(Modifier.width(8.dp))
-            Row(
-                Modifier.clip(RoundedCornerShape(50)).border(1.dp, Ext.c.border, RoundedCornerShape(50))
-                    .clickable { showGit = true }.padding(horizontal = 9.dp, vertical = 6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Icon(Icons.Rounded.CloudUpload, "提交和上传", Modifier.size(15.dp), tint = MaterialTheme.colorScheme.primary)
-                if (wide) {
-                    Spacer(Modifier.width(4.dp))
-                    // 2026-10-22 叫「提交」：没远端时主要是在本地提交，有远端弹窗里照样能推送、开 PR
-                    Text("提交", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-            }
-            Spacer(Modifier.width(8.dp))
-        }
-        if (showGit) GitDialog(ctl, conv, spec) { showGit = false }
-        // 工作区：项目文件夹 + 加进来的文件夹，还有「不再问」的命令（2026-10-17）
-        val extra = spec.extraPaths.size + spec.allowedCommands.size
-        Row(
-            Modifier.clip(RoundedCornerShape(50)).border(1.dp, Ext.c.border, RoundedCornerShape(50))
-                .clickable { showPath = true }.padding(horizontal = 9.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Icon(Icons.Rounded.FolderOpen, "工作区", Modifier.size(15.dp), tint = MaterialTheme.colorScheme.primary)
-            if (wide) {
-                Spacer(Modifier.width(4.dp))
-                Text(if (extra > 0) "工作区 +$extra" else "工作区", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-        }
+        var showHelp by remember(conv.id) { mutableStateOf(ctl.debugDialog == "codehelp") }
+        val onPc = LocalPlatform.current.isDesktop && !ctl.remoteMode
+        CodeMoreMenu(ctl, spec, onPc, onWorkspace = { showPath = true }, onGit = { showGit = true }, onHelp = { showHelp = true })
         Spacer(Modifier.width(8.dp))
+        if (showGit) GitDialog(ctl, conv, spec) { showGit = false }
+        if (showHelp) CodeHelpDialog { showHelp = false }
         // 2026-10-17「自动」「全部放开」：电脑上才有（手机上打不开，PhoneGate 也会拒）。顺序照 Claude 的菜单：自动、手动、接受编辑、全部放开、计划
-        val canOpen = LocalPlatform.current.isDesktop && !ctl.remoteMode
+        val canOpen = onPc
         val base = CodeUi.modesFor(access, spec).map { ModeOpt(it) }
         val options = buildList {
             if (canOpen || spec.autoMode) add(ModeOpt(CodeMode.ACCEPT_EDITS, auto = true))
@@ -318,7 +288,8 @@ private fun CodeTopBar(ctl: AppController, state: AppState, conv: Conversation, 
             base.filter { it.mode == CodeMode.PLAN }.forEach { add(it) }
         }
         val current = ModeOpt(spec.mode, open = spec.openAll && spec.mode != CodeMode.PLAN, auto = spec.autoMode && spec.mode != CodeMode.PLAN && !spec.openAll)
-        CodeModePicker(current, options, enabled = access.canAct) { o ->
+        // 开发截图用：-Djxy.start=code:会话编号#modes 把这个菜单打开
+        CodeModePicker(current, options, enabled = access.canAct, debugOpen = ctl.debugDialog == "modes") { o ->
             ctl.run(Command.CodeSetMode(conv.id, o.mode, openAll = o.open, auto = o.auto), okText = "权限档换成「${o.label}」")
         }
     }
@@ -801,21 +772,96 @@ private data class ModeOpt(val mode: CodeMode, val open: Boolean = false, val au
 }
 
 @Composable
-private fun CodeModePicker(mode: ModeOpt, modes: List<ModeOpt>, enabled: Boolean, onPick: (ModeOpt) -> Unit) {
-    Row(
-        Modifier.clip(RoundedCornerShape(50)).border(1.dp, Ext.c.border, RoundedCornerShape(50)).padding(2.dp),
-    ) {
-        modes.forEach { m ->
-            val on = m == mode
-            Box(
-                Modifier.clip(RoundedCornerShape(50))
-                    .background(if (on) MaterialTheme.colorScheme.primary.copy(alpha = 0.14f) else Color.Transparent)
-                    .clickable(enabled = enabled) { if (!on) onPick(m) }
-                    .padding(horizontal = 10.dp, vertical = 5.dp),
-            ) {
-                Text(m.label, style = MaterialTheme.typography.labelMedium,
-                    color = if (on) (if (m.open) Ext.c.warning else MaterialTheme.colorScheme.primary) else Ext.c.subtle)
+private fun CodeModePicker(mode: ModeOpt, modes: List<ModeOpt>, enabled: Boolean, debugOpen: Boolean = false, onPick: (ModeOpt) -> Unit) {
+    // 2026-10-23：以前五档一字排开，看不出各是什么意思；改成一个按钮显示现在这一档，点开每档带一句说明
+    var open by remember { mutableStateOf(debugOpen) }
+    val color = if (mode.open) Ext.c.warning else MaterialTheme.colorScheme.primary
+    Box {
+        Row(
+            Modifier.clip(RoundedCornerShape(50)).border(1.dp, Ext.c.border, RoundedCornerShape(50))
+                .background(color.copy(alpha = 0.10f))
+                .clickable(enabled = enabled) { open = true }.padding(start = 10.dp, end = 6.dp, top = 6.dp, bottom = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(Icons.Rounded.Security, null, Modifier.size(15.dp), tint = color)
+            Spacer(Modifier.width(4.dp))
+            Text(mode.label, style = MaterialTheme.typography.labelMedium, color = color, maxLines = 1)
+            if (enabled) Icon(Icons.Rounded.ExpandMore, "权限档", Modifier.size(16.dp), tint = Ext.c.subtle)
+        }
+        androidx.compose.material3.DropdownMenu(open, { open = false }) {
+            Text("权限档：AI 改文件、跑命令前要不要先问你", style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle,
+                modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp))
+            modes.forEach { m ->
+                androidx.compose.material3.DropdownMenuItem(
+                    {
+                        Column(Modifier.widthIn(max = 320.dp)) {
+                            Text(m.label, style = MaterialTheme.typography.bodyMedium, color = if (m.open) Ext.c.warning else MaterialTheme.colorScheme.onSurface)
+                            Text(modeOptDesc(m), style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
+                        }
+                    },
+                    trailingIcon = { if (m == mode) Icon(Icons.Rounded.Check, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary) },
+                    onClick = { open = false; if (m != mode) onPick(m) },
+                )
             }
+        }
+    }
+}
+
+private fun modeOptDesc(m: ModeOpt) = when {
+    m.auto -> "读、改项目里的文件直接做；别的先让检查员（裁判模型）看一眼，它拦下的再问你"
+    m.open -> "改文件、跑命令都不问；删整个文件夹、格式化这类危险命令照样问"
+    else -> modeDesc(m.mode)
+}
+
+/** 顶上的「更多」：工作区、终端、提交（电脑上才有后两样）、这一页怎么用。 */
+@Composable
+private fun CodeMoreMenu(ctl: AppController, spec: CodeSpec, onPc: Boolean, onWorkspace: () -> Unit, onGit: () -> Unit, onHelp: () -> Unit) {
+    var open by remember { mutableStateOf(ctl.debugDialog == "more") }
+    val extra = spec.extraPaths.size + spec.allowedCommands.size
+    Box {
+        IconButton(onClick = { open = true }) { Icon(Icons.Rounded.MoreHoriz, "更多") }
+        androidx.compose.material3.DropdownMenu(open, { open = false }) {
+            @Composable
+            fun item(icon: ImageVector, title: String, sub: String, onClick: () -> Unit) = androidx.compose.material3.DropdownMenuItem(
+                {
+                    Column(Modifier.widthIn(max = 320.dp)) {
+                        Text(title, style = MaterialTheme.typography.bodyMedium)
+                        Text(sub, style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
+                    }
+                },
+                leadingIcon = { Icon(icon, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary) },
+                onClick = { open = false; onClick() },
+            )
+            item(Icons.Rounded.FolderOpen, if (extra > 0) "工作区（另加了 $extra 项）" else "工作区",
+                "项目文件夹、另外放进来的文件夹、「不再问」的命令", onWorkspace)
+            if (onPc) {
+                // 终端（2026-10-18，开发补齐第 2 样）：开关在会话之间共用
+                item(Icons.Rounded.Terminal, if (ctl.codeTerminalOpen) "收起终端" else "终端",
+                    "自己在项目文件夹里敲命令（不是 Claude Code，是 PowerShell）", { ctl.codeTerminalOpen = !ctl.codeTerminalOpen })
+                // 2026-10-22 叫「提交」：没远端时主要是在本地提交，有远端弹窗里照样能推送、开 PR
+                item(Icons.Rounded.CloudUpload, "提交", "把改动存成一个版本（git 提交），有 GitHub 的话还能推上去", onGit)
+            }
+            item(Icons.Rounded.Info, "这一页怎么用", "谁在干活、权限档、改动怎么撤销", onHelp)
+        }
+    }
+}
+
+/** 「这一页怎么用」（2026-10-23 用户：「整个 code 页面逻辑我没看懂」）。 */
+@Composable
+private fun CodeHelpDialog(onClose: () -> Unit) {
+    AppDialog("Code 这一页怎么用", onClose, width = 560.dp, actions = { Button(onClose) { Text("知道了") } }) {
+        Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            @Composable
+            fun para(title: String, body: String) = Column {
+                Text(title, style = MaterialTheme.typography.titleSmall)
+                Text(body, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            para("一个会话 = 一个项目文件夹", "左边每一行是一个会话，建的时候选好文件夹和谁来干活。之后在下面说一句要做什么，它就在这个文件夹里读代码、改文件、跑命令。")
+            para("谁在干活", "顶上标题下面写着。选「Claude Code」就是直接用你电脑上装的 Claude Code（用你自己的订阅额度）；选别的模型就是 AI集训营 自己带的助手调那个模型。")
+            para("中间一行一行是什么", "AI 说的话和它做的每一步（读了哪个文件、改了哪个文件、跑了什么命令）按先后排。点某一步能展开看内容；要你批准的那一步会自己展开，带「允许」「拒绝」。")
+            para("权限档（顶上那个盾牌按钮）", "决定它改文件、跑命令前要不要先问你。不放心就用「手动」，什么都先问；只想让它出方案就用「计划」。")
+            para("改错了怎么办", "回答下面的「改了 N 个文件」点进去，能一个文件一个文件地拒绝，文件马上恢复成改之前的样子。你发过的任务下面有「回到这里」，那之后的改动全部还原。")
+            para("「更多」里的东西", "工作区：除了项目文件夹，还允许它碰哪些地方。终端：你自己敲命令用的，和 AI 无关。提交：改满意了，存成一个 git 版本。")
         }
     }
 }
@@ -824,17 +870,17 @@ private fun CodeModePicker(mode: ModeOpt, modes: List<ModeOpt>, enabled: Boolean
 private fun CodeMessageList(ctl: AppController, state: AppState, conv: Conversation, messages: List<Message>, canAct: Boolean, onDiff: (String) -> Unit) {
     // 和聊天一样从底下往上排：打开会话停在最新一行的最后（教训 60），每个会话各记各的位置
     val listState = remember(conv.id) { LazyListState() }
-    val newestFirst = remember(messages) { messages.asReversed() }
     val last = messages.lastOrNull()
-    LaunchedEffect(messages.size, last?.content?.length, last?.tools?.size) {
-        if (messages.isEmpty()) return@LaunchedEffect
-        val justSent = last?.role == Role.USER
-        if (justSent || listState.firstVisibleItemIndex in 1..2) listState.animateScrollToItem(0)
+    // 只在刚发出任务时拽到最底下（2026-10-23）：以前停在最新那条里也算「在底下」，任务在跑时每来一步就拽一次，
+    // 往上翻着点某一步根本点不准。现在一步一行，停在最底下时新的一行自己顶上来；往上翻着时列表按行认位置，不动
+    LaunchedEffect(messages.size) {
+        if (last?.role == Role.USER) listState.animateScrollToItem(0)
     }
     if (messages.isEmpty()) {
         CodeStartHint(conv)
         return
     }
+    val rows = codeRows(ctl, state, messages, canAct, onDiff).asReversed()
     LazyColumn(
         state = listState,
         modifier = Modifier.fillMaxSize(),
@@ -843,10 +889,8 @@ private fun CodeMessageList(ctl: AppController, state: AppState, conv: Conversat
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         item(key = "bottom") { Spacer(Modifier.height(24.dp)) }
-        items(newestFirst, key = { it.id }) { m ->
-            Box(Modifier.widthIn(max = CODE_MAX_WIDTH).fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
-                if (m.role == Role.USER) CodeUserMessage(ctl, m) else CodeAiMessage(ctl, state, m, canAct, onDiff)
-            }
+        items(rows, key = { it.key }) { r ->
+            Box(Modifier.widthIn(max = CODE_MAX_WIDTH).fillMaxWidth().padding(horizontal = 16.dp)) { r.content() }
         }
         item(key = "top") {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -912,40 +956,78 @@ private fun CodeUserMessage(ctl: AppController, m: Message) {
     }
 }
 
-@Composable
-private fun CodeAiMessage(ctl: AppController, state: AppState, m: Message, canAct: Boolean, onDiff: (String) -> Unit) {
-    val clipboard = LocalClipboardManager.current
-    val (body, thinkInline) = remember(m.content) { splitThink(m.content) }
-    val reasoning = (m.reasoning + if (thinkInline.isNotEmpty()) "\n$thinkInline" else "").trim()
-    val changes = remember(m.tools) { m.tools.mapNotNull { it.change } }
-    Row(Modifier.fillMaxWidth()) {
-        MemberAvatar(null, 34.dp, emoji = "🛠️", color = 0xFF4F5BEB)
-        Spacer(Modifier.width(12.dp))
-        Column(Modifier.weight(1f)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("Code 助手", style = MaterialTheme.typography.titleSmall)
-                if (m.modelLabel.isNotBlank()) {
-                    Spacer(Modifier.width(8.dp))
-                    Pill(m.modelLabel, Ext.c.subtle)
+/** 列表里的一行。一条 AI 回答拆成好几行（2026-10-23）：任务在跑时新的一步是新的一行，往上翻着看的那一行不会被挤走。 */
+private class CodeRow(val key: String, val content: @Composable () -> Unit)
+
+/** 头像和名字之后，回答的内容往右缩进到名字底下。 */
+private val CODE_INDENT = 46.dp
+
+private fun codeRows(ctl: AppController, state: AppState, messages: List<Message>, canAct: Boolean, onDiff: (String) -> Unit): List<CodeRow> {
+    val rows = mutableListOf<CodeRow>()
+    val used = HashSet<String>()
+    fun add(key: String, indent: Boolean = true, content: @Composable () -> Unit) {
+        // 编号万一重了（旧数据里步骤没编号），LazyColumn 会崩：加个序号
+        var k = key
+        var n = 1
+        while (!used.add(k)) k = "$key#${n++}"
+        rows += CodeRow(k) { Box(Modifier.fillMaxWidth().padding(start = if (indent) CODE_INDENT else 0.dp)) { content() } }
+    }
+    for (m in messages) {
+        if (m.role == Role.USER) {
+            add(m.id, indent = false) { Box(Modifier.padding(vertical = 8.dp)) { CodeUserMessage(ctl, m) } }
+            continue
+        }
+        val (body, thinkInline) = splitThink(m.content)
+        val reasoning = (m.reasoning + if (thinkInline.isNotEmpty()) "\n$thinkInline" else "").trim()
+        val entries = CodeTimeline.build(m.content, m.tools)
+        val streaming = m.status == MsgStatus.STREAMING
+        add("${m.id}:head", indent = false) { CodeAiHead(m) }
+        // 待办清单放最上面（2026-10-18）
+        m.tools.lastOrNull { it.kind == "todo" }?.let { t -> add("${m.id}:todo") { TodoCard(t.output) } }
+        // 一步工具一行，点开看输入和输出；边做边说的话按时间插在步骤之间
+        entries.forEach { e ->
+            when (e) {
+                is CodeEntry.Step -> add("${m.id}:s:${e.step.id}") { CodeToolStep(ctl, m, e.step, canAct) }
+                is CodeEntry.Said -> {
+                    val text = splitThink(e.text).first
+                    if (text.isNotBlank()) add("${m.id}:t:${e.key}") { SelectionContainer { MarkdownText(text, Modifier.padding(bottom = 6.dp)) } }
                 }
             }
-            Spacer(Modifier.height(6.dp))
-            // 待办清单放最上面（2026-10-18）
-            m.tools.lastOrNull { it.kind == "todo" }?.let { TodoCard(it.output) }
-            // 每一步工具一行，点开看输入和输出；等批准的那一步自己展开
-            m.tools.filter { it.kind != "todo" }.forEach { CodeToolStep(ctl, m, it, canAct) }
-            if (reasoning.isNotEmpty()) CodeReasoning(reasoning, streaming = m.status == MsgStatus.STREAMING && body.isEmpty())
-            if (body.isNotBlank()) SelectionContainer { MarkdownText(body) }
-            // 还在跑、又没在等批准：最下面一直有一行在跳（2026-10-22：以前有了步骤就不显示，两步之间想一分多钟，看不出是在想还是卡住了）
-            if (m.status == MsgStatus.STREAMING && m.tools.none { it.approval == "waiting" })
-                CodeThinking(m.createdAt, started = m.tools.isNotEmpty() || body.isNotEmpty() || reasoning.isNotEmpty())
-            if (changes.isNotEmpty()) ChangesBar(changes) { onDiff(m.id) }
-            if (m.status == MsgStatus.ERROR) CodeErrorBox(ctl, m.error)
-            if (m.status == MsgStatus.STOPPED) Text("（已停止）", style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle, modifier = Modifier.padding(top = 4.dp))
-            if (m.status != MsgStatus.STREAMING && body.isNotBlank()) {
-                Row(Modifier.padding(top = 4.dp)) {
-                    SmallCodeAction(Icons.Rounded.ContentCopy, "复制") { clipboard.setText(AnnotatedString(body)); ctl.toast("已复制") }
-                }
+        }
+        if (reasoning.isNotEmpty()) add("${m.id}:reason") { CodeReasoning(reasoning, streaming = streaming && body.isEmpty()) }
+        // 还在跑、又没在等批准：最下面一直有一行在跳（2026-10-22：以前有了步骤就不显示，两步之间想一分多钟，看不出是在想还是卡住了）
+        if (streaming && m.tools.none { it.approval == "waiting" })
+            add("${m.id}:busy") { CodeThinking(m.createdAt, started = m.tools.isNotEmpty() || body.isNotEmpty() || reasoning.isNotEmpty()) }
+        add("${m.id}:foot") { CodeAiFoot(ctl, m, body, onDiff) }
+    }
+    return rows
+}
+
+@Composable
+private fun CodeAiHead(m: Message) {
+    Row(Modifier.padding(top = 8.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+        MemberAvatar(null, 34.dp, emoji = "🛠️", color = 0xFF4F5BEB)
+        Spacer(Modifier.width(12.dp))
+        Text("Code 助手", style = MaterialTheme.typography.titleSmall)
+        if (m.modelLabel.isNotBlank()) {
+            Spacer(Modifier.width(8.dp))
+            Pill(m.modelLabel, Ext.c.subtle)
+        }
+    }
+}
+
+/** 一条回答的收尾：改动、出错、停止、复制。 */
+@Composable
+private fun CodeAiFoot(ctl: AppController, m: Message, body: String, onDiff: (String) -> Unit) {
+    val clipboard = LocalClipboardManager.current
+    val changes = remember(m.tools) { m.tools.mapNotNull { it.change } }
+    Column(Modifier.padding(bottom = 8.dp)) {
+        if (changes.isNotEmpty()) ChangesBar(changes) { onDiff(m.id) }
+        if (m.status == MsgStatus.ERROR) CodeErrorBox(ctl, m.error)
+        if (m.status == MsgStatus.STOPPED) Text("（已停止）", style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle, modifier = Modifier.padding(top = 4.dp))
+        if (m.status != MsgStatus.STREAMING && body.isNotBlank()) {
+            Row(Modifier.padding(top = 4.dp)) {
+                SmallCodeAction(Icons.Rounded.ContentCopy, "复制") { clipboard.setText(AnnotatedString(body)); ctl.toast("已复制") }
             }
         }
     }

@@ -418,24 +418,28 @@ class ShotsTest {
         File(root, "我的项目/README.md").writeText("# 我的项目\n\n跑法：python src/main.py\n", Charsets.UTF_8)
         File(root, "code/c8").mkdirs()
         File(root, "code/c8/s83.orig").writeText("import os\n\ndef main():\n    print(\"hello\")\n\nif __name__ == \"__main__\":\n    main()\n", Charsets.UTF_8)
+        // 2026-10-23：边做边说的话按 textAt 插在步骤之间
+        val said8 = listOf("先看看项目里有什么。", "\n\n入口只有一个 main()，把参数传进去就行，改这一段。", "\n\n改完跑一下。",
+            "\n\n改好了：**main.py 现在能接收命令行参数**。\n\n- 加了 `sys` 导入；\n- `main()` 改成 `main(argv)`，把参数打进输出；\n- 原来的调用改成 `main(sys.argv[1:])`。\n\n跑了一次 `python src/main.py A B`，退出码 0，输出 `hello ['A', 'B']`。")
+        fun at8(n: Int) = said8.take(n).joinToString("").length
+        val r8bSaid = "README 里的用法也得跟着改，我先看一眼再改。"
         st.saveMessages("c8", listOf(
             Message("u8", "c8", Role.USER, USER_ID, "把 src/main.py 改成能接收命令行参数，改完跑一下看看。", createdAt = now - 900_000),
-            Message("r8", "c8", Role.AI, "tool:code",
-                "改好了：**main.py 现在能接收命令行参数**。\n\n- 加了 `sys` 导入；\n- `main()` 改成 `main(argv)`，把参数打进输出；\n- 原来的调用改成 `main(sys.argv[1:])`。\n\n跑了一次 `python src/main.py A B`，退出码 0，输出 `hello ['A', 'B']`。",
+            Message("r8", "c8", Role.AI, "tool:code", said8.joinToString(""),
                 createdAt = now - 880_000, modelLabel = "deepseek-flash（DeepSeek 4.1 Flash）",
                 tools = listOf(
-                    ToolStep("list", ".", output = "src/\nREADME.md\nrequirements.txt", id = "s81"),
-                    ToolStep("read", "src/main.py", id = "s82",
+                    ToolStep("list", ".", output = "src/\nREADME.md\nrequirements.txt", id = "s81", textAt = at8(1)),
+                    ToolStep("read", "src/main.py", id = "s82", textAt = at8(1),
                         output = "import os\n\ndef main():\n    print(\"hello\")\n\nif __name__ == \"__main__\":\n    main()"),
-                    ToolStep("edit", "src/main.py", id = "s83", output = diffMain, note = "替换 src/main.py 里的一段",
+                    ToolStep("edit", "src/main.py", id = "s83", output = diffMain, note = "替换 src/main.py 里的一段", textAt = at8(2),
                         change = FileChange("s83", "src/main.py", added = 6, removed = 3)),
-                    ToolStep("run", "python src/main.py A B", id = "s84", output = "hello ['A', 'B']", note = "跑完了（退出码 0）"),
+                    ToolStep("run", "python src/main.py A B", id = "s84", output = "hello ['A', 'B']", note = "跑完了（退出码 0）", textAt = at8(3)),
                 ), usage = Usage(3200, 800, 900, 12_000)),
-            Message("r8b", "c8", Role.AI, "tool:code", "README 里的用法也得跟着改，我先看一眼再改。",
+            Message("r8b", "c8", Role.AI, "tool:code", r8bSaid,
                 createdAt = now - 60_000, modelLabel = "deepseek-flash（DeepSeek 4.1 Flash）", status = MsgStatus.STREAMING,
                 tools = listOf(
-                    ToolStep("read", "README.md", id = "s85", output = "# 我的项目\n\n跑法：python src/main.py"),
-                    ToolStep("edit", "README.md", id = "s86", output = diffReadme, note = "替换 README.md 里的一段", approval = "waiting"),
+                    ToolStep("read", "README.md", id = "s85", textAt = r8bSaid.length, output = "# 我的项目\n\n跑法：python src/main.py"),
+                    ToolStep("edit", "README.md", id = "s86", textAt = r8bSaid.length, output = diffReadme, note = "替换 README.md 里的一段", approval = "waiting"),
                 )),
         ))
         // 用户按了停止的那条（c9）：最后一条回答是 STOPPED，侧栏的状态要写「停下了」
@@ -661,6 +665,70 @@ class ShotsTest {
         }
     }
 
+    /**
+     * Code 任务在跑时（2026-10-23，修补清单第 9 条）：往上翻着看某一步，后面再来几步也不把它挤走、不拽回底下；
+     * 停在最底下时新的一步自己露出来。平时就跑（不用 JXY_SHOTS）。
+     */
+    @Test
+    @OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
+    fun codeListHoldsWhileRunning() {
+        val tmp = tempDir("jxy-code-scroll")
+        val engine = seed(File(tmp, "data"), File(tmp, "文档").apply { mkdirs() })
+        val hub = Hub(engine)
+        val desktop = DesktopPlatform(fileLog = false) { null }
+        // 引擎改消息的入口是私有的，测试里借反射用一下（和真跑时 CodeAgent 走的是同一个）
+        val update = Engine::class.java.declaredMethods.first {
+            it.name == "updateMessage" && it.parameterCount == 4 && it.parameterTypes[3] == kotlin.jvm.functions.Function1::class.java
+        }.apply { isAccessible = true }
+        var n = 0
+        fun moreSteps() {
+            repeat(3) {
+                n++
+                val f: (Message) -> Message = { m -> m.copy(content = m.content + "\n\n第 $n 步。",
+                    tools = m.tools + ToolStep("read", "src/new$n.py", id = "x$n", output = "x", textAt = m.content.trimStart().length)) }
+                update.invoke(engine, "c8", "r8b", true, f)
+            }
+        }
+        fun scene() = ImageComposeScene(1280, 820, Density(1f)) { App(hub, desktop, "code:c8") }
+        fun nodes(scene: ImageComposeScene): List<androidx.compose.ui.semantics.SemanticsNode> {
+            val all = mutableListOf<androidx.compose.ui.semantics.SemanticsNode>()
+            fun walk(x: androidx.compose.ui.semantics.SemanticsNode) { all += x; x.children.forEach { walk(it) } }
+            scene.semanticsOwners.forEach { walk(it.rootSemanticsNode) }
+            return all
+        }
+        fun top(scene: ImageComposeScene, text: String) = nodes(scene).firstOrNull { x ->
+            x.config.getOrNull(androidx.compose.ui.semantics.SemanticsProperties.Text).orEmpty().any { text in it.text }
+        }?.boundsInRoot?.top
+        var t = 0L
+        fun frames(scene: ImageComposeScene, k: Int = 10) = repeat(k) { scene.render(t); t += 120_000_000L; Thread.sleep(40) }
+
+        // 一、往上翻到上一条回答的「改了 src/main.py」，再来三步，它的位置不动
+        val a = scene()
+        try {
+            frames(a, 14)
+            var guard = 0
+            while ((top(a, "改了 src/main.py")?.let { it < 150f || it > 600f } ?: true) && guard++ < 40) {
+                a.sendPointerEvent(PointerEventType.Scroll, Offset(800f, 400f), scrollDelta = Offset(0f, -2f))
+                frames(a, 3)
+            }
+            val before = kotlin.test.assertNotNull(top(a, "改了 src/main.py"), "翻不到那一步")
+            moreSteps()
+            frames(a)
+            val after = kotlin.test.assertNotNull(top(a, "改了 src/main.py"), "来了新的几步以后那一步不见了（被拽回底下了）")
+            kotlin.test.assertTrue(kotlin.math.abs(after - before) < 2f, "那一步从 $before 挪到了 $after")
+        } finally { a.close() }
+
+        // 二、停在最底下：新来的一步看得见
+        val b = scene()
+        try {
+            frames(b, 14)
+            moreSteps()
+            frames(b)
+            val y = kotlin.test.assertNotNull(top(b, "读了 src/new$n.py"), "最新的一步没露出来")
+            kotlin.test.assertTrue(y in 0f..820f, "最新的一步在 $y，不在窗口里")
+        } finally { b.close() }
+    }
+
     /** 打开对话停在哪：要停在最新一条的最后一行（10-10 用户报：每次打开都在最上面）。 */
     @Test
     fun scrollShots() {
@@ -780,6 +848,12 @@ class ShotsTest {
         shoot("phone-settings-members", 824, 1784, 2f, hub, phone, "settings:MEMBERS")
         shoot("phone-member-edit", 824, 1784, 2f, hub, phone, "settings:MEMBERS#edit")
         shoot("phone-devices", 824, 1784, 2f, hub, phone, "settings:DEVICES")
+        // 2026-10-23：联机页也有「允许手机用 Code 栏」；Code 顶上的权限档菜单、「更多」、「这一页怎么用」
+        shoot("desktop-settings-devices", 1280, 1100, 1f, hub, desktop, "settings:DEVICES")
+        shoot("desktop-code-modes", 1280, 820, 1f, hub, desktop, "code:c8#modes")
+        shoot("desktop-code-more", 1280, 820, 1f, hub, desktop, "code:c8#more")
+        shoot("desktop-code-help", 1280, 820, 1f, hub, desktop, "code:c8#codehelp")
+        shoot("phone-code-help", 824, 1784, 2f, hub, desktop, "code:c8#codehelp")
 
         // ———— 按意思搜（1.7.0）————
         // 这一页（都没开、自动挑中智谱）在上面那一圈里已经出了：desktop-settings-semantic / phone-settings-semantic。
@@ -977,6 +1051,8 @@ class ShotsTest {
         val codePhoneLocked = codePhoneHub(File(tmp, "code-phone-locked"), allowPhone = false, withCode = true)
         shoot("phone-code-locked", 824, 1784, 2f, codePhoneLocked, phone, "code:c8")
         shoot("phone-code-locked-tab", 824, 1784, 2f, codePhoneLocked, phone, "code")
+        // 2026-10-23：手机切到电脑时侧栏有 Code 标签，设备按钮是「点一下切换」的样子
+        shoot("phone-remote-drawer", 824, 1784, 2f, codePhone, phone, "code:c8#drawer")
 
         // 空白状态：第一次打开
         val empty = Engine(Storage(File(tmp, "empty")))

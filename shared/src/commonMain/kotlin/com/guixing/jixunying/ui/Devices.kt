@@ -4,6 +4,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -20,8 +21,9 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Check
+import androidx.compose.material.icons.rounded.ChevronRight
+import androidx.compose.material.icons.rounded.SwapHoriz
 import androidx.compose.material.icons.rounded.Computer
-import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.Link
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.Download
@@ -92,7 +94,7 @@ fun RemoteBanner(ctl: AppController) {
 }
 
 /**
- * 侧栏右上角的设备下拉（2026-10-14 用户给的侧栏改版图）：显示现在操作的是哪台，角上一个小点表示联机状态。
+ * 侧栏右上角的设备按钮（2026-10-14 用户给的侧栏改版图；10-23 改成点一下就切，下面说的下拉改成长按出来）：显示现在操作的是哪台，角上一个小点表示联机状态。
  * 手机：下拉里是「本机」、配对过的电脑（带连接状态）、「连接电脑…」（原来侧栏底下那一项收进来了）；
  *   点是绿的 = 连着电脑，红的 = 配对过但没连上，没配对就不显示点。
  * 电脑：下拉里是「本机」和「手机联机…」；点是绿的 = 已经连上中转（手机能找到这台电脑）。
@@ -112,11 +114,17 @@ fun DeviceMenu(ctl: AppController, state: com.guixing.jixunying.model.AppState, 
         else -> MaterialTheme.colorScheme.error
     }
     val label = if (onRemote) remote!!.host.hostName.ifBlank { "电脑" } else "本机"
+    // 点一下就切（2026-10-23 用户：「切换设备按钮一键就行」）：手机配对过电脑时在本机和电脑之间来回切；
+    // 没配对的手机、电脑上点一下打开联机页。长按还是原来的下拉（看连接状态、进联机设置）
+    val canToggle = !platform.isDesktop && remote != null
     Box {
         Row(
             Modifier.clip(RoundedCornerShape(50)).background(MaterialTheme.colorScheme.surface)
                 .border(1.dp, Ext.c.border, RoundedCornerShape(50))
-                .clickable { open = true }.padding(start = 10.dp, end = 6.dp, top = 6.dp, bottom = 6.dp),
+                .combinedClickable(onLongClick = { open = true }) {
+                    if (canToggle) ctl.hub.useRemote.value = !onRemote
+                    else { ctl.openSettings(SettingsTab.DEVICES); onNavigate() }
+                }.padding(start = 10.dp, end = 6.dp, top = 6.dp, bottom = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Icon(if (onRemote || platform.isDesktop) Icons.Rounded.Computer else Icons.Rounded.PhoneAndroid, null,
@@ -125,7 +133,8 @@ fun DeviceMenu(ctl: AppController, state: com.guixing.jixunying.model.AppState, 
             Text(label, style = MaterialTheme.typography.labelMedium, maxLines = 1, overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.widthIn(max = 96.dp),
                 color = if (onRemote) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface)
-            Icon(Icons.Rounded.ExpandMore, "切换设备", Modifier.size(16.dp), tint = Ext.c.subtle)
+            Icon(if (canToggle) Icons.Rounded.SwapHoriz else Icons.Rounded.ChevronRight,
+                if (canToggle) "切换设备" else if (platform.isDesktop) "手机联机" else "连接电脑", Modifier.size(16.dp), tint = Ext.c.subtle)
         }
         if (dot != null) {
             Box(Modifier.align(Alignment.TopEnd).offset(x = 2.dp, y = (-2).dp).size(9.dp).clip(CircleShape)
@@ -243,6 +252,15 @@ fun HostDevicesPage(ctl: AppController, state: AppState) {
                 }
                 TextButton(onClick = { ctl.run(Command.RemoveDevice(d.id)) }) { Text("取消配对", color = MaterialTheme.colorScheme.error) }
             }
+        }
+    }
+    Spacer(Modifier.height(12.dp))
+    // 和 设置 → Code 栏 里的是同一个开关（2026-10-23：用户在联机页找不到它）
+    SectionCard {
+        Text("手机能做什么", style = MaterialTheme.typography.titleSmall)
+        Spacer(Modifier.height(6.dp))
+        SwitchRow("允许手机用 Code 栏", PHONE_CODE_NOTE, state.settings.code.allowPhone) { v ->
+            ctl.updateSettings { it.copy(code = it.code.copy(allowPhone = v)) }
         }
     }
     Spacer(Modifier.height(12.dp))
