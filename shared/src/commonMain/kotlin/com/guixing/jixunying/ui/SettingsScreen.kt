@@ -820,6 +820,63 @@ private fun SearchPage(ctl: AppController, state: AppState) {
         FieldLabel("每次搜索取几条结果：${n.toInt()}")
         Slider(n, { n = it }, valueRange = 3f..10f, steps = 6, onValueChangeFinished = { set { it.copy(maxResults = n.toInt()) } })
     }
+    Spacer(Modifier.height(12.dp))
+    PlatformLinksCard(ctl)
+}
+
+/**
+ * 读平台链接（2026-10-23，docs/平台链接设计说明.md）：抖音、小红书、快手、微博、B站的链接用电脑上一个专用的 Edge 读。
+ * 各平台登没登录（看浏览器里的登录 cookie）、「去登录」把浏览器挪到屏幕上让用户扫码。
+ */
+@Composable
+private fun PlatformLinksCard(ctl: AppController) {
+    var info by remember { mutableStateOf<kotlinx.serialization.json.JsonObject?>(null) }
+    var tick by remember { mutableStateOf(0) }
+    var showing by remember { mutableStateOf(false) }
+    var launch by remember { mutableStateOf(false) }
+    androidx.compose.runtime.LaunchedEffect(tick) {
+        ctl.run(Command.PlatformStatus(launch), quiet = true) { r ->
+            info = runCatching { kotlinx.serialization.json.Json.parseToJsonElement(r.data) as kotlinx.serialization.json.JsonObject }.getOrNull()
+        }
+    }
+    val available = (info?.get("available") as? kotlinx.serialization.json.JsonPrimitive)?.content == "true"
+    val started = (info?.get("started") as? kotlinx.serialization.json.JsonPrimitive)?.content == "true"
+    val st = info?.get("platforms") as? kotlinx.serialization.json.JsonObject
+    SectionCard {
+        Text("读平台链接", style = MaterialTheme.typography.titleSmall)
+        Spacer(Modifier.height(4.dp))
+        Text("你发来抖音、小红书、快手、微博、B站的链接（微信里转发的也行），AI 会用这台电脑上一个专用的 Edge 打开来读：文案、作者、点赞、评论、图片和视频地址。" +
+            "这个 Edge 和你平时用的分开，窗口平时放在屏幕外面（任务栏上会有它的图标），AI集训营 关掉时它也关掉。",
+            style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
+        Spacer(Modifier.height(8.dp))
+        when {
+            info == null -> Text("正在查…", style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
+            !available -> Text(if (ctl.remoteMode) "要在电脑上设置（浏览器在电脑上）。" else "这台设备上没有能用的浏览器（电脑上要有 Edge 或 Chrome；手机上不支持，手机遥控电脑时由电脑去读）。",
+                style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
+            else -> {
+                listOf("douyin" to "抖音", "xhs" to "小红书", "kuaishou" to "快手", "weibo" to "微博", "bilibili" to "B站").forEach { (id, name) ->
+                    val s = (st?.get(id) as? kotlinx.serialization.json.JsonPrimitive)?.content
+                    Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text(name, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.width(64.dp))
+                        Text(when (s) { "in" -> "已登录"; "out" -> "没登录"; "notstarted" -> "—"; else -> "看不出登没登录" },
+                            style = MaterialTheme.typography.bodySmall, color = if (s == "in") Ext.c.success else Ext.c.subtle, modifier = Modifier.weight(1f))
+                        if (!ctl.remoteMode) TextButton({
+                            ctl.run(Command.PlatformLogin(id), quiet = true) { r -> showing = r.ok; ctl.toast(r.message) }
+                        }) { Text("去登录") }
+                    }
+                }
+                if (!started) Text("浏览器还没开：AI 第一次读平台链接、或者你点「去登录」「检查登录状态」时才开。",
+                    style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, modifier = Modifier.padding(top = 6.dp))
+                Text("不登录也能读一部分（抖音作品、小红书笔记实测能读）；遇到要登录或验证的，点「去登录」用手机扫码。" +
+                    "B站对国外出口 IP 会直接拦（你电脑现在全局走代理的话就会这样）。", style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle,
+                    modifier = Modifier.padding(top = 6.dp))
+                if (!ctl.remoteMode) Row(Modifier.padding(top = 6.dp)) {
+                    if (showing) Button({ ctl.run(Command.PlatformHide, quiet = true) { showing = false; tick++ } }, shape = RoundedCornerShape(10.dp)) { Text("登好了，收起浏览器") }
+                    else OutlinedButton({ launch = true; tick++ }) { Text(if (started) "刷新登录状态" else "检查登录状态（会开浏览器）") }
+                }
+            }
+        }
+    }
 }
 
 private fun engineLabel(e: SearchEngine) = when (e) {

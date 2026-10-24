@@ -2045,7 +2045,7 @@ class CodeAgent(private val host: CodeHost) {
     private fun providerProblem(p: ProviderConfig?): String? = when {
         p == null -> "服务商已经不在了：到 设置 → 模型服务 看一下"
         !p.enabled -> "服务商「${p.name}」已停用：到 设置 → 模型服务 把它的开关打开"
-        p.apiKey.isBlank() && !p.baseUrl.contains("127.0.0.1") && !p.baseUrl.contains("localhost") -> "服务商「${p.name}」还没填 API Key：到 设置 → 模型服务 填写"
+        p.apiKey.isBlank() && !com.guixing.jixunying.model.Presets.isChatGpt(p) && !p.baseUrl.contains("127.0.0.1") && !p.baseUrl.contains("localhost") -> "服务商「${p.name}」还没填 API Key：到 设置 → 模型服务 填写"
         else -> null
     }
 

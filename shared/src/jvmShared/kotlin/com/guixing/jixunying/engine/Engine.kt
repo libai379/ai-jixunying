@@ -73,6 +73,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.JsonArray
@@ -122,6 +123,8 @@ class Engine(
     private val autoScanDocs: Boolean = System.getProperty("jxy.docs.autoscan") != "false",
     /** 启动后自动联网更新美元汇率。自动测试里关掉（-Djxy.fx.auto=false），免得每个测试都去联网。 */
     private val autoUsdRate: Boolean = System.getProperty("jxy.fx.auto") != "false",
+    /** 读平台链接用的浏览器（测试里换成假的）。 */
+    private val browserFactory: (java.io.File) -> PageBrowser? = { createPageBrowser(it) },
 ) : Backend {
     override val store = ClientStore()
     override val isHost = true
@@ -147,6 +150,9 @@ class Engine(
     /** 用 ChatGPT 登录（2026-10-23）：凭据只在本机 chatgpt/auth.json，不进 state.json、不同步。OpenAI 在国内要走代理。 */
     private val chatgptAuth = ChatGptAuth(java.io.File(storage.root, "chatgpt"), proxy = { proxyFor(true) })
     @Volatile private var chatgptPending: ChatGptAuth.Pending? = null
+    /** 读平台链接用的本机浏览器（2026-10-23，engine/PageBrowser.kt）：只在电脑上有；第一次用才开 Edge。同时最多读两个页面。 */
+    private val pageBrowser: PageBrowser? by lazy { if (isPhone) null else browserFactory(java.io.File(storage.root, "browser")) }
+    private val pageSlots = kotlinx.coroutines.sync.Semaphore(2)
     private val search = WebSearch { state.settings.proxy.trim().ifEmpty { null } }
     private val images = ImageGen { proxyFor(it.useProxy) }
     /** 做视频；查任务进度的间隔测试里调小（jxy.videoPollMs）。 */
@@ -782,6 +788,33 @@ class Engine(
                 }
             }
             CommandResult(message = "在浏览器里打开的 OpenAI 页面上点同意", data = pending.url)
+        }
+        is Command.PlatformStatus -> {
+            val b = pageBrowser ?: return CommandResult(data = """{"available":false,"platforms":{}}""")
+            val started = c.launch || withContext(Dispatchers.IO) { b.running() }
+            val st = SocialLinks.all.associate { p ->
+                p.id to when {
+                    !started -> "notstarted"
+                    p.loginCookies.isEmpty() -> "unknown"
+                    runCatching { b.cookieNames(p.cookieDomain) }.getOrDefault(emptySet()).any { it in p.loginCookies } -> "in"
+                    else -> "out"
+                }
+            }
+            CommandResult(data = buildJsonObject {
+                put("available", true)
+                put("started", started)
+                put("platforms", buildJsonObject { st.forEach { (k, v) -> put(k, v) } })
+            }.toString())
+        }
+        is Command.PlatformLogin -> {
+            val b = pageBrowser ?: return CommandResult(false, "这台设备上没有能用的浏览器（要 Edge 或 Chrome）")
+            val p = SocialLinks.byId(c.platform) ?: return CommandResult(false, "不认识的平台")
+            b.showForLogin(p.loginUrl)
+            CommandResult(message = "浏览器已经打开${p.name}，在里面扫码登录；登好了点「收起浏览器」")
+        }
+        is Command.PlatformHide -> {
+            pageBrowser?.hide()
+            CommandResult()
         }
         is Command.ChatGptSignOut -> {
             chatgptPending?.cancel(); chatgptPending = null
@@ -2995,7 +3028,7 @@ class Engine(
             updateMessage(convId, msg.id) { it.copy(status = MsgStatus.ERROR, error = "服务商「${provider.name}」已停用：到 设置→模型服务 把它的开关打开，「${member.name}」才能回答") }
             return null
         }
-        if (provider.apiKey.isBlank() && !provider.baseUrl.contains("127.0.0.1") && !provider.baseUrl.contains("localhost")) {
+        if (provider.apiKey.isBlank() && !Presets.isChatGpt(provider) && !provider.baseUrl.contains("127.0.0.1") && !provider.baseUrl.contains("localhost")) {
             updateMessage(convId, msg.id) { it.copy(status = MsgStatus.ERROR, error = "服务商「${provider.name}」还没填 API Key：到 设置→模型服务 填写") }
             return null
         }
@@ -3007,6 +3040,8 @@ class Engine(
         val hasImageModel = ImagePick.resolve(state).isNotEmpty()
         val hasVideo = VideoPick.resolve(state) != null
         val wantSearch = conv.webSearch
+        // 用户这句话里贴了网址（比如抖音、小红书的分享链接）：没开「联网」也给读网页的工具（2026-10-23）
+        val linkInAsk = snapshot(convId).lastOrNull { it.role == Role.USER }?.content?.contains("http") == true
         val toolsOk = model.tools && !llm.toolsDropped(provider, model.id)
         // 平台有官方内置搜索就用内置的（智谱、千问），否则用我们自己的搜索工具。
         // Kimi 的内置 $web_search 2026-10-20 下线：Kimi 成员也用我们的 web_search 工具，只是搜索走 Kimi 官方搜索接口（同一个 Key）
@@ -3045,7 +3080,7 @@ class Engine(
 
             // MCP 外部工具（2026-10-18）：电脑上对话栏也能用，和 Code 栏同一套
             val mcp = if (useTools && filesOn) runCatching { mcpTools() }.getOrDefault(emptyList()) else emptyList()
-            val tools = if (useTools) JsonArray(toolDefs(fnSearch, fetch = wantSearch, draw = hasImageModel, native = native, memory = memOn, docs = docsOn, office = officeOn, files = filesOn, video = hasVideo) +
+            val tools = if (useTools) JsonArray(toolDefs(fnSearch, fetch = wantSearch || linkInAsk, draw = hasImageModel, native = native, memory = memOn, docs = docsOn, office = officeOn, files = filesOn, video = hasVideo) +
                 mcp.map { (n, _, t) -> buildJsonObject {
                     put("type", "function")
                     putJsonObject("function") { put("name", n); put("description", ("（外部工具 ${t.name}）" + t.description).take(1000)); put("parameters", t.inputSchema) }
@@ -3185,7 +3220,7 @@ class Engine(
                 buildJsonObject { put("query", prop("搜索关键词，简洁具体，中文问题用中文搜")) }, listOf("query"))
         }
         if (fetch) {
-            fn("fetch_url", "打开一个网页，读取正文文字。搜索摘要不够详细、或用户给了链接时使用。",
+            fn("fetch_url", "打开一个网页，读取正文文字。搜索摘要不够详细、或用户给了链接时使用（抖音、小红书、快手、微博、B站的作品链接和分享短链接也能读：文案、作者、点赞、评论、图片）。",
                 buildJsonObject { put("url", prop("完整网址，http 或 https 开头")) }, listOf("url"))
         }
         if (draw) {
@@ -3936,6 +3971,26 @@ class Engine(
             "fetch_url" -> {
                 val url = args.str("url").orEmpty()
                 if (!url.startsWith("http")) return "参数错误：url 要以 http 开头"
+                // 抖音、小红书、快手、微博、B站：用本机浏览器读（2026-10-23，普通请求只拿到登录页、验证码页）
+                val platform = SocialLinks.platformOf(url)
+                val browser = pageBrowser
+                if (platform != null && browser != null) {
+                    val (text, step) = try {
+                        val page = pageSlots.withPermit { browser.snapshot(url, SocialLinks.EXTRACT_JS) }
+                        if (SocialLinks.blocked(page)) {
+                            ("${platform.name}没让看（页面是登录页、验证码或者风控拦截：${page.str("title").orEmpty().ifBlank { page.str("url").orEmpty() }}）。" +
+                                "请如实告诉用户没读到，并说可以在电脑上 设置 → 联网搜索 → 读平台链接 里点「去登录${platform.name}」扫码登录后再试；" +
+                                "B站拦截一般是因为电脑上网出口在国外。页面上的字：\n" + page.str("text").orEmpty().take(600)) to
+                                ToolStep("fetch", url, listOf(SearchSource(platform.name, url)), ok = false, note = "${platform.name}要登录或被拦")
+                        } else SocialLinks.format(platform, page) to ToolStep("fetch", url, listOf(SearchSource(platform.name + " · " + url.take(60), url)), ok = true)
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Throwable) {
+                        "${platform.name}的页面没打开：${friendlyError(e)}" to ToolStep("fetch", url, ok = false, note = friendlyError(e))
+                    }
+                    updateMessage(convId, msgId, persist = false) { it.copy(tools = it.tools + step) }
+                    return text
+                }
                 val (text, step) = try {
                     val t = runCatching { search.fetch(url, false) }.getOrElse { search.fetch(url, true) }
                     t to ToolStep("fetch", url, listOf(SearchSource(url.take(80), url)), ok = true)

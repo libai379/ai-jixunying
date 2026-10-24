@@ -16,6 +16,12 @@ sealed interface Command {
     @Serializable data object ChatGptSignIn : Command
     /** 退出 ChatGPT 登录（清掉本机令牌）。 */
     @Serializable data object ChatGptSignOut : Command
+    /** 读平台链接（2026-10-23）：各平台登没登录。回执 data 是 JSON {"available":true,"platforms":{"douyin":"in"|"out"|"unknown"}}。只在电脑上有浏览器。 */
+    @Serializable data class PlatformStatus(val launch: Boolean = false) : Command
+    /** 把读平台链接用的浏览器挪到屏幕上、打开这个平台让用户扫码登录。 */
+    @Serializable data class PlatformLogin(val platform: String) : Command
+    /** 登好了：浏览器挪回屏幕外面。 */
+    @Serializable data object PlatformHide : Command
     /** 试画一张（服务商留空 = 按自动规则选）。结果 data 是生成图片的 Attachment JSON。 */
     @Serializable data class TestImage(val providerId: String = "", val modelId: String = "", val prompt: String = "") : Command
 
