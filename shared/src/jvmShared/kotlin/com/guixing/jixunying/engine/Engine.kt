@@ -535,6 +535,14 @@ class Engine(
         emit(Event.Notice("「${d.name}」已配对，以后在哪儿都能连这台电脑"))
     }
 
+    /** 手机来拿微信绑定（RelayHost 调）：还没指定接班的手机、或者指定的那台不在了，就定成它。 */
+    fun noteWeixinPhone(deviceId: String) {
+        updateState { s ->
+            val cur = s.weixinBackup
+            if (cur == "none" || (cur.isNotEmpty() && s.devices.any { it.id == cur })) s else s.copy(weixinBackup = deviceId)
+        }
+    }
+
     fun touchDevice(id: String) {
         updateState { s -> s.copy(devices = s.devices.map { if (it.id == id) it.copy(lastSeen = now()) else it }) }
     }
@@ -1578,6 +1586,11 @@ class Engine(
         }
         is Command.RemoveDevice -> {
             updateState { s -> s.copy(devices = s.devices.filterNot { it.id == c.id }) }
+            CommandResult()
+        }
+        is Command.WeixinSetBackup -> {
+            if (c.deviceId.isNotEmpty() && c.deviceId != "none" && state.devices.none { it.id == c.deviceId }) return CommandResult(false, "没有这台手机")
+            updateState { it.copy(weixinBackup = c.deviceId) }
             CommandResult()
         }
         is Command.RenameDevice -> {

@@ -135,7 +135,7 @@ class JxyApp : Application() {
         val weixin = com.guixing.jixunying.engine.WeixinBridge(engine, File(filesDir, "data/weixin"))
         this.weixin = weixin
         engine.weixin = weixin
-        com.guixing.jixunying.engine.WeixinHandover(hub, engine, weixin).start()
+        com.guixing.jixunying.engine.WeixinHandover(hub, engine, weixin, backupFile = File(filesDir, "data/weixin/backup-phone.txt")).start()
         // 长期记忆：连着电脑时两边互相同步（2026-10-24）
         com.guixing.jixunying.engine.MemorySyncer(hub, engine).start()
         // GitHub：连着电脑就用电脑上登录的；手机自己登录时换令牌也交给电脑（2026-10-24）

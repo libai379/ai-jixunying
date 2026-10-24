@@ -544,6 +544,11 @@ data class AppState(
     val weixin: WeixinInfo = WeixinInfo(),
     /** 这台设备能不能接微信助理（电脑端能）。 */
     val weixinCapable: Boolean = false,
+    /**
+     * 电脑关机时由哪台手机接微信（配对设备的编号；空 = 没定，谁拿了绑定谁接，和以前一样）。2026-10-24 一台电脑连多台手机：
+     * 不定的话电脑一关，几台开着微信助理的手机会一起回。默认是最后一台从电脑拿微信绑定的；电脑 设置 → 微信 里能换。"none" = 都不接。
+     */
+    val weixinBackup: String = "",
     /** 记录员后台活出的错（成功一次就清掉），见 Background.kt。 */
     val bgProblems: List<BgProblem> = emptyList(),
     /** 按意思搜的补算进度（聊天记录、我的文档各一份），见 model/Semantic.kt。 */

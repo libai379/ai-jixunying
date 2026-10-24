@@ -600,6 +600,56 @@ class ShotsTest {
         kotlin.test.assertEquals(6 * 3 * 5 + 7 * 3 * 3 + 5 * 3 * 2, cases)
     }
 
+    /**
+     * 设置首页、每个设置页、侧栏在窄屏和大字体下不出界（2026-10-24，当前任务「大字体、窄屏下的其它页面」）：
+     * 220dp（分屏最窄）、320dp（全屏最窄）、360dp × 字体 100% / 200%。看的是：文字、按钮的右边不超出窗口（在横着滑的区域里的不算），
+     * 能点的东西不被压成 0 宽。平时就跑。
+     */
+    @Test
+    fun phoneSettingsFit() {
+        val tmp = tempDir("jxy-fit-settings")
+        val hub = Hub(seed(File(tmp, "data"), File(tmp, "文档").apply { mkdirs() }))
+        val phone = PhonePlatform()
+        val pages = listOf("settingshome", "conv:c1#drawer") + com.guixing.jixunying.ui.SettingsTab.entries.map { "settings:${it.name}" } +
+            listOf("settings:APPEARANCE#tune")
+        val problems = mutableListOf<String>()
+        var cases = 0
+        for (wDp in listOf(220, 320, 360)) for (font in listOf(1f, 2f)) for (start in pages) {
+            if (outCase(hub, phone, wDp, wDp * 20 / 9, font, start, problems)) cases++
+        }
+        kotlin.test.assertEquals(3 * 2 * pages.size, cases)
+        kotlin.test.assertTrue(problems.isEmpty(), "量了 $cases 种，${problems.size} 处不对：\n" + problems.distinct().take(80).joinToString("\n"))
+    }
+
+    private fun outCase(hub: Hub, platform: Platform, wDp: Int, hDp: Int, font: Float, start: String, problems: MutableList<String>): Boolean {
+        val d = 2f
+        val w = wDp * d
+        val scene = ImageComposeScene(w.toInt(), (hDp * d).toInt(), Density(d, font)) { App(hub, platform, start) }
+        try {
+            repeat(10) { i -> scene.render(i * 120_000_000L); Thread.sleep(15) }
+            val all = mutableListOf<androidx.compose.ui.semantics.SemanticsNode>()
+            fun walk(n: androidx.compose.ui.semantics.SemanticsNode) { all += n; n.children.forEach { walk(it) } }
+            scene.semanticsOwners.forEach { walk(it.rootSemanticsNode) }
+            fun inHScroll(n: androidx.compose.ui.semantics.SemanticsNode) = generateSequence(n.parent) { it.parent }
+                .any { it.config.contains(androidx.compose.ui.semantics.SemanticsProperties.HorizontalScrollAxisRange) }
+            fun label(n: androidx.compose.ui.semantics.SemanticsNode) = (n.config.getOrNull(androidx.compose.ui.semantics.SemanticsProperties.ContentDescription).orEmpty() +
+                n.config.getOrNull(androidx.compose.ui.semantics.SemanticsProperties.Text).orEmpty().map { it.text }).joinToString("/").take(24)
+            val name = "${wDp}dp、字体 ${(font * 100).toInt()}%、$start"
+            for (n in all) {
+                val hasText = n.config.contains(androidx.compose.ui.semantics.SemanticsProperties.Text)
+                val clickable = n.config.contains(androidx.compose.ui.semantics.SemanticsActions.OnClick)
+                if (!hasText && !clickable) continue
+                // 不用 boundsInRoot：它被上级裁过，挤出去又被裁掉的量不出来；用没裁过的位置和大小
+                val left = n.positionInRoot.x
+                val right = left + n.size.width
+                if (n.size.height <= 0 || inHScroll(n)) continue
+                if (right > w + 1f) problems += "$name：「${label(n)}」右边出了窗口 ${((right - w) / d).toInt()}dp"
+                if (clickable && n.size.width < 1) problems += "$name：「${label(n)}」被压成 0 宽"
+            }
+            return true
+        } finally { scene.close() }
+    }
+
     /** 量一种尺寸：离屏画出来，从界面的语义树里找发送键、停止、「+」、写字的地方，不对的写进 problems。量完返回 true。 */
     private fun fitCase(hub: Hub, platform: Platform, wDp: Int, hDp: Int, font: Float, start: String, problems: MutableList<String>, plus: Boolean = true): Boolean {
         val d = 2f

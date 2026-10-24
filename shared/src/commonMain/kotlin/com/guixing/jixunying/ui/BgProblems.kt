@@ -53,14 +53,13 @@ fun BgProblemsCard(ctl: AppController, problems: List<BgProblem>, onMemoryPage: 
                     SelectionContainer { Text(p.reason, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurface) }
                     if (p.raw.isNotBlank()) SelectionContainer { Text("模型原话：" + p.raw, style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle) }
                     Text(p.job.consequence + "。成功一次这条就会自己消失。", style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
-                    Row(verticalAlignment = Alignment.CenterVertically) {
+                    // 排不下就换行（窄屏、大字体，10-24 phoneSettingsFit：「知道了」被挤没）
+                    androidx.compose.foundation.layout.FlowRow(horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(16.dp)) {
                         val pad = PaddingValues(horizontal = 0.dp)
                         val toProviders = listOf("Key", "余额", "额度", "模型服务", "模型名", "接口地址").any { it in p.reason }
                         if (toProviders) TextButton({ ctl.openSettings(SettingsTab.PROVIDERS) }, contentPadding = pad) { Text("去模型服务 ›", style = MaterialTheme.typography.labelMedium) }
-                        if (toProviders && !onMemoryPage) Spacer(Modifier.width(16.dp))
                         if (!onMemoryPage) TextButton({ ctl.openSettings(SettingsTab.MEMORY) }, contentPadding = pad) { Text("换记录员 ›", style = MaterialTheme.typography.labelMedium) }
-                        Spacer(Modifier.weight(1f))
-                        TextButton({ ctl.run(Command.DismissBgProblem(p.job), quiet = true) }) { Text("知道了", style = MaterialTheme.typography.labelMedium) }
+                        TextButton({ ctl.run(Command.DismissBgProblem(p.job), quiet = true) }, contentPadding = pad) { Text("知道了", style = MaterialTheme.typography.labelMedium) }
                     }
                 }
             }

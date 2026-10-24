@@ -107,6 +107,8 @@ class RelayHost(private val engine: Engine) {
                 is WireFrame.Req -> scope?.launch {
                     // 手机遥控电脑：先过 PhoneGate（Code 栏的写操作默认拦下；打开了也有限制；保存设置不许动 Code 栏那几项）
                     val v = PhoneGate.check(f.command, engine.state)
+                    // 哪台手机来拿微信绑定，记下来：电脑关机时就它接（没指定过、或者指定的那台已经取消配对时）
+                    if (v.refusal == null && v.command is com.guixing.jixunying.model.Command.WeixinShare) engine.noteWeixinPhone(deviceId)
                     val r = v.refusal ?: engine.call(v.command)
                     enqueue(deviceId, WireFrame.Res(f.reqId, r))
                 }

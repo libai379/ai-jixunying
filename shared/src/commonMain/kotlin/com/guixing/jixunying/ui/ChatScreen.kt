@@ -820,7 +820,8 @@ private fun MadeFileChip(ctl: AppController, a: Attachment) {
             else Text(when (ext) { "XLSX" -> "表"; "DOCX" -> "文"; "PPTX" -> "演"; "MP4" -> "视"; else -> ext }, color = Color.White, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
         }
         Spacer(Modifier.width(10.dp))
-        Column(Modifier.widthIn(max = 280.dp)) {
+        // weight(fill = false)：窄屏上文字让位，「另存为」不被挤没（10-24 phoneSettingsFit）
+        Column(Modifier.weight(1f, fill = false).widthIn(max = 280.dp)) {
             Text(a.name, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text(listOf(formatSize(a.size), a.note).filter { it.isNotBlank() }.joinToString(" · ") + " · 点一下打开",
                 style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, maxLines = 1, overflow = TextOverflow.Ellipsis)

@@ -317,10 +317,12 @@ private fun ProvidersPage(ctl: AppController, state: AppState) {
                         Text("${p.models.size} 个模型" + (p.models.take(4).joinToString("、", prefix = "：") { it.id }.takeIf { p.models.isNotEmpty() } ?: ""),
                             style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
-                    // 开关旁边写明是什么意思（以前只有一个开关，看不出是干什么的）
-                    Text(if (p.enabled) "启用" else "已停用", style = MaterialTheme.typography.labelSmall,
-                        color = if (p.enabled) Ext.c.subtle else MaterialTheme.colorScheme.error)
-                    Spacer(Modifier.width(6.dp))
+                    // 开关旁边写明是什么意思（以前只有一个开关，看不出是干什么的）；字放大到排不下时不写（10-24 phoneSettingsFit：编辑键被挤没）
+                    if (androidx.compose.ui.platform.LocalDensity.current.fontScale < 1.5f) {
+                        Text(if (p.enabled) "启用" else "已停用", style = MaterialTheme.typography.labelSmall,
+                            color = if (p.enabled) Ext.c.subtle else MaterialTheme.colorScheme.error)
+                        Spacer(Modifier.width(6.dp))
+                    }
                     AppSwitch(p.enabled, { ctl.run(Command.SaveProvider(p.copy(enabled = it)), if (it) "已启用「${p.name}」" else "已停用「${p.name}」：它的成员先不回答") })
                     IconButton(onClick = { editing = p }) { Icon(Icons.Rounded.Edit, "编辑", Modifier.size(18.dp)) }
                 }
@@ -1380,9 +1382,8 @@ private fun AccountCard(ctl: AppController) {
         if (a.githubError.isNotBlank()) Text(a.githubError, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(start = 72.dp))
         Spacer(Modifier.height(6.dp))
         if (ctl.remoteMode) Text("这是这台手机自己的账号（电脑的账号在电脑上看）。", style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
-        Row {
+        androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             OutlinedButton({ exporting = true }) { Text("导出备份码") }
-            Spacer(Modifier.width(8.dp))
             OutlinedButton({ importing = true }) { Text("导入备份码") }
         }
         Text("换手机、换电脑，或者想让手机和电脑用同一个账号：在这台导出备份码，到那台导入。备份码要设口令，口令忘了就导不进去；设备丢了又没备份，这个账号就找不回来了。",

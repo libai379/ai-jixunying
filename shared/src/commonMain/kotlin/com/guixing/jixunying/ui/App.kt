@@ -401,7 +401,8 @@ private fun MainLayout(ctl: AppController) {
             ModalNavigationDrawer(
                 drawerState = drawer,
                 drawerContent = {
-                    ModalDrawerSheet(Modifier.width(300.dp), drawerContainerColor = if (com.guixing.jixunying.ui.glass.LocalGlass.current.on) androidx.compose.ui.graphics.Color.Transparent else Ext.c.sidebar) {
+                    // 最多占窗口的 88%：分屏最窄 220dp 时写死 300dp 会整个出界（10-24 phoneSettingsFit 量出来的）
+                    ModalDrawerSheet(Modifier.width(minOf(300.dp, maxWidth * 0.88f)), drawerContainerColor = if (com.guixing.jixunying.ui.glass.LocalGlass.current.on) androidx.compose.ui.graphics.Color.Transparent else Ext.c.sidebar) {
                         Sidebar(ctl, Modifier.fillMaxSize(), onNavigate = { scope.launch { drawer.close() } })
                     }
                 },

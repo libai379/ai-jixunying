@@ -248,6 +248,8 @@ sealed interface Command {
     @Serializable data class WeixinImport(val shareJson: String) : Command
     /** 微信助理：手机告诉电脑，微信消息它答到了这个时间（消息的 create_time_ms），电脑别再答一遍。 */
     @Serializable data class WeixinReport(val answeredUntil: Long) : Command
+    /** 电脑关机时由哪台手机接微信（设备编号；"none" = 都不接；空 = 不指定）。只能在电脑上改。 */
+    @Serializable data class WeixinSetBackup(val deviceId: String) : Command
 
     /** 把一条回答存成 Word（format = "docx"）或把里面的表格存成 Excel（"xlsx"）。结果 data 是 ExportedFile 的 JSON。 */
     @Serializable data class ExportMessage(val convId: String, val messageId: String, val format: String) : Command

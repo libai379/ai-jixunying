@@ -21,20 +21,27 @@ import kotlinx.coroutines.launch
  *   手机自己扫码绑的不动。
  * - 不重复回答：手机只答最后一次听到电脑以后发来的消息；手机答过的告诉电脑，电脑不再答。
  * 没配对电脑的手机不受影响，自己绑、自己答。
+ * - 一台电脑连多台手机（2026-10-24）：电脑不接的时候只让一台手机接——电脑状态里的 weixinBackup（默认是最后一台来拿绑定的，
+ *   电脑 设置 → 微信 能换）。手机把它记在本机 [backupFile]，电脑关着、手机重启了也知道该不该接。用自己扫码绑的不受这条管。
  */
 class WeixinHandover(
     private val hub: Hub,
     private val engine: Engine,
     private val bridge: WeixinBridge,
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
+    private val backupFile: java.io.File? = null,
 ) {
     companion object {
         const val STANDBY = "电脑在接微信，这台手机待命（电脑关机或关掉微信助理后，手机自动接上）"
         const val CHECKING = "正在看电脑在不在接微信…"
+        const val OTHER_PHONE = "电脑关机时由别的手机接微信，这台待命（在电脑 设置 → 微信 里能换成这台）"
 
         /** 电脑正在收微信消息。老版本电脑没有 answering 这一项，按「已连接」判断。 */
         fun hostAnswering(wx: WeixinInfo) = wx.answering || (wx.bound && wx.status.startsWith("已连接"))
     }
+
+    /** 电脑上定的接班手机（设备编号；"none" = 都不接；空 = 没定）。 */
+    @Volatile private var backup: String = backupFile?.let { f -> runCatching { f.readText().trim() }.getOrNull() }.orEmpty()
 
     private var lastSync = 0L
     private var reportedUntil = 0L
@@ -62,11 +69,18 @@ class WeixinHandover(
                     // 连上了但电脑的状态还没到（weixinCapable 是电脑状态里才有的）
                     !st.weixinCapable -> CHECKING
                     hostAnswering(st.weixin) -> STANDBY
-                    else -> null
+                    else -> notMyTurn(r.host.deviceId)
                 }
             }
-            else -> null
+            else -> notMyTurn(r.host.deviceId)
         }
+    }
+
+    /** 电脑不接时：用的是电脑那份绑定、电脑又定了别的手机接班（或者都不接），这台就待命。 */
+    private fun notMyTurn(me: String): String? {
+        if (!bridge.isShared) return null
+        val b = backup
+        return if (b == "none" || (b.isNotEmpty() && b != me)) OTHER_PHONE else null
     }
 
     private suspend fun tick() {
@@ -74,6 +88,10 @@ class WeixinHandover(
         val connected = remote != null && remote.conn.value is ConnState.Connected
         val st = remote?.store?.state?.value
         if (!connected || st == null || !st.weixinCapable) { wasConnected = false; return }
+        if (st.weixinBackup != backup) {
+            backup = st.weixinBackup
+            backupFile?.let { f -> runCatching { f.parentFile?.mkdirs(); f.writeText(backup) } }
+        }
         // 电脑在接：它最后一次说话以前发来的消息都归它
         if (hostAnswering(st.weixin)) bridge.raiseFence(remote.lastHeardAt)
         if (!wasConnected) { wasConnected = true; reportedUntil = 0; report() }

@@ -120,10 +120,10 @@ fun MemoryPage(ctl: AppController, state: AppState) {
         Spacer(Modifier.height(4.dp))
         AppTextField(newText, { newText = it }, placeholder = "手动添加一条，例如：我在北京做产品经理，回答请先给结论", singleLine = false, minLines = 1)
         Spacer(Modifier.height(6.dp))
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("类别：", style = MaterialTheme.typography.labelMedium, color = Ext.c.subtle)
-            KindPicker(newKind) { newKind = it }
-            Spacer(Modifier.weight(1f))
+        // 类别一行（排不下自己换行），「添加」在下一行靠右：窄屏、大字体下不再挤没（10-24 phoneSettingsFit）
+        Text("类别", style = MaterialTheme.typography.labelMedium, color = Ext.c.subtle)
+        KindPicker(newKind) { newKind = it }
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
             Button(enabled = newText.isNotBlank(), onClick = {
                 val item = MemoryItem("mem" + nowMillis().toString(36), newText.trim(), newKind, "手动添加")
                 ctl.run(Command.SaveMemory(item)) { r -> if (r.ok) newText = "" }
@@ -179,7 +179,8 @@ fun MemoryPage(ctl: AppController, state: AppState) {
 
 @Composable
 private fun KindPicker(kind: String, onPick: (String) -> Unit) {
-    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+    // 排不下就换行（窄屏、大字体，10-24 phoneSettingsFit）
+    androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         memoryKinds.forEach { k ->
             Box(Modifier.clip(RoundedCornerShape(50)).clickable { onPick(k) }) {
                 Pill(k, if (k == kind) MaterialTheme.colorScheme.primary else Ext.c.subtle)

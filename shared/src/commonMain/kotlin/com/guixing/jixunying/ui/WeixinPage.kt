@@ -158,8 +158,23 @@ fun WeixinPage(ctl: AppController, state: AppState) {
     }
     Spacer(Modifier.height(12.dp))
     SectionCard {
-        if (platform.isDesktop || !phoneLocal) SwitchRow("开启微信助理", "关掉后这台电脑不回微信消息（绑定还在）；配对的手机开着微信助理的话，由手机接着答", ws.enabled) { v -> save { it.copy(enabled = v) } }
-        else {
+        if (platform.isDesktop || !phoneLocal) {
+            SwitchRow("开启微信助理", "关掉后这台电脑不回微信消息（绑定还在）；配对的手机开着微信助理的话，由手机接着答", ws.enabled) { v -> save { it.copy(enabled = v) } }
+            // 一台电脑连多台手机（2026-10-24）：电脑不接时只让一台手机接，不然几台一起回
+            if (platform.isDesktop && wx.bound && state.devices.isNotEmpty()) {
+                FieldLabel("电脑关机时由哪台手机接", "只让一台接，不然几台手机会一起回；默认是最后一台来拿绑定的")
+                FlowRowCompat {
+                    val cur = state.weixinBackup
+                    (state.devices.map { it.id to it.name } + ("none" to "都不接")).forEach { (id, name) ->
+                        val sel = cur == id || (cur.isEmpty() && id != "none" && state.devices.size == 1)
+                        androidx.compose.material3.FilterChip(selected = sel, onClick = { ctl.run(Command.WeixinSetBackup(id)) },
+                            label = { Text(name) }, modifier = Modifier.padding(end = 6.dp))
+                    }
+                }
+                if (state.weixinBackup.isEmpty() && state.devices.size > 1)
+                    Text("还没定：电脑一关，几台开着微信助理的手机会一起回。点一台定下来。", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error)
+            }
+        } else {
             SwitchRow("这台手机接微信", "电脑关机或关掉微信助理时由手机接着答。关掉省电：手机不收微信消息，电脑开着照常回答", ws.enabled) { v -> save { it.copy(enabled = v) } }
             if (ws.enabled && wx.bound) {
                 // 手机接微信时通知栏常驻一条（前台服务）；有的手机还会在后台省电时关掉应用，要把电池设成「不限制」

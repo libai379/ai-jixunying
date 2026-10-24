@@ -56,7 +56,7 @@ object PhoneGate {
             is Command.AccountGitHubSignIn, is Command.AccountGitHubUnbind -> return refuse(c, "电脑的账号只能在电脑上改")
             is Command.AccountExport, is Command.AccountImport -> return refuse(c, "电脑的账号备份码只能在电脑上导出、导入")
             // 2026-10-24 一台电脑连多台手机：一台手机不能把别的手机踢掉、改名，也不能换二维码（自己取消配对在手机本机上做，不经电脑）
-            is Command.RemoveDevice, is Command.RenameDevice, is Command.NewPairingCode -> return refuse(c, "已配对的手机只能在电脑上管")
+            is Command.RemoveDevice, is Command.RenameDevice, is Command.NewPairingCode, is Command.WeixinSetBackup -> return refuse(c, "已配对的手机只能在电脑上管")
             is Command.TermRun -> return refuse(c, "终端只能在电脑上用")
             is Command.McpTest -> return refuse(c, "MCP 只能在电脑上配")
             is Command.CodeRewind -> return refuse(c, "「回到这里」只能在电脑上做")

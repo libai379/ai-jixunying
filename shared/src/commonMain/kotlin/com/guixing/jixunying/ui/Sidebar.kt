@@ -172,18 +172,21 @@ fun Sidebar(ctl: AppController, modifier: Modifier, onNavigate: () -> Unit) {
             else ChatSessionSidebar(ctl, state, query, onNavigate)
         }
         HorizontalDivider(color = Ext.c.border)
+        // 窗口窄、字又大时（分屏 220dp + 200% 字体）三样排不下：只留图标，名字给读屏用（10-24 phoneSettingsFit）
+        androidx.compose.foundation.layout.BoxWithConstraints(Modifier.fillMaxWidth()) {
+        val iconsOnly = maxWidth < 120.dp * androidx.compose.ui.platform.LocalDensity.current.fontScale
         Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             // 账号：最底下一行最左边（10-24），登了显示 GitHub 名字，没登显示「登录」，点进 设置 → 账号
             // 账号每台设备一个：手机遥控电脑时也显示手机自己的
             val localState by ctl.hub.local.store.state.collectAsState()
-            AccountChip(localState.account) { ctl.openSettings(SettingsTab.ACCOUNT); onNavigate() }
-            Spacer(Modifier.weight(1f))
-            BottomItem(Icons.Rounded.Payments, "花费", null) { ctl.openPage(MainPage.COSTS); onNavigate() }
+            Box(Modifier.weight(1f)) { AccountChip(localState.account, iconsOnly) { ctl.openSettings(SettingsTab.ACCOUNT); onNavigate() } }
+            BottomItem(Icons.Rounded.Payments, "花费", null, iconsOnly) { ctl.openPage(MainPage.COSTS); onNavigate() }
             Spacer(Modifier.width(6.dp))
             // 记录员后台出了错：设置旁边亮红点。点进去照样是设置首页（以前直接跳「记忆」，
             // 出错提示没消之前每次点设置都进记忆，用户 2026-10-12 报的），首页里「记忆」那一项标红
             val bgBad = state.bgProblems.isNotEmpty()
-            BottomItem(Icons.Rounded.Tune, "设置", if (bgBad) MaterialTheme.colorScheme.error else null) { ctl.openSettings(); onNavigate() }
+            BottomItem(Icons.Rounded.Tune, "设置", if (bgBad) MaterialTheme.colorScheme.error else null, iconsOnly) { ctl.openSettings(); onNavigate() }
+        }
         }
     }
 }
@@ -236,7 +239,7 @@ private fun RowScope.QuickCard(icon: androidx.compose.ui.graphics.vector.ImageVe
 
 /** 侧栏最底下的账号：头像圈里是名字头一个字（GitHub 头像要联网下图，这里不画），旁边是 GitHub 名字或「登录」。 */
 @Composable
-private fun AccountChip(a: com.guixing.jixunying.model.AccountInfo, onClick: () -> Unit) {
+private fun AccountChip(a: com.guixing.jixunying.model.AccountInfo, iconOnly: Boolean = false, onClick: () -> Unit) {
     val signed = a.githubLogin.isNotBlank()
     Row(
         Modifier.widthIn(max = 110.dp).clip(RoundedCornerShape(10.dp)).clickable(onClick = onClick).padding(horizontal = 6.dp, vertical = 6.dp),
@@ -247,22 +250,24 @@ private fun AccountChip(a: com.guixing.jixunying.model.AccountInfo, onClick: () 
             if (signed) Text(a.githubLogin.take(1).uppercase(), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onPrimary)
             else Icon(Icons.Rounded.Person, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
         }
-        Spacer(Modifier.width(6.dp))
-        Text(if (signed) a.githubLogin else "登录", style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis,
+        if (!iconOnly) Spacer(Modifier.width(6.dp))
+        if (!iconOnly) Text(if (signed) a.githubLogin else "登录", style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis,
             color = if (signed) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.primary)
     }
 }
 
 /** 最底下那一行的「花费」「设置」。 */
 @Composable
-private fun BottomItem(icon: androidx.compose.ui.graphics.vector.ImageVector, title: String, dot: Color?, onClick: () -> Unit) {
+private fun BottomItem(icon: androidx.compose.ui.graphics.vector.ImageVector, title: String, dot: Color?, iconOnly: Boolean = false, onClick: () -> Unit) {
     Row(
         Modifier.clip(RoundedCornerShape(10.dp)).clickable(onClick = onClick).padding(horizontal = 10.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Icon(icon, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-        Spacer(Modifier.width(6.dp))
-        Text(title, style = MaterialTheme.typography.bodyMedium)
+        Icon(icon, if (iconOnly) title else null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        if (!iconOnly) {
+            Spacer(Modifier.width(6.dp))
+            Text(title, style = MaterialTheme.typography.bodyMedium)
+        }
         if (dot != null) {
             Spacer(Modifier.width(5.dp))
             Box(Modifier.size(7.dp).clip(CircleShape).background(dot))

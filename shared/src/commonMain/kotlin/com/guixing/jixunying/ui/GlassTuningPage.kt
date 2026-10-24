@@ -310,7 +310,7 @@ private fun Toggle(label: String, checked: Boolean, onChange: (Boolean) -> Unit)
 
 @Composable
 private fun Swatches(current: Long, onPick: (Long) -> Unit) {
-    Row(Modifier.padding(vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+    androidx.compose.foundation.layout.FlowRow(Modifier.padding(vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         swatches.forEach { c ->
             val sel = (c and 0x00FFFFFFL) == (current and 0x00FFFFFFL)
             Box(Modifier.size(26.dp).clip(CircleShape).background(Color(c.toInt()))

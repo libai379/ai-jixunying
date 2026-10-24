@@ -1781,6 +1781,38 @@ class EngineTest {
             delay(500)
             assertEquals(2, replies().size, "手机答过的不再答：${replies()}")
             assertTrue(replies().none { "小米" in it })
+
+            // 2026-10-24 一台电脑两台手机：电脑关掉微信助理时只让一台接（默认是先来拿绑定的那台），不一起回
+            val idA = pc.state.devices.single().id
+            assertEquals(idA, pc.state.weixinBackup, "第一台来拿绑定的手机定成接班")
+            val (phoneB, _) = engineWithMembers("小丽", root = File(dir, "phone3").also { it.mkdirs() })
+            val phoneBWx = com.guixing.jixunying.engine.WeixinBridge(phoneB, File(dir, "phone3/weixin"), loginBase = base(), cdnBase = "${base()}/c2c")
+            phoneB.weixin = phoneBWx
+            val hubB = Hub(phoneB, linkFactory = { RelayLink(it) }, pairer = { c, n -> pairWithHost(c, n) }, deviceName = "第二台手机")
+            assertTrue(hubB.pair(PairingCode(pc.state.hostId, pc.state.pairingSecret, "测试电脑", pc.state.settings.relay.brokers)).isSuccess)
+            com.guixing.jixunying.engine.WeixinHandover(hubB, phoneB, phoneBWx, backupFile = File(dir, "phone3/backup.txt")).start()
+            phoneBWx.start()
+            withTimeout(30_000) { while (!phoneBWx.isShared) delay(100) }
+            assertEquals(idA, pc.state.weixinBackup, "第二台来拿不抢")
+            pc.call(Command.SaveSettings(pc.state.settings.copy(weixin = pcWs.copy(enabled = false))))
+            withTimeout(20_000) { while (!phone.state.weixin.answering) delay(50) }
+            withTimeout(20_000) { while (phoneB.state.weixin.status != com.guixing.jixunying.engine.WeixinHandover.OTHER_PHONE) delay(50) }
+            assertFalse(phoneB.state.weixin.answering)
+            assertEquals(idA, File(dir, "phone3/backup.txt").readText().trim(), "第二台把接班的是谁记在本机（电脑关了也知道）")
+            wxSent.clear()
+            wxInbox += msg(17, "两台手机谁答", System.currentTimeMillis() + 10_000)
+            withTimeout(20_000) { while (replies().isEmpty()) delay(50) }
+            delay(1_500)
+            assertEquals(1, replies().size, "只有一台答：${replies()}")
+            assertTrue("小米" in replies().single())
+            // 电脑上换成第二台：第二台接，第一台待命
+            val idB = pc.state.devices.first { it.id != idA }.id
+            assertTrue(pc.call(Command.WeixinSetBackup(idB)).ok)
+            withTimeout(20_000) { while (!phoneB.state.weixin.answering) delay(50) }
+            withTimeout(20_000) { while (phone.state.weixin.answering) delay(50) }
+            // 手机不能改接班的是谁
+            assertFalse(com.guixing.jixunying.engine.code.PhoneGate.check(Command.WeixinSetBackup(idA), pc.state).refusal == null)
+            phoneBWx.stop()
         } finally {
             phoneWx.stop(); pcWx.stop(); relay.stop(); broker.stopServer()
         }

@@ -74,6 +74,7 @@ fun LiquidToggle(
     enabled: Boolean = true,
 ) {
     val dark = LocalGlass.current.dark
+    val liveToggleParams = rememberUpdatedState(LocalGlass.current.tuning.paramsFor(com.guixing.jixunying.model.GlassTarget.CONTROL))
     val accentColor = MaterialTheme.colorScheme.primary
     val trackColor = if (!dark) Color(0xFF787878).copy(0.2f) else Color(0xFF787880).copy(0.36f)
     val onChange by rememberUpdatedState(onCheckedChange)
@@ -180,10 +181,15 @@ fun LiquidToggle(
                     ),
                     shape = { RoundedCornerShape(50) },
                     effects = {
+                        // 按下时圆钮变成透明玻璃：折射、饱和度、深度、色散照 设置 → 外观 → 液态玻璃调节 的「按钮和开关」（2026-10-24），
+                        // 跟着按下的程度长出来；没按时是模糊的实心圆（照原样）
+                        val p = liveToggleParams.value
                         val progress = dampedDragAnimation.pressProgress
+                        if (p.vibrancy && progress > 0f) glassVibrancy()
                         blur(8f.dp.toPx() * (1f - progress))
                         val cap = size.minDimension * 0.45f
-                        lens((5f.dp.toPx() * progress).coerceAtMost(cap), (10f.dp.toPx() * progress).coerceAtMost(cap), chromaticAberration = false)
+                        lens((p.refractionHeightDp.dp.toPx().coerceAtMost(cap)) * progress, (p.refractionAmountDp.dp.toPx().coerceAtMost(cap)) * progress,
+                            depthEffect = p.depthEffect, chromaticAberration = p.chromaticAberration)
                     },
                     highlight = {
                         val progress = dampedDragAnimation.pressProgress
@@ -191,7 +197,7 @@ fun LiquidToggle(
                         val base = if (ambientHighlightWorks) Highlight.Ambient else Highlight.Plain
                         base.copy(width = base.width / 1.5f, blurRadius = base.blurRadius / 1.5f, alpha = progress)
                     },
-                    shadow = { Shadow(radius = 4f.dp, color = Color.Black.copy(alpha = 0.05f)) },
+                    shadow = { liveToggleParams.value.shadow.takeIf { it.enabled }?.toShadow() ?: Shadow(radius = 4f.dp, color = Color.Black.copy(alpha = 0.05f)) },
                     innerShadow = {
                         val progress = dampedDragAnimation.pressProgress
                         InnerShadow(radius = 4f.dp * progress, alpha = progress)
