@@ -31,6 +31,7 @@ import androidx.compose.material.icons.automirrored.rounded.OpenInNew
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Badge
 import androidx.compose.material.icons.rounded.AccountCircle
+import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material.icons.rounded.Brush
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Cloud
@@ -123,6 +124,7 @@ private fun tabIcon(t: SettingsTab): ImageVector = when (t) {
     SettingsTab.WEIXIN -> Icons.Rounded.Forum
     SettingsTab.DEVICES -> Icons.Rounded.PhoneAndroid
     SettingsTab.APPEARANCE -> Icons.Rounded.Palette
+    SettingsTab.GLASS -> Icons.Rounded.Tune
     SettingsTab.ABOUT -> Icons.Rounded.Info
 }
 
@@ -226,6 +228,7 @@ private fun tabSummary(t: SettingsTab, s: AppState, ctl: AppController): String 
     SettingsTab.CODE -> shellLabel(s.settings.code.shell) + if (s.settings.code.allowPhone) " · 手机能用" else " · 手机不能用"
     SettingsTab.WEIXIN -> if (!s.weixinCapable) "在电脑上设置" else if (s.weixin.bound) "已绑定" else "未绑定"
     SettingsTab.DEVICES -> if (ctl.hub.remote.value != null) "已配对" else if (s.devices.isNotEmpty()) "${s.devices.size} 台" else "未配对"
+    SettingsTab.GLASS -> if (!s.settings.glass) "关着" else if (s.settings.glassTuning.byTarget.isEmpty()) "默认" else "调过 ${s.settings.glassTuning.byTarget.size} 处"
     SettingsTab.APPEARANCE -> listOf("跟随系统", "浅色", "深色").getOrElse(s.settings.darkMode) { "" } + if (s.settings.glass) " · 液态玻璃" else ""
     SettingsTab.ABOUT -> com.guixing.jixunying.model.APP_VERSION
 }
@@ -249,6 +252,7 @@ private fun SettingsPage(ctl: AppController, state: AppState, tab: SettingsTab) 
                 SettingsTab.WEIXIN -> WeixinPage(ctl, state)
                 SettingsTab.DEVICES -> DevicesPage(ctl, state)
                 SettingsTab.APPEARANCE -> AppearancePage(ctl, state)
+                SettingsTab.GLASS -> GlassTuningPage(ctl, state.settings.glassTuning, null)
                 SettingsTab.ABOUT -> AboutPage(ctl)
             }
         }
@@ -1132,7 +1136,7 @@ private fun DevicesPage(ctl: AppController, state: AppState) {
 @Composable
 private fun AppearancePage(ctl: AppController, state: AppState) {
     val s = state.settings
-    // 液态玻璃调节（2026-10-24）：在这一页里打开，「返回外观」回来。开发截图用 settings:APPEARANCE#tune 直接打开
+    // 液态玻璃调节（2026-10-24）：设置里单独一项「液态玻璃」，这里也留一个入口
     var tuning by remember { mutableStateOf(ctl.debugDialog == "tune") }
     if (tuning) { GlassTuningPage(ctl, s.glassTuning) { tuning = false }; return }
     PageHeader("外观与通用", "主题、代理、群聊规则。改了马上生效。")
@@ -1149,7 +1153,7 @@ private fun AppearancePage(ctl: AppController, state: AppState) {
         // 液态玻璃（2026-10-22，docs/界面换装说明.md）
         SwitchRow("液态玻璃", "侧栏、输入框、弹窗、开关、发送键用癸星科技那套玻璃和弹簧动画；关掉就是原来的纯色界面",
             s.glass) { v -> ctl.updateSettings { it.copy(glass = v) } }
-        if (s.glass) Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).clickable { tuning = true }.padding(vertical = 10.dp),
+        Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).clickable { ctl.settingsTab = SettingsTab.GLASS }.padding(vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text("液态玻璃调节", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)

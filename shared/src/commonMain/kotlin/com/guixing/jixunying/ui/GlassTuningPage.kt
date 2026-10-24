@@ -70,7 +70,7 @@ private enum class PreviewBg(val label: String) { WALLPAPER("界面壁纸"), GRA
 private val swatches = listOf(0xFFFFFFFFL, 0xFF000000L, 0xFF0088FFL, 0xFF4F5BEBL, 0xFF34C759L, 0xFFFF8D28L, 0xFFFF5FC9L, 0xFFFFB74DL)
 
 @Composable
-fun GlassTuningPage(ctl: AppController, tuning: GlassTuning, onBack: () -> Unit) {
+fun GlassTuningPage(ctl: AppController, tuning: GlassTuning, onBack: (() -> Unit)?) {
     val clipboard = LocalClipboardManager.current
     var target by remember { mutableStateOf(GlassTarget.CARD) }
     // 草稿：拖的时候改它（预览跟着变），松手 / 点开关时存进设置
@@ -78,14 +78,13 @@ fun GlassTuningPage(ctl: AppController, tuning: GlassTuning, onBack: () -> Unit)
     fun commit(p: GlassParams = draft) { draft = p; ctl.updateSettings { it.copy(glassTuning = it.glassTuning.with(target, p)) } }
     fun change(p: GlassParams) { draft = p }
 
-    Row(verticalAlignment = Alignment.CenterVertically) {
+    if (onBack != null) Row(verticalAlignment = Alignment.CenterVertically) {
         TextButton(onBack) { Text("‹ 返回外观") }
     }
     PageHeader("液态玻璃调节", "每个位置各调各的；上面是预览，下面拖一拖马上看到，松手就存，界面上同时变。调乱了点「恢复默认」或者应用一个预设。")
-    if (!LocalGlass.current.on) {
-        Text("「液态玻璃」现在是关着的：调了界面上看不到，先回外观里打开。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
-        Spacer(Modifier.height(8.dp))
-    }
+    // 总开关也放在这里（以前只在 外观 里）
+    SwitchRow("液态玻璃", "关掉就是原来的纯色界面", LocalGlass.current.on) { v -> ctl.updateSettings { it.copy(glass = v) } }
+    Spacer(Modifier.height(8.dp))
     FlowRowCompat {
         GlassTarget.entries.forEach { t ->
             FilterChip(selected = t == target, onClick = { target = t }, label = { Text(t.label) }, modifier = Modifier.padding(end = 6.dp))
