@@ -1,6 +1,7 @@
 package com.guixing.jixunying.engine
 
 import com.guixing.jixunying.model.ProviderConfig
+import com.guixing.jixunying.model.Presets
 import com.guixing.jixunying.model.SearchSource
 import com.guixing.jixunying.model.Usage
 import io.ktor.client.request.get
@@ -54,6 +55,12 @@ class LlmClient(private val proxyOf: (ProviderConfig) -> String?) {
     /** 某个模型不接受的参数，出过一次 400 就记住，以后不再传。见教训库第 1、2 条。 */
     private val droppedParams = ConcurrentHashMap<String, MutableSet<String>>()
 
+    /** 「用 ChatGPT 登录」的访问令牌（Engine 设置；force = 先刷新一次）。没登录抛 ChatGptAuth.AuthException。 */
+    @Volatile var chatgptToken: (suspend (force: Boolean) -> String)? = null
+
+    /** ChatGPT 订阅走 Responses 接口（2026-10-23，engine/ResponsesApi.kt）；每个地址一个，记着哪些字段不认。 */
+    private val responses = ConcurrentHashMap<String, ResponsesApi>()
+
     private fun url(p: ProviderConfig, path: String) = p.baseUrl.trimEnd('/') + path
 
     /**
@@ -74,6 +81,7 @@ class LlmClient(private val proxyOf: (ProviderConfig) -> String?) {
         onDelta: (content: String, reasoning: String) -> Unit,
     ): ChatResult {
         val key = provider.id + "|" + model
+        if (Presets.isChatGpt(provider)) return chatViaResponses(provider, model, messages, tools, onDelta)
         var attempt = 0
         while (true) {
             val dropped = droppedParams[key] ?: emptySet()
@@ -114,6 +122,29 @@ class LlmClient(private val proxyOf: (ProviderConfig) -> String?) {
                 }
                 throw e
             }
+        }
+    }
+
+    private suspend fun chatViaResponses(
+        provider: ProviderConfig, model: String, messages: List<JsonObject>, tools: JsonArray?, onDelta: (String, String) -> Unit,
+    ): ChatResult {
+        val token = chatgptToken ?: throw ApiException(401, "这台设备上不能用 ChatGPT 订阅")
+        val api = responses.getOrPut(provider.baseUrl) { ResponsesApi({ proxyOf(provider) }, provider.baseUrl) }
+        val accepted = java.util.concurrent.atomic.AtomicBoolean(false)
+        val tag = currentCoroutineContext()[UsageTag]
+        try {
+            val r = try {
+                api.chat(model, messages, tools, token, { accepted.set(true) }, onDelta)
+            } catch (e: ChatGptAuth.AuthException) {
+                throw ApiException(401, e.message ?: "ChatGPT 没登录")
+            }
+            runCatching { onUsage?.invoke(provider, model, r.usage, tag) }
+            return r
+        } catch (e: Throwable) {
+            // 订阅额度不按钱算，也照样记一条次数（花费页按 0 元算）
+            if (accepted.get()) runCatching { onUsage?.invoke(provider, model, Usage(), tag) }
+            if (e is ApiException) ResponsesApi.friendly(e.body)?.let { throw ApiException(e.status, it) }
+            throw e
         }
     }
 
@@ -285,12 +316,22 @@ class LlmClient(private val proxyOf: (ProviderConfig) -> String?) {
 
     /** GET /models，返回模型 id 列表。 */
     suspend fun listModels(provider: ProviderConfig): List<String> {
+        val chatgpt = Presets.isChatGpt(provider)
+        val bearer = if (chatgpt) {
+            val t = chatgptToken ?: throw ApiException(401, "这台设备上不能用 ChatGPT 订阅")
+            try { t(false) } catch (e: ChatGptAuth.AuthException) { throw ApiException(401, e.message ?: "ChatGPT 没登录") }
+        } else provider.apiKey.trim()
         val resp = Http.client(proxyOf(provider)).get(url(provider, "/models")) {
-            header("Authorization", "Bearer ${provider.apiKey.trim()}")
+            header("Authorization", "Bearer $bearer")
         }
         val text = resp.bodyAsText()
         if (resp.status.value !in 200..299) throw ApiException(resp.status.value, text)
         val root = Json.parse(text)
+        // ChatGPT 订阅（官方 Models and inference）：models[]，只要 visibility = "list" 的，模型名用 slug
+        if (chatgpt) return ((root as? JsonObject)?.get("models") as? JsonArray).orEmpty().mapNotNull { el ->
+            val o = el as? JsonObject ?: return@mapNotNull null
+            if (o.str("visibility") != null && o.str("visibility") != "list") null else o.str("slug") ?: o.str("id")
+        }.distinct()
         val arr = (root as? JsonObject)?.let { it["data"] ?: it["models"] } ?: root
         return (arr as? JsonArray)?.mapNotNull { el ->
             (el as? JsonObject)?.let { it.str("id") ?: it.str("name")?.removePrefix("models/") }

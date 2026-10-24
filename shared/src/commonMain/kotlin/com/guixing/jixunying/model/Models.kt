@@ -537,8 +537,23 @@ data class AppState(
     val bgProblems: List<BgProblem> = emptyList(),
     /** 按意思搜的补算进度（聊天记录、我的文档各一份），见 model/Semantic.kt。 */
     val semanticProgress: SemanticProgress = SemanticProgress(),
+    /** 这台设备上「用 ChatGPT 登录」的情况（2026-10-23）。凭据本身不在这里（只存在本机 chatgpt/auth.json）。 */
+    val chatgpt: ChatGptInfo = ChatGptInfo(),
 ) {
     fun member(id: String) = members.firstOrNull { it.id == id }
     fun provider(id: String) = providers.firstOrNull { it.id == id }
     fun conversation(id: String) = conversations.firstOrNull { it.id == id }
 }
+
+/**
+ * 「用 ChatGPT 登录」的状态（2026-10-23，docs/ChatGPT订阅设计说明.md）。
+ * signingIn：正在等用户在浏览器里点同意；planOk：给了「用订阅额度」的权限（chatgpt.tokens.use.direct）。
+ */
+@Serializable
+data class ChatGptInfo(
+    val signedIn: Boolean = false,
+    val email: String = "",
+    val planOk: Boolean = false,
+    val signingIn: Boolean = false,
+    val error: String = "",
+)

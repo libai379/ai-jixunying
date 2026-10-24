@@ -12,6 +12,10 @@ sealed interface Command {
     @Serializable data class FetchModels(val providerId: String) : Command
     /** 用一句话测试连通性。 */
     @Serializable data class TestProvider(val providerId: String, val modelId: String) : Command
+    /** 用 ChatGPT 登录（2026-10-23）：回执 data 是要在浏览器里打开的地址；用户在网页上点完以后状态里的 chatgpt 跟着变。只能在登录的那台设备上用。 */
+    @Serializable data object ChatGptSignIn : Command
+    /** 退出 ChatGPT 登录（清掉本机令牌）。 */
+    @Serializable data object ChatGptSignOut : Command
     /** 试画一张（服务商留空 = 按自动规则选）。结果 data 是生成图片的 Attachment JSON。 */
     @Serializable data class TestImage(val providerId: String = "", val modelId: String = "", val prompt: String = "") : Command
 

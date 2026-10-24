@@ -173,6 +173,8 @@ class ShotsTest {
             ProviderConfig("pi", "mimo", "小米 MiMo", "https://api.xiaomimimo.com/v1", "sk-mimo-xxxx", listOf(ModelInfo("mimo-v2.6-flash"))),
             // 做视频（2026-10-20）只有千问AI平台 / 百炼能做：设置页的「做视频」那块要有东西可选
             ProviderConfig("pqv", "qianwen", "千问AI平台（阿里）", "https://maas.qianwenaiapi.com/compatible-mode/v1", "sk-qw-xxxx", listOf(ModelInfo("qwen3.8-max"))),
+            // 2026-10-23 用 ChatGPT 登录：没登录的样子（不用 Key）
+            ProviderConfig("pg", "chatgpt", "ChatGPT 订阅（用 ChatGPT 登录）", "https://api.openai.com/v1", useProxy = true),
         ) + extraProviders
         val members = listOf(
             Member("ma", "阿德", "🧠", 0xFF5B6CFF, "pd", "deepseek-flash", "全能助手，回答准确、条理清楚，遇到事实问题先查证再说。",
@@ -768,12 +770,12 @@ class ShotsTest {
             "chat" to "conv:c1", "chat-image" to "conv:c3", "newchat" to "newchat", "docs" to "docs", "costs" to "costs",
             "stances" to "stances", "chat-stances" to "conv:c5", "chat-stances-dialog" to "conv:c5#stances", "chat-long" to "conv:c6", "chat-council" to "conv:c7",
         ) + com.guixing.jixunying.ui.SettingsTab.entries.map { "settings-" + it.name.lowercase() to "settings:${it.name}" } +
-            listOf("provider-add" to "settings:PROVIDERS#add")
+            listOf("provider-add" to "settings:PROVIDERS#add", "provider-chatgpt" to "settings:PROVIDERS#edit:pg")
         for ((name, start) in wide) shoot("desktop-$name", 1280, 820, 1f, hub, desktop, start)
         val narrow = listOf("chat" to "conv:c1", "chat-long" to "conv:c6", "chat-council" to "conv:c7", "docs" to "docs", "stances" to "stances", "chat-stances" to "conv:c5", "costs" to "costs",
             "settings-home" to "settingshome", "settings-image" to "settings:IMAGE",
             "settings-memory" to "settings:MEMORY", "settings-semantic" to "settings:SEMANTIC",
-            "settings-weixin" to "settings:WEIXIN", "settings-providers" to "settings:PROVIDERS",
+            "settings-weixin" to "settings:WEIXIN", "settings-providers" to "settings:PROVIDERS", "provider-chatgpt" to "settings:PROVIDERS#edit:pg",
             "settings-search" to "settings:SEARCH", "settings-profile" to "settings:PROFILE", "settings-office" to "settings:OFFICE",
             // 手机上这一页是只读的（Code 栏只能在电脑上跑）
             "settings-code" to "settings:CODE")

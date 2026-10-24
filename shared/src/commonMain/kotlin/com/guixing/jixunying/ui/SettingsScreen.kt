@@ -259,7 +259,8 @@ fun PageHeader(title: String, desc: String, action: @Composable (() -> Unit)? = 
 
 @Composable
 private fun ProvidersPage(ctl: AppController, state: AppState) {
-    var editing by remember { mutableStateOf<ProviderConfig?>(null) }
+    // 开发截图用：-Djxy.start=settings:PROVIDERS#edit:服务商编号 直接打开那个服务商的编辑弹窗
+    var editing by remember { mutableStateOf(ctl.debugDialog.takeIf { it.startsWith("edit:") }?.let { state.provider(it.removePrefix("edit:")) }) }
     // 从欢迎页第一步进来时直接弹出「添加服务商」；只弹一次，下次进这页不再自动弹
     var adding by remember { mutableStateOf(ctl.debugDialog == "add").also { if (ctl.debugDialog == "add") ctl.debugDialog = "" } }
     PageHeader("模型服务", "填 API Key 接入各家模型。Key 只存在这台设备上；手机遥控电脑时，电脑上的 Key 在手机上只显示打码后的样子。") {
@@ -286,7 +287,9 @@ private fun ProvidersPage(ctl: AppController, state: AppState) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text(p.name, style = MaterialTheme.typography.titleSmall)
                             Spacer(Modifier.width(8.dp))
-                            if (p.apiKey.isBlank()) Pill("未填 Key", MaterialTheme.colorScheme.error)
+                            if (Presets.isChatGpt(p)) {
+                                if (state.chatgpt.signedIn) Pill("已登录", Ext.c.success) else Pill("没登录", MaterialTheme.colorScheme.error)
+                            } else if (p.apiKey.isBlank()) Pill("未填 Key", MaterialTheme.colorScheme.error)
                             if (p.useProxy) { Spacer(Modifier.width(4.dp)); Pill("走代理", Ext.c.warning) }
                         }
                         Text(p.baseUrl, style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -409,7 +412,8 @@ private fun ProviderDialog(ctl: AppController, existing: ProviderConfig?, onClos
             FieldLabel("接口地址（Base URL）", "到 /v1 这一级，不要带 /chat/completions")
             AppTextField(baseUrl, { baseUrl = it }, placeholder = "https://…/v1")
             Spacer(Modifier.height(10.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            if (presetId == Presets.CHATGPT) ChatGptLogin(ctl, state) { ctl.run(Command.SaveProvider(draft()), quiet = true) { r -> it(r.ok) } }
+            else Row(verticalAlignment = Alignment.CenterVertically) {
                 FieldLabel("API Key")
                 Spacer(Modifier.weight(1f))
                 if (preset.keyUrl.isNotBlank()) Row(Modifier.clip(RoundedCornerShape(6.dp)).clickable { platform.openUrl(preset.keyUrl) }.padding(4.dp),
@@ -418,15 +422,18 @@ private fun ProviderDialog(ctl: AppController, existing: ProviderConfig?, onClos
                     Icon(Icons.AutoMirrored.Rounded.OpenInNew, null, Modifier.size(13.dp), tint = MaterialTheme.colorScheme.primary)
                 }
             }
-            AppTextField(key, { key = it }, placeholder = "sk-…", password = !showKey, trailing = {
+            if (presetId != Presets.CHATGPT) AppTextField(key, { key = it }, placeholder = "sk-…", password = !showKey, trailing = {
                 IconButton(onClick = { showKey = !showKey }) { Icon(if (showKey) Icons.Rounded.VisibilityOff else Icons.Rounded.Visibility, null, Modifier.size(18.dp)) }
             })
+            // ChatGPT 登录好了引擎会自己拉一次模型列表，弹窗里跟着更新
+            val engineModels = state.provider(id)?.models
+            androidx.compose.runtime.LaunchedEffect(engineModels) { if (presetId == Presets.CHATGPT && !engineModels.isNullOrEmpty()) models = engineModels }
             Spacer(Modifier.height(4.dp))
             SwitchRow("走代理", "海外服务商一般要开 · 代理 ${state.settings.proxy.ifBlank { "未设置" }}（在 外观 里改）", useProxy) { useProxy = it }
             HorizontalDivider(color = Ext.c.border, modifier = Modifier.padding(vertical = 8.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Box(Modifier.weight(1f)) { FieldLabel("模型", "每个模型选「聊天」还是「画图」") }
-                TextButton(enabled = !busy && key.isNotBlank(), onClick = {
+                TextButton(enabled = !busy && (key.isNotBlank() || (presetId == Presets.CHATGPT && state.chatgpt.signedIn)), onClick = {
                     busy = true
                     result = null
                     ctl.run(Command.SaveProvider(draft()), quiet = true) {
@@ -1172,5 +1179,46 @@ private fun TypeToggle(image: Boolean, onChange: (Boolean) -> Unit) {
                     color = if (sel) MaterialTheme.colorScheme.primary else Ext.c.subtle)
             }
         }
+    }
+}
+
+
+/**
+ * 「用 ChatGPT 登录」（2026-10-23，docs/ChatGPT订阅设计说明.md）：替代 Key 输入框。
+ * 点登录先保存这个服务商，再让引擎开本机回调、把 OpenAI 的页面在浏览器里打开；用户在网页上点同意，状态里的 chatgpt 跟着变。
+ * 回调只能回到登录的那台设备，所以手机遥控电脑时不能在手机上登。
+ */
+@Composable
+private fun ChatGptLogin(ctl: AppController, state: AppState, saveFirst: (done: (Boolean) -> Unit) -> Unit) {
+    val platform = LocalPlatform.current
+    val info = state.chatgpt
+    FieldLabel("登录", "不用 Key，用你自己的 ChatGPT 订阅额度")
+    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).border(1.dp, Ext.c.border, RoundedCornerShape(10.dp)).padding(12.dp)) {
+        Text(
+            when {
+                info.signingIn -> "正在等你在浏览器里的 OpenAI 页面上点同意…（5 分钟内有效）"
+                info.signedIn && info.planOk -> "已登录" + (info.email.takeIf { it.isNotBlank() }?.let { "：$it" } ?: "") + "。成员用这个服务商的模型时，花的是你 ChatGPT 订阅的额度。"
+                info.signedIn -> "已登录，但没给「用订阅额度」的权限，调不了模型。点「重新登录」，在 OpenAI 页面上把权限都勾上。"
+                else -> "还没登录。点下面的按钮，会在浏览器打开 OpenAI 的页面，登录你的 ChatGPT 账号并同意，就能用。"
+            },
+            style = MaterialTheme.typography.bodySmall,
+        )
+        if (info.error.isNotBlank()) Text(info.error, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(top = 4.dp))
+        Spacer(Modifier.height(8.dp))
+        if (ctl.remoteMode) {
+            Text("要在电脑上点登录（OpenAI 登录完跳回的是登录那台设备）。", style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
+        } else Row(verticalAlignment = Alignment.CenterVertically) {
+            Button(onClick = {
+                saveFirst { ok ->
+                    if (ok) ctl.run(Command.ChatGptSignIn, quiet = true) { r ->
+                        if (r.ok && r.data.isNotBlank()) platform.openUrl(r.data) else ctl.toast(r.message.ifBlank { "开不了登录页" })
+                    }
+                }
+            }, shape = RoundedCornerShape(10.dp)) { Text(if (info.signedIn) "重新登录" else if (info.signingIn) "重新打开登录页" else "用 ChatGPT 登录") }
+            Spacer(Modifier.width(8.dp))
+            if (info.signedIn) TextButton({ ctl.run(Command.ChatGptSignOut, "已退出 ChatGPT 登录") }) { Text("退出登录") }
+        }
+        Text("OpenAI 官方给开源、本机运行的程序开的通道；在 ChatGPT 网页 设置 里能看每个程序用了多少、设上限。" +
+            "登录只存在这台设备上，不会同步到别的设备。", style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, modifier = Modifier.padding(top = 8.dp))
     }
 }

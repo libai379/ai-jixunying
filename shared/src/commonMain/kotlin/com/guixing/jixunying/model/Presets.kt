@@ -50,6 +50,10 @@ object Presets {
     const val GROUP_GLOBAL = "海外"
     const val GROUP_HUB = "聚合平台与本地"
     const val GROUP_OTHER = "其他"
+    const val CHATGPT = "chatgpt"
+
+    /** 走「用 ChatGPT 登录」的服务商（不用 Key，令牌在本机 chatgpt/auth.json）。 */
+    fun isChatGpt(p: ProviderConfig) = p.presetId == CHATGPT
 
     val all: List<ProviderPreset> = listOf(
         // —— 国内（九模型测评的五家排前面）——
@@ -142,6 +146,11 @@ object Presets {
             "https://platform.openai.com/api-keys",
             listOf(m("gpt-5", vision = true), m("gpt-5-mini", vision = true), img("gpt-image-1")),
             "AI", 0xFF10A37F, useProxy = true),
+        // 2026-10-23 用户：「GPT 订阅能不能加进聊天里」——OpenAI 官方「用 ChatGPT 登录」，开源和本机运行的程序可以用订阅额度（docs/ChatGPT订阅设计说明.md）。
+        // 不要 Key：登录后拉模型列表（GET /v1/models 的 slug）
+        ProviderPreset(CHATGPT, "ChatGPT 订阅（用 ChatGPT 登录）", GROUP_GLOBAL, "https://api.openai.com/v1",
+            "https://chatgpt.com/", emptyList(), "GPT", 0xFF10A37F, useProxy = true,
+            note = "不用 Key：点「用 ChatGPT 登录」，在 OpenAI 网页上同意后用你自己的 ChatGPT 订阅额度（Go / Plus / Pro）。登录只在这台设备上有效。"),
         ProviderPreset("anthropic", "Anthropic Claude", GROUP_GLOBAL, "https://api.anthropic.com/v1",
             "https://platform.claude.com/settings/keys",
             listOf(m("claude-opus-5-5", vision = true), m("claude-sonnet-5-5", vision = true), m("claude-haiku-4-5", vision = true)),

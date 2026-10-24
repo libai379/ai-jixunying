@@ -144,6 +144,9 @@ class Engine(
 
     private fun proxyFor(useProxy: Boolean) = if (useProxy) state.settings.proxy.trim().ifEmpty { null } else null
     private val llm = LlmClient { proxyFor(it.useProxy) }
+    /** 用 ChatGPT 登录（2026-10-23）：凭据只在本机 chatgpt/auth.json，不进 state.json、不同步。OpenAI 在国内要走代理。 */
+    private val chatgptAuth = ChatGptAuth(java.io.File(storage.root, "chatgpt"), proxy = { proxyFor(true) })
+    @Volatile private var chatgptPending: ChatGptAuth.Pending? = null
     private val search = WebSearch { state.settings.proxy.trim().ifEmpty { null } }
     private val images = ImageGen { proxyFor(it.useProxy) }
     /** 做视频；查任务进度的间隔测试里调小（jxy.videoPollMs）。 */
@@ -308,6 +311,8 @@ class Engine(
         if (s.conversations.any { it.background.isNotEmpty() }) s = s.copy(conversations = s.conversations.map { it.copy(background = emptyList()) })
         // 这一版认得的设置版本（新版界面拿到状态再改、再发回来，带的就是它）
         if (s.settings.schema < Settings.SCHEMA) s = s.copy(settings = s.settings.copy(schema = Settings.SCHEMA))
+        // ChatGPT 登录状态以本机凭据为准（上次停在「正在登录」的也清掉）
+        s = s.copy(chatgpt = chatgptInfo())
         // 以前重复导入留下的同一个服务商 / 同一位成员，启动时合并掉
         val (deduped, memberMap, removed) = ConfigMerge.dedupe(s)
         if (removed > 0) s = deduped
@@ -316,6 +321,7 @@ class Engine(
         emit(Event.State(state))
         storage.brokenNotes.forEach { emit(Event.Notice(it, error = true)) }
         llm.onUsage = { p, model, u, tag -> recordUsage(p, model, u, tag?.kind ?: UsageKinds.OTHER, tag) }
+        llm.chatgptToken = { force -> chatgptAuth.accessToken(force) }
         // 补记只补引擎启动以前的（启动以后的回答已经实时记过，免得记两遍）
         val backfillBefore = now()
         if (!ledger.backfilled) scope.launch { runCatching { backfillLedger(backfillBefore) } }
@@ -421,6 +427,10 @@ class Engine(
 
     private fun now() = System.currentTimeMillis()
     private fun newId() = UUID.randomUUID().toString().replace("-", "").take(20)
+
+    private fun chatgptInfo() = chatgptAuth.creds.let { c ->
+        com.guixing.jixunying.model.ChatGptInfo(signedIn = c.signedIn, email = c.email, planOk = c.canUsePlan)
+    }
     private fun newSecret() = Base64.getEncoder().encodeToString(com.guixing.jixunying.relay.Crypto.randomBytes(16))
 
     private fun updateState(transform: (AppState) -> AppState): AppState {
@@ -743,6 +753,41 @@ class Engine(
                 })
             }
             CommandResult(message = "拉到 ${ids.size} 个模型")
+        }
+        is Command.ChatGptSignIn -> {
+            chatgptPending?.cancel()
+            val pending = chatgptAuth.begin("AI集训营")
+            chatgptPending = pending
+            updateState { it.copy(chatgpt = it.chatgpt.copy(signingIn = true, error = "")) }
+            scope.launch {
+                val err = try {
+                    pending.await(); null
+                } catch (e: Throwable) {
+                    if (chatgptPending !== pending) return@launch   // 又点了一次登录，这次的作废
+                    e.message ?: e.toString()
+                }
+                chatgptPending = null
+                updateState { it.copy(chatgpt = chatgptInfo().copy(error = err.orEmpty())) }
+                if (err == null) {
+                    // 登好了：没有 ChatGPT 订阅这个服务商就加一个，再拉一次模型列表
+                    val p = state.providers.firstOrNull { Presets.isChatGpt(it) } ?: run {
+                        val pre = Presets.byId(Presets.CHATGPT)
+                        val np = ProviderConfig(newId(), Presets.CHATGPT, pre.name, pre.baseUrl, useProxy = true)
+                        updateState { st -> st.copy(providers = st.providers + np) }
+                        np
+                    }
+                    runCatching { handle(Command.FetchModels(p.id)) }
+                        .onFailure { e -> emit(Event.Notice("ChatGPT 登录好了，但拉模型列表失败：${e.message}", error = true)) }
+                    emit(Event.Notice("ChatGPT 登录好了" + state.chatgpt.email.takeIf { it.isNotBlank() }?.let { "（$it）" }.orEmpty()))
+                }
+            }
+            CommandResult(message = "在浏览器里打开的 OpenAI 页面上点同意", data = pending.url)
+        }
+        is Command.ChatGptSignOut -> {
+            chatgptPending?.cancel(); chatgptPending = null
+            chatgptAuth.signOut()
+            updateState { it.copy(chatgpt = chatgptInfo()) }
+            CommandResult(message = "已退出 ChatGPT 登录")
         }
         is Command.TestProvider -> {
             val p = state.provider(c.providerId) ?: return CommandResult(false, "服务商不存在")

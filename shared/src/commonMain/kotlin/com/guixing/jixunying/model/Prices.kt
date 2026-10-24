@@ -81,6 +81,8 @@ object Prices {
         overrides[key(platform, model)] ?: table(platform, model.trim().lowercase(), baseUrl.lowercase())
 
     private fun table(platform: String, m: String, url: String): ModelPrice? = when (platform) {
+        // 用 ChatGPT 登录：花的是订阅额度，不按 token 另外收钱（2026-10-23）
+        Presets.CHATGPT -> cny(0.0, 0.0, 0.0, note = "ChatGPT 订阅额度，不另外收钱")
         "deepseek" -> when {
             m.startsWith("deepseek-v4-pro") -> ModelPrice("CNY", listOf(t(9.0, 0.30, 27.0)), offPeakHalf = true)
             m.startsWith("deepseek-flash") || m.startsWith("deepseek-v4-flash") -> ModelPrice("CNY", listOf(t(2.0, 0.04, 8.0)), offPeakHalf = true)
