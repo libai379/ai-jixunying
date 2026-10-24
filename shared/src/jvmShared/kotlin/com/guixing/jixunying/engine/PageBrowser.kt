@@ -24,6 +24,12 @@ interface PageBrowser {
     /** 登好了：窗口挪回屏幕外面。 */
     suspend fun hide()
 
+    /**
+     * 把视频 / 音频地址里的声音解码成 16k 单声道 16 位 PCM（最多 [maxSeconds] 秒），返回 (PCM, 整段多少秒)。
+     * 在浏览器里解码（它自带 AAC / MP4 解码），所以程序不用带 ffmpeg。
+     */
+    suspend fun audioPcm(mediaUrl: String, maxSeconds: Int): Pair<ByteArray, Double>
+
     /** 浏览器已经开着（查登录状态时没开就不去开，免得一打开设置页就冒出一个 Edge）。 */
     fun running(): Boolean
 
@@ -94,6 +100,11 @@ object SocialLinks {
           return JSON.stringify(out);
         })()
     """.trimIndent()
+
+    /** 这个页面的视频地址（小红书笔记里的优先；去掉抖音的占位视频）。没有返回 null。 */
+    fun videoOf(page: JsonObject): String? =
+        (page["note"] as? JsonObject)?.str("video")?.takeIf { it.isNotBlank() }
+            ?: (page["videos"] as? JsonArray)?.mapNotNull { (it as? JsonPrimitive)?.content }?.firstOrNull { "douyinstatic.com" !in it }
 
     /** 页面是登录页、验证码页（没拿到内容）。 */
     fun blocked(page: JsonObject): Boolean {

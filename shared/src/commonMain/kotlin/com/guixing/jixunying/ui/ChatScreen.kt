@@ -591,6 +591,8 @@ private fun ToolStepView(t: ToolStep) {
         "doc" -> Icons.Rounded.FolderOpen to (if (t.ok) t.input.take(60) else "${t.input.take(50)}（没找到）")
         "file" -> Icons.Rounded.Description to (if (t.ok) "做了文件《${t.input.take(50)}》" else "文件没做成：${t.input.take(40)}")
         "run" -> Icons.Rounded.Edit to ("跑了「${t.input.take(50)}」" + if (t.note.isNotBlank()) " · ${t.note.take(30)}" else "")
+        // 听平台视频里说的话（2026-10-23）
+        "listen" -> Icons.Rounded.Mic to ((if (t.ok) "听了视频" else "视频没听成") + if (t.note.isNotBlank()) " · ${t.note.take(40)}" else "")
         "video" -> Icons.Rounded.Movie to ((if (t.ok) "做视频：" else "视频没做成：") + t.input.take(30) + if (t.note.isNotBlank()) " · ${t.note.take(30)}" else "")
         else -> Icons.Rounded.Brush to (if (t.ok) "画图：${t.input.take(40)}" else "画图失败")
     }

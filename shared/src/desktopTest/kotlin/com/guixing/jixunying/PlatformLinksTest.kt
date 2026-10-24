@@ -15,6 +15,7 @@ import io.ktor.server.cio.CIO
 import io.ktor.server.engine.EmbeddedServer
 import io.ktor.server.engine.embeddedServer
 import io.ktor.server.request.receiveText
+import io.ktor.server.response.respondText
 import io.ktor.server.response.respondTextWriter
 import io.ktor.server.routing.post
 import io.ktor.server.routing.routing
@@ -48,6 +49,7 @@ class PlatformLinksTest {
     private val requests = Collections.synchronizedList(mutableListOf<JsonObject>())
     private lateinit var fake: EmbeddedServer<*, *>
     private var port = 0
+    @Volatile private var asrCalls = 0
     private lateinit var dir: File
 
     /** 假浏览器：按网址回事先存好的页面（照 10-23 真读到的样子删减）。 */
@@ -57,7 +59,7 @@ class PlatformLinksTest {
             opened += url
             assertEquals(SocialLinks.EXTRACT_JS, script)
             val json = when {
-                "douyin.com" in url -> """{"url":"$url","title":"","desc":"","text":"精选\n推荐\n第83集 | 医者医人，亦可被人间治愈。#小城良方\n3095\n162\n发布时间：2026-10-16 07:22\n全部评论\n这个是真想看，21号我们一起追","videos":["https://lf-douyin-pc-web.douyinstatic.com/obj/douyin-pc-web/uuu_265.mp4"],"images":[]}"""
+                "douyin.com" in url -> """{"url":"$url","title":"","desc":"","text":"精选\n推荐\n第83集 | 医者医人，亦可被人间治愈。#小城良方\n3095\n162\n发布时间：2026-10-16 07:22\n全部评论\n这个是真想看，21号我们一起追","videos":["https://lf-douyin-pc-web.douyinstatic.com/obj/douyin-pc-web/uuu_265.mp4","https://v5-dy-ov.zjcdn.com/video/abc.mp4"],"images":[]}"""
                 "xiaohongshu.com" in url -> """{"url":"$url","title":"小红书","text":"登录后推荐更懂你的笔记\n扫码","videos":[],"images":[],
                     "note":{"title":"","desc":"#阿凡达3讨论团[话题]#","type":"video","user":"电梯爱看","images":["http://sns-webpic-qc.xhscdn.com/a.webp"],"likes":"700","tags":["阿凡达3讨论团","电影阿凡达3"],"video":"http://sns-video-zl.xhscdn.com/stream/1.mp4"}}"""
                 else -> """{"url":"$url","title":"出错啦! - bilibili.com","text":"错误号: 412\n由于触发哔哩哔哩安全风控策略，该次访问请求被拒绝。","videos":[],"images":[]}"""
@@ -68,6 +70,15 @@ class PlatformLinksTest {
         override suspend fun showForLogin(url: String) { opened += "login:$url" }
         override suspend fun hide() {}
         override fun running() = true
+        val audioAsked = Collections.synchronizedList(mutableListOf<String>())
+        override suspend fun audioPcm(mediaUrl: String, maxSeconds: Int): Pair<ByteArray, Double> {
+            audioAsked += mediaUrl
+            // 3 秒「有声音」的假 PCM（正弦波），整段说是 200 秒
+            val n = 16000 * 3
+            val b = ByteArray(n * 2)
+            for (i in 0 until n) { val v = (Math.sin(i / 8.0) * 8000).toInt(); b[2 * i] = v.toByte(); b[2 * i + 1] = (v shr 8).toByte() }
+            return b to 200.0
+        }
         override fun close() {}
     }
 
@@ -91,7 +102,8 @@ class PlatformLinksTest {
                         when {
                             !hasTools -> chunk(JsonObject(mapOf("content" to JsonPrimitive("[]"))).toString())
                             url != null && canFetch && results.isEmpty() -> {
-                                val fn = JsonObject(mapOf("name" to JsonPrimitive("fetch_url"), "arguments" to JsonPrimitive(JsonObject(mapOf("url" to JsonPrimitive(url))).toString())))
+                                val tool = if ("听一下" in task) "listen_video" else "fetch_url"
+                                val fn = JsonObject(mapOf("name" to JsonPrimitive(tool), "arguments" to JsonPrimitive(JsonObject(mapOf("url" to JsonPrimitive(url))).toString())))
                                 val c = JsonObject(mapOf("index" to JsonPrimitive(0), "id" to JsonPrimitive("f1"), "type" to JsonPrimitive("function"), "function" to fn))
                                 chunk(JsonObject(mapOf("tool_calls" to JsonArray(listOf(c)))).toString())
                                 write("data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n")
@@ -99,6 +111,12 @@ class PlatformLinksTest {
                             else -> chunk(JsonObject(mapOf("content" to JsonPrimitive("看过了。"))).toString())
                         }
                     }
+                }
+                // 假的智谱听写：每段回一句
+                post("/v1/audio/transcriptions") {
+                    call.receiveText()
+                    asrCalls++
+                    call.respondText("""{"text":"第${asrCalls}段台词。"}""", ContentType.Application.Json)
                 }
             }
         }
@@ -162,6 +180,19 @@ class PlatformLinksTest {
         assertEquals("unknown", p["xhs"]!!.jsonPrimitive.content)
         assertEquals("out", p["bilibili"]!!.jsonPrimitive.content)
         assertTrue(e.call(Command.PlatformLogin("douyin")).ok)
+
+        // 听视频：没有能听写的服务商时不给这个工具
+        assertFalse(requests.last()["tools"].toString().contains("listen_video"))
+        e.call(Command.SaveProvider(ProviderConfig("pz", "zhipu", "智谱", "http://127.0.0.1:$port/v1", "sk-z")))
+        // 读过的抖音链接：直接用记下的视频地址（不再开页面）；假 PCM 3 秒 → 智谱按 25 秒一段，一段
+        val opened = browser.opened.size
+        val heard = ask("听一下 https://www.douyin.com/video/7697224638232825098")
+        assertTrue(requests.last()["tools"].toString().contains("listen_video"))
+        assertTrue("第1段台词" in heard && "整段 200 秒" in heard, heard)
+        assertEquals(opened, browser.opened.size, "读过的链接不用再开页面")
+        assertEquals(listOf("https://v5-dy-ov.zjcdn.com/video/abc.mp4"), browser.audioAsked.toList())
+        val step = ai()!!.tools.last { it.kind == "listen" }
+        assertTrue(step.ok && "3 秒" in step.note, step.note)
         assertEquals("login:https://www.douyin.com/", browser.opened.last())
     }
 }

@@ -74,6 +74,67 @@ class EdgeBrowser(private val exe: File, private val profile: File) : PageBrowse
         }
     }
 
+    /**
+     * 新开一个后台标签页直接打开媒体地址（同源，fetch 不受跨域限制），在页面里 fetch 回来、用 OfflineAudioContext 解码
+     * （按 16000 的采样率解码会自动重采样），混成单声道转 16 位，存在页面变量里，再分块用 base64 取回来。
+     */
+    override suspend fun audioPcm(mediaUrl: String, maxSeconds: Int): Pair<ByteArray, Double> {
+        val c = ensure()
+        val target = c.send("Target.createTarget", buildJsonObject { put("url", "about:blank"); put("background", true) }).str("targetId")!!
+        try {
+            val session = c.send("Target.attachToTarget", buildJsonObject { put("targetId", target); put("flatten", true) }).str("sessionId")!!
+            c.send("Page.enable", session = session)
+            val loaded = c.waitEvent("Page.loadEventFired", session)
+            c.send("Page.navigate", buildJsonObject { put("url", mediaUrl) }, session)
+            withTimeoutOrNull(30_000) { loaded.await() }
+            val decode = """
+                (async () => {
+                  const r = await fetch(location.href);
+                  if (!r.ok) return JSON.stringify({error: 'HTTP ' + r.status});
+                  const buf = await r.arrayBuffer();
+                  const ctx = new OfflineAudioContext(1, 1, 16000);
+                  let audio;
+                  try { audio = await ctx.decodeAudioData(buf); } catch (e) { return JSON.stringify({error: '解码失败：' + e}); }
+                  const n = Math.min(audio.length, $maxSeconds * 16000);
+                  const chs = [];
+                  for (let c = 0; c < audio.numberOfChannels; c++) chs.push(audio.getChannelData(c));
+                  const out = new Int16Array(n);
+                  for (let i = 0; i < n; i++) {
+                    let s = 0;
+                    for (const d of chs) s += d[i];
+                    s = s / chs.length;
+                    out[i] = Math.max(-32768, Math.min(32767, Math.round(s * 32767)));
+                  }
+                  window.__jxyPcm = new Uint8Array(out.buffer);
+                  return JSON.stringify({bytes: window.__jxyPcm.length, seconds: audio.duration});
+                })()
+            """.trimIndent()
+            val r = c.send("Runtime.evaluate", buildJsonObject {
+                put("expression", decode); put("returnByValue", true); put("awaitPromise", true)
+            }, session, timeoutMs = 180_000)
+            val v = ((r["result"] as? JsonObject)?.get("value") as? JsonPrimitive)?.contentOrNull
+                ?: throw IllegalStateException("视频的声音读不出来：" + r.toString().take(200))
+            val info = Json.parse(v).jsonObject
+            info.str("error")?.let { throw IllegalStateException("视频的声音读不出来：$it") }
+            val total = (info["bytes"] as? JsonPrimitive)?.intOrNull ?: 0
+            val seconds = (info["seconds"] as? JsonPrimitive)?.contentOrNull?.toDoubleOrNull() ?: 0.0
+            val out = java.io.ByteArrayOutputStream(total)
+            var off = 0
+            val step = 1_000_000
+            while (off < total) {
+                val js = "(() => { const b = window.__jxyPcm.subarray($off, ${off + step}); let s = ''; " +
+                    "for (let i = 0; i < b.length; i += 8192) s += String.fromCharCode.apply(null, b.subarray(i, i + 8192)); return btoa(s); })()"
+                val part = ((c.send("Runtime.evaluate", buildJsonObject { put("expression", js); put("returnByValue", true) }, session)["result"] as? JsonObject)
+                    ?.get("value") as? JsonPrimitive)?.contentOrNull ?: throw IllegalStateException("取声音数据失败")
+                out.write(java.util.Base64.getDecoder().decode(part))
+                off += step
+            }
+            return out.toByteArray() to seconds
+        } finally {
+            runCatching { c.send("Target.closeTarget", buildJsonObject { put("targetId", target) }) }
+        }
+    }
+
     override suspend fun cookieNames(domain: String): Set<String> {
         val r = ensure().send("Storage.getCookies")
         return (r["cookies"] as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }
@@ -212,7 +273,7 @@ class EdgeBrowser(private val exe: File, private val profile: File) : PageBrowse
         fun waitEvent(method: String, session: String?): CompletableDeferred<JsonObject> =
             CompletableDeferred<JsonObject>().also { waiters += Triple(method, session, it) }
 
-        suspend fun send(method: String, params: JsonObject = JsonObject(emptyMap()), session: String? = null): JsonObject {
+        suspend fun send(method: String, params: JsonObject = JsonObject(emptyMap()), session: String? = null, timeoutMs: Long = 30_000): JsonObject {
             val id = nextId.getAndIncrement()
             val d = CompletableDeferred<JsonObject>()
             pending[id] = d
@@ -221,7 +282,7 @@ class EdgeBrowser(private val exe: File, private val profile: File) : PageBrowse
                 if (session != null) put("sessionId", session)
             }
             if (!ws.send(msg.toString())) { pending.remove(id); throw IllegalStateException("浏览器连接断了") }
-            val r = withTimeout(30_000) { d.await() }
+            val r = withTimeout(timeoutMs) { d.await() }
             (r["error"] as? JsonObject)?.let { throw IllegalStateException("浏览器报错（$method）：${it.str("message")}") }
             return (r["result"] as? JsonObject) ?: JsonObject(emptyMap())
         }

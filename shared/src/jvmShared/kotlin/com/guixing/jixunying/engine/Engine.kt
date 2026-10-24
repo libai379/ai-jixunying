@@ -153,6 +153,41 @@ class Engine(
     /** 读平台链接用的本机浏览器（2026-10-23，engine/PageBrowser.kt）：只在电脑上有；第一次用才开 Edge。同时最多读两个页面。 */
     private val pageBrowser: PageBrowser? by lazy { if (isPhone) null else browserFactory(java.io.File(storage.root, "browser")) }
     private val pageSlots = kotlinx.coroutines.sync.Semaphore(2)
+    /** 读过的作品链接 → 视频地址（listen_video 直接用，不用再开一次页面）。 */
+    private val pageVideos = ConcurrentHashMap<String, String>()
+
+    /**
+     * 听平台视频（2026-10-23，docs/平台链接设计说明.md 第 4 节）：浏览器把声音解码成 16k 单声道 → 2 分钟一段交给听写（设置 → 语音 自动挑的那家）。
+     * 最长 10 分钟；几乎没声音的不发（听写对着静音会编话）。
+     */
+    private suspend fun listenVideo(convId: String, msgId: String, url: String): String {
+        if (!url.startsWith("http")) return "参数错误：url 要以 http 开头"
+        val browser = pageBrowser ?: return "这台设备上不能听视频（要电脑上的 Edge）"
+        val target = speechTarget("", "", tts = false) ?: return Speech.NO_ASR + "。请告诉用户去 设置 → 语音 加一家能听写的服务商。"
+        fun step(ok: Boolean, note: String) = updateMessage(convId, msgId, persist = false) { it.copy(tools = it.tools + ToolStep("listen", url, ok = ok, note = note)) }
+        return try {
+            val media = pageVideos[url] ?: if (SocialLinks.platformOf(url) != null) {
+                val page = pageSlots.withPermit { browser.snapshot(url, SocialLinks.EXTRACT_JS) }
+                SocialLinks.videoOf(page)?.also { pageVideos[url] = it }
+            } else url
+            if (media == null) { step(false, "页面上没找到视频"); return "这个页面上没找到视频地址（可能是图文，或者要登录）。" }
+            val (pcm, total) = pageSlots.withPermit { browser.audioPcm(media, LISTEN_MAX_SEC) }
+            val wav = SpeechText.wavOf(16000, 1, 16, pcm)
+            val w = SpeechText.parseWav(wav)
+            if (w == null || SpeechText.isSilent(w)) { step(false, "没有说话声"); return "视频里几乎没有声音（可能只有画面或很轻的音乐），听不出说了什么。" }
+            val parts = SpeechText.splitWav(wav, 120.0)
+            val text = buildString { for (p in parts) append(speech.transcribe(target.provider, target.model, p.bytes)) }
+            val heard = w.seconds.toInt()
+            step(true, "${heard} 秒" + if (total > heard + 1) "（整段 ${total.toInt()} 秒，只听了前 ${LISTEN_MAX_SEC / 60} 分钟）" else "")
+            "视频里说的话（语音转文字，${heard} 秒" + (if (total > heard + 1) "，整段 ${total.toInt()} 秒只听了前 ${LISTEN_MAX_SEC / 60} 分钟" else "") +
+                "；可能有同音错字，背景音乐里的歌词也会被听进来）：\n" + text.ifBlank { "（没听出字）" }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            step(false, friendlyError(e))
+            "视频没听成：${friendlyError(e)}。请如实告诉用户。"
+        }
+    }
     private val search = WebSearch { state.settings.proxy.trim().ifEmpty { null } }
     private val images = ImageGen { proxyFor(it.useProxy) }
     /** 做视频；查任务进度的间隔测试里调小（jxy.videoPollMs）。 */
@@ -3080,7 +3115,8 @@ class Engine(
 
             // MCP 外部工具（2026-10-18）：电脑上对话栏也能用，和 Code 栏同一套
             val mcp = if (useTools && filesOn) runCatching { mcpTools() }.getOrDefault(emptyList()) else emptyList()
-            val tools = if (useTools) JsonArray(toolDefs(fnSearch, fetch = wantSearch || linkInAsk, draw = hasImageModel, native = native, memory = memOn, docs = docsOn, office = officeOn, files = filesOn, video = hasVideo) +
+            val tools = if (useTools) JsonArray(toolDefs(fnSearch, fetch = wantSearch || linkInAsk,
+                listen = (wantSearch || linkInAsk) && pageBrowser != null && speechTarget("", "", tts = false) != null, draw = hasImageModel, native = native, memory = memOn, docs = docsOn, office = officeOn, files = filesOn, video = hasVideo) +
                 mcp.map { (n, _, t) -> buildJsonObject {
                     put("type", "function")
                     putJsonObject("function") { put("name", n); put("description", ("（外部工具 ${t.name}）" + t.description).take(1000)); put("parameters", t.inputSchema) }
@@ -3194,7 +3230,7 @@ class Engine(
     }
 
     private fun toolDefs(search: Boolean, fetch: Boolean, draw: Boolean, native: NativeSearch, memory: Boolean = false, docs: Boolean = false,
-                         office: Boolean = false, files: Boolean = false, video: Boolean = false): JsonArray = buildJsonArray {
+                         office: Boolean = false, files: Boolean = false, video: Boolean = false, listen: Boolean = false): JsonArray = buildJsonArray {
         when (native) {
             NativeSearch.ZHIPU -> add(buildJsonObject {
                 put("type", "web_search")
@@ -3222,6 +3258,10 @@ class Engine(
         if (fetch) {
             fn("fetch_url", "打开一个网页，读取正文文字。搜索摘要不够详细、或用户给了链接时使用（抖音、小红书、快手、微博、B站的作品链接和分享短链接也能读：文案、作者、点赞、评论、图片）。",
                 buildJsonObject { put("url", prop("完整网址，http 或 https 开头")) }, listOf("url"))
+        }
+        if (listen) {
+            fn("listen_video", "听平台视频里说了什么，转成文字（抖音、小红书等作品链接，或者 fetch_url 结果里的视频地址）。用户想知道视频讲了什么、页面文字不够时用；按秒收费，最长听 10 分钟。",
+                buildJsonObject { put("url", prop("作品链接或视频地址")) }, listOf("url"))
         }
         if (draw) {
             fn("generate_image", "根据文字描述画一张图，画好后会直接显示给用户。",
@@ -3909,6 +3949,9 @@ class Engine(
     }
 
     private companion object {
+        /** 听平台视频最长听多少秒（按秒收费，也省时间）。 */
+        const val LISTEN_MAX_SEC = 600
+
         /** 补全文件名时不进去翻的文件夹。 */
         val SKIP_DIRS = setOf(".git", "node_modules", "build", ".gradle", ".idea", "dist", "out", "target", ".venv", "venv", "__pycache__", ".next", ".kotlin")
         /** 后台命令输出里的本机网址（开发服务器）。 */
@@ -3968,6 +4011,7 @@ class Engine(
                 else if (res.isEmpty()) "没有搜到结果。请如实告诉用户。"
                 else res.mapIndexed { i, r -> "[${start + i + 1}] ${r.title}\n${r.url}\n${r.snippet}" }.joinToString("\n\n")
             }
+            "listen_video" -> listenVideo(convId, msgId, args.str("url").orEmpty())
             "fetch_url" -> {
                 val url = args.str("url").orEmpty()
                 if (!url.startsWith("http")) return "参数错误：url 要以 http 开头"
@@ -3982,7 +4026,10 @@ class Engine(
                                 "请如实告诉用户没读到，并说可以在电脑上 设置 → 联网搜索 → 读平台链接 里点「去登录${platform.name}」扫码登录后再试；" +
                                 "B站拦截一般是因为电脑上网出口在国外。页面上的字：\n" + page.str("text").orEmpty().take(600)) to
                                 ToolStep("fetch", url, listOf(SearchSource(platform.name, url)), ok = false, note = "${platform.name}要登录或被拦")
-                        } else SocialLinks.format(platform, page) to ToolStep("fetch", url, listOf(SearchSource(platform.name + " · " + url.take(60), url)), ok = true)
+                        } else {
+                            SocialLinks.videoOf(page)?.let { pageVideos[url] = it }
+                            SocialLinks.format(platform, page) to ToolStep("fetch", url, listOf(SearchSource(platform.name + " · " + url.take(60), url)), ok = true)
+                        }
                     } catch (e: CancellationException) {
                         throw e
                     } catch (e: Throwable) {
