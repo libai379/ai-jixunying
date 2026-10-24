@@ -50,6 +50,11 @@ object PhoneGate {
             is Command.CodeGit -> if (c.op != "repo") return refuse(c, "提交和上传只能在电脑上做")
             is Command.GitHubLogin -> return refuse(c, "登录 GitHub 只能在电脑上做")
             is Command.ClaudeLogin -> return refuse(c, "登录 Claude Code 只能在电脑上做")
+            // 2026-10-23 / 10-24：浏览器登录跳回的是电脑本机；账号备份码里有电脑的私钥，不经联机线路给手机
+            is Command.ChatGptSignIn -> return refuse(c, "用 ChatGPT 登录要在电脑上点（登录完跳回的是电脑）")
+            is Command.PlatformLogin -> return refuse(c, "平台登录要在电脑上做（浏览器在电脑上）")
+            is Command.AccountGitHubSignIn, is Command.AccountGitHubUnbind -> return refuse(c, "电脑的账号只能在电脑上改")
+            is Command.AccountExport, is Command.AccountImport -> return refuse(c, "电脑的账号备份码只能在电脑上导出、导入")
             is Command.TermRun -> return refuse(c, "终端只能在电脑上用")
             is Command.McpTest -> return refuse(c, "MCP 只能在电脑上配")
             is Command.CodeRewind -> return refuse(c, "「回到这里」只能在电脑上做")

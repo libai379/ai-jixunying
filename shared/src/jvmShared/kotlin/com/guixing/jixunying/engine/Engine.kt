@@ -4,6 +4,7 @@ import com.guixing.jixunying.client.Backend
 import com.guixing.jixunying.client.ClientStore
 import com.guixing.jixunying.client.ConnState
 import com.guixing.jixunying.model.AppState
+import com.guixing.jixunying.model.AccountInfo
 import com.guixing.jixunying.model.Attachment
 import com.guixing.jixunying.model.AttachmentKind
 import com.guixing.jixunying.model.BgJob
@@ -153,6 +154,12 @@ class Engine(
     /** 读平台链接用的本机浏览器（2026-10-23，engine/PageBrowser.kt）：只在电脑上有；第一次用才开 Edge。同时最多读两个页面。 */
     private val pageBrowser: PageBrowser? by lazy { if (isPhone) null else browserFactory(java.io.File(storage.root, "browser")) }
     private val pageSlots = kotlinx.coroutines.sync.Semaphore(2)
+    /** 账号（2026-10-24，engine/Account.kt）：本机密钥 + 绑的 GitHub；私钥只在 account/identity.json。GitHub 要走代理。 */
+    private val account by lazy { Account(java.io.File(storage.root, "account"), proxy = { proxyFor(true) }) }
+    @Volatile private var githubJob: Job? = null
+    private fun accountInfo(extra: (AccountInfo) -> AccountInfo = { it }) = account.identity.let { i ->
+        extra(state.account.copy(id = account.accountId, createdAt = i.createdAt, githubLogin = i.githubLogin, githubName = i.githubName, githubAvatar = i.githubAvatar))
+    }
     /** 读过的作品链接 → 视频地址（listen_video 直接用，不用再开一次页面）。 */
     private val pageVideos = ConcurrentHashMap<String, String>()
 
@@ -354,6 +361,7 @@ class Engine(
         if (s.settings.schema < Settings.SCHEMA) s = s.copy(settings = s.settings.copy(schema = Settings.SCHEMA))
         // ChatGPT 登录状态以本机凭据为准（上次停在「正在登录」的也清掉）
         s = s.copy(chatgpt = chatgptInfo())
+        s = s.copy(account = account.identity.let { i -> AccountInfo(Account.idOf(i.publicKey), i.createdAt, i.githubLogin, i.githubName, i.githubAvatar) })
         // 以前重复导入留下的同一个服务商 / 同一位成员，启动时合并掉
         val (deduped, memberMap, removed) = ConfigMerge.dedupe(s)
         if (removed > 0) s = deduped
@@ -851,6 +859,32 @@ class Engine(
             pageBrowser?.hide()
             CommandResult()
         }
+        is Command.AccountGitHubSignIn -> {
+            val clientId = System.getProperty("jxy.github.clientId") ?: com.guixing.jixunying.model.GITHUB_OAUTH_CLIENT_ID
+            val dc = try { account.githubStart(clientId) } catch (e: Account.AccountException) { return CommandResult(false, e.message ?: "开不了 GitHub 登录") }
+            githubJob?.cancel()
+            updateState { it.copy(account = accountInfo { a -> a.copy(githubCode = dc.userCode, githubUri = dc.verificationUri, githubError = "") }) }
+            githubJob = scope.launch {
+                val err = try { account.githubWait(clientId, dc); null } catch (e: CancellationException) { throw e } catch (e: Throwable) { e.message ?: e.toString() }
+                updateState { it.copy(account = accountInfo { a -> a.copy(githubCode = "", githubUri = "", githubError = err.orEmpty()) }) }
+                if (err == null) emit(Event.Notice("GitHub 绑好了：@${account.identity.githubLogin}"))
+            }
+            CommandResult(message = "在 GitHub 页面上输入 ${dc.userCode}", data = buildJsonObject { put("code", dc.userCode); put("uri", dc.verificationUri) }.toString())
+        }
+        is Command.AccountGitHubUnbind -> {
+            githubJob?.cancel()
+            account.githubUnbind()
+            updateState { it.copy(account = accountInfo { a -> a.copy(githubCode = "", githubUri = "", githubError = "") }) }
+            CommandResult(message = "已解绑 GitHub")
+        }
+        is Command.AccountExport -> try {
+            CommandResult(data = account.export(c.passphrase))
+        } catch (e: Account.AccountException) { CommandResult(false, e.message ?: "导不出来") }
+        is Command.AccountImport -> try {
+            account.import(c.code, c.passphrase)
+            updateState { it.copy(account = accountInfo { a -> a.copy(githubCode = "", githubUri = "", githubError = "") }) }
+            CommandResult(message = "已换成账号 ${account.accountId}")
+        } catch (e: Account.AccountException) { CommandResult(false, e.message ?: "导不进来") }
         is Command.ChatGptSignOut -> {
             chatgptPending?.cancel(); chatgptPending = null
             chatgptAuth.signOut()

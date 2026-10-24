@@ -100,6 +100,9 @@ import com.guixing.jixunying.model.SearchEngine
 import com.guixing.jixunying.model.SearchMode
 import com.guixing.jixunying.model.SpeechPick
 import kotlinx.coroutines.flow.first
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.AnnotatedString
 
 private fun tabIcon(t: SettingsTab): ImageVector = when (t) {
     SettingsTab.PROVIDERS -> Icons.Rounded.Cloud
@@ -711,6 +714,8 @@ private fun ProfilePage(ctl: AppController, state: AppState) {
     AutoSave(instructions, personal.instructions) { v -> ctl.updateSettings { it.copy(personal = it.personal.copy(instructions = v)) } }
     AutoSave(codeInstructions, personal.codeInstructions) { v -> ctl.updateSettings { it.copy(personal = it.personal.copy(codeInstructions = v)) } }
     PageHeader("个性化", "AI 会知道你是谁、该怎么做。写下你的身份、偏好和要它一直照着做的规矩，回答会更对路。改了会自动保存。")
+    AccountCard(ctl, state)
+    Spacer(Modifier.height(12.dp))
     SectionCard {
         FieldLabel("自定义指令", "每次回答都照着做：聊天里的每位成员、Code 栏都用")
         AppTextField(instructions, { instructions = it }, singleLine = false, minLines = 5,
@@ -1277,5 +1282,127 @@ private fun ChatGptLogin(ctl: AppController, state: AppState, saveFirst: (done: 
         }
         Text("OpenAI 官方给开源、本机运行的程序开的通道；在 ChatGPT 网页 设置 里能看每个程序用了多少、设上限。" +
             "登录只存在这台设备上，不会同步到别的设备。", style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, modifier = Modifier.padding(top = 8.dp))
+    }
+}
+
+/**
+ * 账号（2026-10-24，docs/账号设计说明.md）：没有服务器——账号就是这台设备上的一对密钥（编号由公钥算），可以绑 GitHub；
+ * 换设备用备份码（口令加密）。手机遥控电脑时这里只看不改。
+ */
+@Composable
+private fun AccountCard(ctl: AppController, state: AppState) {
+    val platform = LocalPlatform.current
+    val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
+    val a = state.account
+    var exporting by remember { mutableStateOf(false) }
+    var importing by remember { mutableStateOf(false) }
+    SectionCard {
+        Text("账号", style = MaterialTheme.typography.titleSmall)
+        Spacer(Modifier.height(4.dp))
+        Text("不用注册、没有服务器：这台设备第一次打开时生成了一对密钥，它就是你的账号（只存在这台设备上）。可以再绑上 GitHub，别人就能认出是你。",
+            style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
+        Spacer(Modifier.height(8.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("账号编号", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.width(72.dp))
+            SelectionContainer(Modifier.weight(1f)) { Text(a.id.ifBlank { "—" }, style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace)) }
+            TextButton({ clipboard.setText(AnnotatedString(a.id)); ctl.toast("已复制账号编号") }, enabled = a.id.isNotBlank()) { Text("复制") }
+        }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("GitHub", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.width(72.dp))
+            Text(
+                when {
+                    a.githubLogin.isNotBlank() -> "@${a.githubLogin}" + (a.githubName.takeIf { it.isNotBlank() }?.let { "（$it）" } ?: "")
+                    a.githubCode.isNotBlank() -> "等你在 GitHub 页面上输入：${a.githubCode}"
+                    else -> "没绑"
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = if (a.githubLogin.isNotBlank()) Ext.c.success else if (a.githubCode.isNotBlank()) MaterialTheme.colorScheme.primary else Ext.c.subtle,
+                modifier = Modifier.weight(1f),
+            )
+            if (!ctl.remoteMode) {
+                if (a.githubLogin.isNotBlank()) TextButton({ ctl.run(Command.AccountGitHubUnbind, "已解绑 GitHub") }) { Text("解绑", color = MaterialTheme.colorScheme.error) }
+                else TextButton({
+                    ctl.run(Command.AccountGitHubSignIn, quiet = true) { r ->
+                        if (!r.ok) { ctl.toast(r.message); return@run }
+                        val o = runCatching { kotlinx.serialization.json.Json.parseToJsonElement(r.data) as kotlinx.serialization.json.JsonObject }.getOrNull()
+                        val code = (o?.get("code") as? kotlinx.serialization.json.JsonPrimitive)?.content.orEmpty()
+                        val uri = (o?.get("uri") as? kotlinx.serialization.json.JsonPrimitive)?.content.orEmpty()
+                        clipboard.setText(AnnotatedString(code))
+                        ctl.toast("码 $code 已复制，在打开的 GitHub 页面上粘贴，点同意")
+                        if (uri.isNotBlank()) platform.openUrl(uri)
+                    }
+                }) { Text(if (a.githubCode.isNotBlank()) "重新拿码" else "用 GitHub 登录") }
+            }
+        }
+        if (a.githubCode.isNotBlank()) Text("码已经复制了；GitHub 页面没打开的话，自己打开 ${a.githubUri.ifBlank { "github.com/login/device" }}。15 分钟内有效。",
+            style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, modifier = Modifier.padding(start = 72.dp))
+        if (a.githubError.isNotBlank()) Text(a.githubError, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(start = 72.dp))
+        Spacer(Modifier.height(6.dp))
+        if (ctl.remoteMode) Text("这是电脑的账号，只能在电脑上改。", style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
+        else Row {
+            OutlinedButton({ exporting = true }) { Text("导出备份码") }
+            Spacer(Modifier.width(8.dp))
+            OutlinedButton({ importing = true }) { Text("导入备份码") }
+        }
+        Text("换手机、换电脑，或者想让手机和电脑用同一个账号：在这台导出备份码，到那台导入。备份码要设口令，口令忘了就导不进去；设备丢了又没备份，这个账号就找不回来了。",
+            style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, modifier = Modifier.padding(top = 6.dp))
+    }
+    if (exporting) AccountExportDialog(ctl) { exporting = false }
+    if (importing) AccountImportDialog(ctl) { importing = false }
+}
+
+@Composable
+private fun AccountExportDialog(ctl: AppController, onClose: () -> Unit) {
+    val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
+    var p1 by remember { mutableStateOf("") }
+    var p2 by remember { mutableStateOf("") }
+    var code by remember { mutableStateOf("") }
+    var error by remember { mutableStateOf("") }
+    AppDialog("导出账号备份码", onClose, width = 520.dp, actions = {
+        TextButton(onClose) { Text(if (code.isBlank()) "取消" else "关闭") }
+        if (code.isBlank()) Button({
+            error = when { p1.length < 6 -> "口令至少 6 个字"; p1 != p2 -> "两次口令不一样"; else -> "" }
+            if (error.isEmpty()) ctl.run(Command.AccountExport(p1), quiet = true) { r -> if (r.ok) code = r.data else error = r.message }
+        }) { Text("导出") } else Button({ clipboard.setText(AnnotatedString(code)); ctl.toast("备份码已复制") }) { Text("复制备份码") }
+    }) {
+        Column {
+            if (code.isBlank()) {
+                Text("备份码里有这个账号的密钥，用你设的口令加密。别发给别人；口令另外记好。", style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
+                Spacer(Modifier.height(8.dp))
+                FieldLabel("口令")
+                AppTextField(p1, { p1 = it }, password = true)
+                Spacer(Modifier.height(6.dp))
+                FieldLabel("再输一次")
+                AppTextField(p2, { p2 = it }, password = true)
+            } else {
+                Text("备份码（存到安全的地方，导入时要用刚才的口令）：", style = MaterialTheme.typography.bodySmall)
+                Spacer(Modifier.height(6.dp))
+                SelectionContainer { Text(code, style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace)) }
+            }
+            if (error.isNotBlank()) Text(error, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(top = 6.dp))
+        }
+    }
+}
+
+@Composable
+private fun AccountImportDialog(ctl: AppController, onClose: () -> Unit) {
+    var code by remember { mutableStateOf("") }
+    var pass by remember { mutableStateOf("") }
+    var error by remember { mutableStateOf("") }
+    AppDialog("导入账号备份码", onClose, width = 520.dp, actions = {
+        TextButton(onClose) { Text("取消") }
+        Button({ ctl.run(Command.AccountImport(code, pass), quiet = true) { r -> if (r.ok) { ctl.toast(r.message); onClose() } else error = r.message } },
+            enabled = code.isNotBlank() && pass.isNotBlank()) { Text("导入") }
+    }) {
+        Column {
+            Text("导入以后这台设备就换成备份码里的账号，原来的账号会被替换掉（要留着就先导出一份）。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+            Spacer(Modifier.height(8.dp))
+            FieldLabel("备份码", "JXYID1: 开头")
+            AppTextField(code, { code = it }, singleLine = false, minLines = 3)
+            Spacer(Modifier.height(6.dp))
+            FieldLabel("口令")
+            AppTextField(pass, { pass = it }, password = true)
+            if (error.isNotBlank()) Text(error, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(top = 6.dp))
+        }
     }
 }

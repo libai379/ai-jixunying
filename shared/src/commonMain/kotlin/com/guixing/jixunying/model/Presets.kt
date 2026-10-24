@@ -224,3 +224,9 @@ const val APP_VERSION = "1.11.0"
 
 /** 开发者署名（关于页、安装包的「发布者」；用户 2026-10-14 定）。desktopApp 的 vendor 一起改。 */
 const val APP_DEVELOPER = "癸星科技"
+
+/**
+ * 「用 GitHub 登录」用的 GitHub OAuth 应用编号（2026-10-24，docs/账号设计说明.md）。要在 GitHub 上建一个 OAuth App、打开 Device Flow 才有；
+ * 空的时候界面写「还没开通」。编号是公开的（设备码登录不用密钥）。
+ */
+const val GITHUB_OAUTH_CLIENT_ID = ""

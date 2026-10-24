@@ -22,6 +22,14 @@ sealed interface Command {
     @Serializable data class PlatformLogin(val platform: String) : Command
     /** 登好了：浏览器挪回屏幕外面。 */
     @Serializable data object PlatformHide : Command
+    /** 账号（2026-10-24）：用 GitHub 设备码登录。回执 data 是 JSON {"code":给用户输的码,"uri":网址}；用户在网页上同意后状态里的 account 跟着变。 */
+    @Serializable data object AccountGitHubSignIn : Command
+    /** 解绑 GitHub（本机密钥账号不变）。 */
+    @Serializable data object AccountGitHubUnbind : Command
+    /** 导出账号备份码（用口令加密）。回执 data 是备份码。只能在这台设备上导（不经过联机线路）。 */
+    @Serializable data class AccountExport(val passphrase: String) : Command
+    /** 导入账号备份码：这台设备换成那个账号。 */
+    @Serializable data class AccountImport(val code: String, val passphrase: String) : Command
     /** 试画一张（服务商留空 = 按自动规则选）。结果 data 是生成图片的 Attachment JSON。 */
     @Serializable data class TestImage(val providerId: String = "", val modelId: String = "", val prompt: String = "") : Command
 

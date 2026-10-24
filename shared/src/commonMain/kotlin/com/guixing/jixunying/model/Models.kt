@@ -539,6 +539,8 @@ data class AppState(
     val semanticProgress: SemanticProgress = SemanticProgress(),
     /** 这台设备上「用 ChatGPT 登录」的情况（2026-10-23）。凭据本身不在这里（只存在本机 chatgpt/auth.json）。 */
     val chatgpt: ChatGptInfo = ChatGptInfo(),
+    /** 这台设备的账号（2026-10-24）：本机密钥算出来的编号 + 绑的 GitHub。私钥不在这里（只在 account/identity.json）。 */
+    val account: AccountInfo = AccountInfo(),
 ) {
     fun member(id: String) = members.firstOrNull { it.id == id }
     fun provider(id: String) = providers.firstOrNull { it.id == id }
@@ -556,4 +558,20 @@ data class ChatGptInfo(
     val planOk: Boolean = false,
     val signingIn: Boolean = false,
     val error: String = "",
+)
+
+/**
+ * 账号（2026-10-24，docs/账号设计说明.md）：id 是本机密钥算出来的编号（jxy-xxxx-…）；github* 是绑的 GitHub。
+ * githubCode / githubUri：正在用设备码登录时给用户看的码和网址；githubError：上一次登录的错。
+ */
+@Serializable
+data class AccountInfo(
+    val id: String = "",
+    val createdAt: Long = 0,
+    val githubLogin: String = "",
+    val githubName: String = "",
+    val githubAvatar: String = "",
+    val githubCode: String = "",
+    val githubUri: String = "",
+    val githubError: String = "",
 )
