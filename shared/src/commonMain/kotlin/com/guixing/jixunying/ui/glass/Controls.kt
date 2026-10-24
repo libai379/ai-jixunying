@@ -188,8 +188,8 @@ fun LiquidToggle(
                         if (p.vibrancy && progress > 0f) glassVibrancy()
                         blur(8f.dp.toPx() * (1f - progress))
                         val cap = size.minDimension * 0.45f
-                        lens((p.refractionHeightDp.dp.toPx().coerceAtMost(cap)) * progress, (p.refractionAmountDp.dp.toPx().coerceAtMost(cap)) * progress,
-                            depthEffect = p.depthEffect, chromaticAberration = p.chromaticAberration)
+                        glassLens((p.refractionHeightDp.dp.toPx().coerceAtMost(cap)) * progress, (p.refractionAmountDp.dp.toPx().coerceAtMost(cap)) * progress,
+                            p.depthEffect, p.chromaticAberration)
                     },
                     highlight = {
                         val progress = dampedDragAnimation.pressProgress

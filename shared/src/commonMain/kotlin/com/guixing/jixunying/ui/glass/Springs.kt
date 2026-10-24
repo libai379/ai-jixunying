@@ -51,9 +51,9 @@ object Springs {
     /** 按下、松开：照癸星科技启动页卡片（Spring.DampingRatioMediumBouncy、Spring.StiffnessMedium），松手会弹一下。 */
     fun <T> press() = spring<T>(dampingRatio = androidx.compose.animation.core.Spring.DampingRatioMediumBouncy,
         stiffness = androidx.compose.animation.core.Spring.StiffnessMedium)
-    /** 列表一条条出现时往上弹到位：照癸星科技 rememberEntranceModifier（LowBouncy、StiffnessLow）。 */
+    /** 列表一条条出现时往上弹到位：LowBouncy 照癸星科技；硬度从 StiffnessLow（200）提到 StiffnessMediumLow（400），快一倍（10-24 用户嫌慢）。 */
     fun <T> entrance() = spring<T>(dampingRatio = androidx.compose.animation.core.Spring.DampingRatioLowBouncy,
-        stiffness = androidx.compose.animation.core.Spring.StiffnessLow)
+        stiffness = androidx.compose.animation.core.Spring.StiffnessMediumLow)
 }
 
 private suspend fun awaitFrame() {

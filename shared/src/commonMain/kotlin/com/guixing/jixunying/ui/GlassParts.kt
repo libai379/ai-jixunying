@@ -139,20 +139,21 @@ fun Modifier.springPress(source: androidx.compose.foundation.interaction.Mutable
 }
 
 /**
- * 一条条出现：第 [index] 条晚 index × 90 毫秒，淡入 420 毫秒、从下面 24dp 弹上来（照癸星科技启动页 rememberEntranceModifier）。
- * 只在第一次出现时动；排在后面的最多等 8 条的时间，长列表不会一直往外冒。
+ * 一条条出现：第 [index] 条晚 index × 35 毫秒，淡入 200 毫秒、从下面 16dp 弹上来。
+ * 10-24 先照癸星科技启动页（90 毫秒一条、淡入 420、LowBouncy + StiffnessLow），用户：「过渡动画太慢了……点进去退出来还得等一下，稍微快一点就行，这个动画挺好」→ 快一倍多，弹的手感留着。
+ * 排在后面的最多等 6 条的时间，长列表不会一直往外冒。
  */
 @Composable
 fun Modifier.entrance(index: Int): Modifier {
     if (com.guixing.jixunying.ui.glass.wallpaperStill) return this   // 截图测试：一下就是最后的样子
     val density = androidx.compose.ui.platform.LocalDensity.current
-    val start = with(density) { 24.dp.toPx() }
+    val start = with(density) { 16.dp.toPx() }
     val alpha = androidx.compose.runtime.remember { androidx.compose.animation.core.Animatable(0f) }
     val offset = androidx.compose.runtime.remember { androidx.compose.animation.core.Animatable(start) }
     androidx.compose.runtime.LaunchedEffect(Unit) {
-        kotlinx.coroutines.delay(index.coerceIn(0, 8) * 90L)
+        kotlinx.coroutines.delay(index.coerceIn(0, 6) * 35L)
         kotlinx.coroutines.coroutineScope {
-            launch { alpha.animateTo(1f, androidx.compose.animation.core.tween(420, easing = androidx.compose.animation.core.FastOutSlowInEasing)) }
+            launch { alpha.animateTo(1f, androidx.compose.animation.core.tween(200, easing = androidx.compose.animation.core.FastOutSlowInEasing)) }
             launch { offset.animateTo(0f, com.guixing.jixunying.ui.glass.Springs.entrance()) }
         }
     }

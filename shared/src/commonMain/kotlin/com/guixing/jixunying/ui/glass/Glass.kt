@@ -47,6 +47,11 @@ expect fun com.kashif_e.backdrop.BackdropEffectScope.glassVibrancy()
 /** 库的 Ambient / Default 高光能不能用：电脑端那两个着色器调了新版 skiko 里没有的方法（RuntimeShaderBuilder.makeShader$default），一画就崩。 */
 expect val ambientHighlightWorks: Boolean
 
+/**
+ * 折射：安卓上用自己重写的一份（库的着色器在分叉里取图，用户手机显卡上折射带内边会出一圈细缝，见 GlassLens.android.kt），电脑上用库的。
+ */
+expect fun com.kashif_e.backdrop.BackdropEffectScope.glassLens(refractionHeight: Float, refractionAmount: Float, depthEffect: Boolean, chromaticAberration: Boolean)
+
 /** 壁纸光斑停着不漂（截图测试用）。 */
 expect val wallpaperStill: Boolean
 
@@ -83,7 +88,7 @@ fun com.kashif_e.backdrop.BackdropEffectScope.glassEffects(p: GlassParams) {
     val cap = size.minDimension * 0.45f
     val h = p.refractionHeightDp.dp.toPx().coerceAtMost(cap)
     val a = p.refractionAmountDp.dp.toPx().coerceAtMost(cap)
-    if (h > 0f && a > 0f) lens(h, a, depthEffect = p.depthEffect, chromaticAberration = p.chromaticAberration)
+    if (h > 0f && a > 0f) glassLens(h, a, p.depthEffect, p.chromaticAberration)
 }
 
 /** 玻璃表面上画的：底色（跟着深浅色）→ 染色（色相混一遍再盖半透明，癸星科技 tint 的画法）→ 调用方要的颜色。 */

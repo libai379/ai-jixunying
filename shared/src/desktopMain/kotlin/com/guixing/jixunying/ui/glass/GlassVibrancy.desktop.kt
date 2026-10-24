@@ -1,5 +1,7 @@
 package com.guixing.jixunying.ui.glass
 
+import com.kashif_e.backdrop.effects.lens
+
 import com.kashif_e.backdrop.BackdropEffectScope
 import com.kashif_e.backdrop.effects.colorFilter
 import org.jetbrains.skia.ColorFilter
@@ -32,3 +34,8 @@ private val Vibrant: ColorFilter by lazy {
 
 /** 截图测试（ShotsTest）里壁纸光斑不漂，每次截出来一样：-Djxy.wallpaper.still=true。 */
 actual val wallpaperStill: Boolean = System.getProperty("jxy.wallpaper.still") == "true"
+
+/** 电脑上照用库自己的折射（安卓那份为什么重写见 GlassLens.android.kt）。 */
+actual fun com.kashif_e.backdrop.BackdropEffectScope.glassLens(refractionHeight: Float, refractionAmount: Float, depthEffect: Boolean, chromaticAberration: Boolean) {
+    lens(refractionHeight, refractionAmount, depthEffect, chromaticAberration)
+}
