@@ -114,10 +114,11 @@ fun Sidebar(ctl: AppController, modifier: Modifier, onNavigate: () -> Unit) {
     val codeAccess = CodeUi.access(LocalPlatform.current.isDesktop, ctl.remoteMode, state.settings.code.allowPhone)
     // 液态玻璃（2026-10-22）：浮在壁纸上的一块圆角玻璃（电脑上留出边距；手机抽屉贴边，只右边圆角）
     val glassOn = com.guixing.jixunying.ui.glass.LocalGlass.current.on
-    val panelShape = if (isDesktopHere) RoundedCornerShape(22.dp) else RoundedCornerShape(topEnd = 22.dp, bottomEnd = 22.dp)
+    val r = com.guixing.jixunying.ui.glass.glassRadius(com.guixing.jixunying.model.GlassTarget.SIDEBAR)
+    val panelShape = if (isDesktopHere) RoundedCornerShape(r) else RoundedCornerShape(topEnd = r, bottomEnd = r)
     Column(modifier
         .then(if (glassOn && isDesktopHere) Modifier.padding(start = 10.dp, top = 10.dp, bottom = 10.dp) else Modifier)
-        .glass(if (glassOn) panelShape else androidx.compose.ui.graphics.RectangleShape, com.guixing.jixunying.ui.glass.GlassStyle.Panel, fallback = Ext.c.sidebar)) {
+        .glass(if (glassOn) panelShape else androidx.compose.ui.graphics.RectangleShape, com.guixing.jixunying.model.GlassTarget.SIDEBAR, fallback = Ext.c.sidebar)) {
         Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
             // 接焦点用的空点（什么都不画）：手机上抽屉一拉开，系统把焦点交给侧栏里第一个能拿焦点的东西，
             // 落在标签、下拉、「+」上都会显出一块灰色的焦点底色；让它落在这里

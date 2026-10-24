@@ -786,6 +786,9 @@ class ShotsTest {
         shoot("phone-chat-draw-360", 720, 1560, 2f, hub, phone, "conv:c1#draw")
         shoot("desktop-chat-plus", 1280, 820, 1f, hub, desktop, "conv:c1#plus")
         shoot("desktop-chat-draw", 1280, 820, 1f, hub, desktop, "conv:c1#draw")
+        // 2026-10-24 液态玻璃调节（设置 → 外观）
+        shoot("desktop-glass-tuning", 1280, 1400, 1f, hub, desktop, "settings:APPEARANCE#tune")
+        shoot("phone-glass-tuning", 824, 3600, 2f, hub, phone, "settings:APPEARANCE#tune")
 
         // 语音（1.7.0）：读出来的按钮、正在读、「合成中…」、输入框正在录音、手机上那一页
         val av = FakeAvPlatform(desktop)
@@ -919,6 +922,7 @@ class ShotsTest {
         // 深色
         kotlinx.coroutines.runBlocking { e.call(com.guixing.jixunying.model.Command.SaveSettings(e.state.settings.copy(darkMode = 2))) }
         shoot("desktop-dark-chat", 1280, 820, 1f, hub, desktop, "conv:c1")
+        shoot("desktop-dark-glass-tuning", 1280, 1400, 1f, hub, desktop, "settings:APPEARANCE#tune")
         shoot("desktop-dark-docs", 1280, 820, 1f, hub, desktop, "docs")
         shoot("desktop-dark-stances", 1280, 820, 1f, hub, desktop, "stances")
         shoot("desktop-dark-chat-stances", 1280, 820, 1f, hub, desktop, "conv:c5")

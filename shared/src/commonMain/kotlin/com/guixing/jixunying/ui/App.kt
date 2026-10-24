@@ -337,7 +337,7 @@ fun App(hub: Hub, platform: Platform, debugStart: String? = null) {
                 Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
                     if (glassOn) com.guixing.jixunying.ui.glass.GlassWallpaper(wallpaper, dark, Modifier.matchParentSize())
                     CompositionLocalProvider(com.guixing.jixunying.ui.glass.LocalGlass provides
-                        com.guixing.jixunying.ui.glass.GlassEnv(if (glassOn) wallpaper else null, glassOn, dark)) {
+                        com.guixing.jixunying.ui.glass.GlassEnv(if (glassOn) wallpaper else null, glassOn, dark, state.settings.glassTuning)) {
                         MainLayout(ctl)
                     }
                     // 开发截图用：-Djxy.start=…#toast 打开就弹一条提示，看它挡不挡东西

@@ -206,6 +206,11 @@ sealed interface Command {
     @Serializable data object TidyMemories : Command
     /** 手机和电脑互相同步记忆（2026-10-24）：发来对方的记忆和删除记录，合进本机，data 回合好的 MemoryBundle JSON。 */
     @Serializable data class SyncMemories(val bundle: MemoryBundle) : Command
+    /**
+     * 手机的 GitHub 登录换令牌交给电脑做（2026-10-24 方案一）：手机拿到授权码后经加密线路发来，电脑去 GitHub 换令牌、查用户资料，
+     * data 回 GitHub 用户资料 JSON（login、id、name、avatar），令牌电脑上也不留、不绑到电脑自己的账号上。
+     */
+    @Serializable data class GitHubExchange(val code: String, val redirectUri: String, val verifier: String) : Command
     /** 花费：period = today / week / month / all。结果 data 是 CostReport 的 JSON。 */
     @Serializable data class GetCosts(val period: String = "month") : Command
     /** 花费设置（汇率、自填单价）单独保存：旧版手机发来的 SaveSettings 里没有这块，不能让它冲掉。 */

@@ -1799,7 +1799,7 @@ private fun CodeComposer(ctl: AppController, conv: Conversation, running: Boolea
                 if (fileQuery != null) FileSuggestList(fileHits) { text = insertAt(text, it) }
                 if (slashQ != null) SlashList(slashHits) { pickSlash(it) }
             }
-            GlassSurface(shape = RoundedCornerShape(22.dp), color = MaterialTheme.colorScheme.surface, border = BorderStroke(1.dp, Ext.c.border), shadowElevation = 3.dp) {
+            GlassSurface(shape = RoundedCornerShape(if (com.guixing.jixunying.ui.glass.LocalGlass.current.on) com.guixing.jixunying.ui.glass.glassRadius(com.guixing.jixunying.model.GlassTarget.BAR) else 22.dp), color = MaterialTheme.colorScheme.surface, border = BorderStroke(1.dp, Ext.c.border), shadowElevation = 3.dp) {
                 Column(Modifier.padding(start = 14.dp, end = 10.dp, top = 10.dp, bottom = 8.dp)) {
                     PendingStrip(ctl, pending)
                     // 写字的地方最后量：下面那一排（发送键）先排，窗口矮时它让位、里面能滑

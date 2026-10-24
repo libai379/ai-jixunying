@@ -235,17 +235,19 @@ fun LiquidButton(
     val liveShape by rememberUpdatedState(shape)
     val liveTint by rememberUpdatedState(tint)
     val liveSurface by rememberUpdatedState(surfaceColor)
+    // 按钮的玻璃照 设置 → 外观 → 液态玻璃调节 里「按钮和开关」那一套（2026-10-24）；按下的形变和跟手高光是按钮自己的
+    val env = LocalGlass.current
+    val p = env.tuning.paramsFor(com.guixing.jixunying.model.GlassTarget.CONTROL)
+    val liveParams by rememberUpdatedState(p)
     Box(
         modifier
             .drawBackdrop(
                 backdrop = backdrop,
                 shape = { liveShape },
-                effects = {
-                    glassVibrancy()
-                    blur(2f.dp.toPx())
-                    val cap = size.minDimension * 0.45f
-                    lens(12f.dp.toPx().coerceAtMost(cap), 24f.dp.toPx().coerceAtMost(cap), chromaticAberration = false)
-                },
+                effects = { glassEffects(liveParams) },
+                highlight = if (p.highlight.enabled) { { liveParams.highlight.toHighlight() } } else null,
+                shadow = if (p.shadow.enabled) { { liveParams.shadow.toShadow() } } else null,
+                innerShadow = if (p.innerShadow.enabled) { { liveParams.innerShadow.toInnerShadow() } } else null,
                 layerBlock = if (enabled) {
                     {
                         val width = size.width
@@ -268,7 +270,7 @@ fun LiquidButton(
                     if (t != Color.Unspecified) {
                         drawRect(t, blendMode = BlendMode.Hue)
                         drawRect(t.copy(alpha = 0.75f * t.alpha))
-                    }
+                    } else glassSurface(liveParams, if (env.dark) Color.Black else Color.White, env.dark, null)
                     if (liveSurface != Color.Unspecified) drawRect(liveSurface)
                 },
             )

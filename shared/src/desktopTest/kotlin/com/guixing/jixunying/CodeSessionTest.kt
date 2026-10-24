@@ -201,7 +201,13 @@ class CodeSessionTest {
         assertEquals(false, e.state.settings.glass, "旧版手机冲不掉电脑上的液态玻璃开关")
         assertTrue(e.call(Command.SaveSettings(e.state.settings.copy(schema = Settings.SCHEMA, glass = true))).ok)
         assertEquals(true, e.state.settings.glass)
-        assertEquals(7, Settings.SCHEMA, "1.7.0 加了语音和按意思搜（5），10-17 加了个性化（6），10-22 加了液态玻璃开关（7）")
+        // 10-24 的液态玻璃调参：电脑上调过，10-22 的手机（schema = 7）不认识、发来空的，电脑上保留
+        val tuned = com.guixing.jixunying.model.GlassTuning().with(com.guixing.jixunying.model.GlassTarget.CARD,
+            com.guixing.jixunying.model.GlassParams(blurRadiusDp = 9f))
+        assertTrue(e.call(Command.SaveSettings(e.state.settings.copy(schema = Settings.SCHEMA, glassTuning = tuned))).ok)
+        assertTrue(e.call(Command.SaveSettings(e.state.settings.copy(schema = 7, glassTuning = com.guixing.jixunying.model.GlassTuning()))).ok)
+        assertEquals(9f, e.state.settings.glassTuning.paramsFor(com.guixing.jixunying.model.GlassTarget.CARD).blurRadiusDp, "旧版手机冲不掉调好的玻璃")
+        assertEquals(8, Settings.SCHEMA, "1.7.0 加了语音和按意思搜（5），10-17 加了个性化（6），10-22 加了液态玻璃开关（7），10-24 加了液态玻璃调参（8）")
     }
 
     @Test

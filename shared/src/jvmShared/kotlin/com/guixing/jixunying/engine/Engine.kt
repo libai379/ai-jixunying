@@ -148,11 +148,7 @@ class Engine(
     private val convs = ConcurrentHashMap<String, MutableList<Message>>()
     private val running = ConcurrentHashMap<String, MutableSet<Job>>()
 
-    /**
-     * 要走代理的（海外的服务商、GitHub、ChatGPT 登录）用哪个代理：设置里填了就用填的；手机上没填就用手机 VPN 给的本机代理
-     * （10-24：用户的 NekoBox 把 AI集训营 排除在 VPN 外，App 直连 github.com 超时；它同时开着 127.0.0.1:2080，排除在外的 App 也能用）。
-     */
-    private fun proxyFor(useProxy: Boolean) = if (useProxy) state.settings.proxy.trim().ifEmpty { if (isPhone) systemVpnProxy() else null } else null
+    private fun proxyFor(useProxy: Boolean) = if (useProxy) state.settings.proxy.trim().ifEmpty { null } else null
     private val llm = LlmClient { proxyFor(it.useProxy) }
     /** 用 ChatGPT 登录（2026-10-23）：凭据只在本机 chatgpt/auth.json，不进 state.json、不同步。OpenAI 在国内要走代理。 */
     private val chatgptAuth = ChatGptAuth(java.io.File(storage.root, "chatgpt"), proxy = { proxyFor(true) })
@@ -163,6 +159,21 @@ class Engine(
     /** 账号（2026-10-24，engine/Account.kt）：本机密钥 + 绑的 GitHub；私钥只在 account/identity.json。GitHub 要走代理。 */
     private val account by lazy { Account(java.io.File(storage.root, "account"), proxy = { proxyFor(true) }) }
     @Volatile private var githubPending: Account.GithubPending? = null
+    /**
+     * 手机连着电脑时，把电脑绑的 GitHub 带过来（10-24 用户：「电脑上登录了，手机上就不用登录了」）。只由本机的 GitHubViaHost 调，不是指令，手机遥控时发不进来。
+     * 返回 true = 换了。
+     */
+    fun adoptGithub(u: Account.GithubUser): Boolean {
+        val i = account.identity
+        if (u.login.isBlank() || (i.githubLogin == u.login && i.githubName == u.name && i.githubAvatar == u.avatar)) return false
+        account.bindGithub(u)
+        updateState { it.copy(account = accountInfo { a -> a.copy(githubSigningIn = false, githubError = "") }) }
+        emit(Event.Notice("已同步电脑上登录的 GitHub：@${u.login}"))
+        return true
+    }
+
+    /** 手机上：GitHub 登录换令牌交给配对的电脑（GitHubViaHost 装上）。返回 null = 电脑不在，自己换。 */
+    @Volatile var githubViaHost: (suspend (code: String, redirect: String, verifier: String) -> Account.GithubUser?)? = null
     private fun accountInfo(extra: (AccountInfo) -> AccountInfo = { it }) = account.identity.let { i ->
         extra(state.account.copy(id = account.accountId, createdAt = i.createdAt, githubLogin = i.githubLogin, githubName = i.githubName, githubAvatar = i.githubAvatar))
     }
@@ -873,7 +884,18 @@ class Engine(
             githubPending = pending
             updateState { it.copy(account = accountInfo { a -> a.copy(githubSigningIn = true, githubError = "") }) }
             scope.launch {
-                val err = try { pending.await(); null } catch (e: CancellationException) { throw e } catch (e: Throwable) { e.message ?: e.toString() }
+                val viaHost = githubViaHost
+                var byPc = false
+                val err = try {
+                    pending.await(exchange = { code, redirect, verifier ->
+                        viaHost?.invoke(code, redirect, verifier)?.also { byPc = true } ?: account.githubExchange(clientId, secret, code, redirect, verifier)
+                    }); null
+                } catch (e: CancellationException) { throw e } catch (e: Throwable) {
+                    val m = e.message ?: e.toString()
+                    // 手机自己去换没换成（多半是直连 github.com 不通）：告诉用户怎么办
+                    if (isPhone && !byPc && !m.startsWith("你在 GitHub") && !m.startsWith("等了")) "$m\n手机连不上 GitHub：开着电脑、手机连上电脑后再点一次（换令牌交给电脑做），或者在电脑上登录 GitHub，手机连上会自动带过来。"
+                    else m
+                }
                 if (githubPending !== pending) return@launch   // 又点了一次，这次的作废
                 githubPending = null
                 updateState { it.copy(account = accountInfo { a -> a.copy(githubSigningIn = false, githubError = err.orEmpty()) }) }
@@ -881,6 +903,12 @@ class Engine(
             }
             CommandResult(message = "在打开的 GitHub 页面上点同意", data = pending.url)
         }
+        is Command.GitHubExchange -> try {
+            val clientId = System.getProperty("jxy.github.clientId") ?: com.guixing.jixunying.model.GITHUB_OAUTH_CLIENT_ID
+            val secret = System.getProperty("jxy.github.secret") ?: BuildSecrets.githubSecret
+            val u = account.githubExchange(clientId, secret, c.code, c.redirectUri, c.verifier)
+            CommandResult(data = AppJson.encodeToString(Account.GithubUser.serializer(), u))
+        } catch (e: CancellationException) { throw e } catch (e: Throwable) { CommandResult(false, "电脑去 GitHub 换令牌没成：" + (e.message ?: e.toString())) }
         is Command.AccountGitHubUnbind -> {
             githubPending?.cancel(); githubPending = null
             account.githubUnbind()
@@ -997,8 +1025,10 @@ class Engine(
                 val personal = if (c.settings.schema >= 6) c.settings.personal else s.settings.personal
                 // 2026-10-22 以前的不认识液态玻璃开关
                 val glass = if (c.settings.schema >= 7) c.settings.glass else s.settings.glass
+                // 2026-10-24 以前的不认识液态玻璃调参
+                val glassTuning = if (c.settings.schema >= 8) c.settings.glassTuning else s.settings.glassTuning
                 s.copy(settings = c.settings.copy(search = c.settings.search.copy(apiKeys = keys), costs = s.settings.costs, memory = memory, office = office, code = code,
-                    speech = speechSettings, semantic = semantic, personal = personal, glass = glass, schema = Settings.SCHEMA))
+                    speech = speechSettings, semantic = semantic, personal = personal, glass = glass, glassTuning = glassTuning, schema = Settings.SCHEMA))
             }
             if (before.enabled != state.settings.relay.enabled || before.brokers != state.settings.relay.brokers) onRelaySettingsChanged?.invoke()
             // 关掉了的后台活不会再跑，它以前的出错提示也就不会「成功一次自己消失」：直接清掉

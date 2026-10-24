@@ -62,5 +62,3 @@ actual fun extractPdfText(bytes: ByteArray): Pair<String?, String> {
 }
 
 actual fun defaultSaveFolder(): java.io.File? = java.io.File(documentsDirs().firstOrNull() ?: java.io.File(home, "Documents"), "AI集训营")
-
-actual fun systemVpnProxy(): String? = null

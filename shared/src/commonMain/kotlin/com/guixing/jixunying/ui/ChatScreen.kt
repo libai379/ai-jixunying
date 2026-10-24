@@ -1165,7 +1165,7 @@ private fun Composer(ctl: AppController, state: AppState, conv: Conversation, ru
                 }
             }
             GlassSurface(
-                shape = RoundedCornerShape(22.dp),
+                shape = RoundedCornerShape(if (com.guixing.jixunying.ui.glass.LocalGlass.current.on) com.guixing.jixunying.ui.glass.glassRadius(com.guixing.jixunying.model.GlassTarget.BAR) else 22.dp),
                 color = MaterialTheme.colorScheme.surface,
                 border = BorderStroke(1.dp, if (drawMode || videoMode) MaterialTheme.colorScheme.secondary else Ext.c.border),
                 shadowElevation = 3.dp,

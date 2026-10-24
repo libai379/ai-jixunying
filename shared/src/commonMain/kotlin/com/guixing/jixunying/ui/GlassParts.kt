@@ -24,7 +24,6 @@ import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import com.guixing.jixunying.ui.glass.GlassStyle
 import com.guixing.jixunying.ui.glass.LiquidButton
 import com.guixing.jixunying.ui.glass.LocalGlass
 import com.guixing.jixunying.ui.glass.glass
@@ -42,7 +41,7 @@ import kotlinx.coroutines.launch
 fun GlassSurface(
     shape: Shape,
     modifier: Modifier = Modifier,
-    style: GlassStyle = GlassStyle.Bar,
+    target: com.guixing.jixunying.model.GlassTarget = com.guixing.jixunying.model.GlassTarget.BAR,
     color: Color = MaterialTheme.colorScheme.surface,
     border: BorderStroke? = null,
     shadowElevation: Dp = 0.dp,
@@ -54,7 +53,7 @@ fun GlassSurface(
         Surface(modifier, shape = shape, color = color, border = border, shadowElevation = shadowElevation, tonalElevation = tonalElevation, content = content)
         return
     }
-    Box(modifier.glass(shape, style, fallback = color).then(
+    Box(modifier.glass(shape, target, fallback = color).then(
         // 有颜色的边框（比如画图模式的青色框）照样画；普通的灰边框交给玻璃自己的高光
         if (border != null && border.brush != androidx.compose.ui.graphics.SolidColor(Ext.c.border)) Modifier.border(border, shape) else Modifier
     ).clip(shape)) {

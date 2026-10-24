@@ -117,7 +117,8 @@ fun SectionCard(modifier: Modifier = Modifier, padding: PaddingValues = PaddingV
     val glass = com.guixing.jixunying.ui.glass.LocalGlass.current
     if (glass.on && glass.backdrop != null) {
         Column(modifier.fillMaxWidth()
-            .glass(MaterialTheme.shapes.medium, com.guixing.jixunying.ui.glass.GlassStyle.Panel, fallback = MaterialTheme.colorScheme.surface)
+            .glass(RoundedCornerShape(com.guixing.jixunying.ui.glass.glassRadius(com.guixing.jixunying.model.GlassTarget.CARD)),
+                com.guixing.jixunying.model.GlassTarget.CARD, fallback = MaterialTheme.colorScheme.surface)
             .padding(padding), content = content)
         return
     }
@@ -212,16 +213,16 @@ fun AppDialog(
         val appear = remember { androidx.compose.animation.core.Animatable(if (env.on) 0f else 1f) }
         LaunchedEffect(Unit) { appear.animateTo(1f, com.guixing.jixunying.ui.glass.Springs.pop()) }
         CompositionLocalProvider(com.guixing.jixunying.ui.glass.LocalGlass provides
-            com.guixing.jixunying.ui.glass.GlassEnv(dialogBackdrop, env.on, env.dark)) {
+            com.guixing.jixunying.ui.glass.GlassEnv(dialogBackdrop, env.on, env.dark, env.tuning)) {
         GlassSurface(
-            shape = RoundedCornerShape(22.dp),
+            shape = RoundedCornerShape(if (env.on) com.guixing.jixunying.ui.glass.glassRadius(com.guixing.jixunying.model.GlassTarget.DIALOG) else 22.dp),
             modifier = Modifier.fillMaxWidth().padding(16.dp).graphicsLayer {
                 val v = appear.value
                 scaleX = 0.92f + 0.08f * v
                 scaleY = 0.92f + 0.08f * v
                 alpha = v.coerceIn(0f, 1f)
             },
-            style = com.guixing.jixunying.ui.glass.GlassStyle.Panel,
+            target = com.guixing.jixunying.model.GlassTarget.DIALOG,
             color = MaterialTheme.colorScheme.surface,
             tonalElevation = 2.dp,
             shadowElevation = 12.dp,

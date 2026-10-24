@@ -25,6 +25,15 @@ import com.kashif_e.backdrop.drawBackdrop
 import com.kashif_e.backdrop.effects.blur
 import com.kashif_e.backdrop.effects.lens
 import com.kashif_e.backdrop.highlight.Highlight
+import com.kashif_e.backdrop.highlight.HighlightStyle
+import com.kashif_e.backdrop.shadow.InnerShadow
+import com.guixing.jixunying.model.GlassHighlightParams
+import com.guixing.jixunying.model.GlassInnerShadowParams
+import com.guixing.jixunying.model.GlassParams
+import com.guixing.jixunying.model.GlassShadowParams
+import com.guixing.jixunying.model.GlassTarget
+import com.guixing.jixunying.model.GlassTuning
+import com.guixing.jixunying.model.HighlightStyleKind
 import com.kashif_e.backdrop.shadow.Shadow
 
 /*
@@ -41,60 +50,70 @@ expect val ambientHighlightWorks: Boolean
 /** 壁纸光斑停着不漂（截图测试用）。 */
 expect val wallpaperStill: Boolean
 
-/** 玻璃要用的东西：采样源（窗口最底下的壁纸）和开没开（设置 → 外观 → 液态玻璃）。 */
+/** 玻璃要用的东西：采样源（窗口最底下的壁纸）、开没开（设置 → 外观 → 液态玻璃）、深浅色、各位置调好的参数（设置 → 外观 → 液态玻璃调节）。 */
 @Immutable
-class GlassEnv(val backdrop: Backdrop?, val on: Boolean, val dark: Boolean)
+class GlassEnv(val backdrop: Backdrop?, val on: Boolean, val dark: Boolean, val tuning: GlassTuning = GlassTuning())
 
 val LocalGlass = staticCompositionLocalOf { GlassEnv(null, false, false) }
 
-/**
- * 一种玻璃的样子。lens 的两个量和用户在癸星科技里调的一样是 dp，画的时候夹到元素短边的 0.45 倍（癸星科技实测：
- * 超过元素本身会读出界，安卓上是原生崩溃）。fill = 铺在玻璃上的那层底色有多厚（保证上面的字看得清）。
- * 色散一律不开：库的色散着色器采样坐标没夹住，背后有真文字时花屏（癸星科技 PITFALLS.md）。
- */
-@Immutable
-data class GlassStyle(
-    val blurDp: Float,
-    val refractionHeightDp: Float,
-    val refractionAmountDp: Float,
-    val depthEffect: Boolean = true,
-    val vibrancy: Boolean = true,
-    val fillLight: Float,
-    val fillDark: Float,
-    val shadowRadiusDp: Float = 6.273656f,
-    val shadowOffsetXDp: Float = -0.41332245f,
-    val shadowOffsetYDp: Float = 4f,
-    /** 用户调的阴影：颜色 0x4D000000、透明度 0.645。 */
-    val shadowAlpha: Float = 0.64483225f,
-    val highlightAlpha: Float = 0.5f,
-) {
-    companion object {
-        /** 按钮、开关这类小控件：就是用户在癸星科技里调好的那组（TunedGlassParams：模糊 0、折射 48 / 64、depthEffect、vibrancy）。 */
-        // 10-24 用户：「效果好像不太明显，还是用的之前那个模板……照着模板抄」。以前顶栏、侧栏自己定了一套（模糊 10～22、
-        // 底色铺到 55%～62%），折射全被底色盖住了。现在都照 TunedGlassParams：不模糊、折射 48 / 64、depthEffect、vibrancy，
-        // 底色只铺薄薄一层（癸星科技 tint 是关的，一点不铺；我们上面有字，留一点保证看得清）。
-        val Control = GlassStyle(blurDp = 0f, refractionHeightDp = 48f, refractionAmountDp = 64f, fillLight = 0.10f, fillDark = 0.06f)
-        /** 顶栏、输入框。 */
-        val Bar = GlassStyle(blurDp = 0f, refractionHeightDp = 48f, refractionAmountDp = 64f, fillLight = 0.30f, fillDark = 0.18f)
-        /** 侧栏、弹窗、设置里的卡片这类大面：字多，底色比顶栏厚一点。 */
-        val Panel = GlassStyle(blurDp = 0f, refractionHeightDp = 48f, refractionAmountDp = 64f, fillLight = 0.38f, fillDark = 0.24f)
+/** 这个位置现在的圆角（调参里改的；按钮、开关不用）。 */
+@Composable
+fun glassRadius(target: GlassTarget): androidx.compose.ui.unit.Dp = LocalGlass.current.tuning.paramsFor(target).cornerRadiusDp.coerceIn(0f, 64f).dp
+
+fun GlassHighlightParams.toHighlight(): Highlight {
+    // 电脑端 Ambient / Default 的着色器和新版 skiko 不兼容（一画就崩），一律退成 Plain
+    val kind = if (ambientHighlightWorks) style else HighlightStyleKind.Plain
+    val st: HighlightStyle = when (kind) {
+        HighlightStyleKind.Ambient -> HighlightStyle.Ambient(intensity = ambientIntensity)
+        // 这一版库（0.0.1-alpha02 多平台分支）的 Default / Plain 不带颜色参数（癸星科技那版带），颜色这一项先不给调
+        HighlightStyleKind.Default -> HighlightStyle.Default(angle = angleDeg, falloff = falloff)
+        HighlightStyleKind.Plain -> HighlightStyle.Plain
     }
+    return Highlight(width = widthDp.dp, blurRadius = blurRadiusDp.dp, alpha = alpha, style = st)
+}
+
+fun GlassShadowParams.toShadow() = Shadow(radius = radiusDp.dp, offset = DpOffset(offsetXDp.dp, offsetYDp.dp), color = Color(colorArgb.toInt()), alpha = alpha)
+fun GlassInnerShadowParams.toInnerShadow() = InnerShadow(radius = radiusDp.dp, offset = DpOffset(offsetXDp.dp, offsetYDp.dp), color = Color(colorArgb.toInt()), alpha = alpha)
+
+/** 用一套参数画玻璃效果（玻璃面、预览、液态按钮共用这一处，调参台里看到的就是界面上的样子）。 */
+fun com.kashif_e.backdrop.BackdropEffectScope.glassEffects(p: GlassParams) {
+    if (p.vibrancy) glassVibrancy()
+    if (p.blurRadiusDp > 0f) blur(p.blurRadiusDp.dp.toPx())
+    // 折射量超过元素本身会读出界（癸星科技真机：安卓上原生崩溃），夹到短边的 0.45 倍
+    val cap = size.minDimension * 0.45f
+    val h = p.refractionHeightDp.dp.toPx().coerceAtMost(cap)
+    val a = p.refractionAmountDp.dp.toPx().coerceAtMost(cap)
+    if (h > 0f && a > 0f) lens(h, a, depthEffect = p.depthEffect, chromaticAberration = p.chromaticAberration)
+}
+
+/** 玻璃表面上画的：底色（跟着深浅色）→ 染色（色相混一遍再盖半透明，癸星科技 tint 的画法）→ 调用方要的颜色。 */
+fun DrawScope.glassSurface(p: GlassParams, surface: Color, dark: Boolean, extra: Color?) {
+    val a = if (dark) p.surfaceDark else p.surfaceLight
+    if (a > 0f) drawRect(surface.copy(alpha = a.coerceIn(0f, 1f)))
+    if (p.tint.enabled) {
+        val c = Color(p.tint.colorArgb.toInt())
+        drawRect(c, alpha = p.tint.alpha, blendMode = androidx.compose.ui.graphics.BlendMode.Hue)
+        drawRect(c.copy(alpha = p.tint.alpha))
+    }
+    if (extra != null) drawRect(extra)
 }
 
 /**
  * 玻璃面。没开玻璃、没有采样源时画成 fallback 纯色（+ 细边框），和换装以前一样。
- * 参数在绘制阶段读（rememberUpdatedState）：癸星科技踩过，组合阶段拍扁成普通值的话静止后玻璃冻在最后一帧。
- * tint = 玻璃上再叠一层颜色（发送键这类有主色的），null 就用这一种玻璃自己的底色。
+ * [target] 决定用哪一套参数（设置 → 外观 → 液态玻璃调节里各调各的）。参数在绘制阶段读（rememberUpdatedState）：
+ * 癸星科技踩过，组合阶段拍扁成普通值的话静止后玻璃冻在最后一帧。tint = 玻璃上再叠一层颜色（有主色的），盖在底色上面。
+ * [params] 不为空就用它（调参台的预览）。
  */
 @Composable
 fun Modifier.glass(
     shape: Shape,
-    style: GlassStyle = GlassStyle.Bar,
+    target: GlassTarget = GlassTarget.BAR,
     fallback: Color,
     border: Color? = null,
     tint: Color? = null,
     backdrop: Backdrop? = null,
     layerBlock: (androidx.compose.ui.graphics.GraphicsLayerScope.() -> Unit)? = null,
+    params: GlassParams? = null,
 ): Modifier {
     val env = LocalGlass.current
     val source = backdrop ?: env.backdrop
@@ -102,29 +121,21 @@ fun Modifier.glass(
         val solid = this.clip(shape).background(tint ?: fallback)
         return if (border != null) solid.border(1.dp, border, shape) else solid
     }
-    val liveStyle = rememberUpdatedState(style)
+    val p = params ?: env.tuning.paramsFor(target)
+    val live = rememberUpdatedState(p)
     val liveShape = rememberUpdatedState(shape)
-    val liveFill = rememberUpdatedState(tint ?: fallback.copy(alpha = if (env.dark) style.fillDark else style.fillLight))
+    val liveFallback = rememberUpdatedState(fallback)
+    val liveTint = rememberUpdatedState(tint)
+    val dark = env.dark
     return this.drawBackdrop(
         backdrop = source,
         shape = { liveShape.value },
-        effects = {
-            val s = liveStyle.value
-            if (s.vibrancy) glassVibrancy()
-            if (s.blurDp > 0f) blur(s.blurDp.dp.toPx())
-            val cap = size.minDimension * 0.45f
-            val h = s.refractionHeightDp.dp.toPx().coerceAtMost(cap)
-            val a = s.refractionAmountDp.dp.toPx().coerceAtMost(cap)
-            if (h > 0f && a > 0f) lens(h, a, depthEffect = s.depthEffect, chromaticAberration = false)
-        },
-        highlight = { liveStyle.value.highlightAlpha.takeIf { it > 0f }?.let { Highlight.Plain.copy(width = 0.8.dp, alpha = it) } },
-        shadow = {
-            val s = liveStyle.value
-            Shadow(radius = s.shadowRadiusDp.dp, offset = DpOffset(s.shadowOffsetXDp.dp, s.shadowOffsetYDp.dp),
-                color = Color(0x4D000000), alpha = s.shadowAlpha)
-        },
+        effects = { glassEffects(live.value) },
+        highlight = if (p.highlight.enabled) { { live.value.highlight.toHighlight() } } else null,
+        shadow = if (p.shadow.enabled) { { live.value.shadow.toShadow() } } else null,
+        innerShadow = if (p.innerShadow.enabled) { { live.value.innerShadow.toInnerShadow() } } else null,
         layerBlock = layerBlock,
-        onDrawSurface = { drawRect(liveFill.value) },
+        onDrawSurface = { glassSurface(live.value, liveFallback.value, dark, liveTint.value) },
     )
 }
 

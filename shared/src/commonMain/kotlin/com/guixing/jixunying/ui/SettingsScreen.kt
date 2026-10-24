@@ -170,11 +170,11 @@ fun SettingsScreen(ctl: AppController, tab: SettingsTab, wide: Boolean, openDraw
                 SettingsTab.entries.forEachIndexed { i, t ->
                     // 液态玻璃开着：每项是一块玻璃，一条条弹出来、按下弹一下（照癸星科技启动页的胶囊卡片，10-24）
                     val press = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
-                    val shape = RoundedCornerShape(14.dp)
+                    val shape = RoundedCornerShape(if (com.guixing.jixunying.ui.glass.LocalGlass.current.on) com.guixing.jixunying.ui.glass.glassRadius(com.guixing.jixunying.model.GlassTarget.CARD) else 14.dp)
                     Row(
                         Modifier.fillMaxWidth().entrance(i).springPress(press, 0.97f).padding(vertical = 3.dp)
                             .then(if (com.guixing.jixunying.ui.glass.LocalGlass.current.on)
-                                Modifier.glass(shape, com.guixing.jixunying.ui.glass.GlassStyle.Panel, fallback = MaterialTheme.colorScheme.surface)
+                                Modifier.glass(shape, com.guixing.jixunying.model.GlassTarget.CARD, fallback = MaterialTheme.colorScheme.surface)
                             else Modifier.clip(shape).background(MaterialTheme.colorScheme.surface).border(1.dp, Ext.c.border, shape))
                             .clickable(interactionSource = press, indication = androidx.compose.foundation.LocalIndication.current) { ctl.settingsTab = t; ctl.settingsHome = false }
                             .padding(horizontal = 14.dp, vertical = 13.dp),
@@ -1130,6 +1130,9 @@ private fun DevicesPage(ctl: AppController, state: AppState) {
 @Composable
 private fun AppearancePage(ctl: AppController, state: AppState) {
     val s = state.settings
+    // 液态玻璃调节（2026-10-24）：在这一页里打开，「返回外观」回来。开发截图用 settings:APPEARANCE#tune 直接打开
+    var tuning by remember { mutableStateOf(ctl.debugDialog == "tune") }
+    if (tuning) { GlassTuningPage(ctl, s.glassTuning) { tuning = false }; return }
     PageHeader("外观与通用", "主题、代理、群聊规则。改了马上生效。")
     SectionCard {
         FieldLabel("主题")
@@ -1144,6 +1147,14 @@ private fun AppearancePage(ctl: AppController, state: AppState) {
         // 液态玻璃（2026-10-22，docs/界面换装说明.md）
         SwitchRow("液态玻璃", "侧栏、输入框、弹窗、开关、发送键用癸星科技那套玻璃和弹簧动画；关掉就是原来的纯色界面",
             s.glass) { v -> ctl.updateSettings { it.copy(glass = v) } }
+        if (s.glass) Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).clickable { tuning = true }.padding(vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("液态玻璃调节", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
+                Text("侧栏、顶栏和输入框、卡片、按钮、弹窗各调各的：折射、模糊、高光、阴影、染色、底色；还能存预设", style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
+            }
+            Text("›", color = Ext.c.subtle)
+        }
         Spacer(Modifier.height(10.dp))
         var proxy by remember { mutableStateOf(s.proxy) }
         AutoSave(proxy, s.proxy) { v -> ctl.updateSettings { it.copy(proxy = v.trim()) } }
@@ -1336,7 +1347,8 @@ private fun AccountCard(ctl: AppController) {
     SectionCard {
         Text("账号", style = MaterialTheme.typography.titleSmall)
         Spacer(Modifier.height(4.dp))
-        Text("不用注册、没有服务器：这台设备第一次打开时生成了一对密钥，它就是你的账号（只存在这台设备上）。可以再绑上 GitHub，别人就能认出是你。",
+        Text("不用注册、没有服务器：这台设备第一次打开时生成了一对密钥，它就是你的账号（只存在这台设备上）。可以再绑上 GitHub，别人就能认出是你。" +
+            (if (!platform.isDesktop) "\n手机配对过电脑的话：电脑上登录了 GitHub，手机连上电脑就自动带过来，不用再登；手机上自己点登录也行，换令牌那一步交给电脑做（电脑要开着）。" else ""),
             style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
         Spacer(Modifier.height(8.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {

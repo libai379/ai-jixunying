@@ -122,6 +122,31 @@ class Account(
     // 10-24 用户：「移动端和桌面端都一样，都是跳转登录」。官方 web application flow + 回环地址（docs.github.com「Loopback redirect urls」：
     // 应用里登记 http://127.0.0.1/auth/github，请求时端口随意）+ PKCE S256。换令牌要 client_secret（官方表格写 Required），见 [GithubApp]。
 
+    /** GitHub 用户资料（换完令牌查到的；令牌本身不留）。手机把换令牌交给电脑时，电脑回的就是这个。 */
+    @Serializable
+    data class GithubUser(val login: String, val id: Long = 0, val name: String = "", val avatar: String = "")
+
+    /**
+     * 换令牌、查用户资料（令牌用完就扔）。要连得上 github.com：电脑上走设置里的代理；
+     * 手机上默认交给配对的电脑做（10-24 用户选的方案一：国内手机直连 github.com 时通时不通，别的 App 是靠自己的服务器换，我们没有服务器，电脑就是那个「服务器」）。
+     */
+    suspend fun githubExchange(clientId: String, clientSecret: String, code: String, redirect: String, verifier: String): GithubUser {
+        val o = postForm("$githubWeb/login/oauth/access_token", mapOf(
+            "client_id" to clientId, "client_secret" to clientSecret, "code" to code, "redirect_uri" to redirect, "code_verifier" to verifier))
+        o.str("error")?.let { throw AccountException("GitHub 回了错误：$it ${o.str("error_description").orEmpty()}") }
+        val token = o.str("access_token") ?: throw AccountException("GitHub 没给令牌")
+        val resp = Http.client(proxy()).get("$githubApi/user") {
+            header("Authorization", "Bearer $token"); header("Accept", "application/vnd.github+json")
+        }
+        val text = resp.bodyAsText()
+        if (resp.status.value !in 200..299) throw AccountException("查 GitHub 用户资料失败：${resp.status.value}")
+        val u = Json.parse(text).jsonObject
+        return GithubUser(u.str("login").orEmpty(), u.num("id") ?: 0, u.str("name").orEmpty(), u.str("avatar_url").orEmpty())
+    }
+
+    fun bindGithub(u: GithubUser): Identity = identity.copy(githubLogin = u.login, githubId = u.id, githubName = u.name,
+        githubAvatar = u.avatar, githubAt = System.currentTimeMillis()).also(::save)
+
     /** 一次登录：本机端口先开好，[url] 在浏览器里打开；[await] 等用户点完同意跳回来。 */
     inner class GithubPending internal constructor(
         val url: String,
@@ -132,28 +157,18 @@ class Account(
         private val clientId: String,
         private val clientSecret: String,
     ) {
-        suspend fun await(timeoutMs: Long = 5 * 60_000): Identity {
+        /** [exchange] 换令牌那一步谁来做：默认本机自己（电脑）；手机传进来的是「交给电脑」。参数：授权码、跳回地址、PKCE 原文。 */
+        suspend fun await(
+            timeoutMs: Long = 5 * 60_000,
+            exchange: suspend (code: String, redirect: String, verifier: String) -> GithubUser = { c, r, v -> githubExchange(clientId, clientSecret, c, r, v) },
+        ): Identity {
             val q = try {
                 withContext(Dispatchers.IO) { ChatGptAuth.waitCallback(server, timeoutMs, "/auth/github", "GitHub") }
             } catch (e: ChatGptAuth.AuthException) { throw AccountException(e.message ?: "没等到 GitHub 跳回来") } finally { runCatching { server.close() } }
             if (q["state"] != state) throw AccountException("登录回来的校验码对不上，再登一次")
             q["error"]?.let { e -> throw AccountException(if (e == "access_denied") "你在 GitHub 页面上点了取消" else "GitHub 回了错误：$e ${q["error_description"].orEmpty()}") }
             val code = q["code"] ?: throw AccountException("GitHub 没给授权码")
-            val o = postForm("$githubWeb/login/oauth/access_token", mapOf(
-                "client_id" to clientId, "client_secret" to clientSecret, "code" to code, "redirect_uri" to redirect, "code_verifier" to verifier))
-            o.str("error")?.let { throw AccountException("GitHub 回了错误：$it ${o.str("error_description").orEmpty()}") }
-            val token = o.str("access_token") ?: throw AccountException("GitHub 没给令牌")
-            // 令牌只用这一次：查用户资料，绑好就扔
-            val resp = Http.client(proxy()).get("$githubApi/user") {
-                header("Authorization", "Bearer $token"); header("Accept", "application/vnd.github+json")
-            }
-            val text = resp.bodyAsText()
-            if (resp.status.value !in 200..299) throw AccountException("查 GitHub 用户资料失败：${resp.status.value}")
-            val u = Json.parse(text).jsonObject
-            val i = identity.copy(githubLogin = u.str("login").orEmpty(), githubId = u.num("id") ?: 0, githubName = u.str("name").orEmpty(),
-                githubAvatar = u.str("avatar_url").orEmpty(), githubAt = System.currentTimeMillis())
-            save(i)
-            return i
+            return bindGithub(exchange(code, redirect, verifier))
         }
 
         fun cancel() { runCatching { server.close() } }
