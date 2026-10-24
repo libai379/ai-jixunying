@@ -17,3 +17,9 @@ expect fun docAccessMissing(): Boolean
 
 /** AI 做的 Word / Excel 默认另存到哪：电脑是「文档\AI集训营」，手机返回 null（存在应用自己的目录里）。 */
 expect fun defaultSaveFolder(): java.io.File?
+
+/**
+ * 手机上开着的 VPN 给的本机代理（比如 NekoBox 的 127.0.0.1:2080），写成 http://主机:端口；没有就 null。电脑上一律 null（用设置里填的代理）。
+ * 10-24 用户手机：NekoBox 的分应用名单把 AI集训营 排除在外，浏览器走 VPN、App 直连，GitHub 登录换令牌超时。
+ */
+expect fun systemVpnProxy(): String?

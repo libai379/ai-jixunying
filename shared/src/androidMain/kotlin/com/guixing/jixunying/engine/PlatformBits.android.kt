@@ -54,3 +54,15 @@ actual fun extractPdfText(bytes: ByteArray): Pair<String?, String> {
 }
 
 actual fun defaultSaveFolder(): java.io.File? = null
+
+actual fun systemVpnProxy(): String? = runCatching {
+    val cm = AndroidEnv.context?.getSystemService(Context.CONNECTIVITY_SERVICE) as? android.net.ConnectivityManager ?: return null
+    @Suppress("DEPRECATION")
+    cm.allNetworks.firstNotNullOfOrNull { n ->
+        val caps = cm.getNetworkCapabilities(n) ?: return@firstNotNullOfOrNull null
+        if (!caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN)) return@firstNotNullOfOrNull null
+        val p = cm.getLinkProperties(n)?.httpProxy ?: return@firstNotNullOfOrNull null
+        val host = p.host?.takeIf { it.isNotBlank() } ?: return@firstNotNullOfOrNull null
+        if (p.port <= 0) null else "http://$host:${p.port}"
+    }
+}.getOrNull()

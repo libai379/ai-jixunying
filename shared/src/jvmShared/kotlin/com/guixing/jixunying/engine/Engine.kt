@@ -148,7 +148,11 @@ class Engine(
     private val convs = ConcurrentHashMap<String, MutableList<Message>>()
     private val running = ConcurrentHashMap<String, MutableSet<Job>>()
 
-    private fun proxyFor(useProxy: Boolean) = if (useProxy) state.settings.proxy.trim().ifEmpty { null } else null
+    /**
+     * 要走代理的（海外的服务商、GitHub、ChatGPT 登录）用哪个代理：设置里填了就用填的；手机上没填就用手机 VPN 给的本机代理
+     * （10-24：用户的 NekoBox 把 AI集训营 排除在 VPN 外，App 直连 github.com 超时；它同时开着 127.0.0.1:2080，排除在外的 App 也能用）。
+     */
+    private fun proxyFor(useProxy: Boolean) = if (useProxy) state.settings.proxy.trim().ifEmpty { if (isPhone) systemVpnProxy() else null } else null
     private val llm = LlmClient { proxyFor(it.useProxy) }
     /** 用 ChatGPT 登录（2026-10-23）：凭据只在本机 chatgpt/auth.json，不进 state.json、不同步。OpenAI 在国内要走代理。 */
     private val chatgptAuth = ChatGptAuth(java.io.File(storage.root, "chatgpt"), proxy = { proxyFor(true) })
