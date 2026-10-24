@@ -35,6 +35,10 @@ internal class ResponsesApi(private val proxyOf: () -> String?, private val base
     /** 模型调工具时回来的 function_call 带不带 namespace，回放历史时照原样带回去（按 call_id 记）。 */
     private val namespaces = ConcurrentHashMap<String, String>()
 
+    /** 上一次回来的 function_call 原样（真登录测试 LiveChatGptTest 看格式用）。 */
+    @Volatile var lastRawCalls: List<String> = emptyList()
+        private set
+
     /** 某个字段报过「不支持」（subscription_sharing_unsupported_capability 带 param），以后不再传。 */
     private val dropped = ConcurrentHashMap.newKeySet<String>()
 
@@ -118,6 +122,7 @@ internal class ResponsesApi(private val proxyOf: () -> String?, private val base
     ): ChatResult {
         var tries = 0
         var forced = false
+        lastRawCalls = emptyList()
         while (true) {
             try {
                 return stream(body(model, messages, tools), token(forced), onAccepted, onDelta)
@@ -175,6 +180,7 @@ internal class ResponsesApi(private val proxyOf: () -> String?, private val base
                         if (item?.str("type") == "function_call") {
                             val id = item.str("call_id") ?: item.str("id").orEmpty()
                             item.str("namespace")?.let { namespaces[id] = it }
+                            lastRawCalls = lastRawCalls + item.toString()
                             calls += ToolCall(id, item.str("name").orEmpty(), item.str("arguments") ?: "{}")
                         }
                     }

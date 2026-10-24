@@ -40,9 +40,14 @@
 
 ChatGptTest：假登录服务（openid-configuration、jwks、token）+ 假 /v1/models、/v1/responses。走一遍：没登录调模型报「登录」→ 登录地址参数逐个核对 → 模拟浏览器回调 → 校验签名 → 拉模型（藏起来的不要）→ 令牌快过期先刷新、刷新令牌换新 → 请求 store/stream/没有 temperature → 额度用完给人话 → 退出 → 再登录用存下的 client_id；另一条测格式转换和工具来回（namespace 带回、function_call_output、developer）。
 
-## 6 没做 / 未确认
+## 6 真登录（2026-10-24，LiveChatGptTest，单独数据目录 G:\DevCache\chatgpt-live）
 
-- 真登录没试（要用户本人在 OpenAI 页面上点）；从国内走代理 OpenAI 会不会按地区拒（官方 403「permitted serving region」）未确认。
+- 用户本人在 OpenAI 页面「使用 ChatGPT 登录 AI集训营」上选了账户、同意；跳回 127.0.0.1:1455，ID 令牌验过，scope 里有 chatgpt.tokens.use.direct（planOk=true）。走 v2rayN 代理没被按地区拒。
+- 拉到的模型（visibility=list）：gpt-6.1-sol、gpt-6-astra、gpt-6-sol、gpt-6-luna、gpt-5.6-sol、gpt-5.6-terra、gpt-5.6-luna。gpt-6.1-sol 问一句 6.3 秒回话。
+- 工具调用真回来的样子：output_item.done 里 {"type":"function_call","status":"completed","arguments":"{}","call_id":"call_…","name":"get_time","namespace":"jxy"}——name 不带前缀，namespace 单独一个字段，和假服务器按「带 namespace」测的一致。
+- 跑法：JXY_LIVE_CHATGPT=数据目录，登录地址写到 数据目录\login-url.txt；登录过的目录再跑直接用存下的令牌。
+
+## 7 没做 / 未确认
 - 思考强度（reasoning.effort）没接，Thinking.kt 里 chatgpt 是「没查到」，两档都灰。
 - 联网：官方说网页搜索「受模型和账号策略管」，我们不传它的内置搜索。
 - 手机本机登录、手机遥控时手机上的成员用电脑上的登录（遥控时本来就是电脑在调，应该可以）都没真机试。
