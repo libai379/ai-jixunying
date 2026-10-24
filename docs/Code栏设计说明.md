@@ -223,7 +223,7 @@
 
 这是「多 AI 协作开发」的第一步：先让一个 Code 会话能交给用户电脑上的 Claude Code 去做；下一步是多角色派活（主控拆活、开发 / 审查 / 测试各用一个脑子），再接 Codex、Gemini。
 
-1. 用法：Code 会话「工作区 → 模型」里选「Claude Code · 默认 / Opus / Sonnet / Haiku」（CodeSpec.providerId = claude-code，modelId 是给它的 --model 别名，空 = 它自己的默认）。一个模型都没加、但装了 Claude Code 的，新建 Code 会话直接用它。设置 → Code 栏「Claude Code（用你的 Claude 订阅）」：检查装没装、登没登录（跑它自己的 --version 和 auth status），没登录点「打开 Claude Code 登录」开一个它自己的终端窗口去登；claude.exe 不在默认位置的可以填路径。
+1. 用法：Code 会话标题下面的「谁来干活」按钮（10-23 起；以前在「工作区 → 模型」）里选「Claude Code · 默认 / Opus / Sonnet / Haiku」（CodeSpec.providerId = claude-code，modelId 是给它的 --model 别名，空 = 它自己的默认）。一个模型都没加、但装了 Claude Code 的，新建 Code 会话直接用它。设置 → Code 栏「Claude Code（用你的 Claude 订阅）」：检查装没装、登没登录（跑它自己的 --version 和 auth status），没登录点「打开 Claude Code 登录」开一个它自己的终端窗口去登；claude.exe 不在默认位置的可以填路径。
 2. 订阅的规矩（Anthropic 官方页面，原文摘录 D:\AI\docs\anthropic-claude-code-legal-20261012.md）：只许用户自己登录未改动的 Claude Code，我们只启动它；本程序不做 Claude 登录、不读不存它的凭据。将来发行营收前要问 Anthropic 销售「从我们的程序里启动它」算不算要签商业条款（未确认）。
 3. 怎么跑（engine/code/ClaudeCli.kt，本机 Claude Code 2.1.302 实测的协议）：每条任务起一个进程 claude -p --input-format stream-json --output-format stream-json --verbose --permission-prompt-tool stdio --disallowedTools AskUserQuestion --permission-mode manual|plan [--model] [--resume 会话编号] [--add-dir 加进工作区的文件夹] [--append-system-prompt-file 自定义指令]。任务、附件（文档文字、图片）走标准输入，不放在命令行里（经 cmd.exe 会被引号弄坏）。环境变量去掉 CLAUDECODE、CLAUDE_CODE_SESSION_ID 这类（CCB 踩过：漏进去它以为自己是子会话），没设代理就带上设置里的代理。
 4. 权限：除了计划档交给它自己的 plan，一律让它跑 manual——要改文件、跑它认为不只读的命令、读工作区外面的都来问（control_request can_use_tool）。我们按这个会话的档答，和自己的循环同一套：shouldAsk、命令规则（危险的永远问、「同样开头不再问」）、自动档的检查员、全部放开；要问用户的照样停在等批准的卡片上。改文件放行之前先 CodeBackup 存原样，它改完算差异挂上 FileChange——回答里照样看差异、拒绝、撤销整条、回到这里。手机发起的任务读工作区外面照样要问（它来问时我们停下等）。它的计划（ExitPlanMode）显示成「计划」一步，回它「不要动手」。
@@ -237,7 +237,7 @@
 
 第 7 节写的通用做法落到实处：一个主控拆活、几个角色按任务单干活，各用各的脑子。
 
-1. 用法：Code 会话「工作区 → 团队」给开发 / 审查 / 测试各选一个脑子：「不用」、Claude Code（默认 / Opus / Sonnet / Haiku），或者自己加的能调工具的模型。上面选的模型就是主控。一个都不选 = 不组队，和以前一样。存在 CodeSpec.team（TeamSeat：role、providerId、modelId），Command.CodeSetTeam 改，只能在电脑上改（PhoneGate）。
+1. 用法：Code 会话「谁来干活 → 团队」（10-23 以前在「工作区 → 团队」）给开发 / 审查 / 测试各选一个脑子：「不用」、Claude Code（默认 / Opus / Sonnet / Haiku），或者自己加的能调工具的模型。上面选的模型就是主控。一个都不选 = 不组队，和以前一样。存在 CodeSpec.team（TeamSeat：role、providerId、modelId），Command.CodeSetTeam 改，只能在电脑上改（PhoneGate）。
 2. 主控：组了队的主控多一个工具 assign_task（role 只能填组了的角色，task 是任务单，name 可选），系统说明里列出手下有谁、各用什么脑子、干什么；一轮里派几张单子同时做。主控是 Claude Code 时不能组队（它调不了我们的工具），界面上写明。
 3. 角色怎么跑（engine/CodeAgent.assign）：自己加的模型走 subAgent——一份新的上下文、同样的工具和权限，不能再派活；审查只给只读的工具（照计划档：没有 write_file / edit_file，系统说明也不提）。Claude Code 走 claudeWorker——每张任务单开一个新的 claude 进程（不 --resume，不记进会话编号），审查用它的 plan 档；它的步子、要批准的都记在主控这条回答上，它说的话不进回答正文，收起来当 assign_task 的结果交回主控。
 4. 开场话（CodeAgent.roleIntro）：只讲角色是谁、交回什么，不加限制词（用户 10-08 的规矩）。
@@ -250,7 +250,7 @@
 
 两家的无界面模式都不能一步步问权限，改文件之前也不通知（本机实测，docs/参考资料.md「Codex / Gemini 命令行无界面模式」）。10-19 我给了甲乙两个方案，用户选甲：
 
-1. 用法：Code 会话「工作区 → 模型」和「团队」的下拉里多了「Codex · 默认」「Gemini CLI · 默认」（CodeSpec.providerId = codex / gemini-cli，modelId 空 = 它们自己配的默认；模型名不凭记忆写，以后要选再从它们自己的配置里查）。设置 → Code 栏「Codex 和 Gemini CLI」：各自装没装、版本（跑 --version），Codex 再跑 login status 看登没登录；Gemini 没有不进界面查登录的命令，只报版本；位置可以自己填（CodeSettings.codexPath / geminiPath），空着就在 PATH 和 %APPDATA%\npm 里找。主控是它们时不能组队（和 Claude Code 一样，它们调不了 assign_task）。
+1. 用法：Code 会话「谁来干活」的模型列表和「团队」的下拉里多了「Codex · 默认」「Gemini CLI · 默认」（CodeSpec.providerId = codex / gemini-cli，modelId 空 = 它们自己配的默认；模型名不凭记忆写，以后要选再从它们自己的配置里查）。设置 → Code 栏「Codex 和 Gemini CLI」：各自装没装、版本（跑 --version），Codex 再跑 login status 看登没登录；Gemini 没有不进界面查登录的命令，只报版本；位置可以自己填（CodeSettings.codexPath / geminiPath），空着就在 PATH 和 %APPDATA%\npm 里找。主控是它们时不能组队（和 Claude Code 一样，它们调不了 assign_task）。
 2. 怎么跑（engine/code/AgentCli.kt）：每条任务起一个新进程，任务走标准输入（codex exec --json --skip-git-repo-check -s <沙箱> [-m] [--add-dir] - ；gemini -p . --output-format stream-json --skip-trust --approval-mode <档> [-m] [--include-directories]），写完就关输入。10-20 实测两家都认标准输入（Gemini 把 -p 的字接在后面，所以只给一个「.」）。不接它们自己的会话，把这个会话前面的对话（最多 2 万字）带进去；图片不带（附件只带文档文字）。用户的自定义指令放在任务前面；它们自己会读项目里的 AGENTS.md / GEMINI.md。
 3. 权限（方案甲）：手动档（没开自动、全部放开）交出去之前弹一张批准卡片，整张单子问一次，不同意就不启动；接受编辑、自动不弹。计划档和审查角色只读：Codex -s read-only、Gemini --approval-mode plan，并在任务前写一句「这次是只读的」。其余 Codex 用 workspace-write 沙箱、Gemini 用 auto_edit（要批准的命令它会跳过）；全部放开时 Codex danger-full-access、Gemini yolo。
 4. 撤销靠快照（engine/code/Snapshot.kt）：不是只读时，交出去之前把工作区（项目文件夹 + 加进来的）里的文件原样记一份，跳过 .git、node_modules、build、.gradle 这类目录；单个文件超过 1MB 只记大小和修改时间；最多 2 万个文件、64MB。跑完（停下、出错也算）再扫一遍比对：改了的、新建的、删掉的各记一步，原样交给 CodeBackup.saveBytes，挂上 FileChange——回答里照样看差异、拒绝、撤销整条、回到这里。超过 1MB 的只说「改了、撤销不了」。没扫完时只报改了和删了的，不报新建（后扫到的可能是当时没扫到的老文件，拒绝新建会删文件）；界面上写明只比对了多少个。同一个会话里会改文件的 Codex / Gemini 一次只跑一个（快照按会话算，两个同时改分不清）。
@@ -263,7 +263,7 @@
 
 方向（10-22 定，长期记忆和当前任务里也记了）：两套并存。Claude Code 当总指挥和主力；自己的 agent 当工人（给 DeepSeek 等便宜模型干体力活）和备胎（Claude 额度满、断网、在手机上）；不再追平 Claude Code 已有的功能，力气放在它没有的：多家 AI 协作、看得清每个 AI 在干嘛、权限和撤销、花费、手机遥控、自动化流程。
 
-1. 用法：Code 会话的模型选 Claude Code，再在「工作区 → 团队」给开发 / 审查 / 测试选脑子（自己加的模型、Codex、Gemini、另一个 Claude Code）。组了队的 Claude Code 会话就是总指挥；不组队和以前一样。以前界面上写「主控是 Claude Code 时不能派活」（CodeScreen.kt 团队那一节），改掉；Codex / Gemini 当主控仍不能组队（它们也能接 MCP，没核对）。
+1. 用法：Code 会话的模型选 Claude Code，再在「谁来干活 → 团队」给开发 / 审查 / 测试选脑子（自己加的模型、Codex、Gemini、另一个 Claude Code）。组了队的 Claude Code 会话就是总指挥；不组队和以前一样。以前界面上写「主控是 Claude Code 时不能派活」（CodeScreen.kt 团队那一节），改掉；Codex / Gemini 当主控仍不能组队（它们也能接 MCP，没核对）。
 2. 怎么接：MCP 的 Streamable HTTP（规范 https://modelcontextprotocol.io/specification/2025-06-18/basic/transports ；Claude Code 的接法 https://code.claude.com/docs/en/mcp ）。
    - 电脑端在本机 127.0.0.1 随便一个空端口起一个 HTTP 服务（JDK 自带的 com.sun.net.httpserver，引擎在两端共用，所以服务放在 desktopMain，引擎经接口拿端口；打包的运行时加 jdk.httpserver 模块）。路径 /mcp：POST 收 JSON-RPC；通知回 202 不带内容；请求回 application/json；GET 回 405（不开推送流）；DELETE 回 200。
    - 每次把任务交给组了队的 Claude Code：生成一个随机口令，写一份临时的 MCP 配置（mcpServers.jxy：type http、url、headers 里 Authorization: Bearer 口令、timeout 1800000），用 --mcp-config 交给 claude；这一轮做完口令作废、配置删掉。
@@ -283,7 +283,7 @@
 
 ## 19 流程模板：一条龙（2026-10-22，第 18 节第 9 条第 1 样；用户「全权交给你处理」「继续其他任务」）
 
-1. 用法：「工作区 → 团队」组了开发、又组了审查或测试（至少一个），下面多一个开关「一条龙」。打开后，这个会话发的每条任务由程序按流程转：开发 → 审查和测试同时看 → 有没过的，把意见交回开发再改 → 都过了就提交。最多转 3 轮（FLOW_ROUNDS），第 3 轮还没过就停下，回答里写清卡在哪。存在 CodeSpec.flow（字符串，"" = 不用、"devflow" = 一条龙；不做成枚举，旧版手机读不坏）；Command.CodeSetFlow 改，只能在电脑上改（PhoneGate）。
+1. 用法：「谁来干活 → 团队」组了开发、又组了审查或测试（至少一个），下面多一个开关「一条龙」。打开后，这个会话发的每条任务由程序按流程转：开发 → 审查和测试同时看 → 有没过的，把意见交回开发再改 → 都过了就提交。最多转 3 轮（FLOW_ROUNDS），第 3 轮还没过就停下，回答里写清卡在哪。存在 CodeSpec.flow（字符串，"" = 不用、"devflow" = 一条龙；不做成枚举，旧版手机读不坏）；Command.CodeSetFlow 改，只能在电脑上改（PhoneGate）。
 2. 为什么由程序转，不交给总指挥自己转：第 7 节的通用做法「状态只由一个调度者来改、靠明确的完成信号判断」；程序转每次都一样、看得清走到第几步；Claude 额度满、断网时角色换成自己的模型照样能转（备胎）。开着一条龙时，上面选的「模型」不参与（不花它的钱），角色用各自的脑子；关掉就回到原来的做法（总指挥 / 主控自己派活）。
 3. 每一步给角色的话：开发拿用户的任务原话（加上这个会话前面最近几条对话，最多 6000 字，让它知道上下文）；第 2 轮起再接上「上一轮审查 / 测试没过，意见如下」。审查和测试拿用户的任务原话 + 开发交回的话（带程序记的改动摘要，第 18 节第 10 条）。审查、测试的开场话多一句：最后单独一行写「结论：通过」或「结论：没过」（这是交回的格式，不是限制）。
 4. 怎么判过没过：认交回的话里最后一个「结论：通过 / 没过」。哪个角色没写结论，流程停下，回答里写明「没给结论，状态不确定」，不悄悄当成过了（第 7 节）。开发出错（模型用不了、Claude Code 报错）也停下。开发这一轮没改任何文件，照样交给审查 / 测试看（可能本来就没问题）。
@@ -296,7 +296,7 @@
 
 起因：用户觉得 Code 栏里的 Claude Code「跟原生不像一个模型」。查了：模型一样（会话记录 237 条都是 claude-opus-5-5），我们没传 --effort（官方：Opus 5.5 默认 medium）；那次显得笨主要是会话里带着「别碰手机」的旧指令和全局红线（编年史 10-22）。
 
-1. 工作区 → 模型 选了 Claude Code 时多一行「思考强度」：默认（不传，官方 medium）、low、medium、high、xhigh、max、ultracode。存在 CodeSpec.effort，Command.CodeSetEffort 改（手机遥控时和其它 Code 写操作一样要电脑开了「允许手机用」）；会话标题下面的那行带上档位。
+1. 「谁来干活」里选了 Claude Code 时多一行「思考强度」：默认（不传，官方 medium）、low、medium、high、xhigh、max、ultracode。存在 CodeSpec.effort，Command.CodeSetEffort 改（手机遥控时和其它 Code 写操作一样要电脑开了「允许手机用」）；会话标题下面的那行带上档位。
 2. 原样交给 --effort（ClaudeCli.args）。官方原文（https://code.claude.com/docs/en/model-config ）：Opus 5.5 / Sonnet 5.5 / Haiku 5.5 都支持 low～max；「If you set a level the active model does not support, Claude Code falls back to the highest supported level at or below the one you set」；ultracode：「launch with `claude --effort ultracode`, which starts the session at `xhigh` effort with ultracode on」，要 2.1.203 以上。本机 claude 2.1.308 实测 -p --effort low、--effort ultracode 都正常回答。
 3. 团队里的 Claude Code 角色也用这个会话的档（它们走同一个 claudeRound）。Codex / Gemini 不管这一项。
 4. 测试：ClaudeCodeTest.acceptEditsWritesWithoutAskingAndResumes 加了：没选不带 --effort；选 ultracode 带 --effort ultracode；不认识的档不收。

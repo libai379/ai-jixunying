@@ -1595,7 +1595,7 @@ class CodeAgent(private val host: CodeHost) {
             Regex("(?i)not logged in|/login|please log ?in|invalid api key|authentication|oauth").containsMatchIn(t) ->
                 "Claude Code 还没登录，或者登录过期了：到 设置 → Code 栏 点「打开 Claude Code 登录」，在弹出的窗口里登录好再发一次。\n（它说：${t.take(300)}）"
             Regex("(?i)usage limit|rate limit|limit reached|out of (extra )?usage").containsMatchIn(t) ->
-                "Claude 订阅的额度用完了，等恢复了再发；或者在「工作区」里先换成别的模型。\n（它说：${t.take(300)}）"
+                "Claude 订阅的额度用完了，等恢复了再发；或者点会话标题下面的「谁来干活」先换成别的模型。\n（它说：${t.take(300)}）"
             t.isEmpty() -> "Claude Code 出错了，没说原因"
             else -> "Claude Code 报错：${t.take(800)}"
         }

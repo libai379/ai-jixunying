@@ -54,6 +54,7 @@ import androidx.compose.material.icons.rounded.Menu
 import androidx.compose.material.icons.rounded.PhoneAndroid
 import androidx.compose.material.icons.rounded.Psychology
 import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material.icons.rounded.SmartToy
 import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material3.Button
 import androidx.compose.material3.OutlinedButton
@@ -226,9 +227,12 @@ private fun CodeTopBar(ctl: AppController, state: AppState, conv: Conversation, 
     var showPath by remember(conv.id) { mutableStateOf(false) }
     // 开发截图用：-Djxy.start=code:会话编号#path 直接把这个弹窗打开
     LaunchedEffect(Unit) { if (ctl.debugDialog == "path") showPath = true }
-    val subtitle = (if (wide) spec.folder else folderName(spec.folder)) +
-        (if (spec.isAgent) " · " + CodeSpec.agentLabel(spec.providerId, spec.modelId) else (provider?.let { " · ${it.name}" } ?: "") + " · ${spec.modelId}") +
-        (if (spec.isClaudeCode && spec.effort.isNotEmpty()) " · ${spec.effort}" else "")
+    // 谁在干活（2026-10-23）：单独一个按钮，点开就能换（以前只写在副标题里，换要进「更多 → 工作区」）
+    var showBrain by remember(conv.id) { mutableStateOf(ctl.debugDialog == "brain") }
+    val subtitle = if (wide) spec.folder else folderName(spec.folder)
+    val brain = (if (spec.isAgent) CodeSpec.agentLabel(spec.providerId, spec.modelId) else (provider?.takeIf { wide }?.let { "${it.name} · " } ?: "") + spec.modelId) +
+        (if (spec.isClaudeCode && spec.effort.isNotEmpty()) " · ${spec.effort}" else "") +
+        (if (spec.team.isNotEmpty()) " · 带团队" else "")
     Row(Modifier.fillMaxWidth().heightIn(min = 60.dp).padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
         if (!wide) IconButton(onClick = openDrawer) { Icon(Icons.Rounded.Menu, "菜单") }
         Column(Modifier.weight(1f).padding(start = 6.dp)) {
@@ -241,18 +245,33 @@ private fun CodeTopBar(ctl: AppController, state: AppState, conv: Conversation, 
                     PhoneMadeMark()
                 }
             }
-            if (wide) {
-                Text(subtitle, style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            } else {
-                // 手机上放不下整条路径：显示最后一节，前面加个文件夹图标、点一下看全路径
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (wide) {
+                    // 文件夹限个宽度，剩下的都给「谁在干活」（两边都 weight 会对半分，短文件夹名旁边的按钮也被截断）
+                    Text(subtitle, style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.widthIn(max = 420.dp))
+                } else {
+                    // 手机上放不下整条路径：显示最后一节，前面加个文件夹图标、点一下看全路径
+                    Row(
+                        Modifier.widthIn(max = 110.dp).clip(RoundedCornerShape(6.dp)).clickable { showPath = true }.padding(vertical = 2.dp, horizontal = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(Icons.Rounded.FolderOpen, null, Modifier.size(13.dp), tint = MaterialTheme.colorScheme.primary)
+                        Spacer(Modifier.width(4.dp))
+                        Text(subtitle, style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                }
+                Spacer(Modifier.width(6.dp))
                 Row(
-                    Modifier.clip(RoundedCornerShape(6.dp)).clickable { showPath = true }.padding(vertical = 2.dp, horizontal = 2.dp),
+                    Modifier.weight(1f, fill = false).clip(RoundedCornerShape(50)).border(1.dp, Ext.c.border, RoundedCornerShape(50))
+                        .clickable { showBrain = true }.padding(start = 6.dp, end = 2.dp, top = 1.dp, bottom = 1.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Icon(Icons.Rounded.FolderOpen, null, Modifier.size(13.dp), tint = MaterialTheme.colorScheme.primary)
+                    Icon(Icons.Rounded.SmartToy, null, Modifier.size(13.dp), tint = MaterialTheme.colorScheme.primary)
                     Spacer(Modifier.width(4.dp))
-                    Text(subtitle, style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    Text(brain, style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f, fill = false))
+                    Icon(Icons.Rounded.ExpandMore, "换谁来干活", Modifier.size(14.dp), tint = Ext.c.subtle)
                 }
             }
         }
@@ -295,6 +314,7 @@ private fun CodeTopBar(ctl: AppController, state: AppState, conv: Conversation, 
     }
     HorizontalDivider(color = Ext.c.border)
     if (showPath) WorkspaceDialog(ctl, conv, spec) { showPath = false }
+    if (showBrain) BrainDialog(ctl, conv, spec) { showBrain = false }
 }
 
 /**
@@ -384,7 +404,7 @@ private fun TerminalPanel(ctl: AppController, conv: Conversation, spec: CodeSpec
             .background(Color(0xFF16181D)).padding(10.dp),
     ) {
         Column(Modifier.weight(1f, fill = false).verticalScroll(scroll)) {
-            if (log.isEmpty()) Text("终端：在这里自己敲命令（在项目文件夹里跑，cd 换目录，末尾加 & 放后台，clear 清屏）。", style = mono, color = Color(0xFF8A90A0))
+            if (log.isEmpty()) Text("自己敲命令：在项目文件夹里跑 PowerShell，和 AI 无关（cd 换目录，末尾加 & 放后台，clear 清屏）。", style = mono, color = Color(0xFF8A90A0))
             log.forEach { l ->
                 SelectionContainer {
                     Column {
@@ -563,7 +583,71 @@ private fun WorkspaceDialog(ctl: AppController, conv: Conversation, spec: CodeSp
                 }) { Text("换一个") }
             }
             Spacer(Modifier.height(12.dp))
-            FieldLabel("模型", "只列能调用工具的")
+            FieldLabel("加进来的文件夹", if (spec.extraPaths.isEmpty()) "还没有" else null)
+            spec.extraPaths.forEach { p ->
+                Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Rounded.FolderOpen, null, Modifier.size(15.dp), tint = Ext.c.subtle)
+                    Spacer(Modifier.width(6.dp))
+                    Text(p, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f), maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    if (canEdit) TextButton({ save(spec.extraPaths - p, spec.allowedCommands) }) { Text("移出", color = MaterialTheme.colorScheme.error) }
+                }
+            }
+            if (canEdit) TextButton({
+                scope.launch {
+                    val f = platform.pickFolder("把一个文件夹加进工作区") ?: return@launch
+                    if (f.trimEnd('\\', '/').equals(spec.folder.trimEnd('\\', '/'), ignoreCase = true) ||
+                        spec.extraPaths.any { it.equals(f, ignoreCase = true) }) { ctl.toast("已经在工作区里了"); return@launch }
+                    save(spec.extraPaths + f, spec.allowedCommands)
+                }
+            }) {
+                Icon(Icons.Rounded.Add, null, Modifier.size(16.dp))
+                Spacer(Modifier.width(4.dp))
+                Text("加一个文件夹")
+            }
+            Spacer(Modifier.height(12.dp))
+            FieldLabel("不再问的命令和网站", if (spec.allowedCommands.isEmpty()) "还没有；批准命令时选「…开头的不再问」就会记在这里" else "以这些开头的命令直接跑；拼起来的和危险的命令照样每次都问")
+            spec.allowedCommands.forEach { c ->
+                Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text(if (c.startsWith("web:")) "网站 " + c.removePrefix("web:") else c,
+                        style = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace), modifier = Modifier.weight(1f))
+                    if (canEdit) TextButton({ save(spec.extraPaths, spec.allowedCommands - c) }) { Text("删掉", color = MaterialTheme.colorScheme.error) }
+                }
+            }
+            if (canEdit) {
+                Spacer(Modifier.height(12.dp))
+                FieldLabel("独立副本", "几个会话同时改同一个项目时，各用一份互不干扰（要是 Git 仓库）")
+                TextButton({
+                    // 照原会话的档开（2026-10-22：以前写死「接受编辑」，「自动」丢了）；「全部放开」不跟过去
+                    ctl.run(Command.CodeCreate(spec.worktreeOf.ifBlank { spec.folder }, spec.providerId, spec.modelId,
+                        if (spec.mode == CodeMode.MANUAL || spec.mode == CodeMode.PLAN) spec.mode else CodeMode.ACCEPT_EDITS,
+                        worktree = true, auto = spec.autoMode), quiet = true) { r ->
+                        if (r.ok) { onClose(); ctl.openConversation(r.data) } else ctl.toast(r.message.ifBlank { "开不了独立副本" })
+                    }
+                }) { Text("用独立副本开一个新会话") }
+            }
+            if (!canEdit) {
+                Spacer(Modifier.height(8.dp))
+                Text("工作区和「不再问」只能在电脑上改。", style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
+            }
+        }
+    }
+}
+
+/**
+ * 谁来干活（2026-10-23 用户：「code 界面是不是我选终端自己链接 Claudecode」——选模型藏在「更多 → 工作区」里找不到，
+ * 「终端」又像是接 Claude Code 的）：顶栏标题下面那个按钮点开就是这里——本机的编程命令行、自己加的模型、思考强度、团队。
+ * 只能在电脑上改（手机上只看，PhoneGate 也会拒）。
+ */
+@Composable
+private fun BrainDialog(ctl: AppController, conv: Conversation, spec: CodeSpec, onClose: () -> Unit) {
+    val platform = LocalPlatform.current
+    val canEdit = platform.isDesktop && !ctl.remoteMode
+    AppDialog("谁来干活", onClose, width = 560.dp, actions = { Button(onClose) { Text("好了") } }) {
+        Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState())) {
+            Text("选 Claude Code、Codex、Gemini CLI，就是把任务交给你电脑上装的那个程序，用你自己的订阅或账号；" +
+                "选「自己加的模型」，就是 AI集训营 自己的助手调那个模型（用 模型服务 里的 Key）。只列能调用工具的模型。",
+                style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
+            Spacer(Modifier.height(8.dp))
             // 本机的编程命令行：Claude Code（2026-10-18，走你的 Claude 订阅）、Codex / Gemini CLI（2026-10-20，各用你自己的账号）
             Text("本机的编程命令行（用你自己的账号；先在 设置 → Code 栏 检查装好、登录了）", style = MaterialTheme.typography.labelMedium,
                 color = Ext.c.subtle, modifier = Modifier.padding(start = 8.dp, top = 2.dp, bottom = 2.dp))
@@ -624,52 +708,9 @@ private fun WorkspaceDialog(ctl: AppController, conv: Conversation, spec: CodeSp
             }
             Spacer(Modifier.height(12.dp))
             TeamSection(ctl, conv, spec, canEdit, options)
-            Spacer(Modifier.height(12.dp))
-            FieldLabel("加进来的文件夹", if (spec.extraPaths.isEmpty()) "还没有" else null)
-            spec.extraPaths.forEach { p ->
-                Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Rounded.FolderOpen, null, Modifier.size(15.dp), tint = Ext.c.subtle)
-                    Spacer(Modifier.width(6.dp))
-                    Text(p, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f), maxLines = 2, overflow = TextOverflow.Ellipsis)
-                    if (canEdit) TextButton({ save(spec.extraPaths - p, spec.allowedCommands) }) { Text("移出", color = MaterialTheme.colorScheme.error) }
-                }
-            }
-            if (canEdit) TextButton({
-                scope.launch {
-                    val f = platform.pickFolder("把一个文件夹加进工作区") ?: return@launch
-                    if (f.trimEnd('\\', '/').equals(spec.folder.trimEnd('\\', '/'), ignoreCase = true) ||
-                        spec.extraPaths.any { it.equals(f, ignoreCase = true) }) { ctl.toast("已经在工作区里了"); return@launch }
-                    save(spec.extraPaths + f, spec.allowedCommands)
-                }
-            }) {
-                Icon(Icons.Rounded.Add, null, Modifier.size(16.dp))
-                Spacer(Modifier.width(4.dp))
-                Text("加一个文件夹")
-            }
-            Spacer(Modifier.height(12.dp))
-            FieldLabel("不再问的命令和网站", if (spec.allowedCommands.isEmpty()) "还没有；批准命令时选「…开头的不再问」就会记在这里" else "以这些开头的命令直接跑；拼起来的和危险的命令照样每次都问")
-            spec.allowedCommands.forEach { c ->
-                Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text(if (c.startsWith("web:")) "网站 " + c.removePrefix("web:") else c,
-                        style = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace), modifier = Modifier.weight(1f))
-                    if (canEdit) TextButton({ save(spec.extraPaths, spec.allowedCommands - c) }) { Text("删掉", color = MaterialTheme.colorScheme.error) }
-                }
-            }
-            if (canEdit) {
-                Spacer(Modifier.height(12.dp))
-                FieldLabel("独立副本", "几个会话同时改同一个项目时，各用一份互不干扰（要是 Git 仓库）")
-                TextButton({
-                    // 照原会话的档开（2026-10-22：以前写死「接受编辑」，「自动」丢了）；「全部放开」不跟过去
-                    ctl.run(Command.CodeCreate(spec.worktreeOf.ifBlank { spec.folder }, spec.providerId, spec.modelId,
-                        if (spec.mode == CodeMode.MANUAL || spec.mode == CodeMode.PLAN) spec.mode else CodeMode.ACCEPT_EDITS,
-                        worktree = true, auto = spec.autoMode), quiet = true) { r ->
-                        if (r.ok) { onClose(); ctl.openConversation(r.data) } else ctl.toast(r.message.ifBlank { "开不了独立副本" })
-                    }
-                }) { Text("用独立副本开一个新会话") }
-            }
             if (!canEdit) {
                 Spacer(Modifier.height(8.dp))
-                Text("工作区和「不再问」只能在电脑上改。", style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
+                Text("谁来干活只能在电脑上改。", style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
             }
         }
     }
@@ -836,8 +877,9 @@ private fun CodeMoreMenu(ctl: AppController, spec: CodeSpec, onPc: Boolean, onWo
                 "项目文件夹、另外放进来的文件夹、「不再问」的命令", onWorkspace)
             if (onPc) {
                 // 终端（2026-10-18，开发补齐第 2 样）：开关在会话之间共用
-                item(Icons.Rounded.Terminal, if (ctl.codeTerminalOpen) "收起终端" else "终端",
-                    "自己在项目文件夹里敲命令（不是 Claude Code，是 PowerShell）", { ctl.codeTerminalOpen = !ctl.codeTerminalOpen })
+                // 2026-10-23 改叫「自己敲命令」：叫「终端」时用户以为是接 Claude Code 的
+                item(Icons.Rounded.Terminal, if (ctl.codeTerminalOpen) "收起「自己敲命令」" else "自己敲命令",
+                    "你自己在项目文件夹里敲命令（PowerShell），和 AI 无关；换谁来干活点标题下面那个按钮", { ctl.codeTerminalOpen = !ctl.codeTerminalOpen })
                 // 2026-10-22 叫「提交」：没远端时主要是在本地提交，有远端弹窗里照样能推送、开 PR
                 item(Icons.Rounded.CloudUpload, "提交", "把改动存成一个版本（git 提交），有 GitHub 的话还能推上去", onGit)
             }
@@ -857,11 +899,12 @@ private fun CodeHelpDialog(onClose: () -> Unit) {
                 Text(body, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             para("一个会话 = 一个项目文件夹", "左边每一行是一个会话，建的时候选好文件夹和谁来干活。之后在下面说一句要做什么，它就在这个文件夹里读代码、改文件、跑命令。")
-            para("谁在干活", "顶上标题下面写着。选「Claude Code」就是直接用你电脑上装的 Claude Code（用你自己的订阅额度）；选别的模型就是 AI集训营 自己带的助手调那个模型。")
+            para("谁在干活", "顶上标题下面那个带小机器人的按钮，点开就能换。选「Claude Code」「Codex」「Gemini CLI」就是直接用你电脑上装的那个程序（用你自己的订阅或账号）；" +
+                "选自己加的模型就是 AI集训营 自己带的助手调那个模型。团队（开发 / 审查 / 测试各派给谁）也在那里。")
             para("中间一行一行是什么", "AI 说的话和它做的每一步（读了哪个文件、改了哪个文件、跑了什么命令）按先后排。点某一步能展开看内容；要你批准的那一步会自己展开，带「允许」「拒绝」。")
             para("权限档（顶上那个盾牌按钮）", "决定它改文件、跑命令前要不要先问你。不放心就用「手动」，什么都先问；只想让它出方案就用「计划」。")
             para("改错了怎么办", "回答下面的「改了 N 个文件」点进去，能一个文件一个文件地拒绝，文件马上恢复成改之前的样子。你发过的任务下面有「回到这里」，那之后的改动全部还原。")
-            para("「更多」里的东西", "工作区：除了项目文件夹，还允许它碰哪些地方。终端：你自己敲命令用的，和 AI 无关。提交：改满意了，存成一个 git 版本。")
+            para("「更多」里的东西", "工作区：除了项目文件夹，还允许它碰哪些地方。自己敲命令：你自己用的 PowerShell 小窗口，和 AI 无关，不是接 Claude Code 的。提交：改满意了，存成一个 git 版本。")
         }
     }
 }

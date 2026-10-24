@@ -811,7 +811,7 @@ class ShotsTest {
         shoot("desktop-code-remember-cmd", 1280, 820, 1f, hub, desktop, "code:c12")
         shoot("desktop-code-workspace", 1280, 820, 1f, hub, desktop, "code:c11#path")
         // 2026-10-19 多角色派活：工作区里的「团队」一节（窗口拉高看全）
-        shoot("desktop-code-team", 1280, 1500, 1f, hub, desktop, "code:c11#path")
+        shoot("desktop-code-team", 1280, 1500, 1f, hub, desktop, "code:c11#brain")
         shoot("desktop-code-claude", 1280, 820, 1f, hub, desktop, "code:c15")
         shoot("desktop-code-claude-tall", 1280, 1400, 1f, hub, desktop, "code:c15")
         shoot("desktop-code-git-local", 1280, 900, 1f, hub, desktop, "code:c9#git", frames = 120)
@@ -819,7 +819,10 @@ class ShotsTest {
         shoot("desktop-code-working", 1280, 820, 1f, hub, desktop, "code:c16")
         shoot("desktop-code-claude-workspace", 1280, 900, 1f, hub, desktop, "code:c15#path")
         // 2026-10-22：主控是 Claude Code 也能组队（总指挥，第 18 节）：团队那一节要能选
-        shoot("desktop-code-claude-team", 1280, 1700, 1f, hub, desktop, "code:c15#path")
+        shoot("desktop-code-claude-team", 1280, 1700, 1f, hub, desktop, "code:c15#brain")
+        // 2026-10-23：「谁来干活」从「工作区」里拆出来，标题下面一个按钮点开
+        shoot("phone-code-brain", 824, 1784, 2f, hub, phone, "code:c15#brain")
+        shoot("phone-code-claude", 824, 1784, 2f, hub, phone, "code:c15")
         shoot("desktop-settings-code-tall", 1280, 1900, 1f, hub, desktop, "settings:CODE")
         shoot("desktop-code-diff", 1280, 820, 1f, hub, desktop, "code:c8#diff")
         shoot("desktop-code-new", 1280, 820, 1f, hub, desktop, "newcode")

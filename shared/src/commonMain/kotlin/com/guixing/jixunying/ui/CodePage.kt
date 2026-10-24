@@ -124,7 +124,7 @@ fun CodePage(ctl: AppController, state: AppState) {
     if (editable) {
         SectionCard {
             Text("Claude Code（用你的 Claude 订阅）", style = MaterialTheme.typography.titleSmall)
-            Text("在 Code 会话的「工作区 → 模型」里选 Claude Code，这个会话就交给你电脑上的 Claude Code 去做：它读文件、改文件、跑命令，" +
+            Text("在 Code 会话标题下面的「谁来干活」按钮里选 Claude Code，这个会话就交给你电脑上的 Claude Code 去做：它读文件、改文件、跑命令，" +
                 "每一步照样显示在会话里，要改文件、跑命令时照这个会话的权限档问你，改过的照样能看差异、撤销。" +
                 "登录在 Claude Code 自己的窗口里完成，本程序不碰你的账号和凭据。",
                 style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle, modifier = Modifier.padding(top = 2.dp))
@@ -154,7 +154,7 @@ fun CodePage(ctl: AppController, state: AppState) {
         // 2026-10-20 Codex / Gemini CLI：用户自己装、自己登录的官方命令行（engine/code/AgentCli）
         SectionCard {
             Text("Codex 和 Gemini CLI（用你自己的账号）", style = MaterialTheme.typography.titleSmall)
-            Text("在 Code 会话的「工作区 → 模型」或「团队」里选它们。它们不能一步步问你：「手动」档交出去之前问一次，「计划」档和审查只读；" +
+            Text("在 Code 会话标题下面的「谁来干活」按钮里选它们（主力或团队里的角色都行）。它们不能一步步问你：「手动」档交出去之前问一次，「计划」档和审查只读；" +
                 "交出去之前给工作区拍一份快照，做完比对，改了的文件照样能看差异、撤销。登录在它们自己的窗口里完成，本程序不碰你的账号。",
                 style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle, modifier = Modifier.padding(top = 2.dp))
             listOf(Triple(CodeSpec.CODEX, c.codexPath, "比如 C:\\Users\\你\\AppData\\Roaming\\npm\\codex.cmd"),
