@@ -239,8 +239,8 @@ class ChatGptAuth(
         private fun b64d(s: String) = Base64.getUrlDecoder().decode(s.trimEnd('='))
         private fun enc(s: String) = URLEncoder.encode(s, "UTF-8").replace("+", "%20")
 
-        /** 等浏览器跳回 127.0.0.1：只认 GET /auth/callback，回一页「可以关掉」。别的请求（浏览器要图标）回 404 接着等。 */
-        internal fun waitCallback(server: ServerSocket, timeoutMs: Long): Map<String, String> {
+        /** 等浏览器跳回 127.0.0.1：只认 GET [callbackPath]，回一页「可以关掉」。别的请求（浏览器要图标）回 404 接着等。GitHub 登录（Account）也用这个。 */
+        internal fun waitCallback(server: ServerSocket, timeoutMs: Long, callbackPath: String = "/auth/callback", what: String = "ChatGPT"): Map<String, String> {
             val deadline = System.currentTimeMillis() + timeoutMs
             while (true) {
                 val left = deadline - System.currentTimeMillis()
@@ -248,11 +248,13 @@ class ChatGptAuth(
                 server.soTimeout = left.toInt().coerceAtLeast(1)
                 val s = try { server.accept() } catch (_: SocketTimeoutException) { continue }
                 s.use { sock ->
-                    sock.soTimeout = 10_000
-                    val line = sock.getInputStream().bufferedReader().readLine().orEmpty()
+                    // 浏览器常先开几条空连接（预连接）不发东西：读不到就丢掉这条接着等，别把整个登录报错（10-24 GitHub 真登录踩到「Read timed out」）
+                    sock.soTimeout = 3_000
+                    val line = try { sock.getInputStream().bufferedReader().readLine().orEmpty() } catch (_: java.io.IOException) { return@use }
+                    if (line.isBlank()) return@use
                     val path = line.split(' ').getOrNull(1).orEmpty()
                     val out = sock.getOutputStream()
-                    if (!path.startsWith("/auth/callback")) {
+                    if (path.substringBefore('?') != callbackPath) {
                         out.write("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".toByteArray())
                         return@use
                     }
@@ -261,7 +263,7 @@ class ChatGptAuth(
                     }
                     val ok = "error" !in q
                     val html = "<!doctype html><meta charset=utf-8><title>AI集训营</title><body style=\"font-family:sans-serif;padding:40px\">" +
-                        (if (ok) "<h2>ChatGPT 登录好了</h2><p>可以关掉这个页面，回到 AI集训营。</p>" else "<h2>没有登录</h2><p>可以关掉这个页面，回到 AI集训营 再试。</p>") + "</body>"
+                        (if (ok) "<h2>$what 登录好了</h2><p>可以关掉这个页面，回到 AI集训营。</p>" else "<h2>没有登录</h2><p>可以关掉这个页面，回到 AI集训营 再试。</p>") + "</body>"
                     val body = html.toByteArray()
                     out.write(("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: ${body.size}\r\nConnection: close\r\n\r\n").toByteArray())
                     out.write(body)

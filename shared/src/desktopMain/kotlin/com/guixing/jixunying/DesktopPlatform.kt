@@ -241,7 +241,10 @@ class DesktopPlatform(private val fileLog: Boolean = true, private val window: (
     }
 
     override fun openUrl(url: String) {
-        runCatching { Desktop.getDesktop().browse(URI(url)) }
+        // Desktop.browse 不支持或报错时，Windows 上交给系统默认浏览器（10-24 用户点「用 GitHub 登录」没看到网页）
+        runCatching { Desktop.getDesktop().browse(URI(url)) }.onFailure {
+            runCatching { ProcessBuilder("rundll32", "url.dll,FileProtocolHandler", url).start() }
+        }
     }
 
     override fun qrMatrix(text: String): List<BooleanArray>? = runCatching {

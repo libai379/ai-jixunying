@@ -5,13 +5,17 @@ import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.parameters
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.longOrNull
 import java.io.File
+import java.net.InetAddress
+import java.net.ServerSocket
+import java.net.URLEncoder
 import java.security.KeyFactory
 import java.security.KeyPairGenerator
 import java.security.MessageDigest
@@ -31,7 +35,8 @@ import javax.crypto.spec.SecretKeySpec
  * 账号（2026-10-24，docs/账号设计说明.md）。用户 10-23：「账号登录就用 GitHub 加密钥两种方式登录」，没有服务器。
  * - 本机密钥：第一次用时生成一对 EC P-256 密钥（电脑和安卓都自带，不加依赖），账号编号由公钥算（SHA-256 前 10 字节）。
  *   私钥只在 <数据>/account/identity.json，不进 state.json、不同步；能导出成口令加密的备份码，换设备导入就是同一个账号。
- * - GitHub：官方设备码登录（docs.github.com「device flow」：不要 client secret），拿到 GitHub 用户名和头像绑到本机账号上；拿到就把令牌扔了，不存。
+ * - GitHub：官方网页登录、跳回本机 127.0.0.1（电脑、手机一样），拿到 GitHub 用户名和头像绑到本机账号上；拿到就把令牌扔了，不存。
+ *   （10-24 起先做的是设备码登录，GitHub 那页要输码、警告一堆、授权按钮常常灰着，用户：「都是跳转登录，不要再搞出验证来」，换掉了。）
  */
 class Account(
     private val dir: File,
@@ -113,49 +118,59 @@ class Account(
         return i
     }
 
-    // ———— GitHub 设备码登录 ————
+    // ———— GitHub 网页登录（跳回本机） ————
+    // 10-24 用户：「移动端和桌面端都一样，都是跳转登录」。官方 web application flow + 回环地址（docs.github.com「Loopback redirect urls」：
+    // 应用里登记 http://127.0.0.1/auth/github，请求时端口随意）+ PKCE S256。换令牌要 client_secret（官方表格写 Required），见 [GithubApp]。
 
-    class DeviceCode(val deviceCode: String, val userCode: String, val verificationUri: String, val interval: Long, val expiresIn: Long)
+    /** 一次登录：本机端口先开好，[url] 在浏览器里打开；[await] 等用户点完同意跳回来。 */
+    inner class GithubPending internal constructor(
+        val url: String,
+        private val server: ServerSocket,
+        private val redirect: String,
+        private val state: String,
+        private val verifier: String,
+        private val clientId: String,
+        private val clientSecret: String,
+    ) {
+        suspend fun await(timeoutMs: Long = 5 * 60_000): Identity {
+            val q = try {
+                withContext(Dispatchers.IO) { ChatGptAuth.waitCallback(server, timeoutMs, "/auth/github", "GitHub") }
+            } catch (e: ChatGptAuth.AuthException) { throw AccountException(e.message ?: "没等到 GitHub 跳回来") } finally { runCatching { server.close() } }
+            if (q["state"] != state) throw AccountException("登录回来的校验码对不上，再登一次")
+            q["error"]?.let { e -> throw AccountException(if (e == "access_denied") "你在 GitHub 页面上点了取消" else "GitHub 回了错误：$e ${q["error_description"].orEmpty()}") }
+            val code = q["code"] ?: throw AccountException("GitHub 没给授权码")
+            val o = postForm("$githubWeb/login/oauth/access_token", mapOf(
+                "client_id" to clientId, "client_secret" to clientSecret, "code" to code, "redirect_uri" to redirect, "code_verifier" to verifier))
+            o.str("error")?.let { throw AccountException("GitHub 回了错误：$it ${o.str("error_description").orEmpty()}") }
+            val token = o.str("access_token") ?: throw AccountException("GitHub 没给令牌")
+            // 令牌只用这一次：查用户资料，绑好就扔
+            val resp = Http.client(proxy()).get("$githubApi/user") {
+                header("Authorization", "Bearer $token"); header("Accept", "application/vnd.github+json")
+            }
+            val text = resp.bodyAsText()
+            if (resp.status.value !in 200..299) throw AccountException("查 GitHub 用户资料失败：${resp.status.value}")
+            val u = Json.parse(text).jsonObject
+            val i = identity.copy(githubLogin = u.str("login").orEmpty(), githubId = u.num("id") ?: 0, githubName = u.str("name").orEmpty(),
+                githubAvatar = u.str("avatar_url").orEmpty(), githubAt = System.currentTimeMillis())
+            save(i)
+            return i
+        }
 
-    /** 第一步：拿设备码和给用户看的码（scope 空 = 只读公开资料）。 */
-    suspend fun githubStart(clientId: String): DeviceCode {
-        if (clientId.isBlank()) throw AccountException("GitHub 登录还没开通（程序里还没填 GitHub 应用的编号）")
-        val o = postForm("$githubWeb/login/device/code", mapOf("client_id" to clientId, "scope" to ""))
-        o.str("error")?.let { throw AccountException("GitHub 回了错误：$it ${o.str("error_description").orEmpty()}") }
-        return DeviceCode(o.str("device_code") ?: throw AccountException("GitHub 没给设备码"), o.str("user_code").orEmpty(),
-            o.str("verification_uri") ?: "$githubWeb/login/device", o.num("interval") ?: 5, o.num("expires_in") ?: 900)
+        fun cancel() { runCatching { server.close() } }
     }
 
-    /** 第二步：按 GitHub 说的间隔等用户在网页上输码同意；拿到令牌就查一次用户资料，绑好，令牌扔掉。 */
-    suspend fun githubWait(clientId: String, dc: DeviceCode): Identity {
-        var interval = dc.interval.coerceAtLeast(1)
-        val deadline = System.currentTimeMillis() + dc.expiresIn * 1000
-        while (System.currentTimeMillis() < deadline) {
-            delay(interval * 1000)
-            val o = postForm("$githubWeb/login/oauth/access_token", mapOf(
-                "client_id" to clientId, "device_code" to dc.deviceCode, "grant_type" to "urn:ietf:params:oauth:grant-type:device_code"))
-            when (o.str("error")) {
-                null -> {
-                    val token = o.str("access_token") ?: throw AccountException("GitHub 没给令牌")
-                    val resp = Http.client(proxy()).get("$githubApi/user") {
-                        header("Authorization", "Bearer $token"); header("Accept", "application/vnd.github+json")
-                    }
-                    val text = resp.bodyAsText()
-                    if (resp.status.value !in 200..299) throw AccountException("查 GitHub 用户资料失败：${resp.status.value}")
-                    val u = Json.parse(text).jsonObject
-                    val i = identity.copy(githubLogin = u.str("login").orEmpty(), githubId = u.num("id") ?: 0, githubName = u.str("name").orEmpty(),
-                        githubAvatar = u.str("avatar_url").orEmpty(), githubAt = System.currentTimeMillis())
-                    save(i)
-                    return i
-                }
-                "authorization_pending" -> {}
-                "slow_down" -> interval = (o.num("interval") ?: (interval + 5))
-                "expired_token" -> throw AccountException("码过期了，重新点一次「用 GitHub 登录」")
-                "access_denied" -> throw AccountException("你在 GitHub 页面上点了取消")
-                else -> throw AccountException("GitHub 回了错误：${o.str("error")} ${o.str("error_description").orEmpty()}")
-            }
-        }
-        throw AccountException("码过期了，重新点一次「用 GitHub 登录」")
+    /** 开始登录：scope 不传 = 只读公开资料。 */
+    fun githubBegin(clientId: String, clientSecret: String): GithubPending {
+        if (clientId.isBlank() || clientSecret.isBlank()) throw AccountException("GitHub 登录还没开通（程序里还没填 GitHub 应用的编号）")
+        val server = ServerSocket(0, 8, InetAddress.getByName("127.0.0.1"))
+        val redirect = "http://127.0.0.1:${server.localPort}/auth/github"
+        val verifier = urlSafe(48)
+        val challenge = Base64.getUrlEncoder().withoutPadding().encodeToString(MessageDigest.getInstance("SHA-256").digest(verifier.toByteArray()))
+        val state = urlSafe(24)
+        val params = listOf("client_id" to clientId, "redirect_uri" to redirect, "state" to state,
+            "code_challenge" to challenge, "code_challenge_method" to "S256", "allow_signup" to "true")
+        val url = "$githubWeb/login/oauth/authorize?" + params.joinToString("&") { (k, v) -> k + "=" + URLEncoder.encode(v, "UTF-8") }
+        return GithubPending(url, server, redirect, state, verifier, clientId, clientSecret)
     }
 
     fun githubUnbind() = save(identity.copy(githubLogin = "", githubId = 0, githubName = "", githubAvatar = "", githubAt = 0))
@@ -173,6 +188,7 @@ class Account(
         private val rnd = SecureRandom()
 
         private fun b64(b: ByteArray) = Base64.getEncoder().encodeToString(b)
+        private fun urlSafe(bytes: Int) = Base64.getUrlEncoder().withoutPadding().encodeToString(ByteArray(bytes).also { rnd.nextBytes(it) })
         private fun unb64(s: String) = Base64.getDecoder().decode(s)
 
         private fun keyOf(passphrase: String, salt: ByteArray) =

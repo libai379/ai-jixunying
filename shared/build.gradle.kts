@@ -6,6 +6,21 @@ plugins {
     alias(libs.plugins.android.kmp.library)
 }
 
+// GitHub 登录要的应用密钥（docs/账号设计说明.md）：不进仓库，只在本机一个文件里，打包时生成 BuildSecrets.kt 放进程序。
+// 文件不在时生成空的，界面上「用 GitHub 登录」提示还没开通。换位置用 -Pjxy.githubSecretFile=路径。
+val githubSecretFile = file((findProperty("jxy.githubSecretFile") as String?) ?: "G:/DevCache/secrets/github-oauth-secret.txt")
+val genSecrets by tasks.registering {
+    val secret = if (githubSecretFile.exists()) githubSecretFile.readText().trim() else ""
+    val out = layout.buildDirectory.dir("generated/secrets/kotlin")
+    inputs.property("githubSecretHash", secret.hashCode())
+    outputs.dir(out)
+    doLast {
+        val f = out.get().file("com/guixing/jixunying/engine/BuildSecrets.kt").asFile
+        f.parentFile.mkdirs()
+        f.writeText("package com.guixing.jixunying.engine\n\n// 打包时生成，别提交（build 目录本来就不进仓库）\ninternal object BuildSecrets {\n    val githubSecret: String get() = \"${secret.reversed()}\".reversed()\n}\n")
+    }
+}
+
 kotlin {
     jvmToolchain(21)
 
@@ -32,6 +47,7 @@ kotlin {
         // 引擎：电脑和手机都要能单独用，所以放在两边共用的 JVM 源码集里
         val jvmShared by creating {
             dependsOn(commonMain.get())
+            kotlin.srcDir(genSecrets)
             dependencies {
                 implementation(libs.ktor.client.core)
                 implementation(libs.ktor.client.okhttp)

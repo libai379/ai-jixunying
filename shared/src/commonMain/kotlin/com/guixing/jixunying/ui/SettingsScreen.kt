@@ -1312,29 +1312,23 @@ private fun AccountCard(ctl: AppController, state: AppState) {
             Text(
                 when {
                     a.githubLogin.isNotBlank() -> "@${a.githubLogin}" + (a.githubName.takeIf { it.isNotBlank() }?.let { "（$it）" } ?: "")
-                    a.githubCode.isNotBlank() -> "等你在 GitHub 页面上输入：${a.githubCode}"
+                    a.githubSigningIn -> "等你在 GitHub 页面上点同意…"
                     else -> "没绑"
                 },
                 style = MaterialTheme.typography.bodySmall,
-                color = if (a.githubLogin.isNotBlank()) Ext.c.success else if (a.githubCode.isNotBlank()) MaterialTheme.colorScheme.primary else Ext.c.subtle,
+                color = if (a.githubLogin.isNotBlank()) Ext.c.success else if (a.githubSigningIn) MaterialTheme.colorScheme.primary else Ext.c.subtle,
                 modifier = Modifier.weight(1f),
             )
             if (!ctl.remoteMode) {
                 if (a.githubLogin.isNotBlank()) TextButton({ ctl.run(Command.AccountGitHubUnbind, "已解绑 GitHub") }) { Text("解绑", color = MaterialTheme.colorScheme.error) }
                 else TextButton({
                     ctl.run(Command.AccountGitHubSignIn, quiet = true) { r ->
-                        if (!r.ok) { ctl.toast(r.message); return@run }
-                        val o = runCatching { kotlinx.serialization.json.Json.parseToJsonElement(r.data) as kotlinx.serialization.json.JsonObject }.getOrNull()
-                        val code = (o?.get("code") as? kotlinx.serialization.json.JsonPrimitive)?.content.orEmpty()
-                        val uri = (o?.get("uri") as? kotlinx.serialization.json.JsonPrimitive)?.content.orEmpty()
-                        clipboard.setText(AnnotatedString(code))
-                        ctl.toast("码 $code 已复制，在打开的 GitHub 页面上粘贴，点同意")
-                        if (uri.isNotBlank()) platform.openUrl(uri)
+                        if (r.ok && r.data.isNotBlank()) platform.openUrl(r.data) else ctl.toast(r.message.ifBlank { "开不了 GitHub 登录页" })
                     }
-                }) { Text(if (a.githubCode.isNotBlank()) "重新拿码" else "用 GitHub 登录") }
+                }) { Text(if (a.githubSigningIn) "重新打开" else "用 GitHub 登录") }
             }
         }
-        if (a.githubCode.isNotBlank()) Text("码已经复制了；GitHub 页面没打开的话，自己打开 ${a.githubUri.ifBlank { "github.com/login/device" }}。15 分钟内有效。",
+        if (a.githubSigningIn) Text("浏览器里打开了 GitHub，点同意后会自动跳回来。",
             style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, modifier = Modifier.padding(start = 72.dp))
         if (a.githubError.isNotBlank()) Text(a.githubError, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(start = 72.dp))
         Spacer(Modifier.height(6.dp))

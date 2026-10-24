@@ -228,6 +228,7 @@ const val APP_DEVELOPER = "癸星科技"
 /**
  * 「用 GitHub 登录」用的 GitHub OAuth 应用编号（2026-10-24，docs/账号设计说明.md）。要在 GitHub 上建一个 OAuth App、打开 Device Flow 才有；
  * 空的时候界面写「还没开通」。编号是公开的（设备码登录不用密钥）。
- * 10-24 在 libai379 账号下建好：应用「AI集训营」（github.com/settings/applications/3959881），勾了 Enable Device Flow。
+ * 10-24 在 libai379 账号下建好：应用「AI集训营」（github.com/settings/applications/3959881），回调登记 http://127.0.0.1/auth/github（跳回本机，端口随意）。
+ * 换令牌要的 client secret 不进仓库：打包时从本机文件生成 engine/BuildSecrets（shared/build.gradle.kts 的 genSecrets）。
  */
 const val GITHUB_OAUTH_CLIENT_ID = "Ov23liSOmf7DEYviKaAe"

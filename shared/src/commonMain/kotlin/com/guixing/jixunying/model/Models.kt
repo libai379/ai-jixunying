@@ -562,7 +562,7 @@ data class ChatGptInfo(
 
 /**
  * 账号（2026-10-24，docs/账号设计说明.md）：id 是本机密钥算出来的编号（jxy-xxxx-…）；github* 是绑的 GitHub。
- * githubCode / githubUri：正在用设备码登录时给用户看的码和网址；githubError：上一次登录的错。
+ * githubSigningIn：正在等用户在 GitHub 页面上点同意；githubError：上一次登录的错。
  */
 @Serializable
 data class AccountInfo(
@@ -571,7 +571,6 @@ data class AccountInfo(
     val githubLogin: String = "",
     val githubName: String = "",
     val githubAvatar: String = "",
-    val githubCode: String = "",
-    val githubUri: String = "",
+    val githubSigningIn: Boolean = false,
     val githubError: String = "",
 )

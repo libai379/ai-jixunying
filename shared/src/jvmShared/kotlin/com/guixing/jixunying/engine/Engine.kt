@@ -156,7 +156,7 @@ class Engine(
     private val pageSlots = kotlinx.coroutines.sync.Semaphore(2)
     /** 账号（2026-10-24，engine/Account.kt）：本机密钥 + 绑的 GitHub；私钥只在 account/identity.json。GitHub 要走代理。 */
     private val account by lazy { Account(java.io.File(storage.root, "account"), proxy = { proxyFor(true) }) }
-    @Volatile private var githubJob: Job? = null
+    @Volatile private var githubPending: Account.GithubPending? = null
     private fun accountInfo(extra: (AccountInfo) -> AccountInfo = { it }) = account.identity.let { i ->
         extra(state.account.copy(id = account.accountId, createdAt = i.createdAt, githubLogin = i.githubLogin, githubName = i.githubName, githubAvatar = i.githubAvatar))
     }
@@ -861,20 +861,24 @@ class Engine(
         }
         is Command.AccountGitHubSignIn -> {
             val clientId = System.getProperty("jxy.github.clientId") ?: com.guixing.jixunying.model.GITHUB_OAUTH_CLIENT_ID
-            val dc = try { account.githubStart(clientId) } catch (e: Account.AccountException) { return CommandResult(false, e.message ?: "开不了 GitHub 登录") }
-            githubJob?.cancel()
-            updateState { it.copy(account = accountInfo { a -> a.copy(githubCode = dc.userCode, githubUri = dc.verificationUri, githubError = "") }) }
-            githubJob = scope.launch {
-                val err = try { account.githubWait(clientId, dc); null } catch (e: CancellationException) { throw e } catch (e: Throwable) { e.message ?: e.toString() }
-                updateState { it.copy(account = accountInfo { a -> a.copy(githubCode = "", githubUri = "", githubError = err.orEmpty()) }) }
+            val secret = System.getProperty("jxy.github.secret") ?: BuildSecrets.githubSecret
+            val pending = try { account.githubBegin(clientId, secret) } catch (e: Account.AccountException) { return CommandResult(false, e.message ?: "开不了 GitHub 登录") }
+            githubPending?.cancel()
+            githubPending = pending
+            updateState { it.copy(account = accountInfo { a -> a.copy(githubSigningIn = true, githubError = "") }) }
+            scope.launch {
+                val err = try { pending.await(); null } catch (e: CancellationException) { throw e } catch (e: Throwable) { e.message ?: e.toString() }
+                if (githubPending !== pending) return@launch   // 又点了一次，这次的作废
+                githubPending = null
+                updateState { it.copy(account = accountInfo { a -> a.copy(githubSigningIn = false, githubError = err.orEmpty()) }) }
                 if (err == null) emit(Event.Notice("GitHub 绑好了：@${account.identity.githubLogin}"))
             }
-            CommandResult(message = "在 GitHub 页面上输入 ${dc.userCode}", data = buildJsonObject { put("code", dc.userCode); put("uri", dc.verificationUri) }.toString())
+            CommandResult(message = "在打开的 GitHub 页面上点同意", data = pending.url)
         }
         is Command.AccountGitHubUnbind -> {
-            githubJob?.cancel()
+            githubPending?.cancel(); githubPending = null
             account.githubUnbind()
-            updateState { it.copy(account = accountInfo { a -> a.copy(githubCode = "", githubUri = "", githubError = "") }) }
+            updateState { it.copy(account = accountInfo { a -> a.copy(githubSigningIn = false, githubError = "") }) }
             CommandResult(message = "已解绑 GitHub")
         }
         is Command.AccountExport -> try {
@@ -882,7 +886,7 @@ class Engine(
         } catch (e: Account.AccountException) { CommandResult(false, e.message ?: "导不出来") }
         is Command.AccountImport -> try {
             account.import(c.code, c.passphrase)
-            updateState { it.copy(account = accountInfo { a -> a.copy(githubCode = "", githubUri = "", githubError = "") }) }
+            updateState { it.copy(account = accountInfo { a -> a.copy(githubSigningIn = false, githubError = "") }) }
             CommandResult(message = "已换成账号 ${account.accountId}")
         } catch (e: Account.AccountException) { CommandResult(false, e.message ?: "导不进来") }
         is Command.ChatGptSignOut -> {

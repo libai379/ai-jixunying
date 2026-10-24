@@ -22,6 +22,10 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import java.io.File
 import java.net.ServerSocket
+import java.net.URI
+import java.net.URLDecoder
+import java.security.MessageDigest
+import java.util.Base64
 import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
@@ -32,7 +36,7 @@ import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
-/** 账号（2026-10-24，docs/账号设计说明.md）：本机密钥、备份码、GitHub 设备码登录（假 GitHub，照官方 device flow 的格式）、手机不能改。 */
+/** 账号（2026-10-24，docs/账号设计说明.md）：本机密钥、备份码、GitHub 网页登录跳回本机（假 GitHub，照官方 web flow + PKCE 的格式）、手机不能改。 */
 class AccountTest {
     private var port = 0
     private lateinit var fake: EmbeddedServer<*, *>
@@ -40,6 +44,7 @@ class AccountTest {
     private val forms = CopyOnWriteArrayList<Map<String, String>>()
     @Volatile private var polls = 0
     @Volatile private var userAuth = ""
+    @Volatile private var challenge = ""
 
     @BeforeTest
     fun setUp() {
@@ -48,21 +53,17 @@ class AccountTest {
         System.setProperty("jxy.github.web", "http://127.0.0.1:$port")
         System.setProperty("jxy.github.api", "http://127.0.0.1:$port/api")
         System.setProperty("jxy.github.clientId", "Iv-test")
+        System.setProperty("jxy.github.secret", "sec-test")
         fake = embeddedServer(CIO, port = port) {
             routing {
-                post("/login/device/code") {
-                    val p = call.receiveParameters(); forms += p.names().associateWith { p[it].orEmpty() }
-                    call.respondText("""{"device_code":"dev-1","user_code":"ABCD-1234","verification_uri":"https://github.com/login/device","expires_in":900,"interval":1}""", ContentType.Application.Json)
-                }
                 post("/login/oauth/access_token") {
-                    val p = call.receiveParameters(); forms += p.names().associateWith { p[it].orEmpty() }
+                    val p = call.receiveParameters(); val form = p.names().associateWith { p[it].orEmpty() }; forms += form
                     polls++
-                    // 第一次：还没同意；第二次：慢一点；第三次给令牌
-                    call.respondText(when (polls) {
-                        1 -> """{"error":"authorization_pending"}"""
-                        2 -> """{"error":"slow_down","interval":1}"""
-                        else -> """{"access_token":"gho_test","token_type":"bearer","scope":""}"""
-                    }, ContentType.Application.Json)
+                    val pkceOk = Base64.getUrlEncoder().withoutPadding().encodeToString(
+                        MessageDigest.getInstance("SHA-256").digest(form["code_verifier"].orEmpty().toByteArray())) == challenge
+                    call.respondText(
+                        if (form["code"] == "c1" && form["client_secret"] == "sec-test" && pkceOk) """{"access_token":"gho_test","token_type":"bearer","scope":""}"""
+                        else """{"error":"bad_verification_code"}""", ContentType.Application.Json)
                 }
                 get("/api/user") {
                     userAuth = call.request.headers["Authorization"].orEmpty()
@@ -75,7 +76,7 @@ class AccountTest {
     @AfterTest
     fun tearDown() {
         fake.stop(100, 500)
-        listOf("jxy.github.web", "jxy.github.api", "jxy.github.clientId").forEach { System.clearProperty(it) }
+        listOf("jxy.github.web", "jxy.github.api", "jxy.github.clientId", "jxy.github.secret").forEach { System.clearProperty(it) }
         dir.deleteRecursively()
     }
 
@@ -114,19 +115,48 @@ class AccountTest {
 
         val r = e.call(Command.AccountGitHubSignIn)
         assertTrue(r.ok, r.message)
-        val d = Json.parseToJsonElement(r.data).jsonObject
-        assertEquals("ABCD-1234", d["code"]!!.jsonPrimitive.content)
-        assertEquals("ABCD-1234", e.state.account.githubCode)
+        // 网页登录：打开的是 GitHub 授权页，跳回本机 127.0.0.1（端口随意，路径和应用里登记的一样）
+        val uri = URI(r.data)
+        assertEquals("/login/oauth/authorize", uri.path)
+        val q = uri.rawQuery.split('&').associate { URLDecoder.decode(it.substringBefore('='), "UTF-8") to URLDecoder.decode(it.substringAfter('='), "UTF-8") }
+        assertEquals("Iv-test", q["client_id"])
+        assertTrue(Regex("""http://127\.0\.0\.1:\d+/auth/github""").matches(q["redirect_uri"]!!), q["redirect_uri"])
+        assertEquals("S256", q["code_challenge_method"])
+        assertFalse("scope" in q, "不要权限 = 只读公开资料")
+        challenge = q["code_challenge"]!!
+        assertTrue(e.state.account.githubSigningIn)
+        // 浏览器跳回来：先来一个要图标的请求（不理），再来真回调
+        val http = java.net.http.HttpClient.newHttpClient()
+        fun get(u: String) = http.send(java.net.http.HttpRequest.newBuilder(URI(u)).build(), java.net.http.HttpResponse.BodyHandlers.ofString())
+        // 浏览器的预连接：连上不发东西（真登录时就是它让登录报了 Read timed out）
+        val idle = java.net.Socket("127.0.0.1", URI(q["redirect_uri"]!!).port)
+        assertEquals(404, get(q["redirect_uri"]!!.replace("/auth/github", "/favicon.ico")).statusCode())
+        idle.close()
+        val cb = get(q["redirect_uri"] + "?code=c1&state=" + q["state"])
+        assertTrue("GitHub 登录好了" in cb.body(), cb.body())
         withTimeout(15_000) { while (e.state.account.githubLogin.isEmpty()) delay(50) }
         assertEquals("libai379", e.state.account.githubLogin)
         assertEquals("李白", e.state.account.githubName)
-        assertEquals("", e.state.account.githubCode)
+        assertFalse(e.state.account.githubSigningIn)
         assertEquals(id, e.state.account.id, "绑 GitHub 不换账号编号")
         assertEquals("Bearer gho_test", userAuth)
-        val start = forms.first()
-        assertEquals("Iv-test", start["client_id"])
-        assertFalse("client_secret" in start)
-        assertEquals("urn:ietf:params:oauth:grant-type:device_code", forms.last()["grant_type"])
+        val tok = forms.last()
+        assertEquals("Iv-test", tok["client_id"]); assertEquals(q["redirect_uri"], tok["redirect_uri"])
+
+        // 校验码不对（别人伪造的跳转）：不绑
+        e.call(Command.AccountGitHubUnbind)
+        val r2 = e.call(Command.AccountGitHubSignIn)
+        val q2 = URI(r2.data).rawQuery.split('&').associate { URLDecoder.decode(it.substringBefore('='), "UTF-8") to URLDecoder.decode(it.substringAfter('='), "UTF-8") }
+        get(q2["redirect_uri"] + "?code=c1&state=wrong")
+        withTimeout(15_000) { while (e.state.account.githubSigningIn) delay(50) }
+        assertEquals("", e.state.account.githubLogin)
+        assertTrue("校验码" in e.state.account.githubError, e.state.account.githubError)
+        // 再正常登一次，后面导出要带着 GitHub
+        val r3 = e.call(Command.AccountGitHubSignIn)
+        val q3 = URI(r3.data).rawQuery.split('&').associate { URLDecoder.decode(it.substringBefore('='), "UTF-8") to URLDecoder.decode(it.substringAfter('='), "UTF-8") }
+        challenge = q3["code_challenge"]!!
+        get(q3["redirect_uri"] + "?code=c1&state=" + q3["state"])
+        withTimeout(15_000) { while (e.state.account.githubLogin.isEmpty()) delay(50) }
         assertFalse("gho_test" in File(dir, "data/account/identity.json").readText(), "令牌不存")
         assertFalse("gho_test" in File(dir, "data/state.json").readText())
 
