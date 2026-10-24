@@ -105,6 +105,8 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.AnnotatedString
 import com.guixing.jixunying.ui.glass.glass
+import kotlinx.coroutines.launch
+import androidx.compose.runtime.rememberCoroutineScope
 
 private fun tabIcon(t: SettingsTab): ImageVector = when (t) {
     SettingsTab.ACCOUNT -> Icons.Rounded.AccountCircle
@@ -206,7 +208,8 @@ private fun tabAlert(t: SettingsTab, s: AppState): Boolean = t == SettingsTab.ME
 
 /** 设置首页每一项右边的小字：一眼看出现在是什么状态。 */
 private fun tabSummary(t: SettingsTab, s: AppState, ctl: AppController): String = when (t) {
-    SettingsTab.ACCOUNT -> if (s.account.githubLogin.isNotBlank()) "@" + s.account.githubLogin else "没登录"
+    // 账号每台设备一个：手机遥控电脑时这里也是手机自己的
+    SettingsTab.ACCOUNT -> ctl.hub.local.store.state.value.account.let { a -> if (a.githubLogin.isNotBlank()) "@" + a.githubLogin else "没登录" }
     SettingsTab.PROVIDERS -> if (s.providers.isEmpty()) "还没添加" else "${s.providers.size} 个"
     SettingsTab.MEMBERS -> if (s.members.isEmpty()) "还没有" else "${s.members.size} 位"
     SettingsTab.PROFILE -> s.profile.name
@@ -1303,16 +1306,31 @@ private fun ChatGptLogin(ctl: AppController, state: AppState, saveFirst: (done: 
  * 换设备用备份码（口令加密）。手机遥控电脑时这里只看不改。
  */
 @Composable
-private fun AccountPage(ctl: AppController, state: AppState) {
+private fun AccountPage(ctl: AppController, @Suppress("UNUSED_PARAMETER") state: AppState) {
     PageHeader("账号", "用 GitHub 登录；不用服务器，账号就在这台设备上，换设备用备份码带过去。")
-    AccountCard(ctl, state)
+    AccountCard(ctl)
+}
+
+/**
+ * 账号每台设备一个，登录也在这台设备上跳回（浏览器回 127.0.0.1）：所以这一页一直用本机引擎（ctl.hub.local），
+ * 手机遥控电脑时也是手机自己的账号（10-24 用户：「手机 GitHub 登录不上」——以前遥控时显示电脑的账号、登录按钮藏着）。
+ */
+private class LocalRunner(val ctl: AppController, val scope: kotlinx.coroutines.CoroutineScope) {
+    fun run(c: Command, okToast: String? = null, onResult: ((com.guixing.jixunying.model.CommandResult) -> Unit)? = null) {
+        scope.launch {
+            val r = ctl.hub.local.call(c)
+            if (onResult != null) onResult(r) else if (!r.ok) ctl.toast(r.message) else if (okToast != null) ctl.toast(okToast)
+        }
+    }
 }
 
 @Composable
-private fun AccountCard(ctl: AppController, state: AppState) {
+private fun AccountCard(ctl: AppController) {
     val platform = LocalPlatform.current
     val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
-    val a = state.account
+    val local by ctl.hub.local.store.state.collectAsState()
+    val a = local.account
+    val runner = LocalRunner(ctl, rememberCoroutineScope())
     var exporting by remember { mutableStateOf(false) }
     var importing by remember { mutableStateOf(false) }
     SectionCard {
@@ -1338,21 +1356,19 @@ private fun AccountCard(ctl: AppController, state: AppState) {
                 color = if (a.githubLogin.isNotBlank()) Ext.c.success else if (a.githubSigningIn) MaterialTheme.colorScheme.primary else Ext.c.subtle,
                 modifier = Modifier.weight(1f),
             )
-            if (!ctl.remoteMode) {
-                if (a.githubLogin.isNotBlank()) TextButton({ ctl.run(Command.AccountGitHubUnbind, "已解绑 GitHub") }) { Text("解绑", color = MaterialTheme.colorScheme.error) }
-                else TextButton({
-                    ctl.run(Command.AccountGitHubSignIn, quiet = true) { r ->
-                        if (r.ok && r.data.isNotBlank()) platform.openUrl(r.data) else ctl.toast(r.message.ifBlank { "开不了 GitHub 登录页" })
-                    }
-                }) { Text(if (a.githubSigningIn) "重新打开" else "用 GitHub 登录") }
-            }
+            if (a.githubLogin.isNotBlank()) TextButton({ runner.run(Command.AccountGitHubUnbind, "已解绑 GitHub") }) { Text("解绑", color = MaterialTheme.colorScheme.error) }
+            else TextButton({
+                runner.run(Command.AccountGitHubSignIn) { r ->
+                    if (r.ok && r.data.isNotBlank()) platform.openUrl(r.data) else ctl.toast(r.message.ifBlank { "开不了 GitHub 登录页" })
+                }
+            }) { Text(if (a.githubSigningIn) "重新打开" else "用 GitHub 登录") }
         }
         if (a.githubSigningIn) Text("浏览器里打开了 GitHub，点同意后会自动跳回来。",
             style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, modifier = Modifier.padding(start = 72.dp))
         if (a.githubError.isNotBlank()) Text(a.githubError, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(start = 72.dp))
         Spacer(Modifier.height(6.dp))
-        if (ctl.remoteMode) Text("这是电脑的账号，只能在电脑上改。", style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
-        else Row {
+        if (ctl.remoteMode) Text("这是这台手机自己的账号（电脑的账号在电脑上看）。", style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
+        Row {
             OutlinedButton({ exporting = true }) { Text("导出备份码") }
             Spacer(Modifier.width(8.dp))
             OutlinedButton({ importing = true }) { Text("导入备份码") }
@@ -1360,12 +1376,12 @@ private fun AccountCard(ctl: AppController, state: AppState) {
         Text("换手机、换电脑，或者想让手机和电脑用同一个账号：在这台导出备份码，到那台导入。备份码要设口令，口令忘了就导不进去；设备丢了又没备份，这个账号就找不回来了。",
             style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, modifier = Modifier.padding(top = 6.dp))
     }
-    if (exporting) AccountExportDialog(ctl) { exporting = false }
-    if (importing) AccountImportDialog(ctl) { importing = false }
+    if (exporting) AccountExportDialog(ctl, runner) { exporting = false }
+    if (importing) AccountImportDialog(ctl, runner) { importing = false }
 }
 
 @Composable
-private fun AccountExportDialog(ctl: AppController, onClose: () -> Unit) {
+private fun AccountExportDialog(ctl: AppController, runner: LocalRunner, onClose: () -> Unit) {
     val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
     var p1 by remember { mutableStateOf("") }
     var p2 by remember { mutableStateOf("") }
@@ -1375,7 +1391,7 @@ private fun AccountExportDialog(ctl: AppController, onClose: () -> Unit) {
         TextButton(onClose) { Text(if (code.isBlank()) "取消" else "关闭") }
         if (code.isBlank()) Button({
             error = when { p1.length < 6 -> "口令至少 6 个字"; p1 != p2 -> "两次口令不一样"; else -> "" }
-            if (error.isEmpty()) ctl.run(Command.AccountExport(p1), quiet = true) { r -> if (r.ok) code = r.data else error = r.message }
+            if (error.isEmpty()) runner.run(Command.AccountExport(p1)) { r -> if (r.ok) code = r.data else error = r.message }
         }) { Text("导出") } else Button({ clipboard.setText(AnnotatedString(code)); ctl.toast("备份码已复制") }) { Text("复制备份码") }
     }) {
         Column {
@@ -1398,13 +1414,13 @@ private fun AccountExportDialog(ctl: AppController, onClose: () -> Unit) {
 }
 
 @Composable
-private fun AccountImportDialog(ctl: AppController, onClose: () -> Unit) {
+private fun AccountImportDialog(ctl: AppController, runner: LocalRunner, onClose: () -> Unit) {
     var code by remember { mutableStateOf("") }
     var pass by remember { mutableStateOf("") }
     var error by remember { mutableStateOf("") }
     AppDialog("导入账号备份码", onClose, width = 520.dp, actions = {
         TextButton(onClose) { Text("取消") }
-        Button({ ctl.run(Command.AccountImport(code, pass), quiet = true) { r -> if (r.ok) { ctl.toast(r.message); onClose() } else error = r.message } },
+        Button({ runner.run(Command.AccountImport(code, pass)) { r -> if (r.ok) { ctl.toast(r.message); onClose() } else error = r.message } },
             enabled = code.isNotBlank() && pass.isNotBlank()) { Text("导入") }
     }) {
         Column {

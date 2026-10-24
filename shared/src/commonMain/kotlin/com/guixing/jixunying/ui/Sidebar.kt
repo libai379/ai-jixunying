@@ -173,7 +173,9 @@ fun Sidebar(ctl: AppController, modifier: Modifier, onNavigate: () -> Unit) {
         HorizontalDivider(color = Ext.c.border)
         Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             // 账号：最底下一行最左边（10-24），登了显示 GitHub 名字，没登显示「登录」，点进 设置 → 账号
-            AccountChip(state.account) { ctl.openSettings(SettingsTab.ACCOUNT); onNavigate() }
+            // 账号每台设备一个：手机遥控电脑时也显示手机自己的
+            val localState by ctl.hub.local.store.state.collectAsState()
+            AccountChip(localState.account) { ctl.openSettings(SettingsTab.ACCOUNT); onNavigate() }
             Spacer(Modifier.weight(1f))
             BottomItem(Icons.Rounded.Payments, "花费", null) { ctl.openPage(MainPage.COSTS); onNavigate() }
             Spacer(Modifier.width(6.dp))
