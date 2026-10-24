@@ -57,7 +57,9 @@ expect val wallpaperStill: Boolean
 
 /** 玻璃要用的东西：采样源（窗口最底下的壁纸）、开没开（设置 → 外观 → 液态玻璃）、深浅色、各位置调好的参数（设置 → 外观 → 液态玻璃调节）。 */
 @Immutable
-class GlassEnv(val backdrop: Backdrop?, val on: Boolean, val dark: Boolean, val tuning: GlassTuning = GlassTuning())
+class GlassEnv(val backdrop: Backdrop?, val on: Boolean, val dark: Boolean, val tuning: GlassTuning = GlassTuning(),
+    /** 背景怎么画（弹窗是另一个窗口，自己照这个画一份当采样源）。 */
+    val paint: DrawScope.() -> Unit = { drawWallpaper(dark) })
 
 val LocalGlass = staticCompositionLocalOf { GlassEnv(null, false, false) }
 
@@ -156,9 +158,9 @@ fun GlassWallpaper(backdrop: LayerBackdrop, dark: Boolean, modifier: Modifier = 
 
 /** 弹窗是另一个窗口，不能采样主窗口的壁纸：弹窗里自己画一份当采样源（不挂图层，不跨窗口）。 */
 @Composable
-fun rememberWallpaperBackdrop(dark: Boolean): Backdrop {
+fun rememberWallpaperBackdrop(paint: DrawScope.() -> Unit): Backdrop {
     // rememberCanvasBackdrop 按 lambda 记，lambda 要先记住，不然每次重组都换一个新的
-    val draw: DrawScope.() -> Unit = androidx.compose.runtime.remember(dark) { { drawWallpaper(dark) } }
+    val draw: DrawScope.() -> Unit = androidx.compose.runtime.remember(paint) { paint }
     return rememberCanvasBackdrop(draw)
 }
 

@@ -207,7 +207,7 @@ class CodeSessionTest {
         assertTrue(e.call(Command.SaveSettings(e.state.settings.copy(schema = Settings.SCHEMA, glassTuning = tuned))).ok)
         assertTrue(e.call(Command.SaveSettings(e.state.settings.copy(schema = 7, glassTuning = com.guixing.jixunying.model.GlassTuning()))).ok)
         assertEquals(9f, e.state.settings.glassTuning.paramsFor(com.guixing.jixunying.model.GlassTarget.CARD).blurRadiusDp, "旧版手机冲不掉调好的玻璃")
-        assertEquals(8, Settings.SCHEMA, "1.7.0 加了语音和按意思搜（5），10-17 加了个性化（6），10-22 加了液态玻璃开关（7），10-24 加了液态玻璃调参（8）")
+        assertEquals(9, Settings.SCHEMA, "1.7.0 加了语音和按意思搜（5），10-17 加了个性化（6），10-22 加了液态玻璃开关（7），10-24 加了液态玻璃调参（8）、界面背景（9）")
     }
 
     @Test

@@ -1,5 +1,6 @@
 package com.guixing.jixunying.ui
 
+import kotlinx.coroutines.launch
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -65,12 +66,12 @@ import kotlin.math.roundToInt
  * 拖滑块时只改预览，松手才存（不然每拖一下都写一遍设置，手机遥控电脑时还要过网）。
  */
 
-private enum class PreviewBg(val label: String) { WALLPAPER("界面壁纸"), GRADIENT("彩色渐变"), SOLID("纯色"), TEXT("文字") }
+private enum class PreviewBg(val label: String) { WALLPAPER("现在的背景"), GRADIENT("彩色渐变"), SOLID("纯色"), TEXT("文字") }
 
 private val swatches = listOf(0xFFFFFFFFL, 0xFF000000L, 0xFF0088FFL, 0xFF4F5BEBL, 0xFF34C759L, 0xFFFF8D28L, 0xFFFF5FC9L, 0xFFFFB74DL)
 
 @Composable
-fun GlassTuningPage(ctl: AppController, tuning: GlassTuning, onBack: (() -> Unit)?) {
+fun GlassTuningPage(ctl: AppController, tuning: GlassTuning, onBack: (() -> Unit)?, embedded: Boolean = false) {
     val clipboard = LocalClipboardManager.current
     var target by remember { mutableStateOf(GlassTarget.CARD) }
     // 草稿：拖的时候改它（预览跟着变），松手 / 点开关时存进设置
@@ -81,9 +82,11 @@ fun GlassTuningPage(ctl: AppController, tuning: GlassTuning, onBack: (() -> Unit
     if (onBack != null) Row(verticalAlignment = Alignment.CenterVertically) {
         TextButton(onBack) { Text("‹ 返回外观") }
     }
-    PageHeader("液态玻璃调节", "每个位置各调各的；上面是预览，下面拖一拖马上看到，松手就存，界面上同时变。调乱了点「恢复默认」或者应用一个预设。")
-    // 总开关也放在这里（以前只在 外观 里）
-    SwitchRow("液态玻璃", "关掉就是原来的纯色界面", LocalGlass.current.on) { v -> ctl.updateSettings { it.copy(glass = v) } }
+    // embedded = 放在 外观 页里（10-24 用户：「液态玻璃和外观，这不是一个东西吗？为什么要分两栏？」——并回外观，标题和总开关外观页自己有）
+    if (!embedded) {
+        PageHeader("液态玻璃调节", "每个位置各调各的；上面是预览，下面拖一拖马上看到，松手就存，界面上同时变。调乱了点「恢复默认」或者应用一个预设。")
+        SwitchRow("液态玻璃", "关掉就是原来的纯色界面", LocalGlass.current.on) { v -> ctl.updateSettings { it.copy(glass = v) } }
+    } else Hint("每个位置各调各的；上面是预览，拖一拖马上看到，松手就存，界面上同时变。调乱了点「恢复默认」或者应用一个预设。")
     Spacer(Modifier.height(8.dp))
     FlowRowCompat {
         GlassTarget.entries.forEach { t ->
@@ -167,7 +170,7 @@ fun GlassTuningPage(ctl: AppController, tuning: GlassTuning, onBack: (() -> Unit
             Labeled("浓度", "${(t.alpha * 100).roundToInt()}%", t.alpha, 0f..1f, { change(p.copy(tint = t.copy(alpha = it))) }, { commit() })
         }
     }
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+    androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         OutlinedButton({ ctl.updateSettings { it.copy(glassTuning = it.glassTuning.reset(target)) }; ctl.toast("「${target.label}」已恢复默认") }) { Text("恢复默认") }
         OutlinedButton({
             clipboard.setText(AnnotatedString(AppJson.encodeToString(GlassParams.serializer(), draft)))
@@ -184,6 +187,7 @@ fun GlassTuningPage(ctl: AppController, tuning: GlassTuning, onBack: (() -> Unit
 private fun Preview(target: GlassTarget, p: GlassParams) {
     var bg by remember { mutableStateOf(PreviewBg.WALLPAPER) }
     val dark = LocalGlass.current.dark
+    val paint = LocalGlass.current.paint
     FlowRowCompat {
         PreviewBg.entries.forEach { b -> FilterChip(selected = b == bg, onClick = { bg = b }, label = { Text(b.label) }, modifier = Modifier.padding(end = 6.dp)) }
     }
@@ -194,7 +198,7 @@ private fun Preview(target: GlassTarget, p: GlassParams) {
         // 采样源要和玻璃是兄弟、背景画在挂 layerBackdrop 的这个节点自己身上（癸星科技踩过的两个坑）
         Box(Modifier.layerBackdrop(backdrop).fillMaxSize().drawBehind {
             when (bg) {
-                PreviewBg.WALLPAPER -> drawWallpaper(dark)
+                PreviewBg.WALLPAPER -> paint()
                 PreviewBg.GRADIENT -> drawRect(Brush.linearGradient(listOf(Color(0xFF8B7CFF), Color(0xFF3CE8D8), Color(0xFFFF5FC9))))
                 PreviewBg.SOLID -> drawRect(if (dark) Color(0xFF3A3A3C) else Color(0xFFD9DCE6))
                 PreviewBg.TEXT -> {
@@ -307,15 +311,78 @@ private fun Toggle(label: String, checked: Boolean, onChange: (Boolean) -> Unit)
     }
 }
 
+/** 颜色：点开取色器（10-24：以前只有 8 个固定色块）。透明度那一位保留原来的。 */
 @Composable
 private fun Swatches(current: Long, onPick: (Long) -> Unit) {
-    androidx.compose.foundation.layout.FlowRow(Modifier.padding(vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        swatches.forEach { c ->
-            val sel = (c and 0x00FFFFFFL) == (current and 0x00FFFFFFL)
-            Box(Modifier.size(26.dp).clip(CircleShape).background(Color(c.toInt()))
-                .border(if (sel) 2.5.dp else 1.dp, if (sel) MaterialTheme.colorScheme.primary else Ext.c.border, CircleShape)
-                .clickable { onPick(c) })
+    Row(Modifier.padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+        ColorSwatch(current or 0xFF000000L, "选颜色", 30) { onPick(it) }
+        Spacer(Modifier.width(8.dp))
+        Text("点色块换颜色", style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
+    }
+}
+
+/**
+ * 背景（2026-10-24）：默认 / 纯色 / 渐变 / 图片；纯色、渐变的颜色用取色器，渐变能调角度；图片从本机选；
+ * 亮度、对比度、饱和度三种都给，模糊给渐变和图片，透明度只给图片（照癸星科技 GlassBackgroundEditor）。
+ */
+@Composable
+fun BackgroundSection(ctl: AppController, bg: com.guixing.jixunying.model.AppBackground) {
+    val platform = LocalPlatform.current
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
+    var draft by remember(bg) { mutableStateOf(bg) }
+    var busy by remember { mutableStateOf(false) }
+    fun commit(b: com.guixing.jixunying.model.AppBackground = draft) { draft = b; ctl.updateSettings { it.copy(background = b) } }
+    FlowRowCompat {
+        com.guixing.jixunying.model.BgMode.entries.forEach { m ->
+            FilterChip(selected = draft.mode == m, onClick = { commit(draft.copy(mode = m)) }, label = { Text(m.label) }, modifier = Modifier.padding(end = 6.dp))
         }
     }
-    Spacer(Modifier.width(1.dp))
+    when (draft.mode) {
+        com.guixing.jixunying.model.BgMode.DEFAULT -> Hint("默认：开着液态玻璃时是几团淡淡的柔光，关着是主题的底色。")
+        com.guixing.jixunying.model.BgMode.SOLID -> Row(Modifier.padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+            ColorSwatch(draft.solidArgb, "背景颜色") { commit(draft.copy(solidArgb = it)) }
+            Spacer(Modifier.width(10.dp))
+            Text("点色块选颜色", style = MaterialTheme.typography.bodySmall)
+        }
+        com.guixing.jixunying.model.BgMode.GRADIENT -> {
+            Row(Modifier.padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                val a = draft.gradientArgb.getOrElse(0) { 0xFF8B7CFFL }
+                val b = draft.gradientArgb.getOrElse(1) { 0xFF3CE8D8L }
+                ColorSwatch(a, "渐变起点颜色") { commit(draft.copy(gradientArgb = listOf(it, b))) }
+                Text("  →  ", style = MaterialTheme.typography.bodyMedium)
+                ColorSwatch(b, "渐变终点颜色") { commit(draft.copy(gradientArgb = listOf(a, it))) }
+            }
+            Labeled("角度", "${draft.gradientAngle.roundToInt()}°", draft.gradientAngle, 0f..360f, { draft = draft.copy(gradientAngle = it) }, { commit() })
+        }
+        com.guixing.jixunying.model.BgMode.IMAGE -> {
+            if (draft.imageId.isNotBlank()) {
+                val img = rememberImage(ctl, draft.imageId)
+                if (img != null) androidx.compose.foundation.Image(img, null, Modifier.fillMaxWidth().height(120.dp).clip(RoundedCornerShape(10.dp)),
+                    contentScale = androidx.compose.ui.layout.ContentScale.Crop, alpha = draft.alpha,
+                    colorFilter = androidx.compose.ui.graphics.ColorFilter.colorMatrix(com.guixing.jixunying.ui.glass.bgColorMatrix(draft.brightness, draft.contrast, draft.saturation)))
+                Spacer(Modifier.height(6.dp))
+            }
+            OutlinedButton(enabled = !busy, onClick = {
+                busy = true
+                scope.launch {
+                    val f = platform.pickFiles(imagesOnly = true).firstOrNull()
+                    if (f != null) {
+                        val att = ctl.backend.upload(f.name, f.mime.ifBlank { "image/jpeg" }, f.bytes)
+                        if (att != null) commit(draft.copy(mode = com.guixing.jixunying.model.BgMode.IMAGE, imageId = att.id)) else ctl.toast("图片存不进去")
+                    }
+                    busy = false
+                }
+            }) { Text(if (busy) "正在导入…" else if (draft.imageId.isBlank()) "选一张图片" else "换一张图片") }
+        }
+    }
+    if (draft.mode != com.guixing.jixunying.model.BgMode.DEFAULT) {
+        Labeled("亮度", "%.1f".format(draft.brightness), draft.brightness, 0.3f..1.7f, { draft = draft.copy(brightness = it) }, { commit() })
+        Labeled("对比度", "%.1f".format(draft.contrast), draft.contrast, 0.3f..1.7f, { draft = draft.copy(contrast = it) }, { commit() })
+        Labeled("饱和度", "%.1f".format(draft.saturation), draft.saturation, 0f..2f, { draft = draft.copy(saturation = it) }, { commit() })
+        if (draft.mode != com.guixing.jixunying.model.BgMode.SOLID)
+            Labeled("模糊", "${draft.blurDp.roundToInt()}dp", draft.blurDp, 0f..30f, { draft = draft.copy(blurDp = it) }, { commit() })
+        if (draft.mode == com.guixing.jixunying.model.BgMode.IMAGE)
+            Labeled("透明度", "${(draft.alpha * 100).roundToInt()}%", draft.alpha, 0.1f..1f, { draft = draft.copy(alpha = it) }, { commit() })
+        Hint("背景深了，字会自动看不清：深色背景配 设置里主题选「深色」，浅色背景选「浅色」。")
+    }
 }

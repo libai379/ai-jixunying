@@ -124,7 +124,6 @@ private fun tabIcon(t: SettingsTab): ImageVector = when (t) {
     SettingsTab.WEIXIN -> Icons.Rounded.Forum
     SettingsTab.DEVICES -> Icons.Rounded.PhoneAndroid
     SettingsTab.APPEARANCE -> Icons.Rounded.Palette
-    SettingsTab.GLASS -> Icons.Rounded.Tune
     SettingsTab.ABOUT -> Icons.Rounded.Info
 }
 
@@ -228,7 +227,6 @@ private fun tabSummary(t: SettingsTab, s: AppState, ctl: AppController): String 
     SettingsTab.CODE -> shellLabel(s.settings.code.shell) + if (s.settings.code.allowPhone) " · 手机能用" else " · 手机不能用"
     SettingsTab.WEIXIN -> if (!s.weixinCapable) "在电脑上设置" else if (s.weixin.bound) "已绑定" else "未绑定"
     SettingsTab.DEVICES -> if (ctl.hub.remote.value != null) "已配对" else if (s.devices.isNotEmpty()) "${s.devices.size} 台" else "未配对"
-    SettingsTab.GLASS -> if (!s.settings.glass) "关着" else if (s.settings.glassTuning.byTarget.isEmpty()) "默认" else "调过 ${s.settings.glassTuning.byTarget.size} 处"
     SettingsTab.APPEARANCE -> listOf("跟随系统", "浅色", "深色").getOrElse(s.settings.darkMode) { "" } + if (s.settings.glass) " · 液态玻璃" else ""
     SettingsTab.ABOUT -> com.guixing.jixunying.model.APP_VERSION
 }
@@ -252,7 +250,6 @@ private fun SettingsPage(ctl: AppController, state: AppState, tab: SettingsTab) 
                 SettingsTab.WEIXIN -> WeixinPage(ctl, state)
                 SettingsTab.DEVICES -> DevicesPage(ctl, state)
                 SettingsTab.APPEARANCE -> AppearancePage(ctl, state)
-                SettingsTab.GLASS -> GlassTuningPage(ctl, state.settings.glassTuning, null)
                 SettingsTab.ABOUT -> AboutPage(ctl)
             }
         }
@@ -1136,10 +1133,8 @@ private fun DevicesPage(ctl: AppController, state: AppState) {
 @Composable
 private fun AppearancePage(ctl: AppController, state: AppState) {
     val s = state.settings
-    // 液态玻璃调节（2026-10-24）：设置里单独一项「液态玻璃」，这里也留一个入口
-    var tuning by remember { mutableStateOf(ctl.debugDialog == "tune") }
-    if (tuning) { GlassTuningPage(ctl, s.glassTuning) { tuning = false }; return }
-    PageHeader("外观与通用", "主题、代理、群聊规则。改了马上生效。")
+    // 10-24 用户：「液态玻璃和外观，这不是一个东西吗？为什么要分两栏？」——主题、背景、液态玻璃（开关和全套调节）都在这一页
+    PageHeader("外观", "主题、背景、液态玻璃。改了马上生效。")
     SectionCard {
         FieldLabel("主题")
         FlowRowCompat {
@@ -1150,18 +1145,24 @@ private fun AppearancePage(ctl: AppController, state: AppState) {
                 }
             }
         }
-        // 液态玻璃（2026-10-22，docs/界面换装说明.md）
-        SwitchRow("液态玻璃", "侧栏、输入框、弹窗、开关、发送键用癸星科技那套玻璃和弹簧动画；关掉就是原来的纯色界面",
+    }
+    Spacer(Modifier.height(12.dp))
+    SectionCard {
+        FieldLabel("背景", "整个界面最底下那一层；液态玻璃折射的就是它")
+        BackgroundSection(ctl, s.background)
+    }
+    Spacer(Modifier.height(12.dp))
+    SectionCard {
+        SwitchRow("液态玻璃", "侧栏、输入框、卡片、弹窗、开关、发送键用癸星科技那套玻璃和弹簧动画；关掉就是原来的纯色界面",
             s.glass) { v -> ctl.updateSettings { it.copy(glass = v) } }
-        Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).clickable { ctl.settingsTab = SettingsTab.GLASS }.padding(vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Text("液态玻璃调节", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
-                Text("侧栏、顶栏和输入框、卡片、按钮、弹窗各调各的：折射、模糊、高光、阴影、染色、底色；还能存预设", style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
-            }
-            Text("›", color = Ext.c.subtle)
+        if (s.glass) {
+            Spacer(Modifier.height(6.dp))
+            GlassTuningPage(ctl, s.glassTuning, null, embedded = true)
         }
-        Spacer(Modifier.height(10.dp))
+    }
+    Spacer(Modifier.height(12.dp))
+    SectionCard {
+        FieldLabel("通用")
         var proxy by remember { mutableStateOf(s.proxy) }
         AutoSave(proxy, s.proxy) { v -> ctl.updateSettings { it.copy(proxy = v.trim()) } }
         FieldLabel("代理地址", "给海外服务商和海外搜索用，比如 v2rayN 默认 127.0.0.1:10809；填好自动保存")

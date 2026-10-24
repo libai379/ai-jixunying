@@ -27,7 +27,8 @@ class UsdRate(
 
     class Source(val name: String, val url: String, val parse: (JsonObject) -> Double?)
 
-    class Result(val rate: Double, val source: String)
+    /** perUsd：1 美元换多少别的货币（取得到的都放进来，至少有 CNY）。 */
+    class Result(val rate: Double, val source: String, val perUsd: Map<String, Double> = emptyMap())
 
     /** 取一次。先直连，连不上再走设置里的代理；两个接口都不行就抛出最后一个错。 */
     suspend fun fetch(): Result {
@@ -36,12 +37,13 @@ class UsdRate(
             val name = src.name
             for (proxy in listOf(null, proxyOf()).distinct()) {
                 try {
-                    val r = withTimeout(12_000) {
+                    val o = withTimeout(12_000) {
                         val text = Http.client(proxy).get(src.url) { header("Accept", "application/json") }.bodyAsText()
-                        src.parse(Json.parse(text).jsonObject)
+                        Json.parse(text).jsonObject
                     }
+                    val r = src.parse(o)
                     if (r == null || r !in SANE) throw IllegalStateException("$name 返回的汇率看着不对：$r")
-                    return Result(r, name)
+                    return Result(r, name, perUsd(o))
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Throwable) {
@@ -62,11 +64,19 @@ class UsdRate(
         /** 两家都是 {"rates":{"CNY":数}}；ExchangeRate-API 另有 "result":"success"。 */
         fun cny(o: JsonObject): Double? = (o["rates"] as? JsonObject)?.get("CNY")?.jsonPrimitive?.doubleOrNull
 
+        /** 换算要的几种（2026-10-24）：人民币、港币、新加坡元、英镑、欧元、日元；美元自己是 1。 */
+        val CURRENCIES = listOf("CNY", "HKD", "SGD", "GBP", "EUR", "JPY")
+
+        fun perUsd(o: JsonObject): Map<String, Double> {
+            val rates = o["rates"] as? JsonObject ?: return emptyMap()
+            return CURRENCIES.mapNotNull { c -> rates[c]?.jsonPrimitive?.doubleOrNull?.takeIf { it > 0 }?.let { c to it } }.toMap() + ("USD" to 1.0)
+        }
+
         val SOURCES: List<Source> = listOf(
             Source("ExchangeRate-API", "https://open.er-api.com/v6/latest/USD") { o ->
                 if (o["result"]?.jsonPrimitive?.content == "success") cny(o) else null
             },
-            Source("Frankfurter（欧洲央行）", "https://api.frankfurter.dev/v1/latest?base=USD&symbols=CNY") { o -> cny(o) },
+            Source("Frankfurter（欧洲央行）", "https://api.frankfurter.dev/v1/latest?base=USD&symbols=CNY,HKD,SGD,GBP,EUR,JPY") { o -> cny(o) },
         )
     }
 }

@@ -130,6 +130,8 @@ fun CostsScreen(ctl: AppController, wide: Boolean, openDrawer: () -> Unit) {
                 // 用了按美元收费的服务（账本里有美元花费、或者加了海外服务商）才说「正在用」；只用国内几家时说明用不上
                 val usesUsd = (report?.total?.usd ?: 0.0) > 0 || state.providers.any { it.enabled && com.guixing.jixunying.model.Presets.byId(it.presetId).group == com.guixing.jixunying.model.Presets.GROUP_GLOBAL }
                 RateCard(ctl, state.settings.costs, usesUsd)
+                Spacer(Modifier.height(12.dp))
+                ConverterCard(ctl, state.settings.costs)
             }
         }
     }
@@ -526,3 +528,61 @@ private fun PriceDialog(ctl: AppController, line: CostLine, current: ModelPrice?
         }
     }
 }
+
+/**
+ * 货币换算（2026-10-24 用户：「不仅是美元，新币港币英镑也有汇率，而且还能跟人民币都可以跟人民币换算，互相之间也可以换算」）。
+ * 汇率和美元汇率同一次联网取（engine/UsdRate，ExchangeRate-API 或欧洲央行），存在 costs.fx（1 美元换多少）；任意两种之间按美元中转算。
+ */
+private val currencyNames = linkedMapOf("CNY" to "人民币", "USD" to "美元", "HKD" to "港币", "SGD" to "新加坡元", "GBP" to "英镑", "EUR" to "欧元", "JPY" to "日元")
+
+@Composable
+private fun ConverterCard(ctl: AppController, costs: com.guixing.jixunying.model.CostSettings) {
+    // 美元对人民币用页面上那个（可能是手填的）；别的用联网取的
+    val perUsd = costs.fx + ("USD" to 1.0) + ("CNY" to costs.usdRate)
+    var from by remember { mutableStateOf("USD") }
+    var amountText by remember { mutableStateOf("100") }
+    var busy by remember { mutableStateOf(false) }
+    val amount = amountText.toDoubleOrNull()
+    SectionCard {
+        FieldLabel("货币换算", "人民币、美元、港币、新加坡元、英镑、欧元、日元，任意两种之间都能换")
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            AppTextField(amountText, { amountText = it.filter { c -> c.isDigit() || c == '.' }.take(12) }, modifier = Modifier.width(140.dp),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
+            Spacer(Modifier.width(8.dp))
+            Text(currencyNames[from].orEmpty(), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+        }
+        Spacer(Modifier.height(6.dp))
+        FlowRowCompat {
+            currencyNames.forEach { (code, name) ->
+                androidx.compose.material3.FilterChip(selected = from == code, onClick = { from = code },
+                    label = { Text(name) }, modifier = Modifier.padding(end = 6.dp))
+            }
+        }
+        Spacer(Modifier.height(6.dp))
+        val fromRate = perUsd[from]
+        currencyNames.forEach { (code, name) ->
+            if (code == from) return@forEach
+            val to = perUsd[code]
+            val v = if (amount != null && fromRate != null && to != null) amount / fromRate * to else null
+            Row(Modifier.fillMaxWidth().padding(vertical = 3.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text(name, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.width(80.dp))
+                Text(v?.let { fmtMoney(it) } ?: "还没取到汇率", style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = if (v != null) FontWeight.SemiBold else FontWeight.Normal, color = if (v != null) MaterialTheme.colorScheme.onSurface else Ext.c.subtle,
+                    modifier = Modifier.weight(1f))
+                if (fromRate != null && to != null) Text("1 ${currencyNames[from]} = ${fmtRate(to / fromRate)} $name",
+                    style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
+            }
+        }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(if (costs.fx.isEmpty()) "别的货币的汇率还没取到，点「现在更新」联网取。" else if (costs.usdRateAt > 0) "汇率 ${formatTime(costs.usdRateAt)} 从 ${costs.usdRateFrom} 取的，每 12 小时自动更新。" else "",
+                style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, modifier = Modifier.weight(1f))
+            TextButton(enabled = !busy, onClick = {
+                busy = true
+                ctl.run(Command.RefreshUsdRate, quiet = true) { r -> busy = false; ctl.toast(if (r.ok) "汇率更新了" else r.message) }
+            }) { Text(if (busy) "正在取…" else "现在更新", style = MaterialTheme.typography.labelMedium) }
+        }
+    }
+}
+
+private fun fmtMoney(v: Double): String = if (v >= 1000) "%,.2f".format(v) else if (v >= 1) "%.2f".format(v) else "%.4f".format(v)
+private fun fmtRate(v: Double): String = if (v >= 100) "%.2f".format(v) else if (v >= 1) "%.4f".format(v) else "%.6f".format(v)

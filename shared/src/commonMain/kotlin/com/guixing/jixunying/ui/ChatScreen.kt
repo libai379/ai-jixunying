@@ -1,5 +1,9 @@
 package com.guixing.jixunying.ui
 
+import androidx.compose.ui.layout.onSizeChanged
+import com.kashif_e.backdrop.backdrops.layerBackdrop
+import androidx.compose.ui.unit.Dp
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
@@ -160,14 +164,35 @@ fun ChatScreen(ctl: AppController, convId: String, wide: Boolean, openDrawer: ()
         BoxWithConstraints(Modifier.fillMaxSize()) {
             val h = maxHeight
             val short = h < 420.dp
-            Column(Modifier.fillMaxSize()) {
-                if (h >= 240.dp) ChatTopBar(state, conv, wide, openDrawer, onStances = if (conv.stanceTopics > 0) ({ stanceDialog = "" }) else null) { showConvSettings = true }
-                Box(Modifier.weight(1f).fillMaxWidth()) {
-                    MessageList(ctl, state, conv, messages, topics) { stanceDialog = it }
-                }
+            // 液态玻璃开着：输入框浮在聊天记录上面，聊天记录一直排到最底下（底部留出输入框的高度），
+            // 输入框的玻璃同时采样壁纸和聊天记录，滚动的字从玻璃下面透出来、被折射（10-24 用户：「它是透明的，能透出下面的文字」）。
+            // 聊天记录这一层和输入框是兄弟（采样源不能是玻璃的上级，癸星科技踩过：安卓上原生崩溃）
+            val env = com.guixing.jixunying.ui.glass.LocalGlass.current
+            val floating = env.on && env.backdrop != null
+            val contentLayer = com.kashif_e.backdrop.backdrops.rememberLayerBackdrop()
+            var composerH by remember { mutableStateOf(0.dp) }
+            val density = androidx.compose.ui.platform.LocalDensity.current
+            val composer: @Composable () -> Unit = {
                 BackgroundBar(ctl, conv)
                 Composer(ctl, state, conv, running = messages.any { it.status == MsgStatus.STREAMING }, short = short,
                     maxText = (h * 0.3f).coerceIn(48.dp, 200.dp))
+            }
+            Column(Modifier.fillMaxSize()) {
+                if (h >= 240.dp) ChatTopBar(state, conv, wide, openDrawer, onStances = if (conv.stanceTopics > 0) ({ stanceDialog = "" }) else null) { showConvSettings = true }
+                Box(Modifier.weight(1f).fillMaxWidth()) {
+                    MessageList(ctl, state, conv, messages, topics,
+                        modifier = if (floating) Modifier.layerBackdrop(contentLayer) else Modifier,
+                        bottomPad = if (floating) composerH else 0.dp) { stanceDialog = it }
+                    if (floating) {
+                        val both = com.kashif_e.backdrop.backdrops.rememberCombinedBackdrop(env.backdrop!!, contentLayer)
+                        Column(Modifier.align(Alignment.BottomCenter).fillMaxWidth()
+                            .onSizeChanged { composerH = with(density) { it.height.toDp() } }) {
+                            CompositionLocalProvider(com.guixing.jixunying.ui.glass.LocalGlass provides
+                                com.guixing.jixunying.ui.glass.GlassEnv(both, env.on, env.dark, env.tuning, env.paint)) { composer() }
+                        }
+                    }
+                }
+                if (!floating) composer()
             }
         }
         if (dragging) Box(
@@ -222,7 +247,7 @@ private fun ChatTopBar(state: AppState, conv: Conversation, wide: Boolean, openD
 
 @Composable
 private fun MessageList(ctl: AppController, state: AppState, conv: Conversation, messages: List<Message>,
-                        topics: List<com.guixing.jixunying.model.StanceTopic>, onStance: (String) -> Unit) {
+                        topics: List<com.guixing.jixunying.model.StanceTopic>, modifier: Modifier = Modifier, bottomPad: Dp = 0.dp, onStance: (String) -> Unit) {
     // 和微信一样从底下往上排：打开对话就停在最新一条的最后一行，图片后加载、AI 正在输出也不会把最新一行挤出去。
     // 每个对话各记各的位置（以前所有对话共用一份：在一个对话里往上翻过，之后打开别的对话都停在上面）
     val listState = remember(conv.id) { LazyListState() }
@@ -250,19 +275,22 @@ private fun MessageList(ctl: AppController, state: AppState, conv: Conversation,
         if (justSent || listState.firstVisibleItemIndex in 1..2) listState.animateScrollToItem(0)
     }
     if (messages.isEmpty()) {
-        ChatEmptyHint(state, conv) { t -> ctl.composerDraft = conv.id to t }
+        Box(Modifier.fillMaxSize().padding(bottom = bottomPad)) { ChatEmptyHint(state, conv) { t -> ctl.composerDraft = conv.id to t } }
         return
     }
     val focusManager = androidx.compose.ui.platform.LocalFocusManager.current
     // 点聊天区域收起键盘（和微信一样）
     LazyColumn(
         state = listState,
-        modifier = Modifier.fillMaxSize().pointerInput(Unit) { detectTapGestures { focusManager.clearFocus() } },
+        modifier = modifier.fillMaxSize().pointerInput(Unit) { detectTapGestures { focusManager.clearFocus() } },
         reverseLayout = true,
+        // 输入框浮在上面时底部留出它的高度：用内边距不用一行空白（空白那行跟着输入框变高会把整个列表推走，10-24 codeListHoldsWhileRunning）
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = bottomPad),
         // 消息少、一屏放得下时照样从上往下排，不沉在底下
         verticalArrangement = Arrangement.Top,
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
+        // 输入框浮在上面时，底部多留出它的高度，最后一条不被挡住（往上一点就从玻璃下面透出来）
         item(key = "bottom") { Spacer(Modifier.height(24.dp)) }
         items(newestFirst, key = { it.id }) { m ->
             Box(Modifier.widthIn(max = CHAT_MAX_WIDTH).fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {

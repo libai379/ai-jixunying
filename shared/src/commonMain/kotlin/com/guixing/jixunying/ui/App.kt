@@ -1,5 +1,18 @@
 package com.guixing.jixunying.ui
 
+import androidx.compose.foundation.layout.Column
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.Icon
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowLeft
+import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
+import androidx.compose.foundation.layout.size
+import androidx.compose.ui.input.pointer.pointerHoverIcon
+import androidx.compose.foundation.gestures.draggable
+import androidx.compose.foundation.gestures.rememberDraggableState
+import androidx.compose.foundation.gestures.Orientation
+import com.guixing.jixunying.ui.glass.drawBackground
+import com.guixing.jixunying.ui.glass.drawWallpaper
 import androidx.compose.ui.graphics.luminance
 
 import androidx.compose.foundation.background
@@ -55,9 +68,7 @@ enum class SettingsTab(val title: String) {
     ACCOUNT("账号"), PROVIDERS("模型服务"), MEMBERS("AI 成员"), PROFILE("个性化"), MEMORY("记忆"), SEMANTIC("按意思搜"), SEARCH("联网搜索"), IMAGE("画图和视频"), SPEECH("语音"),
     OFFICE("Word / Excel / PPT"),
     CODE("Code 栏"),
-    WEIXIN("微信"), DEVICES("联机"), APPEARANCE("外观"),
-    // 液态玻璃调节单独一项（10-24 用户在手机上找不到：以前藏在 外观 的开关下面一小行）
-    GLASS("液态玻璃"), ABOUT("关于"),
+    WEIXIN("微信"), DEVICES("联机"), APPEARANCE("外观"), ABOUT("关于"),
 }
 
 /** 主区域除了对话和设置以外的页面。 */
@@ -336,10 +347,19 @@ fun App(hub: Hub, platform: Platform, debugStart: String? = null) {
                 val glassOn = state.settings.glass
                 val dark = MaterialTheme.colorScheme.background.luminance() < 0.5f
                 val wallpaper = com.kashif_e.backdrop.backdrops.rememberLayerBackdrop()
+                // 界面背景（2026-10-24）：默认 = 开着玻璃是那几团柔光、关着是主题底色；纯色 / 渐变 / 自己的图片照 设置 → 外观 → 背景
+                val bg = state.settings.background
+                val bgImage = if (bg.mode == com.guixing.jixunying.model.BgMode.IMAGE && bg.imageId.isNotBlank()) rememberImage(ctl, bg.imageId) else null
+                val baseColor = MaterialTheme.colorScheme.background
+                val paint: androidx.compose.ui.graphics.drawscope.DrawScope.() -> Unit = remember(bg, bgImage, dark, glassOn, baseColor) {
+                    { drawBackground(bg, bgImage) { if (glassOn) drawWallpaper(dark) else drawRect(baseColor) } }
+                }
                 Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
-                    if (glassOn) com.guixing.jixunying.ui.glass.GlassWallpaper(wallpaper, dark, Modifier.matchParentSize())
+                    if (glassOn || bg.mode != com.guixing.jixunying.model.BgMode.DEFAULT)
+                        com.guixing.jixunying.ui.glass.AppWallpaper(if (glassOn) wallpaper else null, bg, bgImage,
+                            { if (glassOn) drawWallpaper(dark) else drawRect(baseColor) }, Modifier.matchParentSize())
                     CompositionLocalProvider(com.guixing.jixunying.ui.glass.LocalGlass provides
-                        com.guixing.jixunying.ui.glass.GlassEnv(if (glassOn) wallpaper else null, glassOn, dark, state.settings.glassTuning)) {
+                        com.guixing.jixunying.ui.glass.GlassEnv(if (glassOn) wallpaper else null, glassOn, dark, state.settings.glassTuning, paint)) {
                         MainLayout(ctl)
                     }
                     // 开发截图用：-Djxy.start=…#toast 打开就弹一条提示，看它挡不挡东西
@@ -382,8 +402,34 @@ private fun MainLayout(ctl: AppController) {
     BoxWithConstraints(Modifier.fillMaxSize().safeDrawingPadding().imePadding()) {
         val wide = maxWidth >= 860.dp
         if (wide) {
+            // 侧栏能拖宽拖窄、能收起（10-24 用户：「可以变宽，变窄，可以收起那种」）：右边缘拖动，200～420dp，记在本机；
+            // 收起后只剩一条窄边，上面一个展开键
+            val platform = LocalPlatform.current
+            var sideW by remember { mutableStateOf((platform.getPref("sidebar.width")?.toFloatOrNull() ?: 272f).coerceIn(200f, 420f)) }
+            var collapsed by remember { mutableStateOf(platform.getPref("sidebar.collapsed") == "1") }
+            val density = androidx.compose.ui.platform.LocalDensity.current
             Row(Modifier.fillMaxSize()) {
-                Sidebar(ctl, Modifier.width(272.dp).fillMaxHeight(), onNavigate = {})
+                if (collapsed) {
+                    Column(Modifier.width(44.dp).fillMaxHeight().padding(top = 12.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                        IconButton(onClick = { collapsed = false; platform.setPref("sidebar.collapsed", null) }) {
+                            Icon(Icons.AutoMirrored.Rounded.KeyboardArrowRight, "展开侧栏")
+                        }
+                    }
+                } else {
+                    Box(Modifier.width(sideW.dp).fillMaxHeight()) {
+                        Sidebar(ctl, Modifier.fillMaxSize(), onNavigate = {})
+                        // 收起键：侧栏右上角
+                        IconButton(onClick = { collapsed = true; platform.setPref("sidebar.collapsed", "1") },
+                            modifier = Modifier.align(Alignment.TopEnd).padding(top = 6.dp, end = 2.dp).size(28.dp)) {
+                            Icon(Icons.AutoMirrored.Rounded.KeyboardArrowLeft, "收起侧栏", Modifier.size(18.dp), tint = Ext.c.subtle)
+                        }
+                    }
+                    // 拖动条：鼠标放上去变成左右箭头，按住拖
+                    Box(Modifier.width(6.dp).fillMaxHeight()
+                        .pointerHoverIcon(androidx.compose.ui.input.pointer.PointerIcon.Hand)
+                        .draggable(rememberDraggableState { d -> sideW = (sideW + with(density) { d.toDp().value }).coerceIn(200f, 420f) },
+                            Orientation.Horizontal, onDragStopped = { platform.setPref("sidebar.width", sideW.toString()) }))
+                }
                 // 液态玻璃时侧栏是浮着的一块，不要分隔线
                 if (!com.guixing.jixunying.ui.glass.LocalGlass.current.on) VerticalDivider(color = Ext.c.border)
                 Box(Modifier.weight(1f).fillMaxHeight()) { MainContent(ctl, wide = true, openDrawer = {}) }

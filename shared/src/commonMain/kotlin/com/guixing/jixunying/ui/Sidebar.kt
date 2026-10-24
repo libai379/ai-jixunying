@@ -154,8 +154,8 @@ fun Sidebar(ctl: AppController, modifier: Modifier, onNavigate: () -> Unit) {
                     }
                 }
             }
-            Spacer(Modifier.height(10.dp))
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Spacer(Modifier.height(8.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 QuickCard(Icons.Rounded.FolderOpen, "我的文档", when {
                     !state.settings.docs.enabled -> "已关闭"
                     state.docs.needPermission -> "要授权"
@@ -219,20 +219,21 @@ private fun SidebarTabs(tabs: List<SidebarTab>, tab: SidebarTab, onPick: (Sideba
 private fun RowScope.QuickCard(icon: androidx.compose.ui.graphics.vector.ImageVector, title: String, sub: String, dot: Color? = null, onClick: () -> Unit) {
     // 按下弹簧缩一下（2026-10-22）；玻璃上底色半透明
     val press = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
+    // 10-24 用户：「这个框太宽了，要不你做细一点」——图标和名字放一行，状态在下面一行，高度从 70 多压到 40 多
     Column(
-        Modifier.weight(1f).springPress(press).clip(RoundedCornerShape(14.dp)).background(cardFill())
+        Modifier.weight(1f).springPress(press).clip(RoundedCornerShape(12.dp)).background(cardFill())
             .clickable(interactionSource = press, indication = androidx.compose.foundation.LocalIndication.current, onClick = onClick)
-            .padding(horizontal = 10.dp, vertical = 10.dp),
+            .padding(horizontal = 8.dp, vertical = 6.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Icon(icon, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            Icon(icon, null, Modifier.size(15.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.width(4.dp))
+            Text(title, style = MaterialTheme.typography.labelMedium, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
             if (dot != null) {
-                Spacer(Modifier.weight(1f))
-                Box(Modifier.size(7.dp).clip(CircleShape).background(dot))
+                Spacer(Modifier.width(3.dp))
+                Box(Modifier.size(6.dp).clip(CircleShape).background(dot))
             }
         }
-        Spacer(Modifier.height(8.dp))
-        Text(title, style = MaterialTheme.typography.labelLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
         Text(sub, style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }

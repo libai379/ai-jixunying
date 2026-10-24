@@ -134,3 +134,25 @@ object GlassDefaults {
         }),
     )
 }
+
+/**
+ * 界面背景（2026-10-24 用户：「界面壁纸我添加不了自己的图片，色彩渐变纯色我自己改不了颜色」）。
+ * 照癸星科技的 GlassBackgroundConfig（app\src\main\kotlin\com\guixing\glassui\GlassBackground.kt）：默认 / 纯色 / 渐变 / 图片，
+ * 亮度、对比度、饱和度三种都能调（纯色、渐变是把同一个色彩变换算进颜色本身），模糊给渐变和图片，透明度只给图片
+ * （纯色、渐变一律不透明：背景是最底层，半透明只能和随便定的底色混）。图片是上传到本机数据里的文件（imageId）。
+ */
+enum class BgMode(val label: String) { DEFAULT("默认"), SOLID("纯色"), GRADIENT("渐变"), IMAGE("图片") }
+
+@Serializable
+data class AppBackground(
+    val mode: BgMode = BgMode.DEFAULT,
+    val solidArgb: Long = 0xFF15151AL,
+    val gradientArgb: List<Long> = listOf(0xFF8B7CFFL, 0xFF3CE8D8L),
+    val gradientAngle: Float = 45f,
+    val imageId: String = "",
+    val brightness: Float = 1f,
+    val contrast: Float = 1f,
+    val saturation: Float = 1f,
+    val blurDp: Float = 0f,
+    val alpha: Float = 1f,
+)

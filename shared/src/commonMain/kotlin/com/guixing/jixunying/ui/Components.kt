@@ -209,11 +209,11 @@ fun AppDialog(
         // 液态玻璃（2026-10-22，docs/界面换装说明.md）：弹窗是另一个窗口，不采样主窗口的壁纸，自己画一份当采样源；
         // 出现时弹簧放大 + 淡入。弹窗里的开关、按钮经 LocalGlass 拿到的也是这一份
         val env = com.guixing.jixunying.ui.glass.LocalGlass.current
-        val dialogBackdrop = if (env.on) com.guixing.jixunying.ui.glass.rememberWallpaperBackdrop(env.dark) else null
+        val dialogBackdrop = if (env.on) com.guixing.jixunying.ui.glass.rememberWallpaperBackdrop(env.paint) else null
         val appear = remember { androidx.compose.animation.core.Animatable(if (env.on) 0f else 1f) }
         LaunchedEffect(Unit) { appear.animateTo(1f, com.guixing.jixunying.ui.glass.Springs.pop()) }
         CompositionLocalProvider(com.guixing.jixunying.ui.glass.LocalGlass provides
-            com.guixing.jixunying.ui.glass.GlassEnv(dialogBackdrop, env.on, env.dark, env.tuning)) {
+            com.guixing.jixunying.ui.glass.GlassEnv(dialogBackdrop, env.on, env.dark, env.tuning, env.paint)) {
         GlassSurface(
             shape = RoundedCornerShape(if (env.on) com.guixing.jixunying.ui.glass.glassRadius(com.guixing.jixunying.model.GlassTarget.DIALOG) else 22.dp),
             modifier = Modifier.fillMaxWidth().padding(16.dp).graphicsLayer {

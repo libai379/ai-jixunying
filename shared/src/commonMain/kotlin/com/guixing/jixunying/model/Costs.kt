@@ -79,6 +79,11 @@ data class CostSettings(
     /** 最近一次自动取到汇率的时间、从哪取的（界面显示「几点从哪取的」）。0 = 还没取到过。 */
     val usdRateAt: Long = 0,
     val usdRateFrom: String = "",
+    /**
+     * 1 美元换多少某种货币（键是 ISO 代码：CNY、HKD、SGD、GBP、EUR、JPY），和 usdRate 同一次取到（2026-10-24 用户要的换算：
+     * 「不仅是美元，新币港币英镑也有汇率……互相之间也可以换算」）。空 = 还没取到。
+     */
+    val fx: Map<String, Double> = emptyMap(),
     val overrides: Map<String, ModelPrice> = emptyMap(),
     val manual: Map<String, ManualBalance> = emptyMap(),
 )

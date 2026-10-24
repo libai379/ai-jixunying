@@ -422,7 +422,8 @@ class Engine(
             val r = usdRates.fetch()
             val rate = kotlin.math.round(r.rate * 10_000) / 10_000
             updateState { s -> s.copy(settings = s.settings.copy(costs = s.settings.costs.copy(
-                usdRate = rate, usdAuto = true, usdRateAt = now(), usdRateFrom = r.source))) }
+                usdRate = rate, usdAuto = true, usdRateAt = now(), usdRateFrom = r.source,
+                fx = r.perUsd.ifEmpty { s.settings.costs.fx }))) }
             CommandResult(message = "1 美元 = $rate 元（${r.source}）")
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
@@ -978,7 +979,9 @@ class Engine(
         is Command.SaveCosts -> {
             if (c.costs.usdRate <= 0) return CommandResult(false, "汇率要大于 0")
             // 手填的余额只走 SaveManualBalance 改：1.5.0 的手机发来的 SaveCosts 里没有这块
-            updateState { it.copy(settings = it.settings.copy(costs = c.costs.copy(manual = it.settings.costs.manual))) }
+            // 各种货币的汇率也是引擎取的：旧版发来的没有这块，保留（10-24）
+            updateState { it.copy(settings = it.settings.copy(costs = c.costs.copy(manual = it.settings.costs.manual,
+                fx = c.costs.fx.ifEmpty { it.settings.costs.fx }))) }
             CommandResult()
         }
         is Command.SaveManualBalance -> {
@@ -1035,8 +1038,9 @@ class Engine(
                 val glass = if (c.settings.schema >= 7) c.settings.glass else s.settings.glass
                 // 2026-10-24 以前的不认识液态玻璃调参
                 val glassTuning = if (c.settings.schema >= 8) c.settings.glassTuning else s.settings.glassTuning
+                val background = if (c.settings.schema >= 9) c.settings.background else s.settings.background
                 s.copy(settings = c.settings.copy(search = c.settings.search.copy(apiKeys = keys), costs = s.settings.costs, memory = memory, office = office, code = code,
-                    speech = speechSettings, semantic = semantic, personal = personal, glass = glass, glassTuning = glassTuning, schema = Settings.SCHEMA))
+                    speech = speechSettings, semantic = semantic, personal = personal, glass = glass, glassTuning = glassTuning, background = background, schema = Settings.SCHEMA))
             }
             if (before.enabled != state.settings.relay.enabled || before.brokers != state.settings.relay.brokers) onRelaySettingsChanged?.invoke()
             // 关掉了的后台活不会再跑，它以前的出错提示也就不会「成功一次自己消失」：直接清掉

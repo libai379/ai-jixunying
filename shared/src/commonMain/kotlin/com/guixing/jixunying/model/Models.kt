@@ -260,6 +260,8 @@ data class Settings(
     val glass: Boolean = true,
     /** 液态玻璃调参（2026-10-24，model/GlassTuning.kt）：每个位置的参数和用户存的预设。 */
     val glassTuning: GlassTuning = GlassTuning(),
+    /** 界面背景（2026-10-24，model/GlassTuning.kt 的 AppBackground）：默认 / 纯色 / 渐变 / 自己的图片。 */
+    val background: AppBackground = AppBackground(),
     /**
      * 发设置的这一端认得哪一版设置。旧版手机不认识这个字段，发来的就是 0；
      * 电脑看到 0 就保留旧版不认识的那几项（不然手机一改设置就把电脑上的冲回默认值）。
@@ -270,10 +272,10 @@ data class Settings(
         /**
          * 1 = 1.4.0 加了裁判和 AI 核实；2 = 1.5.0 加了 office（Word / Excel）；3 = 1.6.0 加了 code（Code 栏）；
          * 4 = 1.7.0 加了 speech（语音）；5 = 1.7.0 加了 semantic（按意思搜）；6 = 2026-10-17 加了 personal（自定义指令）；
-         * 7 = 2026-10-22 加了 glass（液态玻璃界面）；8 = 2026-10-24 加了 glassTuning（液态玻璃调参）。
+         * 7 = 2026-10-22 加了 glass（液态玻璃界面）；8 = 2026-10-24 加了 glassTuning（液态玻璃调参）；9 = 同一天加了 background（界面背景）。
          * 以后再加旧版不认识的设置项，就加一，并在 SaveSettings 里保留。
          */
-        const val SCHEMA = 8
+        const val SCHEMA = 9
     }
 }
 
