@@ -28,6 +28,7 @@ import com.guixing.jixunying.ui.glass.GlassStyle
 import com.guixing.jixunying.ui.glass.LiquidButton
 import com.guixing.jixunying.ui.glass.LocalGlass
 import com.guixing.jixunying.ui.glass.glass
+import kotlinx.coroutines.launch
 
 /*
  * 界面里换成液态玻璃的几样共用件（2026-10-22，docs/界面换装说明.md）。关了玻璃（设置 → 外观）就画原来的样子，一像素不差。
@@ -134,8 +135,29 @@ fun cardFill(): Color {
 @Composable
 fun Modifier.springPress(source: androidx.compose.foundation.interaction.MutableInteractionSource, pressedScale: Float = 0.95f): Modifier {
     val pressed by source.collectIsPressedAsState()
-    val scale by androidx.compose.animation.core.animateFloatAsState(if (pressed) pressedScale else 1f, com.guixing.jixunying.ui.glass.Springs.snappy())
+    val scale by androidx.compose.animation.core.animateFloatAsState(if (pressed) pressedScale else 1f, com.guixing.jixunying.ui.glass.Springs.press())
     return this.graphicsLayer { scaleX = scale; scaleY = scale }
+}
+
+/**
+ * 一条条出现：第 [index] 条晚 index × 90 毫秒，淡入 420 毫秒、从下面 24dp 弹上来（照癸星科技启动页 rememberEntranceModifier）。
+ * 只在第一次出现时动；排在后面的最多等 8 条的时间，长列表不会一直往外冒。
+ */
+@Composable
+fun Modifier.entrance(index: Int): Modifier {
+    if (com.guixing.jixunying.ui.glass.wallpaperStill) return this   // 截图测试：一下就是最后的样子
+    val density = androidx.compose.ui.platform.LocalDensity.current
+    val start = with(density) { 24.dp.toPx() }
+    val alpha = androidx.compose.runtime.remember { androidx.compose.animation.core.Animatable(0f) }
+    val offset = androidx.compose.runtime.remember { androidx.compose.animation.core.Animatable(start) }
+    androidx.compose.runtime.LaunchedEffect(Unit) {
+        kotlinx.coroutines.delay(index.coerceIn(0, 8) * 90L)
+        kotlinx.coroutines.coroutineScope {
+            launch { alpha.animateTo(1f, androidx.compose.animation.core.tween(420, easing = androidx.compose.animation.core.FastOutSlowInEasing)) }
+            launch { offset.animateTo(0f, com.guixing.jixunying.ui.glass.Springs.entrance()) }
+        }
+    }
+    return this.graphicsLayer { this.alpha = alpha.value; translationY = offset.value }
 }
 
 /** 侧栏列表的选中底色：换选中时用弹簧淡过去（2026-10-22）。 */

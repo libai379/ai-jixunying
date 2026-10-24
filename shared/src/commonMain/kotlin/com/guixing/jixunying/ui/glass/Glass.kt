@@ -38,6 +38,9 @@ expect fun com.kashif_e.backdrop.BackdropEffectScope.glassVibrancy()
 /** 库的 Ambient / Default 高光能不能用：电脑端那两个着色器调了新版 skiko 里没有的方法（RuntimeShaderBuilder.makeShader$default），一画就崩。 */
 expect val ambientHighlightWorks: Boolean
 
+/** 壁纸光斑停着不漂（截图测试用）。 */
+expect val wallpaperStill: Boolean
+
 /** 玻璃要用的东西：采样源（窗口最底下的壁纸）和开没开（设置 → 外观 → 液态玻璃）。 */
 @Immutable
 class GlassEnv(val backdrop: Backdrop?, val on: Boolean, val dark: Boolean)
@@ -67,12 +70,14 @@ data class GlassStyle(
 ) {
     companion object {
         /** 按钮、开关这类小控件：就是用户在癸星科技里调好的那组（TunedGlassParams：模糊 0、折射 48 / 64、depthEffect、vibrancy）。 */
-        val Control = GlassStyle(blurDp = 0f, refractionHeightDp = 48f, refractionAmountDp = 64f, fillLight = 0.30f, fillDark = 0.22f)
-        /** 顶栏、输入框：后面是壁纸，加一点模糊、底色厚一些，字清楚。 */
-        val Bar = GlassStyle(blurDp = 10f, refractionHeightDp = 24f, refractionAmountDp = 40f, fillLight = 0.62f, fillDark = 0.55f)
-        /** 侧栏、弹窗这类大面：模糊更重。 */
-        val Panel = GlassStyle(blurDp = 22f, refractionHeightDp = 28f, refractionAmountDp = 48f, fillLight = 0.58f, fillDark = 0.52f,
-            shadowRadiusDp = 18f, shadowOffsetXDp = 0f, shadowOffsetYDp = 6f, shadowAlpha = 0.5f)
+        // 10-24 用户：「效果好像不太明显，还是用的之前那个模板……照着模板抄」。以前顶栏、侧栏自己定了一套（模糊 10～22、
+        // 底色铺到 55%～62%），折射全被底色盖住了。现在都照 TunedGlassParams：不模糊、折射 48 / 64、depthEffect、vibrancy，
+        // 底色只铺薄薄一层（癸星科技 tint 是关的，一点不铺；我们上面有字，留一点保证看得清）。
+        val Control = GlassStyle(blurDp = 0f, refractionHeightDp = 48f, refractionAmountDp = 64f, fillLight = 0.10f, fillDark = 0.06f)
+        /** 顶栏、输入框。 */
+        val Bar = GlassStyle(blurDp = 0f, refractionHeightDp = 48f, refractionAmountDp = 64f, fillLight = 0.30f, fillDark = 0.18f)
+        /** 侧栏、弹窗、设置里的卡片这类大面：字多，底色比顶栏厚一点。 */
+        val Panel = GlassStyle(blurDp = 0f, refractionHeightDp = 48f, refractionAmountDp = 64f, fillLight = 0.38f, fillDark = 0.24f)
     }
 }
 
@@ -129,6 +134,7 @@ fun Modifier.glass(
  */
 @Composable
 fun GlassWallpaper(backdrop: LayerBackdrop, dark: Boolean, modifier: Modifier = Modifier) {
+    // 10-24 试过照癸星科技启动页换成四团会漂的浓光斑，用户：「把这 4 个颜色的背景给撤掉……不是全抄过来」——撤回原来的淡底，不动
     Box(modifier.layerBackdrop(backdrop).drawBehind { drawWallpaper(dark) })
 }
 

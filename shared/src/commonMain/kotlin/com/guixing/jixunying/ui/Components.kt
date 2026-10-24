@@ -57,6 +57,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import com.guixing.jixunying.ui.glass.glass
 import com.guixing.jixunying.model.Member
 import com.guixing.jixunying.model.ProviderPreset
 
@@ -111,13 +112,20 @@ fun ToggleChip(label: String, icon: ImageVector, checked: Boolean, onToggle: () 
 
 @Composable
 fun SectionCard(modifier: Modifier = Modifier, padding: PaddingValues = PaddingValues(16.dp), content: @Composable ColumnScope.() -> Unit) {
-    // 液态玻璃开着时（2026-10-22）：半透明底 + 细亮边，透出后面的壁纸。不做真折射：设置页能滚，每张卡每帧重画着色器手机上会卡
+    // 液态玻璃开着时：10-22 先做的是半透明底 + 细亮边（怕滚动时每张卡重画着色器卡）；10-24 用户说效果不明显、照癸星科技的模板来，
+    // 改成真玻璃（和侧栏同一种）
     val glass = com.guixing.jixunying.ui.glass.LocalGlass.current
+    if (glass.on && glass.backdrop != null) {
+        Column(modifier.fillMaxWidth()
+            .glass(MaterialTheme.shapes.medium, com.guixing.jixunying.ui.glass.GlassStyle.Panel, fallback = MaterialTheme.colorScheme.surface)
+            .padding(padding), content = content)
+        return
+    }
     Surface(
         modifier.fillMaxWidth(),
         shape = MaterialTheme.shapes.medium,
-        color = if (glass.on) MaterialTheme.colorScheme.surface.copy(alpha = if (glass.dark) 0.62f else 0.72f) else MaterialTheme.colorScheme.surface,
-        border = BorderStroke(1.dp, if (glass.on) androidx.compose.ui.graphics.Color.White.copy(alpha = if (glass.dark) 0.08f else 0.6f) else Ext.c.border),
+        color = MaterialTheme.colorScheme.surface,
+        border = BorderStroke(1.dp, Ext.c.border),
     ) {
         Column(Modifier.padding(padding), content = content)
     }

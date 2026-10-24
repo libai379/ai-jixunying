@@ -88,6 +88,8 @@ tasks.withType<Test>().configureEach {
     // 自动测试不开真浏览器（读平台链接用的 Edge）；LiveBrowserTest 自己直接建
     systemProperty("jxy.browser", "off")
     systemProperty("jxy.fx.auto", "false")
+    // 壁纸光斑在截图里停着（不然每张截图光斑位置不一样）
+    systemProperty("jxy.wallpaper.still", "true")
     // 界面截图（ShotsTest）写成 -Pjxy.shots=文件夹 就能跑：JVM 里读不了 Gradle 的属性，这里转成环境变量。
     // 给 -P 才设，不然测试进程会一直带着上一轮的目录
     (project.findProperty("jxy.shots") as String?)?.let { environment("JXY_SHOTS", it) }

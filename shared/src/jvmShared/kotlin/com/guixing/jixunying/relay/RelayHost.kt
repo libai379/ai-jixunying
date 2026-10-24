@@ -30,6 +30,7 @@ class RelayHost(private val engine: Engine) {
     private var unsubscribe: (() -> Unit)? = null
     private val assemblers = ConcurrentHashMap<String, Envelope.Assembler>()
     private val lastSeen = ConcurrentHashMap<String, Long>()
+    private val touched = ConcurrentHashMap<String, Long>()
     private val queues = ConcurrentHashMap<String, Channel<WireFrame>>()
     /** 设备编号 → 密钥的快照，用来在取消配对时还能给它发最后一句「已取消」。 */
     private val knownKeys = ConcurrentHashMap<String, ByteArray>()
@@ -93,8 +94,10 @@ class RelayHost(private val engine: Engine) {
         val key = keyOf(device) ?: return
         val frames = Envelope.openFrames(key, whole) ?: return
         val first = !isOnline(deviceId)
-        lastSeen[deviceId] = System.currentTimeMillis()
-        if (first) engine.touchDevice(deviceId)
+        val t = System.currentTimeMillis()
+        lastSeen[deviceId] = t
+        // 联机页要显示哪几台手机现在在线（一台电脑连多台手机，10-24）：最多 30 秒记一次，不然每条消息都写一遍状态
+        if (first || t - (touched[deviceId] ?: 0) > 30_000) { touched[deviceId] = t; engine.touchDevice(deviceId) }
         for (f in frames) {
             when (f) {
                 is WireFrame.Hello -> {

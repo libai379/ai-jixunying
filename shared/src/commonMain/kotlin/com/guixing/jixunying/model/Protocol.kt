@@ -204,6 +204,8 @@ sealed interface Command {
     @Serializable data class DeleteMemory(val id: String) : Command
     /** 让记录员合并重复、矛盾的记忆。 */
     @Serializable data object TidyMemories : Command
+    /** 手机和电脑互相同步记忆（2026-10-24）：发来对方的记忆和删除记录，合进本机，data 回合好的 MemoryBundle JSON。 */
+    @Serializable data class SyncMemories(val bundle: MemoryBundle) : Command
     /** 花费：period = today / week / month / all。结果 data 是 CostReport 的 JSON。 */
     @Serializable data class GetCosts(val period: String = "month") : Command
     /** 花费设置（汇率、自填单价）单独保存：旧版手机发来的 SaveSettings 里没有这块，不能让它冲掉。 */
@@ -297,6 +299,8 @@ sealed interface Command {
     /** 换一个新的配对二维码（旧的立即失效）。 */
     @Serializable data object NewPairingCode : Command
     @Serializable data class RemoveDevice(val id: String) : Command
+    /** 给配对过的手机改个名字（一台电脑连好几台手机时分得清，10-24）。 */
+    @Serializable data class RenameDevice(val id: String, val name: String) : Command
 }
 
 @Serializable

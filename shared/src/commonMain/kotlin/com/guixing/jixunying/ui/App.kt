@@ -51,7 +51,8 @@ import kotlinx.coroutines.launch
 val LocalSnackbar = androidx.compose.runtime.staticCompositionLocalOf { SnackbarHostState() }
 
 enum class SettingsTab(val title: String) {
-    PROVIDERS("模型服务"), MEMBERS("AI 成员"), PROFILE("个性化"), MEMORY("记忆"), SEMANTIC("按意思搜"), SEARCH("联网搜索"), IMAGE("画图和视频"), SPEECH("语音"),
+    // 账号放第一项（10-24 用户：「全世界哪个 APP 账号放在里边？」——以前塞在「个性化」里找不到）
+    ACCOUNT("账号"), PROVIDERS("模型服务"), MEMBERS("AI 成员"), PROFILE("个性化"), MEMORY("记忆"), SEMANTIC("按意思搜"), SEARCH("联网搜索"), IMAGE("画图和视频"), SPEECH("语音"),
     OFFICE("Word / Excel / PPT"),
     CODE("Code 栏"),
     WEIXIN("微信"), DEVICES("联机"), APPEARANCE("外观"), ABOUT("关于"),

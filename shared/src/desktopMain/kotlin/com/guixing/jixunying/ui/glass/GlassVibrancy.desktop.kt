@@ -29,3 +29,6 @@ private val Vibrant: ColorFilter by lazy {
         0f, 0f, 0f, 1f, 0f,
     ))
 }
+
+/** 截图测试（ShotsTest）里壁纸光斑不漂，每次截出来一样：-Djxy.wallpaper.still=true。 */
+actual val wallpaperStill: Boolean = System.getProperty("jxy.wallpaper.still") == "true"

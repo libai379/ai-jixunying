@@ -153,6 +153,13 @@ data class MemoryItem(
     val pinned: Boolean = false,
 )
 
+@Serializable
+data class MemoryTombstone(val id: String, val deletedAt: Long)
+
+/** 记忆同步时两边交换的东西（Command.SyncMemories 的参数和结果）。 */
+@Serializable
+data class MemoryBundle(val items: List<MemoryItem> = emptyList(), val deleted: List<MemoryTombstone> = emptyList())
+
 /** 本机文档（AI 能搜、能读）。 */
 @Serializable
 data class DocSettings(
@@ -527,6 +534,8 @@ data class AppState(
     val relayStatus: String = "",
     /** 关于用户的长期记忆。 */
     val memories: List<MemoryItem> = emptyList(),
+    /** 删掉的记忆（编号 + 删的时间），手机和电脑互相同步时让删除也跟过去（engine/MemorySync.kt）；留 90 天。 */
+    val memoryDeleted: List<MemoryTombstone> = emptyList(),
     /** 本机文档索引的情况（界面显示用）。 */
     val docs: DocIndexInfo = DocIndexInfo(),
     /** 微信助理的情况（界面显示用；手机上没有，一直是空的）。 */

@@ -93,6 +93,8 @@ import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
 import com.guixing.jixunying.model.AppJson
 import com.guixing.jixunying.model.ConfigBundle
+import com.guixing.jixunying.model.MemoryBundle
+import com.guixing.jixunying.model.MemoryTombstone
 import java.io.File
 import java.util.Base64
 import java.util.UUID
@@ -1478,10 +1480,18 @@ class Engine(
             CommandResult()
         }
         is Command.DeleteMemory -> {
-            updateState { s -> s.copy(memories = s.memories.filterNot { it.id == c.id }) }
+            updateState { s -> s.copy(memories = s.memories.filterNot { it.id == c.id }, memoryDeleted = tombstoned(s, listOf(c.id))) }
             CommandResult()
         }
         is Command.TidyMemories -> tidyMemories()
+        is Command.SyncMemories -> {
+            var out = MemoryBundle()
+            updateState { s ->
+                out = MemorySync.merge(MemoryBundle(s.memories, s.memoryDeleted), c.bundle)
+                s.copy(memories = out.items, memoryDeleted = out.deleted)
+            }
+            CommandResult(data = AppJson.encodeToString(MemoryBundle.serializer(), out))
+        }
         is Command.SearchHistory -> CommandResult(data = AppJson.encodeToString(
             kotlinx.serialization.builtins.ListSerializer(HistoryHit.serializer()), searchHistory(c.query, c.limit).hits))
         is Command.WeixinLogin -> weixin?.login() ?: CommandResult(false, "这台设备没有接微信助理")
@@ -1534,6 +1544,13 @@ class Engine(
         }
         is Command.RemoveDevice -> {
             updateState { s -> s.copy(devices = s.devices.filterNot { it.id == c.id }) }
+            CommandResult()
+        }
+        is Command.RenameDevice -> {
+            val name = c.name.trim().take(30)
+            if (name.isEmpty()) return CommandResult(false, "名字是空的")
+            if (state.devices.none { it.id == c.id }) return CommandResult(false, "没有这台手机")
+            updateState { s -> s.copy(devices = s.devices.map { if (it.id == c.id) it.copy(name = name) else it }) }
             CommandResult()
         }
         is Command.UploadFile -> {
@@ -2181,6 +2198,12 @@ class Engine(
         return changed
     }
 
+    /** 删掉的记忆记下编号和时间，手机电脑同步时删除也跟过去（MemorySync）。 */
+    private fun tombstoned(s: AppState, ids: List<String>): List<MemoryTombstone> {
+        val t = now()
+        return s.memoryDeleted.filterNot { it.id in ids } + ids.map { MemoryTombstone(it, t) }
+    }
+
     /** 密码、Key、证件号之类不进长期记忆。 */
     private fun looksSensitive(text: String): Boolean {
         val t = text.lowercase()
@@ -2215,7 +2238,7 @@ class Engine(
             val src = e.from.mapNotNull { items.getOrNull(it - 1) }
             MemoryItem(newId(), e.text, e.kind, src.firstOrNull()?.source ?: "整理", src.minOfOrNull { it.createdAt } ?: now(), now())
         }
-        updateState { it.copy(memories = pinned + next) }
+        updateState { it.copy(memories = pinned + next, memoryDeleted = tombstoned(it, items.map { m -> m.id })) }
         return CommandResult(message = "整理好了：${items.size} 条变成 ${next.size} 条（置顶的没动）")
     }
 

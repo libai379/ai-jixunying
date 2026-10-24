@@ -215,7 +215,7 @@ fun HostDevicesPage(ctl: AppController, state: AppState) {
                         "2. 扫左边的二维码，几秒钟就好\n" +
                         "3. 以后手机侧栏顶上能在「本机」和这台电脑之间切换\n\n" +
                         "扫不了码？点下面「复制配对码」，用微信发到手机上，在手机的联机页粘贴。\n" +
-                        "每个二维码只能用一次，配对成功后自动换新的。",
+                        "每个二维码只能用一次，配对成功后自动换新的；还有别的手机要连，就用新出来的这个再扫一次。",
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Spacer(Modifier.height(10.dp))
@@ -239,18 +239,41 @@ fun HostDevicesPage(ctl: AppController, state: AppState) {
     }
     Spacer(Modifier.height(12.dp))
     SectionCard {
-        Text("已配对的手机", style = MaterialTheme.typography.titleSmall)
+        // 一台电脑可以配好几台手机，同时连（10-24 用户：「一个桌面端可以连接多个移动端」）
+        // 在线 = 90 秒内收到过它的消息（电脑最多 30 秒记一次）；每 15 秒重算一次，手机断了这里会自己变成「最近在线」
+        var now by remember { mutableStateOf(com.guixing.jixunying.ui.nowMillis()) }
+        androidx.compose.runtime.LaunchedEffect(Unit) { while (true) { kotlinx.coroutines.delay(15_000); now = com.guixing.jixunying.ui.nowMillis() } }
+        val online = state.devices.count { now - it.lastSeen < 90_000 }
+        Text(if (state.devices.isEmpty()) "已配对的手机" else "已配对的手机（${state.devices.size} 台，$online 台在线）", style = MaterialTheme.typography.titleSmall)
+        Text("可以配好几台手机（自己的、家里人的），都能同时连这台电脑；每台各用各的密钥，取消一台不影响别的。",
+            style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
         Spacer(Modifier.height(6.dp))
         if (state.devices.isEmpty()) Text("还没有", style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
+        var renaming by remember { mutableStateOf<com.guixing.jixunying.model.PairedDevice?>(null) }
         state.devices.forEach { d ->
+            val on = now - d.lastSeen < 90_000
             Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Rounded.PhoneAndroid, null, Modifier.size(18.dp), tint = Ext.c.subtle)
+                Box {
+                    Icon(Icons.Rounded.PhoneAndroid, null, Modifier.size(18.dp), tint = if (on) MaterialTheme.colorScheme.primary else Ext.c.subtle)
+                    if (on) Box(Modifier.align(Alignment.BottomEnd).size(7.dp).clip(CircleShape).background(Ext.c.success))
+                }
                 Spacer(Modifier.width(8.dp))
                 Column(Modifier.weight(1f)) {
                     Text(d.name, style = MaterialTheme.typography.bodyMedium)
-                    if (d.lastSeen > 0) Text("最近在线：" + formatTime(d.lastSeen), style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
+                    Text(if (on) "在线" else if (d.lastSeen > 0) "最近在线：" + formatTime(d.lastSeen) else "配对后还没连过",
+                        style = MaterialTheme.typography.labelSmall, color = if (on) Ext.c.success else Ext.c.subtle)
                 }
+                TextButton(onClick = { renaming = d }) { Text("改名") }
                 TextButton(onClick = { ctl.run(Command.RemoveDevice(d.id)) }) { Text("取消配对", color = MaterialTheme.colorScheme.error) }
+            }
+        }
+        renaming?.let { d ->
+            var name by remember(d.id) { mutableStateOf(d.name) }
+            AppDialog("给这台手机改个名字", onDismiss = { renaming = null }, width = 420.dp, actions = {
+                TextButton(onClick = { renaming = null }) { Text("取消") }
+                Button(enabled = name.isNotBlank(), onClick = { ctl.run(Command.RenameDevice(d.id, name)); renaming = null }) { Text("保存") }
+            }) {
+                AppTextField(name, { name = it.take(30) }, placeholder = "比如：我的 S25、妈妈的手机")
             }
         }
     }

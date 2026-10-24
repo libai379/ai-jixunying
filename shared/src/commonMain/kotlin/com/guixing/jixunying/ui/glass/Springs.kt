@@ -48,6 +48,12 @@ object Springs {
     fun <T> pop() = spring<T>(dampingRatio = 0.72f, stiffness = 380f)
     /** 选中块滑过去、按下缩放：快、轻微回弹。 */
     fun <T> snappy() = spring<T>(dampingRatio = 0.8f, stiffness = 700f)
+    /** 按下、松开：照癸星科技启动页卡片（Spring.DampingRatioMediumBouncy、Spring.StiffnessMedium），松手会弹一下。 */
+    fun <T> press() = spring<T>(dampingRatio = androidx.compose.animation.core.Spring.DampingRatioMediumBouncy,
+        stiffness = androidx.compose.animation.core.Spring.StiffnessMedium)
+    /** 列表一条条出现时往上弹到位：照癸星科技 rememberEntranceModifier（LowBouncy、StiffnessLow）。 */
+    fun <T> entrance() = spring<T>(dampingRatio = androidx.compose.animation.core.Spring.DampingRatioLowBouncy,
+        stiffness = androidx.compose.animation.core.Spring.StiffnessLow)
 }
 
 private suspend fun awaitFrame() {

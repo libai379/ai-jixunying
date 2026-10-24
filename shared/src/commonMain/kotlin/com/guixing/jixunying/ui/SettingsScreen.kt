@@ -30,6 +30,7 @@ import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.OpenInNew
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Badge
+import androidx.compose.material.icons.rounded.AccountCircle
 import androidx.compose.material.icons.rounded.Brush
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Cloud
@@ -103,8 +104,10 @@ import kotlinx.coroutines.flow.first
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.AnnotatedString
+import com.guixing.jixunying.ui.glass.glass
 
 private fun tabIcon(t: SettingsTab): ImageVector = when (t) {
+    SettingsTab.ACCOUNT -> Icons.Rounded.AccountCircle
     SettingsTab.PROVIDERS -> Icons.Rounded.Cloud
     SettingsTab.MEMBERS -> Icons.Rounded.Groups
     SettingsTab.PROFILE -> Icons.Rounded.Badge
@@ -130,12 +133,16 @@ fun SettingsScreen(ctl: AppController, tab: SettingsTab, wide: Boolean, openDraw
         Row(Modifier.fillMaxSize()) {
             Column(Modifier.width(210.dp).fillMaxHeight().padding(12.dp)) {
                 Text("设置", style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(start = 10.dp, top = 6.dp, bottom = 14.dp))
-                SettingsTab.entries.forEach { t ->
+                SettingsTab.entries.forEachIndexed { i, t ->
                     val sel = t == tab
+                    val press = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
+                    val selBg by androidx.compose.animation.animateColorAsState(
+                        if (sel) MaterialTheme.colorScheme.primary.copy(alpha = 0.1f) else Color.Transparent, com.guixing.jixunying.ui.glass.Springs.snappy())
                     Row(
-                        Modifier.fillMaxWidth().padding(vertical = 1.dp).clip(RoundedCornerShape(10.dp))
-                            .background(if (sel) MaterialTheme.colorScheme.primary.copy(alpha = 0.1f) else Color.Transparent)
-                            .clickable { ctl.settingsTab = t }.padding(horizontal = 10.dp, vertical = 9.dp),
+                        Modifier.fillMaxWidth().entrance(i).springPress(press, 0.97f).padding(vertical = 1.dp).clip(RoundedCornerShape(10.dp))
+                            .background(selBg)
+                            .clickable(interactionSource = press, indication = androidx.compose.foundation.LocalIndication.current) { ctl.settingsTab = t }
+                            .padding(horizontal = 10.dp, vertical = 9.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Icon(tabIcon(t), null, Modifier.size(18.dp), tint = if (sel) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
@@ -158,11 +165,17 @@ fun SettingsScreen(ctl: AppController, tab: SettingsTab, wide: Boolean, openDraw
             }
             Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 8.dp)) {
                 val desktop = LocalPlatform.current.isDesktop
-                SettingsTab.entries.forEach { t ->
+                SettingsTab.entries.forEachIndexed { i, t ->
+                    // 液态玻璃开着：每项是一块玻璃，一条条弹出来、按下弹一下（照癸星科技启动页的胶囊卡片，10-24）
+                    val press = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
+                    val shape = RoundedCornerShape(14.dp)
                     Row(
-                        Modifier.fillMaxWidth().padding(vertical = 3.dp).clip(RoundedCornerShape(14.dp)).background(MaterialTheme.colorScheme.surface)
-                            .border(1.dp, Ext.c.border, RoundedCornerShape(14.dp))
-                            .clickable { ctl.settingsTab = t; ctl.settingsHome = false }.padding(horizontal = 14.dp, vertical = 13.dp),
+                        Modifier.fillMaxWidth().entrance(i).springPress(press, 0.97f).padding(vertical = 3.dp)
+                            .then(if (com.guixing.jixunying.ui.glass.LocalGlass.current.on)
+                                Modifier.glass(shape, com.guixing.jixunying.ui.glass.GlassStyle.Panel, fallback = MaterialTheme.colorScheme.surface)
+                            else Modifier.clip(shape).background(MaterialTheme.colorScheme.surface).border(1.dp, Ext.c.border, shape))
+                            .clickable(interactionSource = press, indication = androidx.compose.foundation.LocalIndication.current) { ctl.settingsTab = t; ctl.settingsHome = false }
+                            .padding(horizontal = 14.dp, vertical = 13.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Icon(tabIcon(t), null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.primary)
@@ -193,6 +206,7 @@ private fun tabAlert(t: SettingsTab, s: AppState): Boolean = t == SettingsTab.ME
 
 /** 设置首页每一项右边的小字：一眼看出现在是什么状态。 */
 private fun tabSummary(t: SettingsTab, s: AppState, ctl: AppController): String = when (t) {
+    SettingsTab.ACCOUNT -> if (s.account.githubLogin.isNotBlank()) "@" + s.account.githubLogin else "没登录"
     SettingsTab.PROVIDERS -> if (s.providers.isEmpty()) "还没添加" else "${s.providers.size} 个"
     SettingsTab.MEMBERS -> if (s.members.isEmpty()) "还没有" else "${s.members.size} 位"
     SettingsTab.PROFILE -> s.profile.name
@@ -218,6 +232,7 @@ private fun SettingsPage(ctl: AppController, state: AppState, tab: SettingsTab) 
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 24.dp, vertical = 20.dp)) {
         Column(Modifier.widthIn(max = 760.dp)) {
             when (tab) {
+                SettingsTab.ACCOUNT -> AccountPage(ctl, state)
                 SettingsTab.PROVIDERS -> ProvidersPage(ctl, state)
                 SettingsTab.MEMBERS -> MembersPage(ctl, state)
                 SettingsTab.PROFILE -> ProfilePage(ctl, state)
@@ -714,8 +729,6 @@ private fun ProfilePage(ctl: AppController, state: AppState) {
     AutoSave(instructions, personal.instructions) { v -> ctl.updateSettings { it.copy(personal = it.personal.copy(instructions = v)) } }
     AutoSave(codeInstructions, personal.codeInstructions) { v -> ctl.updateSettings { it.copy(personal = it.personal.copy(codeInstructions = v)) } }
     PageHeader("个性化", "AI 会知道你是谁、该怎么做。写下你的身份、偏好和要它一直照着做的规矩，回答会更对路。改了会自动保存。")
-    AccountCard(ctl, state)
-    Spacer(Modifier.height(12.dp))
     SectionCard {
         FieldLabel("自定义指令", "每次回答都照着做：聊天里的每位成员、Code 栏都用")
         AppTextField(instructions, { instructions = it }, singleLine = false, minLines = 5,
@@ -1289,6 +1302,12 @@ private fun ChatGptLogin(ctl: AppController, state: AppState, saveFirst: (done: 
  * 账号（2026-10-24，docs/账号设计说明.md）：没有服务器——账号就是这台设备上的一对密钥（编号由公钥算），可以绑 GitHub；
  * 换设备用备份码（口令加密）。手机遥控电脑时这里只看不改。
  */
+@Composable
+private fun AccountPage(ctl: AppController, state: AppState) {
+    PageHeader("账号", "用 GitHub 登录；不用服务器，账号就在这台设备上，换设备用备份码带过去。")
+    AccountCard(ctl, state)
+}
+
 @Composable
 private fun AccountCard(ctl: AppController, state: AppState) {
     val platform = LocalPlatform.current

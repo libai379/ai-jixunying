@@ -9,3 +9,6 @@ actual val ambientHighlightWorks: Boolean = true
 actual fun BackdropEffectScope.glassVibrancy() {
     vibrancy()
 }
+
+/** 壁纸光斑不漂：安卓上一直漂。 */
+actual val wallpaperStill: Boolean = false

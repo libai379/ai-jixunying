@@ -136,6 +136,8 @@ class JxyApp : Application() {
         this.weixin = weixin
         engine.weixin = weixin
         com.guixing.jixunying.engine.WeixinHandover(hub, engine, weixin).start()
+        // 长期记忆：连着电脑时两边互相同步（2026-10-24）
+        com.guixing.jixunying.engine.MemorySyncer(hub, engine).start()
         weixin.start()
         watchLifecycle()
     }

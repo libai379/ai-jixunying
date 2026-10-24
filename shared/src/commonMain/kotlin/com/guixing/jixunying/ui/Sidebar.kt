@@ -5,6 +5,8 @@ import com.guixing.jixunying.ui.glass.glass
 import androidx.compose.foundation.background
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material.icons.rounded.Tune
+import androidx.compose.material.icons.rounded.Person
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material.icons.rounded.Flag
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.border
@@ -170,6 +172,9 @@ fun Sidebar(ctl: AppController, modifier: Modifier, onNavigate: () -> Unit) {
         }
         HorizontalDivider(color = Ext.c.border)
         Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            // 账号：最底下一行最左边（10-24），登了显示 GitHub 名字，没登显示「登录」，点进 设置 → 账号
+            AccountChip(state.account) { ctl.openSettings(SettingsTab.ACCOUNT); onNavigate() }
+            Spacer(Modifier.weight(1f))
             BottomItem(Icons.Rounded.Payments, "花费", null) { ctl.openPage(MainPage.COSTS); onNavigate() }
             Spacer(Modifier.width(6.dp))
             // 记录员后台出了错：设置旁边亮红点。点进去照样是设置首页（以前直接跳「记忆」，
@@ -223,6 +228,25 @@ private fun RowScope.QuickCard(icon: androidx.compose.ui.graphics.vector.ImageVe
         Spacer(Modifier.height(8.dp))
         Text(title, style = MaterialTheme.typography.labelLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
         Text(sub, style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
+}
+
+/** 侧栏最底下的账号：头像圈里是名字头一个字（GitHub 头像要联网下图，这里不画），旁边是 GitHub 名字或「登录」。 */
+@Composable
+private fun AccountChip(a: com.guixing.jixunying.model.AccountInfo, onClick: () -> Unit) {
+    val signed = a.githubLogin.isNotBlank()
+    Row(
+        Modifier.widthIn(max = 110.dp).clip(RoundedCornerShape(10.dp)).clickable(onClick = onClick).padding(horizontal = 6.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(Modifier.size(24.dp).clip(CircleShape).background(if (signed) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceContainerHighest),
+            contentAlignment = Alignment.Center) {
+            if (signed) Text(a.githubLogin.take(1).uppercase(), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onPrimary)
+            else Icon(Icons.Rounded.Person, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Spacer(Modifier.width(6.dp))
+        Text(if (signed) a.githubLogin else "登录", style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis,
+            color = if (signed) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.primary)
     }
 }
 
@@ -287,12 +311,14 @@ private fun ColumnScope.ChatSessionSidebar(ctl: AppController, state: AppState, 
                     }
                 }
             }
+            // 一条条弹出来（癸星科技启动页的入场动画）：按在整个列表里的位置排先后
+            val order = groups.flatMap { it.second }.map { it.id }
             groups.forEach { (label, convs) ->
                 item(key = "h_$label") {
                     Text(label, style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, modifier = Modifier.padding(start = 10.dp, top = 12.dp, bottom = 4.dp))
                 }
                 items(convs, key = { it.id }) { c ->
-                    ConversationRow(ctl, state, c, selected = c.id == ctl.currentConvId && ctl.settingsTab == null && ctl.page == null) {
+                    ConversationRow(ctl, state, c, selected = c.id == ctl.currentConvId && ctl.settingsTab == null && ctl.page == null, index = order.indexOf(c.id)) {
                         ctl.openConversation(c.id); onNavigate()
                     }
                 }
@@ -333,7 +359,7 @@ private fun ColumnScope.CodeSessionSidebar(ctl: AppController, state: AppState, 
     LazyColumn(Modifier.weight(1f)) {
         items(convs, key = { it.id }) { c ->
             CodeSessionRow(ctl, state, c, allMessages[c.id].orEmpty(),
-                selected = c.id == ctl.currentConvId && ctl.settingsTab == null && ctl.page == null) {
+                selected = c.id == ctl.currentConvId && ctl.settingsTab == null && ctl.page == null, index = convs.indexOf(c)) {
                 ctl.openConversation(c.id); onNavigate()
             }
         }
@@ -341,15 +367,17 @@ private fun ColumnScope.CodeSessionSidebar(ctl: AppController, state: AppState, 
 }
 
 @Composable
-private fun CodeSessionRow(ctl: AppController, state: AppState, c: Conversation, messages: List<Message>, selected: Boolean, onClick: () -> Unit) {
+private fun CodeSessionRow(ctl: AppController, state: AppState, c: Conversation, messages: List<Message>, selected: Boolean, index: Int = 0, onClick: () -> Unit) {
     var menu by remember { mutableStateOf(false) }
     var renaming by remember { mutableStateOf(false) }
     var confirmDelete by remember { mutableStateOf(false) }
     val status = codeStatus(messages)
+    val press = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
     Row(
-        Modifier.fillMaxWidth().padding(vertical = 1.dp).clip(RoundedCornerShape(10.dp))
+        Modifier.fillMaxWidth().entrance(index).springPress(press, 0.97f).padding(vertical = 1.dp).clip(RoundedCornerShape(10.dp))
             .background(animatedSelection(selected))
-            .clickable(onClick = onClick).padding(start = 8.dp, top = 7.dp, bottom = 7.dp, end = 2.dp),
+            .clickable(interactionSource = press, indication = androidx.compose.foundation.LocalIndication.current, onClick = onClick)
+            .padding(start = 8.dp, top = 7.dp, bottom = 7.dp, end = 2.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         MemberAvatar(null, 30.dp, emoji = "🛠️", color = 0xFF4F5BEB)
@@ -471,15 +499,17 @@ private fun GroupAvatar(members: List<com.guixing.jixunying.model.Member>, size:
 }
 
 @Composable
-private fun ConversationRow(ctl: AppController, state: AppState, c: Conversation, selected: Boolean, onClick: () -> Unit) {
+private fun ConversationRow(ctl: AppController, state: AppState, c: Conversation, selected: Boolean, index: Int = 0, onClick: () -> Unit) {
     var menu by remember { mutableStateOf(false) }
     var renaming by remember { mutableStateOf(false) }
     var confirmDelete by remember { mutableStateOf(false) }
     val members = c.memberIds.mapNotNull { state.member(it) }
+    val press = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
     Row(
-        Modifier.fillMaxWidth().padding(vertical = 1.dp).clip(RoundedCornerShape(10.dp))
+        Modifier.fillMaxWidth().entrance(index).springPress(press, 0.97f).padding(vertical = 1.dp).clip(RoundedCornerShape(10.dp))
             .background(animatedSelection(selected))
-            .clickable(onClick = onClick).padding(start = 8.dp, top = 7.dp, bottom = 7.dp, end = 2.dp),
+            .clickable(interactionSource = press, indication = androidx.compose.foundation.LocalIndication.current, onClick = onClick)
+            .padding(start = 8.dp, top = 7.dp, bottom = 7.dp, end = 2.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         when {
