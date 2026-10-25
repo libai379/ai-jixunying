@@ -1,5 +1,11 @@
 package com.guixing.jixunying.ui
 
+import androidx.compose.material.icons.rounded.FormatQuote
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material.icons.rounded.KeyboardArrowDown
+import androidx.compose.material.icons.rounded.KeyboardArrowUp
+import com.guixing.jixunying.ui.glass.glass
 import androidx.compose.ui.layout.onSizeChanged
 import com.kashif_e.backdrop.backdrops.layerBackdrop
 import androidx.compose.ui.unit.Dp
@@ -177,14 +183,42 @@ fun ChatScreen(ctl: AppController, convId: String, wide: Boolean, openDrawer: ()
                 Composer(ctl, state, conv, running = messages.any { it.status == MsgStatus.STREAMING }, short = short,
                     maxText = (h * 0.3f).coerceIn(48.dp, 200.dp))
             }
+            var topH by remember { mutableStateOf(0.dp) }
+            // 在这个对话里找（2026-10-24）：Ctrl+F 或顶栏放大镜；命中的消息一条条跳，当前这条框出来
+            var findQuery by remember(convId) { mutableStateOf("") }
+            var findIndex by remember(convId) { mutableStateOf(0) }
+            val findHits = remember(messages, findQuery) {
+                val q = findQuery.trim()
+                if (q.isEmpty()) emptyList() else messages.filter { it.content.contains(q, ignoreCase = true) }.map { it.id }
+            }
+            val currentFind = if (ctl.findOpen) findHits.getOrNull(findIndex.coerceIn(0, (findHits.size - 1).coerceAtLeast(0))) else null
+            LaunchedEffect(currentFind) { if (currentFind != null) ctl.focusMessageId = currentFind }
+            val topBar: @Composable () -> Unit = {
+                if (h >= 240.dp) ChatTopBar(state, conv, wide, openDrawer, onStances = if (conv.stanceTopics > 0) ({ stanceDialog = "" }) else null,
+                    onFind = { ctl.findOpen = true }) { showConvSettings = true }
+                if (ctl.findOpen) FindBar(findQuery, { findQuery = it; findIndex = (findHits.size - 1).coerceAtLeast(0) }, findHits.size, findIndex,
+                    onPrev = { if (findHits.isNotEmpty()) findIndex = (findIndex - 1 + findHits.size) % findHits.size },
+                    onNext = { if (findHits.isNotEmpty()) findIndex = (findIndex + 1) % findHits.size },
+                    onClose = { ctl.findOpen = false; findQuery = "" })
+            }
             Column(Modifier.fillMaxSize()) {
-                if (h >= 240.dp) ChatTopBar(state, conv, wide, openDrawer, onStances = if (conv.stanceTopics > 0) ({ stanceDialog = "" }) else null) { showConvSettings = true }
+                if (!floating) topBar()
                 Box(Modifier.weight(1f).fillMaxWidth()) {
                     MessageList(ctl, state, conv, messages, topics,
                         modifier = if (floating) Modifier.layerBackdrop(contentLayer) else Modifier,
-                        bottomPad = if (floating) composerH else 0.dp) { stanceDialog = it }
+                        bottomPad = if (floating) composerH else 0.dp, topPad = if (floating) topH else 0.dp, highlightId = currentFind) { stanceDialog = it }
                     if (floating) {
                         val both = com.kashif_e.backdrop.backdrops.rememberCombinedBackdrop(env.backdrop!!, contentLayer)
+                        // 顶栏也浮在聊天记录上面（10-24：「所有的框都是」透出下面的字）：一条贴顶的玻璃，往上翻的字从它下面过
+                        Box(Modifier.align(Alignment.TopCenter).fillMaxWidth().onSizeChanged { topH = with(density) { it.height.toDp() } }) {
+                            CompositionLocalProvider(com.guixing.jixunying.ui.glass.LocalGlass provides
+                                com.guixing.jixunying.ui.glass.GlassEnv(both, env.on, env.dark, env.tuning, env.paint)) {
+                                Box(Modifier.fillMaxWidth().glass(RoundedCornerShape(0.dp), com.guixing.jixunying.model.GlassTarget.BAR,
+                                    fallback = MaterialTheme.colorScheme.background)) {
+                                    Column { topBar() }
+                                }
+                            }
+                        }
                         Column(Modifier.align(Alignment.BottomCenter).fillMaxWidth()
                             .onSizeChanged { composerH = with(density) { it.height.toDp() } }) {
                             CompositionLocalProvider(com.guixing.jixunying.ui.glass.LocalGlass provides
@@ -208,7 +242,7 @@ fun ChatScreen(ctl: AppController, convId: String, wide: Boolean, openDrawer: ()
 }
 
 @Composable
-private fun ChatTopBar(state: AppState, conv: Conversation, wide: Boolean, openDrawer: () -> Unit, onStances: (() -> Unit)?, onSettings: () -> Unit) {
+private fun ChatTopBar(state: AppState, conv: Conversation, wide: Boolean, openDrawer: () -> Unit, onStances: (() -> Unit)?, onFind: () -> Unit = {}, onSettings: () -> Unit) {
     val members = conv.memberIds.mapNotNull { state.member(it) }
     // 至少 60 高，系统字体调大时跟着长高（2026-10-22：以前写死 60，200% 字体时副标题掉出顶栏、压到消息上）
     Row(
@@ -231,6 +265,8 @@ private fun ChatTopBar(state: AppState, conv: Conversation, wide: Boolean, openD
             Pill("立场 ${conv.stanceTopics}", MaterialTheme.colorScheme.primary, onClick = onStances)
             Spacer(Modifier.width(8.dp))
         }
+        IconButton(onClick = onFind, modifier = Modifier.size(36.dp)) { Icon(Icons.Rounded.Search, "在对话里找", Modifier.size(19.dp), tint = Ext.c.subtle) }
+        Spacer(Modifier.width(4.dp))
         Row(
             Modifier.clip(RoundedCornerShape(50)).border(1.dp, Ext.c.border, RoundedCornerShape(50)).clickable(onClick = onSettings)
                 .padding(start = 6.dp, end = 10.dp, top = 4.dp, bottom = 4.dp),
@@ -247,7 +283,8 @@ private fun ChatTopBar(state: AppState, conv: Conversation, wide: Boolean, openD
 
 @Composable
 private fun MessageList(ctl: AppController, state: AppState, conv: Conversation, messages: List<Message>,
-                        topics: List<com.guixing.jixunying.model.StanceTopic>, modifier: Modifier = Modifier, bottomPad: Dp = 0.dp, onStance: (String) -> Unit) {
+                        topics: List<com.guixing.jixunying.model.StanceTopic>, modifier: Modifier = Modifier, bottomPad: Dp = 0.dp, topPad: Dp = 0.dp,
+                        highlightId: String? = null, onStance: (String) -> Unit) {
     // 和微信一样从底下往上排：打开对话就停在最新一条的最后一行，图片后加载、AI 正在输出也不会把最新一行挤出去。
     // 每个对话各记各的位置（以前所有对话共用一份：在一个对话里往上翻过，之后打开别的对话都停在上面）
     val listState = remember(conv.id) { LazyListState() }
@@ -275,7 +312,7 @@ private fun MessageList(ctl: AppController, state: AppState, conv: Conversation,
         if (justSent || listState.firstVisibleItemIndex in 1..2) listState.animateScrollToItem(0)
     }
     if (messages.isEmpty()) {
-        Box(Modifier.fillMaxSize().padding(bottom = bottomPad)) { ChatEmptyHint(state, conv) { t -> ctl.composerDraft = conv.id to t } }
+        Box(Modifier.fillMaxSize().padding(top = topPad, bottom = bottomPad)) { ChatEmptyHint(state, conv) { t -> ctl.composerDraft = conv.id to t } }
         return
     }
     val focusManager = androidx.compose.ui.platform.LocalFocusManager.current
@@ -285,7 +322,7 @@ private fun MessageList(ctl: AppController, state: AppState, conv: Conversation,
         modifier = modifier.fillMaxSize().pointerInput(Unit) { detectTapGestures { focusManager.clearFocus() } },
         reverseLayout = true,
         // 输入框浮在上面时底部留出它的高度：用内边距不用一行空白（空白那行跟着输入框变高会把整个列表推走，10-24 codeListHoldsWhileRunning）
-        contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = bottomPad),
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(top = topPad, bottom = bottomPad),
         // 消息少、一屏放得下时照样从上往下排，不沉在底下
         verticalArrangement = Arrangement.Top,
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -293,7 +330,8 @@ private fun MessageList(ctl: AppController, state: AppState, conv: Conversation,
         // 输入框浮在上面时，底部多留出它的高度，最后一条不被挡住（往上一点就从玻璃下面透出来）
         item(key = "bottom") { Spacer(Modifier.height(24.dp)) }
         items(newestFirst, key = { it.id }) { m ->
-            Box(Modifier.widthIn(max = CHAT_MAX_WIDTH).fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
+            Box(Modifier.widthIn(max = CHAT_MAX_WIDTH).fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)
+                .then(if (m.id == highlightId) Modifier.border(2.dp, MaterialTheme.colorScheme.primary, RoundedCornerShape(12.dp)).padding(6.dp) else Modifier)) {
                 if (m.role == Role.USER) UserMessage(ctl, state, m) else AiMessage(ctl, state, m, stanceOf[m.id].orEmpty(), onStance)
             }
         }
@@ -751,6 +789,13 @@ private fun MessageActions(ctl: AppController, m: Message, alignEnd: Boolean, ca
         if (hasTable) SmallAction(Icons.Rounded.TableChart, "表格存成 Excel") { export("xlsx") }
         // 自己说的话：放回输入框改一改再发（和豆包、ChatGPT 一样）
         if (m.role == Role.USER && m.content.isNotBlank()) SmallAction(Icons.Rounded.Edit, "改了重发") { ctl.composerDraft = m.convId to m.content }
+        // 引用回复（2026-10-24，照微信、Slack）：这条的开头几行用「> 」引起来放进输入框；引的是 AI 的话就顺带 @ 它，让它来接
+        if (m.role != Role.USER && body.isNotBlank()) SmallAction(Icons.Rounded.FormatQuote, "引用") {
+            val who = ctl.backend.store.state.value.member(m.senderId)?.name
+            val lines = body.lines().map { it.trim() }.filter { it.isNotEmpty() }
+            val head = lines.take(3).joinToString("\n") { "> " + it.take(80) } + if (lines.size > 3) "\n> …" else ""
+            ctl.composerDraft = m.convId to (if (who != null) "@$who " else "") + "\n" + head + "\n\n"
+        }
         if (canRegenerate) SmallAction(Icons.Rounded.Refresh, "重新回答") { ctl.run(Command.Regenerate(m.convId, m.id)) }
         SmallAction(Icons.Rounded.Delete, "删除") { ctl.run(Command.DeleteMessage(m.convId, m.id)) }
         m.usage?.let { u ->
@@ -1230,6 +1275,10 @@ private fun Composer(ctl: AppController, state: AppState, conv: Conversation, ru
                                         if (files.isEmpty()) ctl.toast("剪贴板里的东西读不出来") else ctl.composerInbox = conv.id to Incoming(files = files)
                                     }
                                     true
+                                } else if (platform.isDesktop && e.type == KeyEventType.KeyDown && e.key == Key.DirectionUp && text.text.isEmpty()) {
+                                    // 输入框空着按 ↑：调出自己上一条发过的话（2026-10-24，照终端和 Slack 的习惯），改改再发
+                                    val lastMine = ctl.backend.store.messages.value[conv.id].orEmpty().lastOrNull { it.role == Role.USER }?.content.orEmpty()
+                                    if (lastMine.isNotBlank()) { text = TextFieldValue(lastMine, TextRange(lastMine.length)); true } else false
                                 } else false
                             },
                         )
@@ -1486,5 +1535,37 @@ private fun ConversationSettingsDialog(ctl: AppController, state: AppState, conv
             Spacer(Modifier.height(8.dp))
             SwitchRow("联网搜索", "需要时先搜索再回答，回答里标出处", search) { search = it }
         }
+    }
+}
+
+/** 对话里的查找栏（2026-10-24）：输入框 + 第几条 / 共几条 + 上一个 / 下一个 + 关掉；Enter 下一个，Esc 关掉。 */
+@Composable
+private fun FindBar(query: String, onQuery: (String) -> Unit, count: Int, index: Int, onPrev: () -> Unit, onNext: () -> Unit, onClose: () -> Unit) {
+    val focus = remember { androidx.compose.ui.focus.FocusRequester() }
+    LaunchedEffect(Unit) { runCatching { focus.requestFocus() } }
+    Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.weight(1f).clip(RoundedCornerShape(10.dp)).background(MaterialTheme.colorScheme.surface)
+            .border(1.dp, Ext.c.border, RoundedCornerShape(10.dp)).padding(horizontal = 10.dp, vertical = 7.dp), verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Rounded.Search, null, Modifier.size(16.dp), tint = Ext.c.subtle)
+            Spacer(Modifier.width(6.dp))
+            Box(Modifier.weight(1f)) {
+                if (query.isEmpty()) Text("在这个对话里找", style = MaterialTheme.typography.bodyMedium, color = Ext.c.subtle)
+                BasicTextField(query, onQuery, singleLine = true,
+                    textStyle = MaterialTheme.typography.bodyMedium.copy(color = MaterialTheme.colorScheme.onSurface),
+                    cursorBrush = androidx.compose.ui.graphics.SolidColor(MaterialTheme.colorScheme.primary),
+                    modifier = Modifier.fillMaxWidth().focusRequester(focus).onPreviewKeyEvent { e ->
+                        if (e.type != KeyEventType.KeyDown) false
+                        else when (e.key) {
+                            Key.Enter -> { if (e.isShiftPressed) onPrev() else onNext(); true }
+                            Key.Escape -> { onClose(); true }
+                            else -> false
+                        }
+                    })
+            }
+            if (query.isNotBlank()) Text(if (count == 0) "没有" else "${index + 1} / $count", style = MaterialTheme.typography.labelMedium, color = Ext.c.subtle)
+        }
+        IconButton(onClick = onPrev, enabled = count > 0) { Icon(Icons.Rounded.KeyboardArrowUp, "上一个") }
+        IconButton(onClick = onNext, enabled = count > 0) { Icon(Icons.Rounded.KeyboardArrowDown, "下一个") }
+        IconButton(onClick = onClose) { Icon(Icons.Rounded.Close, "关掉查找") }
     }
 }

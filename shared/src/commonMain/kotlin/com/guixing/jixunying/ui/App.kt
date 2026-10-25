@@ -1,5 +1,12 @@
 package com.guixing.jixunying.ui
 
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.isAltPressed
+import androidx.compose.ui.input.key.isShiftPressed
+import androidx.compose.ui.input.key.isMetaPressed
+import androidx.compose.ui.input.key.isCtrlPressed
+import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.foundation.layout.Column
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Icon
@@ -119,6 +126,12 @@ class AppController(
     var focusMessageId by mutableStateOf<String?>(null)
     var settingsTab by mutableStateOf<SettingsTab?>(null)
     var showNewChat by mutableStateOf(false)
+    /** 电脑快捷键（2026-10-24）：Ctrl+K 每按一次加一，侧栏搜索框看到变了就打开、拿焦点。 */
+    var searchTick by mutableStateOf(0)
+    /** Ctrl+F：在当前对话里找（对话页顶上出一条查找栏）。 */
+    var findOpen by mutableStateOf(false)
+    /** 电脑上侧栏收起（Ctrl+B 或侧栏右上角的键），记在本机 sidebar.collapsed。 */
+    var sidebarCollapsed by mutableStateOf(false)
     var debugDialog = ""
     /** 截图、尺寸测试用：#后面能用 + 叠几个开关（比如 conv:c14#longdraft+draw）。 */
     fun debug(flag: String) = flag in debugDialog.split('+')
@@ -354,7 +367,22 @@ fun App(hub: Hub, platform: Platform, debugStart: String? = null) {
                 val paint: androidx.compose.ui.graphics.drawscope.DrawScope.() -> Unit = remember(bg, bgImage, dark, glassOn, baseColor) {
                     { drawBackground(bg, bgImage) { if (glassOn) drawWallpaper(dark) else drawRect(baseColor) } }
                 }
-                Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+                // 电脑快捷键（2026-10-24，照 ChatGPT / Claude 桌面版的习惯）：Ctrl+N 新对话、Ctrl+K 搜索对话、Ctrl+B 收起侧栏、
+                // Ctrl+, 设置、Ctrl+F 在这个对话里找。先过一遍（onPreviewKeyEvent），输入框里打字照常
+                val plat = LocalPlatform.current
+                val isDesk = plat.isDesktop
+                Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).onPreviewKeyEvent { e ->
+                    if (!isDesk || e.type != androidx.compose.ui.input.key.KeyEventType.KeyDown || !(e.isCtrlPressed || e.isMetaPressed) || e.isShiftPressed || e.isAltPressed) return@onPreviewKeyEvent false
+                    when (e.key) {
+                        androidx.compose.ui.input.key.Key.N -> { ctl.settingsTab = null; ctl.page = null; ctl.showNewChat = true; true }
+                        androidx.compose.ui.input.key.Key.K -> { ctl.sidebarCollapsed = false; ctl.searchTick++; true }
+                        androidx.compose.ui.input.key.Key.B -> { ctl.sidebarCollapsed = !ctl.sidebarCollapsed
+                            plat.setPref("sidebar.collapsed", if (ctl.sidebarCollapsed) "1" else null); true }
+                        androidx.compose.ui.input.key.Key.Comma -> { ctl.openSettings(); true }
+                        androidx.compose.ui.input.key.Key.F -> if (ctl.currentConvId != null && ctl.settingsTab == null && ctl.page == null) { ctl.findOpen = true; true } else false
+                        else -> false
+                    }
+                }) {
                     if (glassOn || bg.mode != com.guixing.jixunying.model.BgMode.DEFAULT)
                         com.guixing.jixunying.ui.glass.AppWallpaper(if (glassOn) wallpaper else null, bg, bgImage,
                             { if (glassOn) drawWallpaper(dark) else drawRect(baseColor) }, Modifier.matchParentSize())
@@ -406,12 +434,13 @@ private fun MainLayout(ctl: AppController) {
             // 收起后只剩一条窄边，上面一个展开键
             val platform = LocalPlatform.current
             var sideW by remember { mutableStateOf((platform.getPref("sidebar.width")?.toFloatOrNull() ?: 272f).coerceIn(200f, 420f)) }
-            var collapsed by remember { mutableStateOf(platform.getPref("sidebar.collapsed") == "1") }
+            LaunchedEffect(Unit) { ctl.sidebarCollapsed = platform.getPref("sidebar.collapsed") == "1" }
+            val collapsed = ctl.sidebarCollapsed
             val density = androidx.compose.ui.platform.LocalDensity.current
             Row(Modifier.fillMaxSize()) {
                 if (collapsed) {
                     Column(Modifier.width(44.dp).fillMaxHeight().padding(top = 12.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                        IconButton(onClick = { collapsed = false; platform.setPref("sidebar.collapsed", null) }) {
+                        IconButton(onClick = { ctl.sidebarCollapsed = false; platform.setPref("sidebar.collapsed", null) }) {
                             Icon(Icons.AutoMirrored.Rounded.KeyboardArrowRight, "展开侧栏")
                         }
                     }
@@ -419,7 +448,7 @@ private fun MainLayout(ctl: AppController) {
                     Box(Modifier.width(sideW.dp).fillMaxHeight()) {
                         Sidebar(ctl, Modifier.fillMaxSize(), onNavigate = {})
                         // 收起键：侧栏右上角
-                        IconButton(onClick = { collapsed = true; platform.setPref("sidebar.collapsed", "1") },
+                        IconButton(onClick = { ctl.sidebarCollapsed = true; platform.setPref("sidebar.collapsed", "1") },
                             modifier = Modifier.align(Alignment.TopEnd).padding(top = 6.dp, end = 2.dp).size(28.dp)) {
                             Icon(Icons.AutoMirrored.Rounded.KeyboardArrowLeft, "收起侧栏", Modifier.size(18.dp), tint = Ext.c.subtle)
                         }

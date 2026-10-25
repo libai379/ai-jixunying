@@ -1,5 +1,10 @@
 package com.guixing.jixunying.ui
 
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.ui.graphics.luminance
+import androidx.compose.material.icons.rounded.Check
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -245,20 +250,74 @@ internal fun cellWidth(s: String): Float = s.sumOf { ch -> if (ch.code >= 0x2E80
 @Composable
 fun CodeBlock(lang: String, code: String) {
     val clipboard = LocalClipboardManager.current
+    // 2026-10-24：语法上色、复制后显示「已复制」、超过 30 行先折起来（照 ChatGPT / Cherry Studio 的代码块）
+    var copied by remember { mutableStateOf(false) }
+    androidx.compose.runtime.LaunchedEffect(copied) { if (copied) { kotlinx.coroutines.delay(1500); copied = false } }
+    val lines = remember(code) { code.lines() }
+    val long = lines.size > 30
+    var expanded by remember(code) { mutableStateOf(false) }
+    val dark = MaterialTheme.colorScheme.background.luminance() < 0.5f
+    val shown = if (long && !expanded) lines.take(20).joinToString("\n") else code
+    val highlighted = remember(shown, lang, dark) { highlightCode(shown, lang, dark) }
     Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(Ext.c.codeBg).border(1.dp, Ext.c.border, RoundedCornerShape(12.dp))) {
         Row(Modifier.fillMaxWidth().padding(start = 14.dp, end = 8.dp, top = 6.dp, bottom = 2.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text(lang.ifBlank { "代码" }, style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, modifier = Modifier.weight(1f))
-            Row(Modifier.clip(RoundedCornerShape(6.dp)).clickable { clipboard.setText(AnnotatedString(code)) }.padding(horizontal = 6.dp, vertical = 3.dp),
+            Text(lang.ifBlank { "代码" } + if (long) " · ${lines.size} 行" else "", style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, modifier = Modifier.weight(1f))
+            Row(Modifier.clip(RoundedCornerShape(6.dp)).clickable { clipboard.setText(AnnotatedString(code)); copied = true }.padding(horizontal = 6.dp, vertical = 3.dp),
                 verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Rounded.ContentCopy, null, Modifier.size(13.dp), tint = Ext.c.subtle)
+                Icon(if (copied) Icons.Rounded.Check else Icons.Rounded.ContentCopy, null, Modifier.size(13.dp), tint = if (copied) Ext.c.success else Ext.c.subtle)
                 Spacer(Modifier.width(3.dp))
-                Text("复制", style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
+                Text(if (copied) "已复制" else "复制", style = MaterialTheme.typography.labelSmall, color = if (copied) Ext.c.success else Ext.c.subtle)
             }
         }
-        Box(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(start = 14.dp, end = 14.dp, bottom = 12.dp, top = 2.dp)) {
-            Text(code, fontFamily = FontFamily.Monospace, fontSize = 13.sp, lineHeight = 19.sp, color = MaterialTheme.colorScheme.onSurface, softWrap = false)
+        Box(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(start = 14.dp, end = 14.dp, bottom = if (long) 4.dp else 12.dp, top = 2.dp)) {
+            Text(highlighted, fontFamily = FontFamily.Monospace, fontSize = 13.sp, lineHeight = 19.sp, color = MaterialTheme.colorScheme.onSurface, softWrap = false)
         }
+        if (long) Text(if (expanded) "收起" else "展开全部 ${lines.size} 行",
+            style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.fillMaxWidth().clickable { expanded = !expanded }.padding(horizontal = 14.dp, vertical = 8.dp))
     }
+}
+
+private val codeKeywords = setOf(
+    "fun", "val", "var", "if", "else", "for", "while", "do", "return", "class", "def", "import", "from", "function", "const", "let",
+    "true", "false", "null", "None", "True", "False", "nil", "undefined", "public", "private", "protected", "internal", "static", "final",
+    "new", "try", "catch", "finally", "throw", "throws", "in", "is", "as", "when", "object", "interface", "package", "async", "await",
+    "yield", "lambda", "struct", "enum", "match", "case", "break", "continue", "switch", "default", "this", "self", "super", "extends",
+    "implements", "override", "suspend", "data", "sealed", "open", "abstract", "void", "int", "long", "float", "double", "boolean", "char",
+    "string", "str", "bool", "fn", "pub", "mut", "impl", "use", "mod", "go", "func", "type", "export", "with", "not", "and", "or", "pass",
+    "raise", "except", "global", "echo", "then", "fi", "esac", "select", "insert", "update", "delete", "where", "create", "table", "SELECT",
+    "FROM", "WHERE", "INSERT", "UPDATE", "DELETE", "CREATE", "TABLE", "JOIN", "ORDER", "BY", "GROUP", "AND", "OR", "NOT", "NULL",
+)
+
+/** 简单的通用上色：注释、字符串、数字、关键字、注解；认不出的语言也能看。 */
+private fun highlightCode(code: String, lang: String, dark: Boolean): AnnotatedString {
+    val cComment = if (dark) Color(0xFF7F8C98) else Color(0xFF8A8F98)
+    val cString = if (dark) Color(0xFF9ECE6A) else Color(0xFF2E7D32)
+    val cNumber = if (dark) Color(0xFFFF9E64) else Color(0xFFB4530A)
+    val cKeyword = if (dark) Color(0xFFBB9AF7) else Color(0xFF7C3AED)
+    val cAnno = if (dark) Color(0xFF7DCFFF) else Color(0xFF0369A1)
+    val hashComment = lang.lowercase() in setOf("python", "py", "sh", "bash", "shell", "zsh", "yaml", "yml", "toml", "ruby", "rb", "r", "powershell", "ps1", "dockerfile", "makefile", "ini", "conf")
+    val b = AnnotatedString.Builder(code)
+    val token = Regex(
+        (if (hashComment) """#[^\n]*|""" else "") +
+            """//[^\n]*|/\*[\s\S]*?\*/|--[^\n]*|"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'|`[^`]*`|""" +
+            """\b\d+(?:\.\d+)?[fFLl]?\b|@[A-Za-z_]\w*|\b[A-Za-z_]\w*\b"""
+    )
+    for (m in token.findAll(code)) {
+        val t = m.value
+        val style = when {
+            t.startsWith("//") || t.startsWith("/*") || (hashComment && t.startsWith("#")) || (t.startsWith("--") && lang.lowercase() in setOf("sql", "lua", "haskell")) ->
+                androidx.compose.ui.text.SpanStyle(color = cComment, fontStyle = androidx.compose.ui.text.font.FontStyle.Italic)
+            t.startsWith("--") -> null
+            t.startsWith("\"") || t.startsWith("'") || t.startsWith("`") -> androidx.compose.ui.text.SpanStyle(color = cString)
+            t[0].isDigit() -> androidx.compose.ui.text.SpanStyle(color = cNumber)
+            t.startsWith("@") -> androidx.compose.ui.text.SpanStyle(color = cAnno)
+            t in codeKeywords -> androidx.compose.ui.text.SpanStyle(color = cKeyword, fontWeight = FontWeight.Medium)
+            else -> null
+        }
+        if (style != null) b.addStyle(style, m.range.first, m.range.last + 1)
+    }
+    return b.toAnnotatedString()
 }
 
 /** 把 <think>…</think> 拆出来当推理过程显示。 */

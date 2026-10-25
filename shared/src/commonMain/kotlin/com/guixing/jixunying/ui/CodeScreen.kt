@@ -1,5 +1,6 @@
 package com.guixing.jixunying.ui
 
+import com.guixing.jixunying.ui.glass.glass
 import com.kashif_e.backdrop.backdrops.layerBackdrop
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.runtime.CompositionLocalProvider
@@ -182,8 +183,13 @@ fun CodeScreen(ctl: AppController, convId: String, wide: Boolean, openDrawer: ()
             val h = maxHeight
             val short = h < 420.dp
             Column(Modifier.fillMaxSize()) {
-                if (h >= 240.dp) CodeTopBar(ctl, state, conv, spec, wide, openDrawer, running, access)
-                if (spec.prUrl.isNotBlank() && platform.isDesktop && !ctl.remoteMode) CiBar(ctl, conv, spec)
+                val topBars: @Composable () -> Unit = {
+                    if (h >= 240.dp) CodeTopBar(ctl, state, conv, spec, wide, openDrawer, running, access)
+                    if (spec.prUrl.isNotBlank() && platform.isDesktop && !ctl.remoteMode) CiBar(ctl, conv, spec)
+                }
+                val glassOnHere = com.guixing.jixunying.ui.glass.LocalGlass.current.let { it.on && it.backdrop != null } &&
+                    !(ctl.codeTerminalOpen && access.canAct && platform.isDesktop && !ctl.remoteMode)
+                if (!glassOnHere) topBars()
                 // 和对话页一样（10-24）：开着液态玻璃、没开终端时，输入框浮在步骤列表上，列表一直排到底，输入框的玻璃透出下面的字
                 val env = com.guixing.jixunying.ui.glass.LocalGlass.current
                 val terminal = ctl.codeTerminalOpen && access.canAct && platform.isDesktop && !ctl.remoteMode
@@ -195,12 +201,21 @@ fun CodeScreen(ctl: AppController, convId: String, wide: Boolean, openDrawer: ()
                     BackgroundBar(ctl, conv)
                     if (access.canAct) CodeComposer(ctl, conv, running, short = short, maxText = (h * 0.3f).coerceIn(48.dp, 200.dp)) else CodeBottomNote(access)
                 }
+                var topH by remember { mutableStateOf(0.dp) }
                 Box(Modifier.weight(1f).fillMaxWidth()) {
                     CodeMessageList(ctl, state, conv, messages, access.canAct,
                         modifier = if (floating) Modifier.layerBackdrop(contentLayer) else Modifier,
-                        bottomPad = if (floating) bottomH else 0.dp) { diffMessage = it }
+                        bottomPad = if (floating) bottomH else 0.dp, topPad = if (floating) topH else 0.dp) { diffMessage = it }
                     if (floating) {
                         val both = com.kashif_e.backdrop.backdrops.rememberCombinedBackdrop(env.backdrop!!, contentLayer)
+                        // 顶栏也浮在步骤列表上面（10-24），和对话页一样
+                        Box(Modifier.align(Alignment.TopCenter).fillMaxWidth().onSizeChanged { topH = with(density) { it.height.toDp() } }) {
+                            CompositionLocalProvider(com.guixing.jixunying.ui.glass.LocalGlass provides
+                                com.guixing.jixunying.ui.glass.GlassEnv(both, env.on, env.dark, env.tuning, env.paint)) {
+                                Column(Modifier.fillMaxWidth().glass(RoundedCornerShape(0.dp), com.guixing.jixunying.model.GlassTarget.BAR,
+                                    fallback = MaterialTheme.colorScheme.background)) { topBars() }
+                            }
+                        }
                         Column(Modifier.align(Alignment.BottomCenter).fillMaxWidth()
                             .onSizeChanged { bottomH = with(density) { it.height.toDp() } }) {
                             CompositionLocalProvider(com.guixing.jixunying.ui.glass.LocalGlass provides
@@ -934,7 +949,7 @@ private fun CodeHelpDialog(onClose: () -> Unit) {
 
 @Composable
 private fun CodeMessageList(ctl: AppController, state: AppState, conv: Conversation, messages: List<Message>, canAct: Boolean,
-                            modifier: Modifier = Modifier, bottomPad: androidx.compose.ui.unit.Dp = 0.dp, onDiff: (String) -> Unit) {
+                            modifier: Modifier = Modifier, bottomPad: androidx.compose.ui.unit.Dp = 0.dp, topPad: androidx.compose.ui.unit.Dp = 0.dp, onDiff: (String) -> Unit) {
     // 和聊天一样从底下往上排：打开会话停在最新一行的最后（教训 60），每个会话各记各的位置
     val listState = remember(conv.id) { LazyListState() }
     val last = messages.lastOrNull()
@@ -944,7 +959,7 @@ private fun CodeMessageList(ctl: AppController, state: AppState, conv: Conversat
         if (last?.role == Role.USER) listState.animateScrollToItem(0)
     }
     if (messages.isEmpty()) {
-        Box(Modifier.fillMaxSize().padding(bottom = bottomPad)) { CodeStartHint(conv) }
+        Box(Modifier.fillMaxSize().padding(top = topPad, bottom = bottomPad)) { CodeStartHint(conv) }
         return
     }
     val rows = codeRows(ctl, state, messages, canAct, onDiff).asReversed()
@@ -953,7 +968,7 @@ private fun CodeMessageList(ctl: AppController, state: AppState, conv: Conversat
         modifier = modifier.fillMaxSize(),
         reverseLayout = true,
         // 输入框浮在上面时底部留出它的高度：用内边距不用一行空白（空白那行跟着输入框变高会把整个列表推走，10-24 codeListHoldsWhileRunning）
-        contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = bottomPad),
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(top = topPad, bottom = bottomPad),
         verticalArrangement = Arrangement.Top,
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {

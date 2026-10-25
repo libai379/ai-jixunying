@@ -1,5 +1,8 @@
 package com.guixing.jixunying.ui
 
+import androidx.compose.material.icons.rounded.Check
+import androidx.compose.material.icons.rounded.Download
+import androidx.compose.material.icons.rounded.Archive
 import com.guixing.jixunying.ui.glass.glass
 
 import androidx.compose.foundation.background
@@ -140,7 +143,7 @@ fun Sidebar(ctl: AppController, modifier: Modifier, onNavigate: () -> Unit) {
             }
             Spacer(Modifier.height(10.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
-                TapToSearchField(query, { query = it }, if (code) "搜索 Code 会话" else "搜索对话", Modifier.weight(1f))
+                TapToSearchField(query, { query = it }, if (code) "搜索 Code 会话" else "搜索对话", Modifier.weight(1f), activate = ctl.searchTick)
                 // 新对话 / 新建 Code 会话（Code 栏在这台设备上动不了时不给，见 CodeUi）
                 val canNew = !code || codeAccess.canAct
                 if (canNew) {
@@ -294,12 +297,18 @@ private fun ColumnScope.ChatSessionSidebar(ctl: AppController, state: AppState, 
         }
         val now = nowMillis()
         val dayMs = 86_400_000L
+        // 归档的（2026-10-24）不进时间分组，放最底下「已归档」，点开才列出来；搜索时照样搜得到
+        val live = if (query.isBlank()) list.filter { !it.archived } else list
+        val archived = if (query.isBlank()) list.filter { it.archived } else emptyList()
+        var showArchived by remember { mutableStateOf(false) }
+        var picking by remember { mutableStateOf(false) }
+        var picked by remember { mutableStateOf(setOf<String>()) }
         val groups = listOf(
-            "置顶" to list.filter { it.pinned },
-            "今天" to list.filter { !it.pinned && now - it.updatedAt < dayMs },
-            "最近 7 天" to list.filter { !it.pinned && now - it.updatedAt in dayMs until 7 * dayMs },
-            "更早" to list.filter { !it.pinned && now - it.updatedAt >= 7 * dayMs },
-        ).filter { it.second.isNotEmpty() }
+            "置顶" to live.filter { it.pinned },
+            "今天" to live.filter { !it.pinned && now - it.updatedAt < dayMs },
+            "最近 7 天" to live.filter { !it.pinned && now - it.updatedAt in dayMs until 7 * dayMs },
+            "更早" to live.filter { !it.pinned && now - it.updatedAt >= 7 * dayMs },
+        ).filter { it.second.isNotEmpty() } + (if (showArchived) listOf("已归档" to archived) else emptyList())
 
         LazyColumn(Modifier.weight(1f)) {
             if (list.isEmpty() && hits.isEmpty()) item {
@@ -322,16 +331,45 @@ private fun ColumnScope.ChatSessionSidebar(ctl: AppController, state: AppState, 
             }
             // 一条条弹出来（癸星科技启动页的入场动画）：按在整个列表里的位置排先后
             val order = groups.flatMap { it.second }.map { it.id }
+            if (archived.isNotEmpty()) item(key = "archived_toggle") {
+                Text((if (showArchived) "收起已归档" else "已归档（${archived.size}）") + "  ›",
+                    style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle,
+                    modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable { showArchived = !showArchived }.padding(start = 10.dp, top = 12.dp, bottom = 4.dp, end = 10.dp))
+            }
             groups.forEach { (label, convs) ->
                 item(key = "h_$label") {
                     Text(label, style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, modifier = Modifier.padding(start = 10.dp, top = 12.dp, bottom = 4.dp))
                 }
                 items(convs, key = { it.id }) { c ->
-                    ConversationRow(ctl, state, c, selected = c.id == ctl.currentConvId && ctl.settingsTab == null && ctl.page == null, index = order.indexOf(c.id)) {
-                        ctl.openConversation(c.id); onNavigate()
+                    ConversationRow(ctl, state, c, selected = c.id == ctl.currentConvId && ctl.settingsTab == null && ctl.page == null, index = order.indexOf(c.id),
+                        picking = picking, picked = c.id in picked, onPickMode = { picking = true; picked = setOf(c.id) }) {
+                        if (picking) picked = if (c.id in picked) picked - c.id else picked + c.id
+                        else { ctl.openConversation(c.id); onNavigate() }
                     }
                 }
             }
+        }
+        // 多选（2026-10-24，照 Cherry Studio）：底下一条批量归档 / 删除
+        if (picking) {
+            var confirm by remember { mutableStateOf(false) }
+            Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("选了 ${picked.size} 个", style = MaterialTheme.typography.labelMedium, modifier = Modifier.weight(1f).padding(start = 8.dp))
+                TextButton(enabled = picked.isNotEmpty(), onClick = {
+                    picked.mapNotNull { id -> state.conversation(id) }.forEach { c -> ctl.run(Command.UpdateConversation(c.copy(archived = !c.archived, pinned = false)), quiet = true) }
+                    ctl.toast("已归档 / 放回 ${picked.size} 个"); picking = false; picked = emptySet()
+                }) { Text("归档") }
+                TextButton(enabled = picked.isNotEmpty(), onClick = { confirm = true }) { Text("删除", color = MaterialTheme.colorScheme.error) }
+                TextButton(onClick = { picking = false; picked = emptySet() }) { Text("取消") }
+            }
+            if (confirm) AppDialog("删除 ${picked.size} 个对话", { confirm = false }, width = 420.dp, actions = {
+                TextButton({ confirm = false }) { Text("取消") }
+                Button({
+                    confirm = false
+                    if (ctl.currentConvId in picked) ctl.currentConvId = state.conversations.firstOrNull { it.id !in picked && !it.isCode }?.id
+                    picked.forEach { ctl.run(Command.DeleteConversation(it), quiet = true) }
+                    picking = false; picked = emptySet()
+                }, colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)) { Text("删除") }
+            }) { Text("这几个对话的聊天记录和附件会从电脑上删除，不能恢复。", style = MaterialTheme.typography.bodyMedium) }
         }
 }
 
@@ -508,7 +546,8 @@ private fun GroupAvatar(members: List<com.guixing.jixunying.model.Member>, size:
 }
 
 @Composable
-private fun ConversationRow(ctl: AppController, state: AppState, c: Conversation, selected: Boolean, index: Int = 0, onClick: () -> Unit) {
+private fun ConversationRow(ctl: AppController, state: AppState, c: Conversation, selected: Boolean, index: Int = 0,
+                            picking: Boolean = false, picked: Boolean = false, onPickMode: () -> Unit = {}, onClick: () -> Unit) {
     var menu by remember { mutableStateOf(false) }
     var renaming by remember { mutableStateOf(false) }
     var confirmDelete by remember { mutableStateOf(false) }
@@ -521,6 +560,7 @@ private fun ConversationRow(ctl: AppController, state: AppState, c: Conversation
             .padding(start = 8.dp, top = 7.dp, bottom = 7.dp, end = 2.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        if (picking) androidx.compose.material3.Checkbox(picked, { onClick() }, Modifier.size(32.dp))
         when {
             members.isEmpty() -> MemberAvatar(null, 36.dp, emoji = "💬")
             members.size == 1 -> MemberAvatar(members[0], 36.dp)
@@ -543,6 +583,12 @@ private fun ConversationRow(ctl: AppController, state: AppState, c: Conversation
                     onClick = { menu = false; ctl.run(Command.UpdateConversation(c.copy(pinned = !c.pinned))) })
                 DropdownMenuItem({ Text("重命名") }, leadingIcon = { Icon(Icons.Rounded.Edit, null, Modifier.size(18.dp)) },
                     onClick = { menu = false; renaming = true })
+                DropdownMenuItem({ Text("多选") }, leadingIcon = { Icon(Icons.Rounded.Check, null, Modifier.size(18.dp)) },
+                    onClick = { menu = false; onPickMode() })
+                DropdownMenuItem({ Text("导出成 Markdown") }, leadingIcon = { Icon(Icons.Rounded.Download, null, Modifier.size(18.dp)) },
+                    onClick = { menu = false; exportConversationMarkdown(ctl, state, c) })
+                DropdownMenuItem({ Text(if (c.archived) "取消归档" else "归档") }, leadingIcon = { Icon(Icons.Rounded.Archive, null, Modifier.size(18.dp)) },
+                    onClick = { menu = false; ctl.run(Command.UpdateConversation(c.copy(archived = !c.archived, pinned = false)), if (c.archived) "已放回列表" else "已归档：侧栏最底下「已归档」里能找到") })
                 DropdownMenuItem({ Text("删除", color = MaterialTheme.colorScheme.error) }, leadingIcon = { Icon(Icons.Rounded.Delete, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.error) },
                     onClick = { menu = false; confirmDelete = true })
             }

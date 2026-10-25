@@ -130,7 +130,8 @@ fun Modifier.glass(
     }
     val p = params ?: env.tuning.paramsFor(target)
     val live = rememberUpdatedState(p)
-    val liveShape = rememberUpdatedState(shape)
+    // 库的折射只认圆角矩形一类（CornerBasedShape），给别的形状直接抛 UnsupportedOperationException（10-24 顶栏用直角形状崩过）
+    val liveShape = rememberUpdatedState(if (shape is androidx.compose.foundation.shape.CornerBasedShape) shape else androidx.compose.foundation.shape.RoundedCornerShape(0.dp))
     val liveFallback = rememberUpdatedState(fallback)
     val liveTint = rememberUpdatedState(tint)
     val dark = env.dark

@@ -279,9 +279,11 @@ val MemberEmojis = listOf("🤖", "🧠", "📊", "💻", "🧐", "✍️", "�
  * 侧栏和下拉菜单打开时会把焦点交给里面第一个能输入的框，直接放输入框会一打开就弹键盘。
  */
 @Composable
-fun TapToSearchField(value: String, onChange: (String) -> Unit, placeholder: String, modifier: Modifier = Modifier) {
+fun TapToSearchField(value: String, onChange: (String) -> Unit, placeholder: String, modifier: Modifier = Modifier, activate: Int = 0) {
     var active by remember { mutableStateOf(false) }
     var focusedOnce by remember { mutableStateOf(false) }
+    // 电脑上 Ctrl+K（2026-10-24）：外面每按一次 activate 加一，这里就打开、拿焦点
+    LaunchedEffect(activate) { if (activate > 0) { active = true; focusedOnce = false } }
     val focus = remember { androidx.compose.ui.focus.FocusRequester() }
     Row(
         modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).background(MaterialTheme.colorScheme.surface)
