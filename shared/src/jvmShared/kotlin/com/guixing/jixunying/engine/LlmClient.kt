@@ -56,7 +56,7 @@ class LlmClient(private val proxyOf: (ProviderConfig) -> String?) {
     private val droppedParams = ConcurrentHashMap<String, MutableSet<String>>()
 
     /** 手机上：电脑本机的模型（ProviderConfig.viaHost）交给配对的电脑去问（HostModels 装上，request 见 HostChatCodec）。 */
-    @Volatile var viaHost: (suspend (ProviderConfig, String, String) -> ChatResult)? = null
+    @Volatile var viaHost: (suspend (ProviderConfig, String, String, (String, String) -> Unit) -> ChatResult)? = null
 
     /** 「用 ChatGPT 登录」的访问令牌（Engine 设置；force = 先刷新一次）。没登录抛 ChatGptAuth.AuthException。 */
     @Volatile var chatgptToken: (suspend (force: Boolean) -> String)? = null
@@ -85,9 +85,16 @@ class LlmClient(private val proxyOf: (ProviderConfig) -> String?) {
     ): ChatResult {
         if (provider.viaHost) {
             val h = viaHost ?: throw IllegalStateException("「${provider.name}」是电脑本机的模型，要电脑开着、手机连上电脑才能用")
-            // 电脑那边已经记了账（本机模型 0 元），手机这边不再记；回答整段回来
-            val r = h(provider, model, HostChatCodec.request(messages, temperature, tools, extra, thinking))
-            onDelta(r.content, r.reasoning)
+            // 电脑那边已经记了账（本机模型 0 元），手机这边不再记；电脑边问边发增量，答完发整段
+            val got = StringBuilder()
+            val gotReasoning = StringBuilder()
+            val r = h(provider, model, HostChatCodec.request(messages, temperature, tools, extra, thinking)) { d, rs ->
+                got.append(d); gotReasoning.append(rs); onDelta(d, rs)
+            }
+            // 增量丢了一截（或者电脑是不发增量的旧版）：把没出来的补上
+            val restC = if (r.content.startsWith(got)) r.content.substring(got.length) else ""
+            val restR = if (r.reasoning.startsWith(gotReasoning)) r.reasoning.substring(gotReasoning.length) else ""
+            if (restC.isNotEmpty() || restR.isNotEmpty()) onDelta(restC, restR)
             return r
         }
         val key = provider.id + "|" + model

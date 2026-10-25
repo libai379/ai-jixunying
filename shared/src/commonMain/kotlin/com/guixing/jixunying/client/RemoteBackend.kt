@@ -52,6 +52,8 @@ class RemoteBackend(
 
     private var nextReq = 1L
     private val pending = mutableMapOf<Long, CompletableDeferred<CommandResult>>()
+    /** callStreaming 的请求：电脑先回的一截交给谁。 */
+    private val partSinks = mutableMapOf<Long, (String, String) -> Unit>()
     private val lock = Mutex()
     private val fileCache = LinkedHashMap<String, ByteArray>()
     private val clock = TimeSource.Monotonic
@@ -95,6 +97,7 @@ class RemoteBackend(
                 when (f) {
                     is WireFrame.Evt -> store.apply(f.event)
                     is WireFrame.Res -> lock.withLock { pending.remove(f.reqId) }?.complete(f.result)
+                    is WireFrame.Part -> lock.withLock { partSinks[f.reqId] }?.invoke(f.content, f.reasoning)
                     is WireFrame.Hello, is WireFrame.Req -> Unit
                     is WireFrame.Revoked -> revoked.value = true
                 }
@@ -158,18 +161,32 @@ class RemoteBackend(
         link.close()
     }
 
-    override suspend fun call(command: Command): CommandResult {
+    override suspend fun call(command: Command): CommandResult = callStreaming(command, null)
+
+    /**
+     * 和 call 一样，电脑没答完时先回的一截（WireFrame.Part）交给 onPart。
+     * 借电脑本机模型（HostChat）：大模型在电脑上慢慢想，从最后一次收到东西算起等 10 分钟。
+     */
+    suspend fun callStreaming(command: Command, onPart: ((String, String) -> Unit)?): CommandResult {
         if (revoked.value) return CommandResult(false, "已取消配对")
         val deferred = CompletableDeferred<CommandResult>()
-        val id = lock.withLock { val id = nextReq++; pending[id] = deferred; id }
+        var lastPart = clock.markNow()
+        val sink: ((String, String) -> Unit)? = onPart?.let { f -> { c, r -> lastPart = clock.markNow(); f(c, r) } }
+        val id = lock.withLock { val id = nextReq++; pending[id] = deferred; sink?.let { partSinks[id] = it }; id }
+        val limit = if (command is Command.HostChat) 600.seconds else 120.seconds
         return try {
             link.send(WireFrame.Req(id, command))
-            // 借电脑本机模型问一次（HostChat）：大模型在电脑上慢慢想，等 10 分钟
-            withTimeoutOrNull(if (command is Command.HostChat) 600_000 else 120_000) { deferred.await() } ?: CommandResult(false, "电脑没有响应（不在线或网络太慢）")
+            var r: CommandResult? = null
+            while (r == null) {
+                val left = limit - lastPart.elapsedNow()
+                if (!left.isPositive()) break
+                r = withTimeoutOrNull(left) { deferred.await() }
+            }
+            r ?: CommandResult(false, "电脑没有响应（不在线或网络太慢）")
         } catch (e: Throwable) {
             CommandResult(false, e.message ?: "发送失败")
         } finally {
-            lock.withLock { pending.remove(id) }
+            lock.withLock { pending.remove(id); partSinks.remove(id) }
         }
     }
 

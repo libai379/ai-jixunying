@@ -31,9 +31,17 @@ import kotlinx.serialization.json.put
  *
  * 电脑上地址是本机（127.0.0.1 / localhost）的服务商——Ollama 这类——手机自己连不上。手机连着电脑时：
  * - 把这些服务商抄一份到手机上，标 viaHost、不带 Key；第一次抄过来时，电脑上用它的成员也抄一份（以后手机上删了就不再加回来）。
- * - 手机上问这些模型时，LlmClient 把请求原样经加密线路交给电脑（Command.HostChat），电脑问完把整段回答发回来。
- * 电脑关了、没连上：服务商和成员还在，问的时候直接说「要电脑开着」。回答是整段回来的，不是一个字一个字出。
+ * - 手机上问这些模型时，LlmClient 把请求原样经加密线路交给电脑（Command.HostChat），电脑边问边把增量发回来
+ *   （WireFrame.Part，10-25 起一个字一个字出），答完再发整段结果（工具调用、用量都在里面）。
+ * 电脑关了、没连上：服务商和成员还在，问的时候直接说「要电脑开着」。
  */
+
+/** 电脑上：这次 HostChat 的增量交给谁（RelayHost 放进协程上下文，Engine 处理 HostChat 时取出来）。 */
+class HostChatParts(val onPart: (content: String, reasoning: String) -> Unit) :
+    kotlin.coroutines.AbstractCoroutineContextElement(HostChatParts) {
+    companion object Key : kotlin.coroutines.CoroutineContext.Key<HostChatParts>
+}
+
 object HostChatCodec {
     fun isLoopback(baseUrl: String): Boolean {
         val host = runCatching { java.net.URI(baseUrl.trim()).host }.getOrNull()?.lowercase()?.trim('[', ']') ?: return false
@@ -108,11 +116,11 @@ class HostModels(
     }
 
     fun install() {
-        engine.hostChat = { p, model, request ->
+        engine.hostChat = { p, model, request, onDelta ->
             val remote = hub.remote.value
             if (remote == null || remote.conn.value !is ConnState.Connected)
                 throw IllegalStateException("「${p.name}」是电脑本机的模型，要电脑开着、手机连上电脑才能用")
-            val r = remote.call(Command.HostChat(p.id, model, request))
+            val r = remote.callStreaming(Command.HostChat(p.id, model, request), onDelta)
             if (!r.ok) throw IllegalStateException(r.message)
             HostChatCodec.parseResult(r.data)
         }

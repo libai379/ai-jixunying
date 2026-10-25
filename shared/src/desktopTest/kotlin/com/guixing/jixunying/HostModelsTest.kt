@@ -62,7 +62,11 @@ class HostModelsTest {
                     call.receiveText()
                     asked.incrementAndGet()
                     call.respondTextWriter(ContentType.Text.EventStream) {
-                        write("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"我是电脑上的千问\"}}]}\n\n")
+                        // 两截中间停一下：手机应该先收到第一截（一个字一个字出），不是等整段
+                        write("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"我是电脑上的\"}}]}\n\n")
+                        flush()
+                        Thread.sleep(600)
+                        write("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"千问\"}}]}\n\n")
                         write("data: [DONE]\n\n")
                         flush()
                     }
@@ -115,6 +119,20 @@ class HostModelsTest {
             val r = phone.call(Command.TestProvider("ollama1", "qwen3.6:35b-a3b-coding"))
             assertTrue(r.ok, r.message); assertTrue("我是电脑上的千问" in r.message, r.message)
             assertEquals(1, asked.get(), "是电脑去问的本机模型")
+            // 增量先到：第一截在整段结果回来之前就到了手机
+            val parts = java.util.Collections.synchronizedList(mutableListOf<String>())
+            val firstPartAt = java.util.concurrent.atomic.AtomicLong(0)
+            val ask = HostChatCodec.request(listOf(kotlinx.serialization.json.buildJsonObject {
+                put("role", kotlinx.serialization.json.JsonPrimitive("user")); put("content", kotlinx.serialization.json.JsonPrimitive("你是谁"))
+            }), null, null, null, null)
+            val streamed = hub.remote.value!!.callStreaming(Command.HostChat("ollama1", "qwen3.6:35b-a3b-coding", ask)) { c, _ ->
+                firstPartAt.compareAndSet(0, System.currentTimeMillis()); parts += c
+            }
+            val doneAt = System.currentTimeMillis()
+            assertTrue(streamed.ok, streamed.message)
+            assertEquals("我是电脑上的千问", HostChatCodec.parseResult(streamed.data).content)
+            assertEquals("我是电脑上的千问", parts.joinToString(""), "几截拼起来就是整段")
+            assertTrue(firstPartAt.get() in 1..(doneAt - 300), "第一截比整段早到（差 ${doneAt - firstPartAt.get()} 毫秒）")
             // 手机不能借这条路用电脑上的云端服务商
             val cloud = hub.remote.value!!.call(Command.HostChat("cloud1", "x", HostChatCodec.request(emptyList(), null, null, null, null)))
             assertFalse(cloud.ok)

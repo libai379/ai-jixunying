@@ -173,7 +173,7 @@ class Engine(
     }
 
     /** 手机上：电脑本机的模型经电脑问（HostModels 装上）。 */
-    var hostChat: (suspend (ProviderConfig, String, String) -> ChatResult)?
+    var hostChat: (suspend (ProviderConfig, String, String, (String, String) -> Unit) -> ChatResult)?
         get() = llm.viaHost
         set(v) { llm.viaHost = v }
 
@@ -923,7 +923,10 @@ class Engine(
             if (p == null || p.viaHost || !HostChatCodec.isLoopback(p.baseUrl)) CommandResult(false, "电脑上没有这个本机模型")
             else {
                 val q = HostChatCodec.parseRequest(c.request)
-                val r = withContext(UsageTag("chat")) { llm.chat(p, c.model, q.messages, q.temperature, q.tools, q.extra, thinking = q.thinking) { _, _ -> } }
+                val parts = currentCoroutineContext()[HostChatParts]
+                val r = withContext(UsageTag("chat")) {
+                    llm.chat(p, c.model, q.messages, q.temperature, q.tools, q.extra, thinking = q.thinking) { d, rs -> parts?.onPart?.invoke(d, rs) }
+                }
                 CommandResult(data = HostChatCodec.result(r))
             }
         } catch (e: CancellationException) { throw e } catch (e: Throwable) { CommandResult(false, "电脑上的模型没答上来：" + (e.message ?: e.toString())) }

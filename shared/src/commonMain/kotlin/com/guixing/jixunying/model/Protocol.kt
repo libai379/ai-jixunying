@@ -387,6 +387,8 @@ sealed interface Event {
 sealed interface WireFrame {
     @Serializable data class Req(val reqId: Long, val command: Command) : WireFrame
     @Serializable data class Res(val reqId: Long, val result: CommandResult) : WireFrame
+    /** 一次请求还没答完时先回的一截（借电脑本机模型 HostChat 一个字一个字出，10-25）。只发给发请求的那台手机，旧版手机不会收到。 */
+    @Serializable data class Part(val reqId: Long, val content: String = "", val reasoning: String = "") : WireFrame
     @Serializable data class Evt(val event: Event) : WireFrame
     /** 手机上线 / 心跳。电脑收到后把最新状态推给它。 */
     @Serializable data class Hello(val deviceName: String, val wantState: Boolean = true) : WireFrame

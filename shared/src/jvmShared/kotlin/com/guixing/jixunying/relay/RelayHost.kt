@@ -16,6 +16,7 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.Base64
 import java.util.concurrent.ConcurrentHashMap
@@ -109,7 +110,11 @@ class RelayHost(private val engine: Engine) {
                     val v = PhoneGate.check(f.command, engine.state)
                     // 哪台手机来拿微信绑定，记下来：电脑关机时就它接（没指定过、或者指定的那台已经取消配对时）
                     if (v.refusal == null && v.command is com.guixing.jixunying.model.Command.WeixinShare) engine.noteWeixinPhone(deviceId)
-                    val r = v.refusal ?: engine.call(v.command)
+                    // 借电脑本机模型：边问边把增量发回这台手机（发送队列会把 80 毫秒里的几截并成一截）
+                    val parts = if (v.command is com.guixing.jixunying.model.Command.HostChat)
+                        com.guixing.jixunying.engine.HostChatParts { c, rs -> enqueue(deviceId, WireFrame.Part(f.reqId, c, rs)) }
+                    else kotlin.coroutines.EmptyCoroutineContext
+                    val r = v.refusal ?: withContext(parts) { engine.call(v.command) }
                     enqueue(deviceId, WireFrame.Res(f.reqId, r))
                 }
                 else -> Unit
@@ -185,8 +190,12 @@ class RelayHost(private val engine: Engine) {
             val last = out.lastOrNull()
             val d = (f as? WireFrame.Evt)?.event as? Event.MessageDelta
             val ld = (last as? WireFrame.Evt)?.event as? Event.MessageDelta
+            val p = f as? WireFrame.Part
+            val lp = last as? WireFrame.Part
             if (d != null && ld != null && d.messageId == ld.messageId && d.convId == ld.convId) {
                 out[out.size - 1] = WireFrame.Evt(ld.copy(content = ld.content + d.content, reasoning = ld.reasoning + d.reasoning))
+            } else if (p != null && lp != null && p.reqId == lp.reqId) {
+                out[out.size - 1] = lp.copy(content = lp.content + p.content, reasoning = lp.reasoning + p.reasoning)
             } else out += f
         }
         return out
