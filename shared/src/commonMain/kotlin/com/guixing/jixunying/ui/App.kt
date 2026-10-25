@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Menu
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.foundation.layout.size
@@ -439,19 +440,15 @@ private fun MainLayout(ctl: AppController) {
             val density = androidx.compose.ui.platform.LocalDensity.current
             Row(Modifier.fillMaxSize()) {
                 if (collapsed) {
-                    Column(Modifier.width(44.dp).fillMaxHeight().padding(top = 12.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                        IconButton(onClick = { ctl.sidebarCollapsed = false; platform.setPref("sidebar.collapsed", null) }) {
-                            Icon(Icons.AutoMirrored.Rounded.KeyboardArrowRight, "展开侧栏")
-                        }
+                    // 收起后左边一条窄边：顶上一个大的展开键，下面写着「展开」
+                    Column(Modifier.width(56.dp).fillMaxHeight().padding(top = 14.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                        CollapseButton(Icons.Rounded.Menu, "展开侧栏（Ctrl+B）") { ctl.sidebarCollapsed = false; platform.setPref("sidebar.collapsed", null) }
+                        androidx.compose.material3.Text("展开", style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, modifier = Modifier.padding(top = 4.dp))
                     }
                 } else {
                     Box(Modifier.width(sideW.dp).fillMaxHeight()) {
-                        Sidebar(ctl, Modifier.fillMaxSize(), onNavigate = {})
-                        // 收起键：侧栏右上角
-                        IconButton(onClick = { ctl.sidebarCollapsed = true; platform.setPref("sidebar.collapsed", "1") },
-                            modifier = Modifier.align(Alignment.TopEnd).padding(top = 6.dp, end = 2.dp).size(28.dp)) {
-                            Icon(Icons.AutoMirrored.Rounded.KeyboardArrowLeft, "收起侧栏", Modifier.size(18.dp), tint = Ext.c.subtle)
-                        }
+                        Sidebar(ctl, Modifier.fillMaxSize(), onNavigate = {},
+                            onCollapse = { ctl.sidebarCollapsed = true; platform.setPref("sidebar.collapsed", "1") })
                     }
                     // 拖动条：鼠标放上去变成左右箭头，按住拖
                     Box(Modifier.width(6.dp).fillMaxHeight()

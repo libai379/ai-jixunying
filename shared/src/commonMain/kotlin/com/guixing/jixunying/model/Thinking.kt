@@ -93,6 +93,7 @@ object Thinking {
             p.presetId.startsWith("moonshot") || "moonshot" in u || "api.kimi" in u -> "kimi"
             p.presetId == "ark" || "volces.com" in u -> "ark"
             p.presetId == "siliconflow" || "siliconflow" in u -> "siliconflow"
+            p.presetId == "lmstudio" || "127.0.0.1:1234" in u || "localhost:1234" in u -> "lmstudio"
             p.presetId == "openai" || "api.openai.com" in u -> "openai"
             p.presetId == "gemini" || "generativelanguage.googleapis.com" in u -> "gemini"
             p.presetId == "anthropic" || "api.anthropic.com" in u -> "anthropic"

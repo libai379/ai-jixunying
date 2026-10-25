@@ -212,8 +212,8 @@ fun CodeScreen(ctl: AppController, convId: String, wide: Boolean, openDrawer: ()
                         Box(Modifier.align(Alignment.TopCenter).fillMaxWidth().onSizeChanged { topH = with(density) { it.height.toDp() } }) {
                             CompositionLocalProvider(com.guixing.jixunying.ui.glass.LocalGlass provides
                                 com.guixing.jixunying.ui.glass.GlassEnv(both, env.on, env.dark, env.tuning, env.paint)) {
-                                Column(Modifier.fillMaxWidth().glass(RoundedCornerShape(0.dp), com.guixing.jixunying.model.GlassTarget.BAR,
-                                    fallback = MaterialTheme.colorScheme.background)) { topBars() }
+                                GlassSurface(RoundedCornerShape(com.guixing.jixunying.ui.glass.glassRadius(com.guixing.jixunying.model.GlassTarget.BAR)),
+                                    Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 4.dp)) { Column { topBars() } }
                             }
                         }
                         Column(Modifier.align(Alignment.BottomCenter).fillMaxWidth()

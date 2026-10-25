@@ -140,6 +140,7 @@ class JxyApp : Application() {
         com.guixing.jixunying.engine.MemorySyncer(hub, engine).start()
         // GitHub：连着电脑就用电脑上登录的；手机自己登录时换令牌也交给电脑（2026-10-24）
         com.guixing.jixunying.engine.GitHubViaHost(hub, engine).start()
+        com.guixing.jixunying.engine.HostModels(hub, engine).start()
         weixin.start()
         watchLifecycle()
     }

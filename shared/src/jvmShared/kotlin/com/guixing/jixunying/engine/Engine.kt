@@ -172,6 +172,11 @@ class Engine(
         return true
     }
 
+    /** 手机上：电脑本机的模型经电脑问（HostModels 装上）。 */
+    var hostChat: (suspend (ProviderConfig, String, String) -> ChatResult)?
+        get() = llm.viaHost
+        set(v) { llm.viaHost = v }
+
     /** 手机上：GitHub 登录换令牌交给配对的电脑（GitHubViaHost 装上）。返回 null = 电脑不在，自己换。 */
     @Volatile var githubViaHost: (suspend (code: String, redirect: String, verifier: String) -> Account.GithubUser?)? = null
     private fun accountInfo(extra: (AccountInfo) -> AccountInfo = { it }) = account.identity.let { i ->
@@ -912,6 +917,16 @@ class Engine(
             }
             CommandResult(message = "在打开的 GitHub 页面上点同意", data = pending.url)
         }
+        is Command.HostChat -> try {
+            // 只认地址是电脑本机的服务商（Ollama 这类）：手机不能借这条路花电脑上云端服务商的钱
+            val p = state.provider(c.providerId)
+            if (p == null || p.viaHost || !HostChatCodec.isLoopback(p.baseUrl)) CommandResult(false, "电脑上没有这个本机模型")
+            else {
+                val q = HostChatCodec.parseRequest(c.request)
+                val r = withContext(UsageTag("chat")) { llm.chat(p, c.model, q.messages, q.temperature, q.tools, q.extra, thinking = q.thinking) { _, _ -> } }
+                CommandResult(data = HostChatCodec.result(r))
+            }
+        } catch (e: CancellationException) { throw e } catch (e: Throwable) { CommandResult(false, "电脑上的模型没答上来：" + (e.message ?: e.toString())) }
         is Command.GitHubExchange -> try {
             val clientId = System.getProperty("jxy.github.clientId") ?: com.guixing.jixunying.model.GITHUB_OAUTH_CLIENT_ID
             val secret = System.getProperty("jxy.github.secret") ?: BuildSecrets.githubSecret

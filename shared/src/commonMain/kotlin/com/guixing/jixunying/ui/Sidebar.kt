@@ -35,6 +35,8 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.MenuOpen
+import androidx.compose.material.icons.rounded.Menu
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Edit
@@ -105,7 +107,7 @@ fun BrandMark(size: Int = 30) {
 }
 
 @Composable
-fun Sidebar(ctl: AppController, modifier: Modifier, onNavigate: () -> Unit) {
+fun Sidebar(ctl: AppController, modifier: Modifier, onNavigate: () -> Unit, onCollapse: (() -> Unit)? = null) {
     val isDesktopHere = LocalPlatform.current.isDesktop
     val state by ctl.backend.store.state.collectAsState()
     var query by remember { mutableStateOf("") }
@@ -126,12 +128,17 @@ fun Sidebar(ctl: AppController, modifier: Modifier, onNavigate: () -> Unit) {
             // 接焦点用的空点（什么都不画）：手机上抽屉一拉开，系统把焦点交给侧栏里第一个能拿焦点的东西，
             // 落在标签、下拉、「+」上都会显出一块灰色的焦点底色；让它落在这里
             Box(Modifier.size(0.dp).focusable())
-            Row(Modifier.padding(start = 6.dp, top = 16.dp, bottom = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+            Row(Modifier.fillMaxWidth().padding(start = 6.dp, top = 16.dp, bottom = 12.dp), verticalAlignment = Alignment.CenterVertically) {
                 BrandMark(36)
                 Spacer(Modifier.width(10.dp))
                 Column {
                     Text("AI集训营", style = MaterialTheme.typography.titleMedium)
                     Text("多模型助手 · 数据只在本机", style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
+                }
+                // 收起侧栏（电脑上）：带边框的大按钮，一眼能找到（10-24 用户：「做的真小气……我都找不到在哪儿」）
+                if (onCollapse != null) {
+                    Spacer(Modifier.weight(1f))
+                    CollapseButton(Icons.AutoMirrored.Rounded.MenuOpen, "收起侧栏（Ctrl+B）", onCollapse)
                 }
             }
             Row(Modifier.fillMaxWidth().padding(start = 4.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -669,4 +676,13 @@ fun NewChatDialog(ctl: AppController) {
             }
         }
     }
+}
+
+/** 收起 / 展开侧栏的按钮：40dp、有边框和底色，底色边框一眼看得见。 */
+@Composable
+fun CollapseButton(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, onClick: () -> Unit) {
+    Box(Modifier.size(40.dp).clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.surface.copy(alpha = 0.7f))
+            .border(1.dp, Ext.c.border, RoundedCornerShape(12.dp)).clickable(onClick = onClick), contentAlignment = Alignment.Center) {
+            Icon(icon, label, Modifier.size(24.dp), tint = MaterialTheme.colorScheme.primary)
+        }
 }

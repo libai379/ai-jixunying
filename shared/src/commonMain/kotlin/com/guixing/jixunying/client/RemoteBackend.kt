@@ -164,7 +164,8 @@ class RemoteBackend(
         val id = lock.withLock { val id = nextReq++; pending[id] = deferred; id }
         return try {
             link.send(WireFrame.Req(id, command))
-            withTimeoutOrNull(120_000) { deferred.await() } ?: CommandResult(false, "电脑没有响应（不在线或网络太慢）")
+            // 借电脑本机模型问一次（HostChat）：大模型在电脑上慢慢想，等 10 分钟
+            withTimeoutOrNull(if (command is Command.HostChat) 600_000 else 120_000) { deferred.await() } ?: CommandResult(false, "电脑没有响应（不在线或网络太慢）")
         } catch (e: Throwable) {
             CommandResult(false, e.message ?: "发送失败")
         } finally {

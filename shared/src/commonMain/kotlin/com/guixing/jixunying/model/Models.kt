@@ -13,6 +13,11 @@ data class ProviderConfig(
     val models: List<ModelInfo> = emptyList(),
     val useProxy: Boolean = false,
     val enabled: Boolean = true,
+    /**
+     * 手机上：这是电脑本机的模型（Ollama 这类，地址是电脑的 127.0.0.1），手机自己连不上，
+     * 每次调用经加密线路交给配对的电脑去问（HostModels，2026-10-24）。电脑开着、手机连上电脑才能用。
+     */
+    val viaHost: Boolean = false,
 )
 
 @Serializable

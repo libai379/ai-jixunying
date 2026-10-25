@@ -311,7 +311,9 @@ private fun ProvidersPage(ctl: AppController, state: AppState) {
                             Spacer(Modifier.width(8.dp))
                             if (Presets.isChatGpt(p)) {
                                 if (state.chatgpt.signedIn) Pill("已登录", Ext.c.success) else Pill("没登录", MaterialTheme.colorScheme.error)
-                            } else if (p.apiKey.isBlank()) Pill("未填 Key", MaterialTheme.colorScheme.error)
+                            } else if (p.viaHost) Pill("经电脑 · 电脑开着才能用", MaterialTheme.colorScheme.primary)
+                            else if (p.baseUrl.contains("127.0.0.1") || p.baseUrl.contains("localhost")) Pill("本机", Ext.c.success)
+                            else if (p.apiKey.isBlank()) Pill("未填 Key", MaterialTheme.colorScheme.error)
                             if (p.useProxy) { Spacer(Modifier.width(4.dp)); Pill("走代理", Ext.c.warning) }
                         }
                         Text(p.baseUrl, style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, maxLines = 1, overflow = TextOverflow.Ellipsis)

@@ -55,6 +55,9 @@ class LlmClient(private val proxyOf: (ProviderConfig) -> String?) {
     /** 某个模型不接受的参数，出过一次 400 就记住，以后不再传。见教训库第 1、2 条。 */
     private val droppedParams = ConcurrentHashMap<String, MutableSet<String>>()
 
+    /** 手机上：电脑本机的模型（ProviderConfig.viaHost）交给配对的电脑去问（HostModels 装上，request 见 HostChatCodec）。 */
+    @Volatile var viaHost: (suspend (ProviderConfig, String, String) -> ChatResult)? = null
+
     /** 「用 ChatGPT 登录」的访问令牌（Engine 设置；force = 先刷新一次）。没登录抛 ChatGptAuth.AuthException。 */
     @Volatile var chatgptToken: (suspend (force: Boolean) -> String)? = null
 
@@ -80,6 +83,13 @@ class LlmClient(private val proxyOf: (ProviderConfig) -> String?) {
         thinking: JsonObject? = null,
         onDelta: (content: String, reasoning: String) -> Unit,
     ): ChatResult {
+        if (provider.viaHost) {
+            val h = viaHost ?: throw IllegalStateException("「${provider.name}」是电脑本机的模型，要电脑开着、手机连上电脑才能用")
+            // 电脑那边已经记了账（本机模型 0 元），手机这边不再记；回答整段回来
+            val r = h(provider, model, HostChatCodec.request(messages, temperature, tools, extra, thinking))
+            onDelta(r.content, r.reasoning)
+            return r
+        }
         val key = provider.id + "|" + model
         if (Presets.isChatGpt(provider)) return chatViaResponses(provider, model, messages, tools, onDelta)
         var attempt = 0
