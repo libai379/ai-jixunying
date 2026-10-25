@@ -90,6 +90,8 @@ class SemanticTest {
     private lateinit var fake: EmbeddedServer<*, *>
     private var port = 0
     private lateinit var dir: File
+    /** 建过的引擎：删文件夹前先停掉，不然后台重存会把文件夹建回来。 */
+    private val engines = java.util.concurrent.CopyOnWriteArrayList<Engine>()
 
     private fun freePort() = ServerSocket(0).use { it.localPort }
     private fun base() = "http://127.0.0.1:$port"
@@ -207,6 +209,8 @@ class SemanticTest {
     @AfterTest
     fun tearDown() {
         fake.stop(100, 200)
+        engines.forEach { it.close() }
+        engines.clear()
         dir.deleteRecursively()
     }
 
@@ -215,7 +219,7 @@ class SemanticTest {
 
     /** 一个引擎：chat 用「假服务商」，向量用参数里指定的那些（presetId 照真平台写）。 */
     private suspend fun engine(vararg embedPresets: String, root: File = dir): Engine {
-        val e = Engine(Storage(root))
+        val e = Engine(Storage(root)).also { engines += it }
         e.call(Command.SaveProvider(ProviderConfig("p1", "custom", "假服务商", "${base()}/v1", "sk-test", listOf(ModelInfo("fake-chat")))))
         e.call(Command.SaveMember(Member("m0", "小智", providerId = "p1", modelId = "fake-chat", bio = "小智的定位")))
         for (id in embedPresets) {

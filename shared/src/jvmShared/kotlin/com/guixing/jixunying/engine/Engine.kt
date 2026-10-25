@@ -68,6 +68,7 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -651,6 +652,12 @@ class Engine(
 
     /** 关掉全部 MCP 服务器（退出程序时）。 */
     fun closeMcp() { mcpClients.values.forEach { it.close() }; mcpClients.clear() }
+
+    /**
+     * 停掉后台的活（自动测试删数据文件夹之前用）：不然没存上的那次两秒后重存，又把文件夹建回来，
+     * 每跑一次全量就在 %TEMP% 留几百个（10-25 查到 300 个 jxy-semantic）。
+     */
+    fun close() { scope.cancel(); closeMcp() }
 
     /** 连 GitHub 用的（只有能跑命令的设备有）：外壳、代理、gh 位置都照设置。 */
     private fun gitHub(): com.guixing.jixunying.engine.code.GitHub? = codeRunner?.let {

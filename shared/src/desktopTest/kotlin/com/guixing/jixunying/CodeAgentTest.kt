@@ -64,6 +64,8 @@ class CodeAgentTest {
     private lateinit var fake: EmbeddedServer<*, *>
     private var port = 0
     private lateinit var dir: File
+    /** 建过的引擎：删文件夹前先停掉，不然后台重存会把文件夹建回来。 */
+    private val engines = java.util.concurrent.CopyOnWriteArrayList<Engine>()
 
     /** 用户选的那个项目文件夹。 */
     private lateinit var project: File
@@ -232,12 +234,14 @@ class CodeAgentTest {
     @AfterTest
     fun cleanup() {
         fake.stop(500, 1_000)
+        engines.forEach { it.close() }
+        engines.clear()
         dir.deleteRecursively()
     }
 
     /** 装好一个能跑 Code 的电脑引擎：执行器、服务商（支持工具）、Code 设置都在。 */
     private suspend fun engine(): Engine {
-        val e = Engine(Storage(dir))
+        val e = Engine(Storage(dir)).also { engines += it }
         e.codeRunner = com.guixing.jixunying.engine.code.CodeShell()
         e.call(Command.SaveProvider(ProviderConfig("p1", "custom", "假服务商", "${base()}/v1", "sk-test", listOf(ModelInfo("code-model")))))
         e.call(Command.SaveSettings(e.state.settings.copy(
@@ -1064,7 +1068,7 @@ class CodeAgentTest {
             setProperty("data_path", File(dir, "mqtt").absolutePath)
         }))
         val pcDir = File(dir, "pc").also { it.mkdirs() }
-        val pc = Engine(Storage(pcDir))
+        val pc = Engine(Storage(pcDir)).also { engines += it }
         pc.codeRunner = com.guixing.jixunying.engine.code.CodeShell()
         pc.call(Command.SaveProvider(ProviderConfig("p1", "custom", "假服务商", "${base()}/v1", "sk-test", listOf(ModelInfo("code-model")))))
         pc.call(Command.SaveSettings(pc.state.settings.copy(
@@ -1076,7 +1080,7 @@ class CodeAgentTest {
         try {
             withTimeout(15_000) { while (!pc.state.relayStatus.startsWith("已连上")) delay(100) }
             val code = PairingCode(pc.state.hostId, pc.state.pairingSecret, "测试电脑", pc.state.settings.relay.brokers)
-            val phoneEngine = Engine(Storage(File(dir, "phone")), isPhone = true)
+            val phoneEngine = Engine(Storage(File(dir, "phone")), isPhone = true).also { engines += it }
             val hub = Hub(phoneEngine, linkFactory = { RelayLink(it) }, pairer = { c, n -> pairWithHost(c, n) }, deviceName = "测试手机")
             assertTrue(hub.pair(code).isSuccess)
             val remote = assertNotNull(hub.remote.value)
