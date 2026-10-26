@@ -56,6 +56,7 @@ object UsageKinds {
         "addressing" -> "点名判断"
         "stances" -> "立场档案"
         "council" -> "会审（互评、汇总）"
+        "wolf" -> "狼人杀"
         IMAGE -> "画图"
         VIDEO -> "做视频"
         TTS -> "读出来"

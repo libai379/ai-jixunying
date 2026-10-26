@@ -2162,6 +2162,49 @@ class Engine(
         ledger.backfilled = true
     }
 
+    // ———————————————— 狼人杀（集训场，docs/狼人杀设计说明.md） ————————————————
+
+    private val wolfStore = com.guixing.jixunying.engine.wolf.WolfStore(java.io.File(storage.root, "wolf"))
+
+    /**
+     * 打一局全 AI 的狼人杀：memberIds 按座位顺序（1 号起），身份按 seed 随机发。每一步存盘并交给 onUpdate。
+     * 第一期只有引擎和测试（LiveWolfTest）在用；界面、真人座位是第二期。
+     */
+    internal suspend fun playWolf(board: com.guixing.jixunying.model.WolfBoard, memberIds: List<String>, seed: Long = System.nanoTime(),
+                                  onUpdate: (com.guixing.jixunying.model.WolfGameRecord) -> Unit = {}): com.guixing.jixunying.model.WolfGameRecord {
+        require(memberIds.size == board.roles.size) { "${board.label} 要 ${board.roles.size} 个座位，给了 ${memberIds.size} 个" }
+        val roles = com.guixing.jixunying.engine.wolf.WolfRules.deal(board.roles, kotlin.random.Random(seed))
+        val seats = memberIds.mapIndexed { i, id ->
+            val m = state.member(id) ?: throw IllegalArgumentException("没有这位 AI 成员：$id")
+            com.guixing.jixunying.model.WolfSeat(i + 1, roles[i], id, name = m.name, modelLabel = Prompts.modelLabel(state, m), modelId = m.modelId)
+        }
+        val start = com.guixing.jixunying.model.WolfGameRecord("wolf-" + newId().take(12), board, seats)
+        val game = com.guixing.jixunying.engine.wolf.WolfGame(start, { wolfBrain() }, ::now, { r -> wolfStore.save(r); onUpdate(r) })
+        return game.run()
+    }
+
+    internal fun wolfGames() = wolfStore.all()
+
+    /** AI 座位：用这位成员的模型问一次（不带工具）。网络出错等 3 秒再试一次，还不行整局记出错。 */
+    private fun wolfBrain() = com.guixing.jixunying.engine.wolf.WolfBrain { seat, system, user ->
+        val m = state.member(seat.memberId) ?: throw IllegalStateException("${seat.no}号的 AI 成员不在了")
+        val p = state.provider(m.providerId) ?: throw IllegalStateException("${m.name} 的模型服务不在了")
+        val msgs = listOf(buildJsonObject { put("role", "system"); put("content", system) }, userMsg(user))
+        var last: Exception? = null
+        repeat(2) { attempt ->
+            try {
+                val r = withContext(Dispatchers.IO + UsageTag("wolf", m.id)) { llm.chat(p, m.modelId, msgs, m.temperature, null) { _, _ -> } }
+                return@WolfBrain r.content
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                last = e
+                if (attempt == 0) kotlinx.coroutines.delay(3000)
+            }
+        }
+        throw IllegalStateException("${seat.no}号（${m.name}）调用失败：${friendlyError(last!!)}")
+    }
+
     // ———————————————— 记忆 ————————————————
 
     private val memoLocks = ConcurrentHashMap<String, kotlinx.coroutines.sync.Mutex>()
