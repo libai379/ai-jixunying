@@ -1496,6 +1496,9 @@ private fun ConversationSettingsDialog(ctl: AppController, state: AppState, conv
     var search by remember { mutableStateOf(conv.webSearch) }
     var council by remember { mutableStateOf(conv.council) }
     var title by remember { mutableStateOf(conv.title) }
+    // 记忆话题（记忆二期）：autoTopic = 交给记录员认
+    var topic by remember { mutableStateOf(conv.memoryTopic) }
+    var autoTopic by remember { mutableStateOf(!conv.memoryTopicByUser) }
     AppDialog("对话设置", onClose, width = 560.dp, actions = {
         TextButton(onClose) { Text("取消") }
         Button(enabled = picked.isNotEmpty(), onClick = {
@@ -1505,6 +1508,9 @@ private fun ConversationSettingsDialog(ctl: AppController, state: AppState, conv
                 memberIds = state.members.map { it.id }.filter { it in picked } + conv.memberIds.filter { it in picked && state.member(it) == null },
                 replyMode = mode, webSearch = search, council = council && picked.size > 1,
             )))
+            val nextTopic = if (autoTopic) null else topic.trim()
+            if (autoTopic != !conv.memoryTopicByUser || (!autoTopic && nextTopic != conv.memoryTopic))
+                ctl.run(Command.SetConvTopic(conv.id, nextTopic), quiet = true)
         }) { Text("保存") }
     }) {
         Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState())) {
@@ -1535,6 +1541,12 @@ private fun ConversationSettingsDialog(ctl: AppController, state: AppState, conv
             }
             Spacer(Modifier.height(8.dp))
             SwitchRow("联网搜索", "需要时先搜索再回答，回答里标出处", search) { search = it }
+            if (conv.code == null && state.settings.memory.enabled) {
+                Spacer(Modifier.height(8.dp))
+                SwitchRow("记忆话题自动认", "记录员看聊天内容认出这个对话属于哪个话题，AI 回答时带上那个话题的记忆。" +
+                    "现在：" + conv.memoryTopic.ifBlank { "不属于任何话题" }, autoTopic) { autoTopic = it; if (it) topic = conv.memoryTopic }
+                if (!autoTopic) TopicPicker(state, topic) { topic = it }
+            }
         }
     }
 }

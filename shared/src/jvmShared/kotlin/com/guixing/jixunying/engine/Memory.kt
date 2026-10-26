@@ -58,19 +58,33 @@ object Recorder {
         append("</新的聊天记录>")
     }
 
-    fun extractPrompt(existing: List<MemoryItem>, transcript: String, userName: String): String = buildString {
-        appendLine("你是记录员。下面是用户「$userName」和 AI 的一段聊天。找出值得长期记住的、关于用户本人的信息，以后的对话都会用到。")
+    /**
+     * 挑长期记忆（记忆二期，2026-10-26）：除了关于用户本人的，也记某个话题 / 项目的长期信息（只在这个话题的对话里带上）；
+     * 每条抄一句原话当出处（程序核对原话真在记录里，对不上就不挂）；顺带认出这段聊天属于哪个话题。
+     */
+    fun extractPrompt(existing: List<MemoryItem>, transcript: String, userName: String, topics: List<String>, convTopic: String, topicFixed: Boolean): String = buildString {
+        appendLine("你是记录员。下面是用户「$userName」和 AI 的一段聊天。找出值得长期记住的信息，以后的对话会用到。")
         appendLine()
-        appendLine("只记这些：用户的身份、职业、所在城市、长期关心的事、正在做的长期项目、对回答方式的要求和偏好、明确说「记住」的事。")
+        appendLine("两种记忆：")
+        appendLine("- 关于用户本人的（topic 留空）：身份、职业、所在城市、长期关心的事、对回答方式的要求和偏好、明确说「记住」的事。所有对话都会带上。")
+        appendLine("- 某个话题 / 项目的（topic 写话题名）：用户长期在做的项目、长期关心的话题里定下的事、背景、要求，例如「AI集训营 的成员不再限定四家」。只在聊这个话题时带上。")
         appendLine("不要记：一次性的问题、闲聊内容、AI 说的话、密码 / Key / 身份证号 / 银行卡等敏感信息、只跟这次对话有关的细节。")
-        appendLine("每条写成一句完整的话，以用户为主语（例如「在北京做产品经理」「希望回答先给结论」）。一次最多 3 条。")
+        appendLine("每条写成一句完整的话（关于用户本人的以用户为主语，例如「在北京做产品经理」「希望回答先给结论」）。一次最多 3 条。")
+        appendLine("每条附上 quote：聊天记录里用户说的、能作为依据的那句原话，一字不改地抄（抄不出就留空）。")
         appendLine()
-        if (existing.isNotEmpty()) {
-            appendLine("已经记住的（不要重复；如果新信息推翻了某条，用 replaces 写它的编号）：")
-            existing.forEachIndexed { i, m -> appendLine("${i + 1}. [${m.kind}] ${m.text}") }
+        if (topics.isNotEmpty()) {
+            appendLine("已有的话题（能归进去就用原名，别另起近义的名字）：${topics.joinToString("、")}")
             appendLine()
         }
-        appendLine("输出 JSON 数组，不要别的文字：[{\"text\": \"…\", \"kind\": \"关于我|偏好|要求|事实\", \"replaces\": 编号或 null}]。没有值得记的就输出 []。")
+        if (existing.isNotEmpty()) {
+            appendLine("已经记住的（不要重复；如果新信息推翻了某条，用 replaces 写它的编号）：")
+            existing.forEachIndexed { i, m -> appendLine("${i + 1}. [${m.kind}]" + (if (m.topic.isNotBlank()) "[话题：${m.topic}]" else "") + " ${m.text}") }
+            appendLine()
+        }
+        if (topicFixed) appendLine("这段聊天的话题用户已经定了：${convTopic.ifBlank { "（不属于任何话题）" }}。conversationTopic 照抄。")
+        else appendLine("conversationTopic：这段聊天主要在聊哪个长期话题 / 项目（用已有的名字或起一个简短的新名字）；只是零散的问答、不属于任何长期话题就留空。")
+        appendLine()
+        appendLine("输出 JSON，不要别的文字：{\"conversationTopic\": \"…\", \"items\": [{\"text\": \"…\", \"kind\": \"关于我|偏好|要求|事实\", \"topic\": \"\", \"quote\": \"…\", \"replaces\": 编号或 null}]}。没有值得记的 items 就写 []。")
         appendLine()
         appendLine("<聊天记录>")
         appendLine(transcript.trim())
@@ -81,12 +95,35 @@ object Recorder {
         appendLine("下面是关于一位用户的长期记忆，可能有重复、互相矛盾或过时的条目。请整理：合并重复的，矛盾的保留更新的（编号大的更新），删掉没用的。")
         appendLine("不要新增原来没有的信息，措辞尽量保留原样。")
         appendLine()
-        items.forEachIndexed { i, m -> appendLine("${i + 1}. [${m.kind}] ${m.text}") }
+        appendLine("带「话题」的是只在聊那个话题时才用的记忆；只合并同一话题里的，话题名照抄（没有话题的 topic 留空）。")
         appendLine()
-        append("输出 JSON 数组，不要别的文字：[{\"text\": \"…\", \"kind\": \"关于我|偏好|要求|事实\", \"from\": [原来的编号…]}]")
+        items.forEachIndexed { i, m -> appendLine("${i + 1}. [${m.kind}]" + (if (m.topic.isNotBlank()) "[话题：${m.topic}]" else "") + " ${m.text}") }
+        appendLine()
+        append("输出 JSON 数组，不要别的文字：[{\"text\": \"…\", \"kind\": \"关于我|偏好|要求|事实\", \"topic\": \"\", \"from\": [原来的编号…]}]")
     }
 
-    class Extracted(val text: String, val kind: String, val replaces: Int?, val from: List<Int>)
+    class Extracted(val text: String, val kind: String, val replaces: Int?, val from: List<Int>, val topic: String = "", val quote: String = "")
+
+    /** 挑记忆的输出：这段聊天的话题（null = 没写）和条目。也认旧格式（只有数组）。 */
+    class Extraction(val conversationTopic: String?, val items: List<Extracted>)
+
+    fun parseExtraction(raw: String): Extraction? {
+        val t = raw.substringAfter("</think>", raw)
+        val o = t.indexOf('{')
+        val a = t.indexOf('[')
+        if (o >= 0 && (a < 0 || o < a)) {
+            val end = t.lastIndexOf('}')
+            val obj = if (end > o) runCatching { Json.parse(t.substring(o, end + 1)) as? JsonObject }.getOrNull() else null
+            if (obj != null) {
+                val items = (obj["items"] as? JsonArray)?.let { parseItems(it.toString()) } ?: emptyList()
+                return Extraction(obj.str("conversationTopic")?.let(::cleanTopic), items)
+            }
+        }
+        return parseItems(t)?.let { Extraction(null, it) }
+    }
+
+    /** 话题名：去掉引号书名号和首尾空白，最长 20 字。 */
+    fun cleanTopic(raw: String): String = raw.trim().trim('「', '」', '《', '》', '"', '\'', '“', '”').trim().take(20)
 
     /** 宽松地解析模型输出的 JSON 数组（容忍前后多余的文字、代码块）。 */
     fun parseItems(raw: String): List<Extracted>? {
@@ -102,7 +139,7 @@ object Recorder {
             val kind = o.str("kind")?.trim()?.takeIf { it in kinds } ?: "关于我"
             val replaces = (o["replaces"] as? JsonPrimitive)?.contentOrNull?.toIntOrNull()
             val from = (o["from"] as? JsonArray)?.mapNotNull { (it as? JsonPrimitive)?.intOrNull }.orEmpty()
-            Extracted(text.take(200), kind, replaces, from)
+            Extracted(text.take(200), kind, replaces, from, o.str("topic")?.let(::cleanTopic).orEmpty(), o.str("quote")?.trim().orEmpty().take(200))
         }
     }
 
@@ -122,8 +159,8 @@ object Recorder {
     }
 
     /** 给成员的系统提示用：置顶的在前，然后按更新时间，总长有上限。 */
-    fun forPrompt(items: List<MemoryItem>, limitChars: Int = 2500): List<MemoryItem> {
-        val sorted = items.sortedWith(compareByDescending<MemoryItem> { it.pinned }.thenByDescending { it.updatedAt })
+    fun forPrompt(items: List<MemoryItem>, topic: String = "", limitChars: Int = 2500): List<MemoryItem> {
+        val sorted = items.filter { it.topic.isBlank() || (topic.isNotBlank() && it.topic == topic) }.sortedWith(compareByDescending<MemoryItem> { it.pinned }.thenByDescending { it.updatedAt })
         val out = mutableListOf<MemoryItem>()
         var used = 0
         for (m in sorted) {
@@ -132,6 +169,26 @@ object Recorder {
             out += m
         }
         return out
+    }
+
+    /** 所有话题名，最近用过的在前。 */
+    fun topics(items: List<MemoryItem>): List<String> =
+        items.filter { it.topic.isNotBlank() }.groupBy { it.topic }.entries.sortedByDescending { e -> e.value.maxOf { it.updatedAt } }.map { it.key }
+
+    /**
+     * 原话核对：记录员抄的原话真在某条消息里才挂出处（去掉空白再比）；抄得不全的，按字的二元组重合最多的那条算，太低就不挂。
+     * 返回（消息编号，原话）；对不上返回 null。
+     */
+    fun locateQuote(quote: String, messages: List<Pair<String, String>>): Pair<String, String>? {
+        val q = quote.filterNot { it.isWhitespace() }
+        if (q.length < 2) return null
+        messages.lastOrNull { (_, text) -> q in text.filterNot { it.isWhitespace() } }?.let { return it.first to quote.trim() }
+        fun grams(s: String) = s.filterNot { it.isWhitespace() }.lowercase().windowed(2).toSet()
+        val gq = grams(q)
+        if (gq.isEmpty()) return null
+        val best = messages.maxByOrNull { (_, text) -> grams(text).intersect(gq).size } ?: return null
+        val share = grams(best.second).intersect(gq).size.toDouble() / gq.size
+        return if (share >= 0.8) best.first to quote.trim() else null
     }
 
     /** 搜聊天记录：把问题拆成词，中文再拆成两字一组，按命中多少排序。 */

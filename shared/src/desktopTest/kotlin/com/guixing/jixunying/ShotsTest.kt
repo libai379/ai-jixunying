@@ -187,7 +187,7 @@ class ShotsTest {
         val convs = listOf(
             Conversation("c5", "绳子剪几段", listOf("ma", "mb", "mc", "md"), ReplyMode.INDEPENDENT, createdAt = now - 1_800_000, updatedAt = now - 30_000,
                 stanceTopics = 2, stanceAt = now),
-            Conversation("c1", "租房合同要注意什么", listOf("ma", "mb"), ReplyMode.INDEPENDENT, createdAt = now - 3_600_000, updatedAt = now - 60_000),
+            Conversation("c1", "租房合同要注意什么", listOf("ma", "mb"), ReplyMode.INDEPENDENT, createdAt = now - 3_600_000, updatedAt = now - 60_000, memoryTopic = "找房"),
             Conversation("c2", "微信对话", listOf("ma"), createdAt = now - 7_200_000, updatedAt = now - 3_000_000, channel = "weixin:u1@im.wechat"),
             // 2026-10-17 对话栏 = Chat + Cowork：改文件在等批准（带差异）、改过一个文件（能撤销），拖进来过一个文件夹
             Conversation("c14", "整理八字项目的资料", listOf("ma"), createdAt = now - 100_000, updatedAt = now - 1_000,
@@ -228,7 +228,10 @@ class ShotsTest {
             memories = listOf(
                 MemoryItem("m1", "在北京做产品经理", "关于我", "手动添加", now, now, pinned = true),
                 MemoryItem("m2", "希望回答先给结论，少用术语", "偏好", "租房合同要注意什么", now, now),
-                MemoryItem("m3", "正在找房，预算每月 5000 以内", "事实", "租房合同要注意什么", now, now),
+                MemoryItem("m3", "正在找房，预算每月 5000 以内", "事实", "租房合同要注意什么", now, now, topic = "找房",
+                    convId = "c1", messageId = "x", quote = "我最近在找房，每月预算 5000 以内"),
+                MemoryItem("m4", "成员不再限定四家，可以加别的模型", "事实", "整理八字项目的资料", now - 1000, now - 1000, topic = "AI集训营",
+                    convId = "c-gone", quote = "成员固定四家这条禁令撤掉吧"),
             ),
             settings = Settings(proxy = "127.0.0.1:10809", docs = DocSettings(folders = listOf(docsDir.path)), semantic = semantic),            hostId = "h1", pairingSecret = Base64.getEncoder().encodeToString(ByteArray(16) { 1 }),
             // 记录员后台出过错：设置 → 记忆、立场档案页、侧栏「设置」上都要看得到
@@ -901,6 +904,9 @@ class ShotsTest {
         // 弹窗
         shoot("desktop-convsettings", 1280, 820, 1f, hub, desktop, "conv:c1#convsettings")
         shoot("desktop-convsettings-tall", 1280, 1300, 1f, hub, desktop, "conv:c7#convsettings")
+        // 记忆二期：按话题分组、出处能点（对话删了的只显示名字）
+        shoot("desktop-settings-memory-tall", 1280, 2400, 1f, hub, desktop, "settings:MEMORY")
+        shoot("desktop-convsettings-c1-tall", 1280, 1300, 1f, hub, desktop, "conv:c1#convsettings")
         shoot("desktop-member-edit", 1280, 820, 1f, hub, desktop, "settings:MEMBERS#edit")
         shoot("phone-convsettings", 824, 1784, 2f, hub, phone, "conv:c1#convsettings")
         shoot("phone-settings-members", 824, 1784, 2f, hub, phone, "settings:MEMBERS")

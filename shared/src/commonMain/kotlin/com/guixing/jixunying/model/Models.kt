@@ -156,6 +156,16 @@ data class MemoryItem(
     val createdAt: Long = 0,
     val updatedAt: Long = 0,
     val pinned: Boolean = false,
+    /**
+     * 话题记忆（记忆二期，2026-10-26 用户定）：空 = 关于用户本人，所有对话都带；
+     * 有名字（例如「AI集训营」「星阙」）= 只在属于这个话题的对话里带上，别的对话里 AI 用 recall_memory 查。
+     */
+    val topic: String = "",
+    /** 出处：从哪个对话的哪条消息记下来的（点开能跳回去）；手动添加的为空。 */
+    val convId: String = "",
+    val messageId: String = "",
+    /** 那条消息里的原话（记录员抄的，程序核对过确实在原文里）。 */
+    val quote: String = "",
 )
 
 @Serializable
@@ -405,6 +415,9 @@ data class Conversation(
     val fileAuto: Boolean = false,
     /** 这个对话 / 会话开着的后台命令（2026-10-18，npm run dev 这种）。程序重开时清空（进程已经没了）。 */
     val background: List<BackgroundProc> = emptyList(),
+    /** 这个对话属于哪个记忆话题（记忆二期）：记录员自动认；用户在对话设置里改过就以用户的为准（memoryTopicByUser）。 */
+    val memoryTopic: String = "",
+    val memoryTopicByUser: Boolean = false,
 ) {
     val isGroup: Boolean get() = memberIds.size > 1
 

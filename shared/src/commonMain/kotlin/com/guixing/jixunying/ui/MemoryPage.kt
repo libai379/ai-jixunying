@@ -52,6 +52,7 @@ fun MemoryPage(ctl: AppController, state: AppState) {
     fun saveMs(f: (MemorySettings) -> MemorySettings) = ctl.updateSettings { it.copy(memory = f(it.memory)) }
     var newText by remember { mutableStateOf("") }
     var newKind by remember { mutableStateOf(memoryKinds.first()) }
+    var newTopic by remember { mutableStateOf("") }
     var editing by remember { mutableStateOf<MemoryItem?>(null) }
     var tidying by remember { mutableStateOf(false) }
     var result by remember { mutableStateOf<Pair<Boolean, String>?>(null) }
@@ -114,7 +115,8 @@ fun MemoryPage(ctl: AppController, state: AppState) {
                 ctl.run(Command.TidyMemories, quiet = true) { r -> tidying = false; result = r.ok to r.message }
             }) { Text(if (tidying) "正在整理…" else "整理") }
         }
-        Text("置顶的每次都会带上，其余按新旧带上（总长约 2500 字）。「整理」让记录员合并重复和矛盾的条目，置顶的不动。",
+        Text("「关于你」的每个对话都带上；带话题的只在属于那个话题的对话里带上（对话设置里能改话题），别的对话里 AI 要用时自己查。" +
+            "置顶的优先，其余按新旧（总长约 2500 字）。点「来自」能跳回记下这条的那句话。「整理」让记录员合并重复和矛盾的条目，置顶的不动。",
             style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, modifier = Modifier.padding(top = 2.dp, bottom = 8.dp))
         result?.let { (ok, text) -> TestResultBox(ok, text) { result = null } }
         Spacer(Modifier.height(4.dp))
@@ -123,9 +125,12 @@ fun MemoryPage(ctl: AppController, state: AppState) {
         // 类别一行（排不下自己换行），「添加」在下一行靠右：窄屏、大字体下不再挤没（10-24 phoneSettingsFit）
         Text("类别", style = MaterialTheme.typography.labelMedium, color = Ext.c.subtle)
         KindPicker(newKind) { newKind = it }
+        Spacer(Modifier.height(6.dp))
+        Text("话题", style = MaterialTheme.typography.labelMedium, color = Ext.c.subtle)
+        TopicPicker(state, newTopic) { newTopic = it }
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
             Button(enabled = newText.isNotBlank(), onClick = {
-                val item = MemoryItem("mem" + nowMillis().toString(36), newText.trim(), newKind, "手动添加")
+                val item = MemoryItem("mem" + nowMillis().toString(36), newText.trim(), newKind, "手动添加", topic = newTopic.trim())
                 ctl.run(Command.SaveMemory(item)) { r -> if (r.ok) newText = "" }
             }) { Text("添加") }
         }
@@ -134,9 +139,15 @@ fun MemoryPage(ctl: AppController, state: AppState) {
             Text("还没有。聊天时跟 AI 说「记住……」，或者在上面手动添加；打开「聊完自动记住要点」后，记录员也会自己挑。",
                 style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
         }
-        val sorted = state.memories.sortedWith(compareByDescending<MemoryItem> { it.pinned }.thenByDescending { it.updatedAt })
+        // 按话题分组（记忆二期）：先「关于你」，再各个话题（最近用过的在前）
+        val order = compareByDescending<MemoryItem> { it.pinned }.thenByDescending { it.updatedAt }
+        val groups = state.memories.groupBy { it.topic }.entries
+            .sortedWith(compareBy<Map.Entry<String, List<MemoryItem>>> { it.key.isNotBlank() }.thenByDescending { e -> e.value.maxOf { it.updatedAt } })
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            sorted.forEach { m ->
+          groups.forEach { (topic, list) ->
+            Text(if (topic.isBlank()) "关于你（所有对话都带上）· ${list.size} 条" else "话题「$topic」（聊这个话题时带上）· ${list.size} 条",
+                style = MaterialTheme.typography.labelMedium, color = Ext.c.subtle, modifier = Modifier.padding(top = 6.dp))
+            list.sortedWith(order).forEach { m ->
                 Row(
                     Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).border(1.dp, Ext.c.border, RoundedCornerShape(10.dp))
                         .padding(start = 10.dp, top = 6.dp, bottom = 6.dp, end = 2.dp),
@@ -148,7 +159,7 @@ fun MemoryPage(ctl: AppController, state: AppState) {
                             if (m.pinned) { Spacer(Modifier.width(4.dp)); Pill("置顶", Ext.c.warning) }
                         }
                         Text(m.text, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(top = 3.dp))
-                        if (m.source.isNotBlank()) Text("来自：${m.source}", style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
+                        MemorySource(ctl, state, m)
                     }
                     IconButton(onClick = { ctl.run(Command.SaveMemory(m.copy(pinned = !m.pinned)), quiet = true) }) {
                         Icon(Icons.Rounded.PushPin, if (m.pinned) "取消置顶" else "置顶", Modifier.size(17.dp),
@@ -158,14 +169,16 @@ fun MemoryPage(ctl: AppController, state: AppState) {
                     IconButton(onClick = { ctl.run(Command.DeleteMemory(m.id), "已删除") }) { Icon(Icons.Rounded.Delete, "删除", Modifier.size(17.dp), tint = Ext.c.subtle) }
                 }
             }
+          }
         }
     }
     editing?.let { m ->
         var text by remember(m.id) { mutableStateOf(m.text) }
         var kind by remember(m.id) { mutableStateOf(m.kind) }
+        var topic by remember(m.id) { mutableStateOf(m.topic) }
         AppDialog("修改记忆", { editing = null }, width = 520.dp, actions = {
             TextButton({ editing = null }) { Text("取消") }
-            Button(enabled = text.isNotBlank(), onClick = { editing = null; ctl.run(Command.SaveMemory(m.copy(text = text.trim(), kind = kind)), "已保存") }) { Text("保存") }
+            Button(enabled = text.isNotBlank(), onClick = { editing = null; ctl.run(Command.SaveMemory(m.copy(text = text.trim(), kind = kind, topic = topic.trim())), "已保存") }) { Text("保存") }
         }) {
             AppTextField(text, { text = it }, singleLine = false, minLines = 2)
             Spacer(Modifier.height(8.dp))
@@ -173,7 +186,44 @@ fun MemoryPage(ctl: AppController, state: AppState) {
                 Text("类别：", style = MaterialTheme.typography.labelMedium, color = Ext.c.subtle)
                 KindPicker(kind) { kind = it }
             }
+            Spacer(Modifier.height(8.dp))
+            Text("话题", style = MaterialTheme.typography.labelMedium, color = Ext.c.subtle)
+            TopicPicker(state, topic) { topic = it }
         }
+    }
+}
+
+/** 话题：留空 = 关于你本人（所有对话都带）；点已有的话题名直接填上。 */
+@Composable
+internal fun TopicPicker(state: AppState, topic: String, onChange: (String) -> Unit) {
+    AppTextField(topic, onChange, placeholder = "留空 = 关于你本人，所有对话都带")
+    val known = state.memories.map { it.topic }.filter { it.isNotBlank() }.distinct()
+    if (known.isNotEmpty()) {
+        Spacer(Modifier.height(4.dp))
+        androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            known.forEach { k ->
+                Box(Modifier.clip(RoundedCornerShape(50)).clickable { onChange(k) }) {
+                    Pill(k, if (k == topic.trim()) MaterialTheme.colorScheme.primary else Ext.c.subtle)
+                }
+            }
+        }
+    }
+}
+
+/** 出处：哪个对话、哪天，有原话就带上；点一下跳回那个对话的那一条（对话删了就只显示名字）。 */
+@Composable
+private fun MemorySource(ctl: AppController, state: AppState, m: MemoryItem) {
+    val conv = m.convId.takeIf { it.isNotBlank() }?.let { state.conversation(it) }
+    if (m.source.isBlank() && conv == null) return
+    val label = "来自：" + (conv?.title ?: m.source) + (if (conv == null && m.convId.isNotBlank()) "（对话已删除）" else "")
+    Column(if (conv != null) Modifier.clip(RoundedCornerShape(6.dp)).clickable {
+        ctl.focusMessageId = m.messageId.ifBlank { null }
+        ctl.openConversation(conv.id)
+    } else Modifier) {
+        Text(label + if (conv != null) " ›" else "", style = MaterialTheme.typography.labelSmall,
+            color = if (conv != null) MaterialTheme.colorScheme.primary else Ext.c.subtle)
+        if (m.quote.isNotBlank()) Text("原话：「${m.quote.take(80)}${if (m.quote.length > 80) "…" else ""}」",
+            style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
     }
 }
 

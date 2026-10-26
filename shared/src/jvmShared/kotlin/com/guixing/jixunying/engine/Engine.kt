@@ -1130,7 +1130,8 @@ class Engine(
             CommandResult(data = conv.id)
         }
         is Command.UpdateConversation -> {
-            updateState { s -> s.copy(conversations = s.conversations.map { if (it.id == c.conversation.id) c.conversation.copy(updatedAt = it.updatedAt) else it }) }
+            updateState { s -> s.copy(conversations = s.conversations.map { if (it.id == c.conversation.id) c.conversation.copy(updatedAt = it.updatedAt,
+                memoryTopic = it.memoryTopic, memoryTopicByUser = it.memoryTopicByUser) else it }) }
             CommandResult()
         }
         is Command.DeleteConversation -> {
@@ -1545,13 +1546,23 @@ class Engine(
             if (text.isBlank()) return CommandResult(false, "内容是空的")
             if (looksSensitive(text)) return CommandResult(false, "这条像是密码、Key、证件号之类的敏感信息，不建议放进记忆（每次聊天都会发给模型）")
             updateState { s ->
-                val item = c.item.copy(text = text.take(300), updatedAt = now(), createdAt = c.item.createdAt.takeIf { it > 0 } ?: now())
+                val old = s.memories.firstOrNull { it.id == c.item.id }
+                // 出处界面上改不了：发来的是空的（旧版手机不认识这几个字段）就留着原来的
+                val src = if (old != null && c.item.convId.isBlank()) c.item.copy(convId = old.convId, messageId = old.messageId, quote = old.quote) else c.item
+                val item = src.copy(text = text.take(300), topic = Recorder.cleanTopic(src.topic), updatedAt = now(), createdAt = c.item.createdAt.takeIf { it > 0 } ?: now())
                 s.copy(memories = if (s.memories.any { it.id == item.id }) s.memories.map { if (it.id == item.id) item else it } else s.memories + item)
             }
             CommandResult()
         }
         is Command.DeleteMemory -> {
             updateState { s -> s.copy(memories = s.memories.filterNot { it.id == c.id }, memoryDeleted = tombstoned(s, listOf(c.id))) }
+            CommandResult()
+        }
+        is Command.SetConvTopic -> {
+            val topic = c.topic?.let(Recorder::cleanTopic)
+            updateState { s -> s.copy(conversations = s.conversations.map {
+                if (it.id == c.convId) it.copy(memoryTopic = topic ?: it.memoryTopic, memoryTopicByUser = topic != null) else it
+            }) }
             CommandResult()
         }
         is Command.TidyMemories -> tidyMemories()
@@ -2245,28 +2256,43 @@ class Engine(
         if (fresh.isEmpty() || (!force && fresh.count { it.role == Role.USER } < 4)) return
         val (p, model) = Recorder.pick(state) ?: run { bg.failed(BgJob.MEMORY, BackgroundWatch.NO_RECORDER, titleOf(convId)); return }
         val existing = state.memories
-        val prompt = Recorder.extractPrompt(existing, transcriptOf(fresh.takeLast(40), 1500), state.profile.name)
+        val conv = state.conversation(convId)
+        val window = fresh.takeLast(40)
+        val prompt = Recorder.extractPrompt(existing, transcriptOf(window, 1500), state.profile.name,
+            Recorder.topics(existing), conv?.memoryTopic.orEmpty(), conv?.memoryTopicByUser == true)
         val r = withContext(Dispatchers.IO) { llm.chat(p, model, listOf(userMsg(prompt)), null, null) { _, _ -> } }
         // 看不懂输出就不挪扫描位置，下次再试
-        val items = Recorder.parseItems(r.content) ?: run { bg.failed(BgJob.MEMORY, BackgroundWatch.UNREADABLE, titleOf(convId), BackgroundWatch.rawOf(r)); return }
+        val out = Recorder.parseExtraction(r.content) ?: run { bg.failed(BgJob.MEMORY, BackgroundWatch.UNREADABLE, titleOf(convId), BackgroundWatch.rawOf(r)); return }
         bg.ok(BgJob.MEMORY)
         storage.saveMemo(convId, storage.loadMemo(convId).copy(scannedUpToTime = fresh.last().createdAt))
-        val changed = applyExtracted(items.take(3), existing, state.conversation(convId)?.title.orEmpty())
+        // 这段聊天属于哪个话题：用户在对话设置里定过就不动
+        val convTopic = out.conversationTopic
+        if (convTopic != null && conv?.memoryTopicByUser != true && convTopic != conv?.memoryTopic) {
+            updateState { s -> s.copy(conversations = s.conversations.map { if (it.id == convId && !it.memoryTopicByUser) it.copy(memoryTopic = convTopic) else it }) }
+        }
+        // 出处只认用户自己说的话
+        val userLines = window.filter { it.role == Role.USER }.map { it.id to it.content }
+        val changed = applyExtracted(out.items.take(3), existing, conv?.title.orEmpty(), convId, userLines)
         if (changed.isNotEmpty()) emit(Event.Notice("记住了：${changed.first().text}" + (if (changed.size > 1) " 等 ${changed.size} 条" else "") + "（设置 → 记忆 可以查看和修改）"))
     }
 
-    private fun applyExtracted(items: List<Recorder.Extracted>, existing: List<MemoryItem>, source: String): List<MemoryItem> {
+    private fun applyExtracted(items: List<Recorder.Extracted>, existing: List<MemoryItem>, source: String,
+                               convId: String = "", userLines: List<Pair<String, String>> = emptyList()): List<MemoryItem> {
         val changed = mutableListOf<MemoryItem>()
         updateState { s ->
             val list = s.memories.toMutableList()
             for (e in items) {
                 if (looksSensitive(e.text)) continue
                 val replaced = e.replaces?.let { existing.getOrNull(it - 1) }?.let { old -> list.indexOfFirst { it.id == old.id } }?.takeIf { it >= 0 }
-                val same = list.indexOfFirst { Recorder.similar(it.text, e.text) }
+                val same = list.indexOfFirst { it.topic == e.topic && Recorder.similar(it.text, e.text) }
+                // 原话对不上聊天记录（记录员编的、抄错的）就不挂，只记是哪个对话
+                val at = Recorder.locateQuote(e.quote, userLines)
+                fun MemoryItem.withSource() = copy(source = source, convId = convId, messageId = at?.first.orEmpty(), quote = at?.second.orEmpty())
                 when {
-                    replaced != null -> list[replaced] = list[replaced].copy(text = e.text, kind = e.kind, updatedAt = now()).also(changed::add)
+                    replaced != null -> list[replaced] = list[replaced].copy(text = e.text, kind = e.kind, topic = e.topic, updatedAt = now())
+                        .let { if (convId.isNotBlank()) it.withSource() else it }.also(changed::add)
                     same >= 0 -> Unit
-                    else -> list += MemoryItem(newId(), e.text, e.kind, source, now(), now()).also(changed::add)
+                    else -> list += MemoryItem(newId(), e.text, e.kind, source, now(), now(), topic = e.topic).withSource().also(changed::add)
                 }
             }
             s.copy(memories = list)
@@ -2287,19 +2313,34 @@ class Engine(
             Regex("sk-[a-z0-9]{12,}").containsMatchIn(t) || Regex("\\d{15,}").containsMatchIn(t)
     }
 
-    private fun rememberNow(text: String, kind: String, source: String): String {
+    private fun rememberNow(text: String, kind: String, source: String, topic: String = "", convId: String = ""): String {
         val clean = text.trim().take(300)
+        val ask = if (convId.isBlank()) null else snapshot(convId).lastOrNull { it.role == Role.USER }
         if (clean.isBlank()) return "参数错误：缺少 text"
         if (looksSensitive(clean)) return "这条看起来是密码、Key、证件号之类的敏感信息，没有记。请提醒用户敏感信息不要放进记忆。"
         var result = "已记住：$clean"
         updateState { s ->
-            val i = s.memories.indexOfFirst { Recorder.similar(it.text, clean) }
+            val i = s.memories.indexOfFirst { it.topic == topic && Recorder.similar(it.text, clean) }
+            val item = MemoryItem(newId(), clean, kind, source, now(), now(), topic = topic, convId = convId,
+                messageId = ask?.id.orEmpty(), quote = ask?.content?.trim()?.take(200).orEmpty())
             if (i >= 0) {
                 result = "已经记过类似的，已更新为：$clean"
-                s.copy(memories = s.memories.toMutableList().also { it[i] = it[i].copy(text = clean, kind = kind, updatedAt = now()) })
-            } else s.copy(memories = s.memories + MemoryItem(newId(), clean, kind, source, now(), now()))
+                s.copy(memories = s.memories.toMutableList().also { it[i] = item.copy(id = it[i].id, pinned = it[i].pinned, createdAt = it[i].createdAt) })
+            } else s.copy(memories = s.memories + item)
         }
         return result
+    }
+
+    /** recall_memory：先按话题名（完全一样，再退到包含），再按关键词，最多 20 条。 */
+    private fun recallMemory(topic: String, query: String): List<MemoryItem> {
+        val all = state.memories
+        val byTopic = if (topic.isBlank()) emptyList() else all.filter { it.topic == topic }.ifEmpty {
+            all.filter { it.topic.isNotBlank() && (topic in it.topic || it.topic in topic) }
+        }
+        val terms = Recorder.terms(query)
+        val byQuery = if (terms.isEmpty()) emptyList()
+        else all.map { it to Recorder.score(it.topic + " " + it.text, terms) }.filter { it.second > 0 }.sortedByDescending { it.second }.map { it.first }
+        return (byTopic + byQuery).distinctBy { it.id }.take(20)
     }
 
     private suspend fun tidyMemories(): CommandResult {
@@ -2312,7 +2353,10 @@ class Engine(
         if (out.isEmpty()) return CommandResult(false, "记录员一条都没留，不像话，没有改动")
         val next = out.map { e ->
             val src = e.from.mapNotNull { items.getOrNull(it - 1) }
-            MemoryItem(newId(), e.text, e.kind, src.firstOrNull()?.source ?: "整理", src.minOfOrNull { it.createdAt } ?: now(), now())
+            val first = src.firstOrNull { it.convId.isNotBlank() } ?: src.firstOrNull()
+            MemoryItem(newId(), e.text, e.kind, first?.source ?: "整理", src.minOfOrNull { it.createdAt } ?: now(), now(),
+                topic = e.topic.ifBlank { if (src.isNotEmpty() && src.all { it.topic == src.first().topic }) src.first().topic else "" },
+                convId = first?.convId.orEmpty(), messageId = first?.messageId.orEmpty(), quote = first?.quote.orEmpty())
         }
         updateState { it.copy(memories = pinned + next, memoryDeleted = tombstoned(it, items.map { m -> m.id })) }
         return CommandResult(message = "整理好了：${items.size} 条变成 ${next.size} 条（置顶的没动）")
@@ -3232,7 +3276,9 @@ class Engine(
             val sys = Prompts.system(state, conv, member, canSearch = wantSearch, canDraw = hasImageModel && useTools,
                 canSeeImages = model.vision, independentRound = independent, calledBy = calledBy,
                 nativeSearch = native != NativeSearch.NONE, hasImageModel = hasImageModel,
-                memories = if (memOn) Recorder.forPrompt(state.memories) else emptyList(), canRemember = memOn && useTools,
+                memories = if (memOn) Recorder.forPrompt(state.memories, conv.memoryTopic) else emptyList(), canRemember = memOn && useTools,
+                memoryTopic = if (memOn) conv.memoryTopic else "",
+                otherTopics = if (memOn) Recorder.topics(state.memories).filter { it != conv.memoryTopic } else emptyList(),
                 docCount = if (docsOn && useTools) docs.count else 0, deviceLabel = if (isPhone) "这台手机" else "这台电脑",
                 canMakeFiles = officeOn && useTools, canReadFiles = filesOn && useTools, canVideo = hasVideo && useTools)
             working += buildJsonObject { put("role", "system"); put("content", sys) }
@@ -3445,7 +3491,13 @@ class Engine(
                 buildJsonObject {
                     put("text", prop("要记的内容，一句完整的话，以用户为主语，例如「希望回答先给结论」"))
                     put("kind", prop("类别：关于我 / 偏好 / 要求 / 事实"))
+                    put("topic", prop("属于哪个话题 / 项目（例如「AI集训营」），只在聊这个话题时才用；关于用户本人的留空"))
                 }, listOf("text"))
+            fn("recall_memory", "查长期记忆里某个话题 / 项目的记忆（设定里只带了关于用户本人的和这个对话所属话题的）。用户聊到别的话题、项目时使用。",
+                buildJsonObject {
+                    put("topic", prop("话题名，设定里列出的那些；不确定就留空，用 query"))
+                    put("query", prop("关键词（可选）"))
+                }, emptyList())
             fn("search_history", "搜索以前所有对话的聊天记录。用户提到「上次」「之前说过」「以前聊的」，或者需要回忆更早的原话时使用。返回匹配的片段（对话标题、日期、谁说的）。",
                 buildJsonObject { put("query", prop("关键词，越具体越好")) }, listOf("query"))
         }
@@ -4219,9 +4271,18 @@ class Engine(
             "remember" -> {
                 val text = args.str("text").orEmpty()
                 val kind = args.str("kind")?.trim()?.takeIf { it in Recorder.kinds } ?: "关于我"
-                val res = rememberNow(text, kind, state.conversation(convId)?.title.orEmpty())
+                val res = rememberNow(text, kind, state.conversation(convId)?.title.orEmpty(), Recorder.cleanTopic(args.str("topic").orEmpty()), convId)
                 updateMessage(convId, msgId, persist = false) { it.copy(tools = it.tools + ToolStep("memory", text.trim().take(80), ok = res.startsWith("已"))) }
                 res
+            }
+            "recall_memory" -> {
+                val topic = Recorder.cleanTopic(args.str("topic").orEmpty())
+                val q = args.str("query").orEmpty().trim()
+                val hits = recallMemory(topic, q)
+                updateMessage(convId, msgId, persist = false) { it.copy(tools = it.tools + ToolStep("memory", "查记忆：" + topic.ifBlank { q }.take(60), ok = hits.isNotEmpty())) }
+                if (hits.isEmpty()) "长期记忆里没有" + (if (topic.isNotBlank()) "话题「$topic」的" else "和「$q」相关的") + "记忆。现有话题：" +
+                    Recorder.topics(state.memories).joinToString("、").ifBlank { "（没有）" }
+                else hits.joinToString("\n") { "- [${it.kind}]" + (if (it.topic.isNotBlank()) "[${it.topic}]" else "") + " ${it.text}" }
             }
             "search_history" -> {
                 val q = args.str("query").orEmpty().ifBlank { return "参数错误：缺少 query" }

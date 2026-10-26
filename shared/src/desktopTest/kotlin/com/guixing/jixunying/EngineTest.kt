@@ -178,7 +178,8 @@ class EngineTest {
                             "中立、严谨的主席" in firstText -> say("结论：1.5 大。首轮分歧：回答甲和回答乙一致。少数派：没有。")
                             // —— 记录员 ——
                             "你是聊天记录员" in firstText -> say("## 话题\n测试话题\n## 已经定下的结论\n摘要里的结论")
-                            "找出值得长期记住的" in firstText -> say("""好的：[{"text":"在北京做产品经理","kind":"关于我","replaces":null}]""")
+                            "找出值得长期记住的" in firstText -> say("""好的：{"conversationTopic":"找房","items":[{"text":"在北京做产品经理","kind":"关于我","topic":"","quote":"第3句","replaces":null},""" +
+                                """{"text":"预算每月五千","kind":"事实","topic":"找房","quote":"记录员编的一句话","replaces":null}]}""")
                             "下面是关于一位用户的长期记忆" in firstText -> say("""[{"text":"喜欢简短的回答","kind":"偏好","from":[1,2]}]""")
                             // 点名：只有「让丙……」是在叫人，其他算对大家说
                             "判断这句话是想让哪几位成员来回答" in firstText -> say(if ("让丙" in firstText) """好的：{"to":["丙"]}""" else """{"to":[]}""")
@@ -203,6 +204,8 @@ class EngineTest {
                                 chunk("""{"tool_calls":[{"index":0,"id":"mem_1","type":"function","function":{"name":"remember","arguments":"{\"text\":\"喜欢简短的回答\",\"kind\":\"偏好\"}"}}]}""")
                                 write("data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n")
                             }
+                            hasTool("recall_memory") && latest.contains("上次找房") && !sawTool -> callTool("recall_memory", mapOf("topic" to "找房"))
+                            toolTexts.any { "预算每月五千" in it } -> say("查到了：预算每月五千。")
                             remembered -> say("记住了。")
                             // 要文件：先调 create_word / create_excel，拿到「已做好」再说话
                             hasTool("create_word") && latest.contains("做成 Word") && !sawTool -> callTool("create_word",
@@ -1154,6 +1157,35 @@ class EngineTest {
         assertFalse("第0句" in ctx, "压缩掉的原文不再发")
         // 长期记忆：自动挑出来了
         assertTrue(e.state.memories.any { it.text == "在北京做产品经理" }, e.state.memories.toString())
+        // 记忆二期：话题、出处。原话对得上的挂到那条消息上，对不上的（记录员编的）不挂
+        val me = e.state.memories.first { it.text == "在北京做产品经理" }
+        val third = e.store.messages.value[conv]!!.first { it.role == Role.USER && it.content.startsWith("第3句") }
+        assertEquals("" to conv, me.topic to me.convId)
+        assertEquals(third.id, me.messageId)
+        val budget = e.state.memories.first { it.text == "预算每月五千" }
+        assertEquals("找房", budget.topic)
+        assertEquals("" to "", budget.messageId to budget.quote)
+        assertEquals("找房", e.state.conversation(conv)!!.memoryTopic)
+        // 这个对话带上话题记忆；别的对话只带话题名，要用时 recall_memory 查
+        e.call(Command.SendMessage(conv, "接着说"))
+        waitIdle(e, conv, 6)
+        assertTrue("预算每月五千" in systemOf(requests.last { runCatching { memberName(it) }.getOrNull() == "甲" }))
+        val other = e.call(Command.CreateConversation(listOf(ms[0].id))).data
+        e.call(Command.UpdateConversation(e.state.conversation(other)!!.copy(webSearch = false)))
+        e.call(Command.SendMessage(other, "上次找房的预算是多少"))
+        waitIdle(e, other, 1)
+        val firstAsk = requests.first { runCatching { memberName(it) }.getOrNull() == "甲" && "上次找房" in it.toString() }
+        val sys = systemOf(firstAsk)
+        assertFalse("预算每月五千" in sys, "别的话题的内容不进设定")
+        assertTrue("recall_memory 查：找房" in sys, sys)
+        assertEquals("查到了：预算每月五千。", e.store.messages.value[other]!!.last().content)
+        // 用户在对话设置里定了话题，记录员不再改；改界面拿的旧对话也冲不掉
+        e.call(Command.SetConvTopic(conv, "租房"))
+        e.call(Command.UpdateConversation(c.copy(title = "改个名")))
+        assertEquals("租房" to true, e.state.conversation(conv)!!.let { it.memoryTopic to it.memoryTopicByUser })
+        e.call(Command.SetConvTopic(conv, null))
+        assertFalse(e.state.conversation(conv)!!.memoryTopicByUser)
+        e.state.memories.filter { it.text == "预算每月五千" }.forEach { e.call(Command.DeleteMemory(it.id)) }
 
         // 搜以前的聊天
         val hits = AppJson.decodeFromString(kotlinx.serialization.builtins.ListSerializer(com.guixing.jixunying.model.HistoryHit.serializer()),

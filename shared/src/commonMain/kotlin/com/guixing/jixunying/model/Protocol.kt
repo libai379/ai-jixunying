@@ -202,6 +202,8 @@ sealed interface Command {
     /** 长期记忆：新增或修改一条。 */
     @Serializable data class SaveMemory(val item: MemoryItem) : Command
     @Serializable data class DeleteMemory(val id: String) : Command
+    /** 对话属于哪个记忆话题（对话设置里改）：topic = null 交回记录员自动认，"" = 不属于任何话题。 */
+    @Serializable data class SetConvTopic(val convId: String, val topic: String?) : Command
     /** 让记录员合并重复、矛盾的记忆。 */
     @Serializable data object TidyMemories : Command
     /** 手机和电脑互相同步记忆（2026-10-24）：发来对方的记忆和删除记录，合进本机，data 回合好的 MemoryBundle JSON。 */

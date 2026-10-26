@@ -38,6 +38,10 @@ object Prompts {
         memories: List<com.guixing.jixunying.model.MemoryItem> = emptyList(),
         /** 能用 remember / search_history 工具。 */
         canRemember: Boolean = false,
+        /** 这个对话属于哪个记忆话题（memories 里已经带上了这个话题的）；空 = 不属于任何话题。 */
+        memoryTopic: String = "",
+        /** 别的话题的名字：设定里不带内容，AI 用 recall_memory 查。 */
+        otherTopics: List<String> = emptyList(),
         /** 本机文档库里有几个文档（0 = 不能查文档）。 */
         docCount: Int = 0,
         deviceLabel: String = "这台电脑",
@@ -76,11 +80,21 @@ object Prompts {
                 }
                 appendLine("- 聊天记录里，别人的发言会以「【名字】」开头标明是谁说的；你自己以前的发言就是 assistant 消息。")
             }
-            if (memories.isNotEmpty()) {
+            val aboutMe = memories.filter { it.topic.isBlank() }
+            val topicMems = memories.filter { it.topic.isNotBlank() }
+            if (memories.isNotEmpty() || otherTopics.isNotEmpty()) {
                 appendLine()
-                appendLine("【关于${profile.name}的长期记忆】（以前的对话里记下的，所有 AI 成员共用）")
-                memories.forEach { appendLine("- [${it.kind}] ${it.text}") }
-                appendLine("用法：自然地用上，不用每次复述，也不要说「根据记忆」；和用户现在说的冲突时以现在为准" +
+                if (aboutMe.isNotEmpty()) {
+                    appendLine("【关于${profile.name}的长期记忆】（以前的对话里记下的，所有 AI 成员共用）")
+                    aboutMe.forEach { appendLine("- [${it.kind}] ${it.text}") }
+                }
+                if (topicMems.isNotEmpty()) {
+                    appendLine("【这个对话的话题「$memoryTopic」的记忆】")
+                    topicMems.forEach { appendLine("- [${it.kind}] ${it.text}") }
+                }
+                if (otherTopics.isNotEmpty() && canRemember)
+                    appendLine("长期记忆里还有这些话题的记忆，聊到时用 recall_memory 查：${otherTopics.take(30).joinToString("、")}")
+                if (memories.isNotEmpty()) appendLine("用法：自然地用上，不用每次复述，也不要说「根据记忆」；和用户现在说的冲突时以现在为准" +
                     if (canRemember) "，并用 remember 更新。" else "。")
             }
             appendLine()
@@ -136,7 +150,7 @@ object Prompts {
                     "消息里给了路径（比如拖进来的文件夹）就直接用。改文件之前程序会备份，用户能一键撤销；要不要先问用户由程序管。不要说你够不着用户的文件。")
             }
             if (canRemember) {
-                appendLine("- 你能记事：用户说「记住……」，或者说出了以后的对话也用得上的个人信息（身份、职业、所在地、偏好、对回答方式的要求、长期项目）时，调用 remember 记下来，记完简单说一句「记住了」。密码、Key、证件号之类不要记。")
+                appendLine("- 你能记事：用户说「记住……」，或者说出了以后的对话也用得上的个人信息（身份、职业、所在地、偏好、对回答方式的要求、长期项目）时，调用 remember 记下来，记完简单说一句「记住了」。只跟某个项目 / 话题有关的，topic 写上话题名。密码、Key、证件号之类不要记。")
                 appendLine("- 你能翻以前的聊天：用户说「上次」「之前说过」「以前聊的」时，先用 search_history 搜以前的聊天记录再回答，别凭印象编。")
             }
             // 用户在 设置 → 个性化 里写的自定义指令（2026-10-17）：放在最后，是用户本人的要求
