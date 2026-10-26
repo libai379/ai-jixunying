@@ -148,25 +148,35 @@ fun MemoryPage(ctl: AppController, state: AppState) {
             Text(if (topic.isBlank()) "关于你（所有对话都带上）· ${list.size} 条" else "话题「$topic」（聊这个话题时带上）· ${list.size} 条",
                 style = MaterialTheme.typography.labelMedium, color = Ext.c.subtle, modifier = Modifier.padding(top = 6.dp))
             list.sortedWith(order).forEach { m ->
-                Row(
-                    Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).border(1.dp, Ext.c.border, RoundedCornerShape(10.dp))
-                        .padding(start = 10.dp, top = 6.dp, bottom = 6.dp, end = 2.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Column(Modifier.weight(1f)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Pill(m.kind)
-                            if (m.pinned) { Spacer(Modifier.width(4.dp)); Pill("置顶", Ext.c.warning) }
-                        }
-                        Text(m.text, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(top = 3.dp))
-                        MemorySource(ctl, state, m)
-                    }
+                @Composable
+                fun actions() {
                     IconButton(onClick = { ctl.run(Command.SaveMemory(m.copy(pinned = !m.pinned)), quiet = true) }) {
                         Icon(Icons.Rounded.PushPin, if (m.pinned) "取消置顶" else "置顶", Modifier.size(17.dp),
                             tint = if (m.pinned) MaterialTheme.colorScheme.primary else Ext.c.subtle)
                     }
                     IconButton(onClick = { editing = m }) { Icon(Icons.Rounded.Edit, "修改", Modifier.size(17.dp), tint = Ext.c.subtle) }
                     IconButton(onClick = { ctl.run(Command.DeleteMemory(m.id), "已删除") }) { Icon(Icons.Rounded.Delete, "删除", Modifier.size(17.dp), tint = Ext.c.subtle) }
+                }
+                @Composable
+                fun body(mod: Modifier) = Column(mod) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Pill(m.kind)
+                        if (m.pinned) { Spacer(Modifier.width(4.dp)); Pill("置顶", Ext.c.warning) }
+                    }
+                    Text(m.text, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(top = 3.dp))
+                    MemorySource(ctl, state, m)
+                }
+                val card = Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).border(1.dp, Ext.c.border, RoundedCornerShape(10.dp))
+                    .padding(start = 10.dp, top = 6.dp, bottom = 6.dp, end = 2.dp)
+                // 分屏 220dp 这种窄宽度：三个按钮占掉大半，文字和出处会被挤成 0 宽（phoneSettingsFit），按钮挪到下面一行
+                androidx.compose.foundation.layout.BoxWithConstraints(Modifier.fillMaxWidth()) {
+                    if (maxWidth < 300.dp) Column(card) {
+                        body(Modifier.fillMaxWidth())
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) { actions() }
+                    } else Row(card, verticalAlignment = Alignment.CenterVertically) {
+                        body(Modifier.weight(1f))
+                        actions()
+                    }
                 }
             }
           }
