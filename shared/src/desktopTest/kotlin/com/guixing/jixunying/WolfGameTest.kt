@@ -158,12 +158,14 @@ class WolfGameTest {
                 "check" -> target(1)
                 "witch" -> { witchSaw = user.substringAfterLast("【现在】"); "{\"save\": true, \"poison\": 0}" }
                 "speak", "lastWords" -> "<发言>嗯</发言>"
-                "judge" -> "{\"most\": 1}"
+                // 10-27 真局写过带引号的「"2号"」
+                "judge" -> "{\"most\": \"1号\"}"
                 "vote" -> target(0)
                 else -> "?"
             }
         }
         val out = WolfGame(r, { brain }, onUpdate = { r = it }, maxDays = 1).run()
+        assertTrue(out.notes.any { it.kind == "judge" && it.most == 1 }, "\"1号\" 当成 1 号")
         assertTrue("不能用解药" in witchSaw && "解药 1 瓶" in witchSaw, witchSaw)
         assertFalse(out.seats.first { it.no == 4 }.alive)
         assertTrue(out.notes.any { it.seat == 4 && it.kind == "abstain" && it.stage == "用药" })

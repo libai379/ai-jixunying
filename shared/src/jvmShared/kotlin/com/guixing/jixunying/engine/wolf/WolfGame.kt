@@ -9,7 +9,6 @@ import com.guixing.jixunying.model.WolfSeat
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
-import kotlinx.serialization.json.intOrNull
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -157,7 +156,7 @@ class WolfGame(
             note(WolfNote(day, w.no, "think", "用药", think))
             if (obj != null) {
                 val save = (obj["save"] as? JsonPrimitive)?.contentOrNull == "true"
-                val p = (obj["poison"] as? JsonPrimitive)?.intOrNull ?: 0
+                val p = (obj["poison"] as? JsonPrimitive)?.contentOrNull?.filter { it.isDigit() }?.toIntOrNull() ?: 0
                 val ok = (!save || canSave) && (p == 0 || p in poisonable) && !(save && p != 0)
                 if (ok) return save to p
             }
@@ -241,7 +240,8 @@ class WolfGame(
                 val raw = brainOf(s).ask(s, systemFor(s), userFor(s, day, false, ask))
                 countCall()
                 val (_, obj) = WolfParse.split(raw)
-                val most = (obj?.get("most") as? JsonPrimitive)?.intOrNull ?: 0
+                // 10-27 真局：阿德写成 "most": "2号"（带引号的字符串），和 target 一样只取数字
+                val most = (obj?.get("most") as? JsonPrimitive)?.contentOrNull?.filter { it.isDigit() }?.toIntOrNull() ?: 0
                 if (obj != null && most in others) {
                     val probs = (obj["probs"] as? JsonObject)?.mapNotNull { (k, v) ->
                         val n = k.filter { it.isDigit() }.toIntOrNull() ?: return@mapNotNull null
