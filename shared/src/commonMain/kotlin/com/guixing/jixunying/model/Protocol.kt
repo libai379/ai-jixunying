@@ -323,10 +323,32 @@ sealed interface Command {
     /** 立场档案：删掉一个议题（记录员认错了的）。 */
     @Serializable data class StanceDelete(val topicId: String) : Command
 
-    /** 集训场：开一局狼人杀（座位按给的顺序，身份随机发；同一时间只打一局）。结果 data 是局编号。 */
-    @Serializable data class WolfStart(val board: WolfBoard, val seats: List<WolfSeatPick>) : Command
-    /** 集训场：真人座位交这一步（askId 见 WolfAsk）。发言、遗言填 text；选座位填 target（0 = 不选）；女巫填 save / poison。 */
-    @Serializable data class WolfAnswer(val askId: String, val text: String = "", val target: Int = 0, val save: Boolean = false, val poison: Int = 0) : Command
+    /**
+     * 集训场：开一局狼人杀（同一时间只打一局）。roles 是这局的身份（个数 = 座位数），座位按给的顺序；
+     * 座位上 role 指定了的按指定，其余随机发。stepMode = 主持人一步一步点；judge = AI 每天交私下判断（测评用）；useExp = AI 带上以前总结的经验。
+     * 结果 data 是局编号。
+     */
+    @Serializable data class WolfStart(
+        val roles: List<WolfRole>,
+        val seats: List<WolfSeatPick>,
+        val setupName: String = "",
+        val stepMode: Boolean = false,
+        val judge: Boolean = true,
+        val useExp: Boolean = true,
+    ) : Command
+    /**
+     * 集训场：真人座位（或主持人）交这一步（askId 见 WolfAsk）。发言、遗言填 text（skill 是发言时顺带用的技能：explode / whiteExplode / duel，
+     * 带人、决斗的对象填 target）；选座位填 target（0 = 不选）；女巫填 save / poison；奇迹商人填 target + gift（check / shield / poison）；
+     * next 随便交；error 填 text = retry / skip。
+     */
+    @Serializable data class WolfAnswer(
+        val askId: String, val text: String = "", val target: Int = 0, val save: Boolean = false, val poison: Int = 0,
+        val skill: String = "", val gift: String = "",
+    ) : Command
+    /** 集训场：主持人控制节奏。action：pause 暂停 / resume 继续 / step 改成一步一步 / auto 改成自动。 */
+    @Serializable data class WolfControl(val action: String) : Command
+    /** 集训场：主持人在桌上说一句（大家都看得到，AI 也会看到）。 */
+    @Serializable data class WolfSay(val text: String) : Command
     /** 集训场：停掉正在打的那一局。 */
     @Serializable data object WolfStop : Command
     /** 集训场：正在打的那一局。结果 data 是 WolfLive 的 JSON，没有就是空。 */
@@ -411,6 +433,8 @@ sealed interface Event {
     @Serializable data class Notice(val text: String, val error: Boolean = false) : Event
     /** 集训场正在打的那一局变了（每一步都推）。 */
     @Serializable data class Wolf(val live: WolfLive) : Event
+    /** 集训场：某个 AI 正在说的话（边出边推，说完由 Wolf 里的记录接上）。text 空 = 说完了。 */
+    @Serializable data class WolfTyping(val seat: Int, val text: String) : Event
 }
 
 /** 手机和电脑之间的一帧（加密前的明文）。 */

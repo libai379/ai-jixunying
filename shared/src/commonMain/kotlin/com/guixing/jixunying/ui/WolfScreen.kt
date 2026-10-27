@@ -6,7 +6,6 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
@@ -16,16 +15,25 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Menu
+import androidx.compose.material.icons.rounded.Mic
+import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -35,6 +43,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -44,28 +53,35 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.guixing.jixunying.model.AppJson
 import com.guixing.jixunying.model.AppState
 import com.guixing.jixunying.model.Command
 import com.guixing.jixunying.model.WolfAsk
-import com.guixing.jixunying.model.WolfBoard
 import com.guixing.jixunying.model.WolfEvent
 import com.guixing.jixunying.model.WolfGameRecord
 import com.guixing.jixunying.model.WolfLive
+import com.guixing.jixunying.model.WolfNote
+import com.guixing.jixunying.model.WolfPresets
+import com.guixing.jixunying.model.WolfRole
 import com.guixing.jixunying.model.WolfSeat
 import com.guixing.jixunying.model.WolfSeatPick
 import kotlinx.coroutines.launch
 import kotlinx.serialization.builtins.ListSerializer
 
 /**
- * 集训场（侧栏第三栏，docs/狼人杀设计说明.md 第 5 节第二期，2026-10-27）：开一局狼人杀，座位可以是真人也可以是 AI 成员。
- * 真人在这台设备上轮流操作：只有一个真人时一直显示他那份；几个真人时，轮到谁先挡住屏幕，那个人点「我是 X号」才显示他的身份和要做的事。
- * 全是 AI 的局是上帝视角。几台手机各自进一个房间是第三期，还没做。
+ * 集训场（侧栏第三栏，docs/狼人杀设计说明.md，2026-10-27 照第一代 G:\ai-discussion-app\src\wolf 重做）：
+ * 开局页选「我当主持人」（全 AI，上帝视角，能暂停、一步一步、插话）或「我上桌玩」（真人座位，同一台设备轮流）；
+ * 预设 8 套 + 自己加减 14 种身份，身份随机或手动指定，角色图鉴。
+ * 对局页像群聊：顶上一排座位头像，中间 AI 带头像一句一句说（边出字边显示），法官的话夹在中间，底下是轮到你做的事。
+ * 打完 AI 各说一句复盘感想；复盘页能看每个 AI 的心里话。
  */
 @Composable
 fun WolfScreen(ctl: AppController, wide: Boolean, openDrawer: () -> Unit) {
@@ -79,13 +95,13 @@ fun WolfScreen(ctl: AppController, wide: Boolean, openDrawer: () -> Unit) {
     Column(Modifier.fillMaxSize()) {
         if (!wide) Row(Modifier.fillMaxWidth().heightIn(min = 56.dp).padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = openDrawer) { Icon(Icons.Rounded.Menu, "菜单") }
-            Text("集训场", style = MaterialTheme.typography.titleMedium)
+            Text("集训场 · 狼人杀", style = MaterialTheme.typography.titleMedium)
         }
         val l = live
         when {
-            l != null && !l.over -> WolfTable(ctl, l, wide)
-            ctl.wolfView.isNotBlank() -> WolfReplay(ctl, ctl.wolfView, wide)
-            l != null && ctl.wolfShowLast -> WolfTable(ctl, l, wide)
+            l != null && !l.over && ctl.wolfView.isBlank() -> WolfTable(ctl, state, l, wide)
+            ctl.wolfView.isNotBlank() -> WolfReplay(ctl, state, ctl.wolfView, wide)
+            l != null && ctl.wolfShowLast -> WolfTable(ctl, state, l, wide)
             else -> WolfLobby(ctl, state, wide)
         }
     }
@@ -101,24 +117,24 @@ fun rememberWolfGames(ctl: AppController, rev: Any?): List<WolfGameRecord> {
     return games
 }
 
-/** 侧栏「集训场」一栏：正在打的那局 + 打过的局。 */
+/** 侧栏「集训场」一栏：开一局、正在打的那局、打过的局。 */
 @Composable
 fun WolfSidebar(ctl: AppController, modifier: Modifier, onNavigate: () -> Unit) {
     val live by ctl.backend.store.wolf.collectAsState()
     val games = rememberWolfGames(ctl, live?.over to live?.record?.id)
+    val playing = live?.takeIf { !it.over }
     Column(modifier.verticalScroll(rememberScrollState())) {
         Spacer(Modifier.height(6.dp))
-        SideRow("开一局", "狼人杀：真人和 AI 一起玩", ctl.wolfView.isBlank() && live?.over != false) {
-            ctl.wolfView = ""; ctl.wolfShowLast = false; onNavigate()
+        if (playing != null) {
+            SideRow("🐺 正在打", playing.record.phase.ifBlank { "开局" } + " · " + playing.record.seats.size + " 人", ctl.wolfView.isBlank()) { ctl.wolfView = ""; onNavigate() }
+        } else {
+            SideRow("🐺 开一局狼人杀", "当主持人看 AI 打，或者上桌一起玩", ctl.wolfView.isBlank()) { ctl.wolfView = ""; ctl.wolfShowLast = false; onNavigate() }
         }
-        live?.takeIf { !it.over }?.let { l ->
-            SideRow("正在打", "${l.record.board.roles.size} 人局 · 第 ${l.record.day.coerceAtLeast(1)} 天", ctl.wolfView.isBlank()) { ctl.wolfView = ""; onNavigate() }
-        }
-        if (games.isNotEmpty()) {
+        val past = games.filter { it.id != playing?.record?.id }
+        if (past.isNotEmpty()) {
             Text("打过的局", style = MaterialTheme.typography.labelMedium, color = Ext.c.subtle, modifier = Modifier.padding(start = 8.dp, top = 12.dp, bottom = 4.dp))
-            for (g in games) if (g.id != live?.takeIf { !it.over }?.record?.id) {
-                SideRow(gameTitle(g), gameSub(g), ctl.wolfView == g.id) { ctl.wolfView = g.id; onNavigate() }
-            }
+            for (g in past) SideRow(g.setupName.ifBlank { "${g.seats.size} 人局" } + " · " + resultText(g), WolfUiText.time(g.startedAt) + " · " + g.seats.joinToString("、") { it.name },
+                ctl.wolfView == g.id) { ctl.wolfView = g.id; onNavigate() }
         }
     }
 }
@@ -133,69 +149,124 @@ private fun SideRow(title: String, sub: String, on: Boolean, onClick: () -> Unit
     }
 }
 
-private fun gameTitle(g: WolfGameRecord) = g.seats.joinToString("、") { it.name }
-private fun gameSub(g: WolfGameRecord) = "${g.seats.size} 人局 · " + when {
+private fun resultText(g: WolfGameRecord) = when {
     g.winner == "good" -> "好人赢"
     g.winner == "wolf" -> "狼人赢"
-    g.error.isNotBlank() -> g.error.take(20)
+    g.error.isNotBlank() -> g.error.take(12)
     else -> "没打完"
-} + " · " + WolfText.time(g.startedAt)
+}
+
+object WolfUiText {
+    /** 「3 小时前」「10月27日」这种（公共代码里没有时区库，用 Devices.kt 的 formatTime）。 */
+    fun time(ms: Long): String = if (ms <= 0) "" else formatTime(ms)
+}
 
 // ———————————————— 开局 ————————————————
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun WolfLobby(ctl: AppController, state: AppState, wide: Boolean) {
-    var board by remember { mutableStateOf(WolfBoard.SIX) }
     val members = state.members
-    // 默认：1 号是你，其余按 AI 成员轮着坐
+    var host by remember { mutableStateOf(true) }
+    var presetName by remember { mutableStateOf(WolfPresets.all[1].name) }
+    val counts = remember { mutableStateOf(WolfPresets.all[1].roles) }
+    val roles = WolfRole.entries.flatMap { r -> List(counts.value[r] ?: 0) { r } }
     val picks = remember { mutableStateListOf<WolfSeatPick>() }
-    LaunchedEffect(board, members.size) {
-        val n = board.roles.size
-        while (picks.size > n) picks.removeAt(picks.lastIndex)
-        while (picks.size < n) {
+    // 座位数跟着身份数走；主持人模式全是 AI；上桌模式默认 1 号是你
+    LaunchedEffect(roles.size, host, members.size) {
+        while (picks.size > roles.size) picks.removeAt(picks.lastIndex)
+        while (picks.size < roles.size) {
             val i = picks.size
-            picks += if (i == 0 || members.isEmpty()) WolfSeatPick(humanName = if (i == 0) "我" else "玩家${i + 1}")
-            else WolfSeatPick(memberId = members[(i - 1) % members.size].id)
+            picks += if (!host && i == 0 || members.isEmpty()) WolfSeatPick(humanName = if (i == 0) "我" else "玩家${i + 1}")
+            else WolfSeatPick(memberId = members[(if (host) i else i - 1).mod(members.size)].id)
         }
+        if (host) for (i in picks.indices) if (picks[i].memberId.isBlank() && members.isNotEmpty()) picks[i] = WolfSeatPick(memberId = members[i % members.size].id, role = picks[i].role)
+        if (!host && picks.none { it.memberId.isBlank() } && picks.isNotEmpty()) picks[0] = WolfSeatPick(humanName = "我", role = picks[0].role)
+        // 指定的身份这局没有了：改回随机
+        for (i in picks.indices) picks[i].role?.let { r -> if (picks.count { it.role == r } > roles.count { it == r }) picks[i] = picks[i].copy(role = null) }
     }
+    var step by remember { mutableStateOf(false) }
+    var judge by remember { mutableStateOf(true) }
+    var useExp by remember { mutableStateOf(true) }
+    var guide by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
+    val warns = WolfPresets.warnings(roles)
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = if (wide) 24.dp else 16.dp, vertical = 20.dp)) {
-        Column(Modifier.widthIn(max = 760.dp)) {
-            PageHeader("狼人杀", "几个真人和几个 AI 一起玩。法官是程序，AI 每一步自己想、自己说；真人在这里发言、投票。" +
-                "几个真人用同一台设备轮流操作：轮到谁，屏幕先挡住，那个人点「我是几号」才看到自己的身份。")
+        Column(Modifier.widthIn(max = 820.dp)) {
+            PageHeader("狼人杀", "法官是程序，AI 各用自己的模型，一步一步自己想、自己说。")
+            // 两种玩法
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                ModeCard("🎙️ 我当主持人", "全是 AI 打。你看得到所有身份和夜里谁做了什么，可以暂停、一步一步来，白天能插话。", host) { host = true }
+                ModeCard("🙋 我上桌玩", "你（和朋友）坐几个座位，跟 AI 一起打。几个人就同一台设备轮流，轮到谁先挡住屏幕。", !host) { host = false }
+            }
+            Spacer(Modifier.height(12.dp))
             SectionCard {
-                FieldLabel("板子")
+                FieldLabel("板子", "点一套预设，或者自己加减身份")
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    for (b in WolfBoard.entries) ChoiceChip(b.label, b == board) { board = b }
+                    for (p in WolfPresets.all) ChoiceChip("${p.name} ${p.players}人", presetName == p.name) { presetName = p.name; counts.value = p.roles }
+                    ChoiceChip("自定义", presetName == "自定义") { presetName = "自定义" }
                 }
-                Spacer(Modifier.height(12.dp))
-                FieldLabel("座位", "身份开局时随机发")
-                picks.forEachIndexed { i, p ->
-                    SeatPickRow(i + 1, p, state) { picks[i] = it }
+                Spacer(Modifier.height(10.dp))
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    for (r in WolfRole.entries) RoleCounter(r, counts.value[r] ?: 0) { n ->
+                        counts.value = (counts.value + (r to n)).filterValues { it > 0 }
+                        presetName = WolfPresets.all.firstOrNull { it.roles == counts.value }?.name ?: "自定义"
+                    }
                 }
-                val humans = picks.count { it.memberId.isBlank() }
-                Text(when (humans) {
-                    0 -> "全是 AI：你在旁边看（上帝视角，所有身份都看得到）。"
-                    1 -> "1 个真人、${picks.size - 1} 个 AI。"
-                    else -> "$humans 个真人、${picks.size - humans} 个 AI：轮到谁就把设备交给谁。"
-                }, style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle, modifier = Modifier.padding(top = 8.dp))
-                Text("AI 每一步都调一次它的模型，一局大约几十次（上次 6 个 AI 一局 36 次，约 0.38 元）；本地模型不花钱。",
-                    style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle, modifier = Modifier.padding(top = 2.dp))
+                Text("一共 ${roles.size} 人：" + com.guixing.jixunying.model.WolfText.roles(roles).ifBlank { "还没选" }, style = MaterialTheme.typography.bodySmall,
+                    color = Ext.c.subtle, modifier = Modifier.padding(top = 8.dp))
+                for (w in warns) Text("⚠️ $w", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                TextButton(onClick = { guide = !guide }) { Text(if (guide) "收起角色图鉴" else "角色图鉴：每个身份能干什么") }
+                if (guide) for (r in WolfRole.entries) Row(Modifier.padding(vertical = 3.dp)) {
+                    Text(r.icon, modifier = Modifier.width(28.dp))
+                    Column {
+                        Text(r.label + "  " + when (r.faction) { "wolf" -> "狼人阵营"; "good" -> if (r.god) "好人·神职" else "好人"; else -> "第三方" },
+                            style = MaterialTheme.typography.labelLarge)
+                        Text(r.desc, style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
+                    }
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+            SectionCard {
+                FieldLabel("座位", if (host) "每个座位坐哪位 AI；身份默认随机发，也可以点右边指定" else "点左边选真人还是哪位 AI；身份默认随机发")
+                picks.forEachIndexed { i, p -> SeatPickRow(i + 1, p, state, host, roles, picks) { picks[i] = it } }
+                if (members.isEmpty()) Text("还没有 AI 成员：先到 设置 → AI 成员 加几位。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+            }
+            Spacer(Modifier.height(12.dp))
+            SectionCard {
+                if (host) SwitchRow("一步一步来", "每一步（天黑、狼人行动、投票……）等你点「下一步」再走；不开就自动打，随时能暂停", step) { step = it }
+                SwitchRow("记录 AI 的私下判断", "每天发言前、投票前让每个 AI 说它怀疑谁、几成把握（测评用，不给别人看）；调用大约多一倍", judge) { judge = it }
+                SwitchRow("带上以前的经验", "每局打完 AI 各总结一句经验，下局开打前给它看（照第一代）", useExp) { useExp = it }
+                val ai = picks.count { it.memberId.isNotBlank() }
+                Text("这局 $ai 个 AI。6 个 AI 实测一局调 36 次模型、约 0.38 元；开着私下判断大约翻倍，打完复盘每个 AI 再多一次；本地模型不花钱。",
+                    style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle, modifier = Modifier.padding(top = 4.dp))
                 if (error.isNotBlank()) Text(error, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 6.dp))
-                Spacer(Modifier.height(12.dp))
-                Button(enabled = !busy, onClick = {
+                Spacer(Modifier.height(10.dp))
+                Button(enabled = !busy && warns.none { "至少" in it || "没有狼" in it } && picks.size == roles.size && members.isNotEmpty(), onClick = {
                     busy = true; error = ""
                     scope.launch {
-                        val r = ctl.backend.call(Command.WolfStart(board, picks.toList()))
+                        val r = ctl.backend.call(Command.WolfStart(roles, picks.toList(), presetName, stepMode = host && step, judge = judge, useExp = useExp))
                         busy = false
                         if (!r.ok) error = r.message.ifBlank { "开不了" } else { ctl.wolfView = ""; ctl.wolfShowLast = true }
                     }
                 }) { Text(if (busy) "正在开…" else "开始") }
             }
+            Spacer(Modifier.height(24.dp))
         }
+    }
+}
+
+@Composable
+private fun ModeCard(title: String, desc: String, on: Boolean, onClick: () -> Unit) {
+    val primary = MaterialTheme.colorScheme.primary
+    Column(Modifier.widthIn(max = 380.dp).clip(RoundedCornerShape(14.dp))
+        .background(if (on) primary.copy(alpha = 0.10f) else cardFill())
+        .border(if (on) 1.5.dp else 1.dp, if (on) primary else Ext.c.border, RoundedCornerShape(14.dp))
+        .clickable(onClick = onClick).padding(14.dp)) {
+        Text(title, style = MaterialTheme.typography.titleSmall, color = if (on) primary else MaterialTheme.colorScheme.onSurface)
+        Text(desc, style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle, modifier = Modifier.padding(top = 4.dp))
     }
 }
 
@@ -210,215 +281,472 @@ private fun ChoiceChip(text: String, on: Boolean, onClick: () -> Unit) {
     }
 }
 
-/** 一个座位：点左边选「真人」或哪位 AI 成员；真人的话右边填昵称。 */
+/** 一种身份的加减：「🐺 普通狼  − 2 ＋」。 */
 @Composable
-private fun SeatPickRow(no: Int, p: WolfSeatPick, state: AppState, onChange: (WolfSeatPick) -> Unit) {
+private fun RoleCounter(r: WolfRole, n: Int, onChange: (Int) -> Unit) {
+    Row(Modifier.clip(RoundedCornerShape(10.dp)).background(if (n > 0) MaterialTheme.colorScheme.primary.copy(alpha = 0.08f) else Color.Transparent)
+        .border(1.dp, Ext.c.border, RoundedCornerShape(10.dp)).padding(start = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text("${r.icon} ${r.label}", style = MaterialTheme.typography.labelLarge)
+        TextButton(onClick = { if (n > 0) onChange(n - 1) }, enabled = n > 0) { Text("−") }
+        Text("$n", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
+        TextButton(onClick = { if (n < 8) onChange(n + 1) }) { Text("＋") }
+    }
+}
+
+/** 一个座位：点左边选「真人」或哪位 AI 成员（主持人模式只有 AI）；真人填昵称；右边身份「随机」或指定。 */
+@Composable
+private fun SeatPickRow(no: Int, p: WolfSeatPick, state: AppState, host: Boolean, roles: List<WolfRole>, all: List<WolfSeatPick>, onChange: (WolfSeatPick) -> Unit) {
     var open by remember { mutableStateOf(false) }
-    Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text("${no}号", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold, modifier = Modifier.width(40.dp))
+    var roleOpen by remember { mutableStateOf(false) }
+    Row(Modifier.fillMaxWidth().padding(vertical = 3.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text("${no}号", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold, modifier = Modifier.width(36.dp))
         Box {
-            val label = if (p.memberId.isBlank()) "真人" else state.member(p.memberId)?.name ?: "（成员不在了）"
-            OutlinedButton(onClick = { open = true }) { Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+            val m = state.member(p.memberId)
+            OutlinedButton(onClick = { open = true }) {
+                Text(if (p.memberId.isBlank()) "🙋 真人" else "${m?.avatar ?: "🤖"} ${m?.name ?: "（不在了）"}", maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
             DropdownMenu(open, { open = false }) {
-                DropdownMenuItem(text = { Text("真人") }, onClick = { open = false; onChange(WolfSeatPick(humanName = p.humanName.ifBlank { "玩家$no" })) })
-                for (m in state.members) DropdownMenuItem(text = { Text(m.name) }, onClick = { open = false; onChange(WolfSeatPick(memberId = m.id)) })
+                if (!host) DropdownMenuItem(text = { Text("🙋 真人") }, onClick = { open = false; onChange(WolfSeatPick(humanName = p.humanName.ifBlank { "玩家$no" }, role = p.role)) })
+                for (mm in state.members) DropdownMenuItem(text = { Text("${mm.avatar} ${mm.name}  ·  ${mm.modelId}") },
+                    onClick = { open = false; onChange(WolfSeatPick(memberId = mm.id, role = p.role)) })
             }
         }
         Spacer(Modifier.width(8.dp))
         if (p.memberId.isBlank()) AppTextField(p.humanName, { onChange(p.copy(humanName = it.take(12))) }, Modifier.weight(1f), placeholder = "昵称")
-        else Text(state.member(p.memberId)?.modelId.orEmpty(), style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle,
-            maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+        else Spacer(Modifier.weight(1f))
+        Spacer(Modifier.width(8.dp))
+        Box {
+            TextButton(onClick = { roleOpen = true }) { Text(p.role?.let { "${it.icon} ${it.label}" } ?: "随机", maxLines = 1) }
+            DropdownMenu(roleOpen, { roleOpen = false }) {
+                DropdownMenuItem(text = { Text("随机") }, onClick = { roleOpen = false; onChange(p.copy(role = null)) })
+                for (r in roles.distinct()) {
+                    val left = roles.count { it == r } - all.count { it.role == r } + (if (p.role == r) 1 else 0)
+                    if (left > 0) DropdownMenuItem(text = { Text("${r.icon} ${r.label}") }, onClick = { roleOpen = false; onChange(p.copy(role = r)) })
+                }
+            }
+        }
     }
 }
 
 // ———————————————— 对局 ————————————————
 
+/** 聊天流里的一行。 */
+private sealed interface WolfLine {
+    data class Sys(val e: WolfEvent) : WolfLine
+    data class Talk(val e: WolfEvent) : WolfLine
+    data class Votes(val list: List<WolfEvent>) : WolfLine
+    data class Thought(val n: WolfNote) : WolfLine
+    data class Typing(val seat: Int, val text: String) : WolfLine
+}
+
+private fun linesOf(r: WolfGameRecord, visible: (WolfEvent) -> Boolean, notes: List<WolfNote>): List<WolfLine> {
+    val out = mutableListOf<WolfLine>()
+    val items = r.events.filter(visible).map { it.at to (it as Any) } + notes.map { it.at to (it as Any) }
+    for ((_, x) in items.sortedBy { it.first }) {
+        when (x) {
+            is WolfNote -> out += WolfLine.Thought(x)
+            is WolfEvent -> when (x.kind) {
+                "vote" -> {
+                    val last = out.lastOrNull()
+                    if (last is WolfLine.Votes && last.list.first().day == x.day) out[out.lastIndex] = WolfLine.Votes(last.list + x) else out += WolfLine.Votes(listOf(x))
+                }
+                "speech", "pk", "lastWords", "review", "host" -> out += WolfLine.Talk(x)
+                else -> out += WolfLine.Sys(x)
+            }
+        }
+    }
+    return out
+}
+
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun WolfTable(ctl: AppController, live: WolfLive, wide: Boolean) {
+private fun WolfTable(ctl: AppController, state: AppState, live: WolfLive, wide: Boolean) {
     val r = live.record
     val humans = r.seats.filter { it.human }
-    // 谁在看：一个真人 → 一直是他；几个真人 → 0 = 挡着，点「我是几号」才是他；没有真人 → 上帝视角
+    val hostMode = humans.isEmpty()
+    // 谁在看：一个真人 → 一直是他；几个真人 → 0 = 挡着，点「我是几号」才是他；没有真人 → 主持人（上帝视角）
     var viewer by remember(r.id) { mutableStateOf(if (humans.size == 1) humans[0].no else 0) }
-    val god = humans.isEmpty() || live.over
+    // 这一夜已经看过一眼的真人（天亮清空）
+    val seen = remember(r.id, r.day, "夜" in r.phase) { mutableStateListOf<Int>() }
+    val god = hostMode || live.over
     val me = r.seats.firstOrNull { it.no == viewer }
-    val myAsk = live.asks.firstOrNull { it.seat == viewer }
-    val waiting = live.asks.filter { a -> r.seats.firstOrNull { it.no == a.seat }?.human == true }
+    val typing by ctl.backend.store.wolfTyping.collectAsState()
     val scope = rememberCoroutineScope()
-    val scroll = rememberScrollState()
-    LaunchedEffect(r.events.size, live.asks.size) { scroll.animateScrollTo(scroll.maxValue) }
+    fun send(c: Command) = scope.launch { val res = ctl.backend.call(c); if (!res.ok && res.message.isNotBlank()) ctl.toast(res.message) }
 
-    Column(Modifier.fillMaxSize().verticalScroll(scroll).padding(horizontal = if (wide) 24.dp else 16.dp, vertical = 16.dp)) {
-        Column(Modifier.widthIn(max = 760.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(r.board.label, style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
-                if (!live.over) TextButton(onClick = { scope.launch { ctl.backend.call(Command.WolfStop) } }) { Text("停掉这局") }
-                else TextButton(onClick = { ctl.wolfShowLast = false; ctl.backend.store.wolf.value = null }) { Text("再开一局") }
+    // 夜里谁在想就说明谁有技能：上桌玩时夜里只显示自己和狼队友在想（主持人和打完以后都看得到）
+    val night = "夜" in r.phase
+    val thinking = if (god || !night) live.thinking else live.thinking.filter { n ->
+        n == me?.no || (me != null && me.role.wolf && r.seats.firstOrNull { it.no == n }?.role?.wolf == true)
+    }
+    val lines = remember(r, viewer, god, typing, thinking) {
+        linesOf(r, { e -> god || e.visibleTo.isEmpty() || (me != null && me.no in e.visibleTo) }, emptyList()) +
+            thinking.map { WolfLine.Typing(it, typing[it].orEmpty()) }
+    }
+    val list = rememberLazyListState()
+    val nearBottom by remember { derivedStateOf { (list.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0) >= list.layoutInfo.totalItemsCount - 3 } }
+    // 打开时翻到最新的地方；之后人在底下才跟着往下走（往上翻着看的时候不打扰）
+    LaunchedEffect(r.id) { if (lines.isNotEmpty()) list.scrollToItem(lines.lastIndex) }
+    LaunchedEffect(lines.size, typing) { if (nearBottom && lines.isNotEmpty()) list.animateScrollToItem(lines.lastIndex) }
+
+    Column(Modifier.fillMaxSize()) {
+        // 顶上：现在第几天哪一步 + 主持人的按钮
+        Row(Modifier.fillMaxWidth().padding(horizontal = if (wide) 24.dp else 12.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(if (live.over) (if (live.reviewing) "复盘中…" else "结束 · " + resultText(r)) else r.phase.ifBlank { "开局" },
+                    style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(r.label + if (live.paused && !live.over) " · 已暂停" else "", style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
-            // 座位
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                for (s in r.seats) SeatChip(s, roleVisible(s, me, god, r), live.thinking.contains(s.no), s.no == viewer && humans.size > 1)
-            }
-            Spacer(Modifier.height(12.dp))
-            // 记录（只显示这个人看得到的）
-            for (e in r.events) if (eventVisible(e, me, god)) EventLine(e, r, god)
-            if (live.thinking.isNotEmpty()) Text("正在想：" + live.thinking.joinToString("、") { "${it}号" }, style = MaterialTheme.typography.bodySmall,
-                color = Ext.c.subtle, modifier = Modifier.padding(top = 6.dp))
-            if (live.over) {
-                Spacer(Modifier.height(10.dp))
-                SectionCard {
-                    Text(when (r.winner) { "good" -> "好人赢了"; "wolf" -> "狼人赢了"; else -> r.error.ifBlank { "没分出胜负" } },
-                        style = MaterialTheme.typography.titleMedium)
-                    Text(r.seats.joinToString("，") { "${it.no}号${it.name}：${it.role.label}" }, style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
-                    TextButton(onClick = { ctl.wolfView = r.id }) { Text("看复盘（每个 AI 心里怎么想的）") }
+            if (!live.over) {
+                if (hostMode) {
+                    TextButton(onClick = { send(Command.WolfControl(if (live.paused) "resume" else "pause")) }) { Text(if (live.paused) "继续" else "暂停") }
+                    TextButton(onClick = { send(Command.WolfControl(if (live.stepMode) "auto" else "step")) }) { Text(if (live.stepMode) "改成自动" else "一步一步") }
                 }
+                TextButton(onClick = { send(Command.WolfStop) }) { Text("停掉", color = MaterialTheme.colorScheme.error) }
+            } else if (!live.reviewing) {
+                TextButton(onClick = { ctl.wolfView = r.id }) { Text("看心里话") }
+                TextButton(onClick = { ctl.wolfShowLast = false; ctl.backend.store.wolf.value = null }) { Text("再开一局") }
             }
-            Spacer(Modifier.height(12.dp))
-            // 要真人做的事
-            if (!live.over) when {
-                humans.size > 1 && viewer == 0 -> {
-                    if (waiting.isEmpty()) Text("等 AI……", style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
-                    for (a in waiting) {
-                        val s = r.seats.first { it.no == a.seat }
-                        SectionCard(Modifier.padding(bottom = 8.dp)) {
-                            Text("轮到 ${s.no}号（${s.name}）：${a.what}", style = MaterialTheme.typography.titleSmall)
-                            Text("把设备交给 ${s.name}，别人别看。", style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
-                            Button(onClick = { viewer = s.no }, modifier = Modifier.padding(top = 6.dp)) { Text("我是 ${s.no}号，打开") }
+        }
+        SeatStrip(r, state, { s -> god || (me != null && (s.no == me.no || (me.role.wolf && s.role.wolf))) || s.revealed }, thinking, viewer, wide)
+        HorizontalDivider(color = Ext.c.border)
+        // 中间：像群聊一样
+        LazyColumn(Modifier.weight(1f).fillMaxWidth(), state = list,
+            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = if (wide) 24.dp else 12.dp, vertical = 10.dp)) {
+            items(lines.size) { i -> Box(Modifier.widthIn(max = 820.dp)) { LineView(lines[i], r, state, god) } }
+        }
+        HorizontalDivider(color = Ext.c.border)
+        // 底下：轮到谁做什么
+        Column(Modifier.fillMaxWidth().heightIn(max = 420.dp).verticalScroll(rememberScrollState())
+            .padding(horizontal = if (wide) 24.dp else 12.dp, vertical = 10.dp)) {
+            Column(Modifier.widthIn(max = 820.dp)) {
+                val hostAsks = live.asks.filter { it.seat == 0 }
+                for (a in hostAsks) HostAskCard(a) { send(it) }
+                when {
+                    live.over -> Text(if (live.reviewing) "AI 们在说复盘感想……" else r.endReason.ifBlank { r.error.ifBlank { "这局结束了" } },
+                        style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
+                    hostMode -> HostSay(live) { send(Command.WolfSay(it)) }
+                    humans.size > 1 && viewer == 0 -> {
+                        // 几个真人轮流：白天轮到谁叫谁；夜里不说谁有事（不然等于亮身份），活着的真人每人都看一眼
+                        val waiting = live.asks.filter { it.seat != 0 }
+                        val callOut = if (!night) waiting.mapNotNull { a -> r.seats.firstOrNull { it.no == a.seat } }
+                            else if (waiting.isEmpty()) emptyList()
+                            else humans.filter { it.alive && (it.no !in seen || waiting.any { a -> a.seat == it.no }) }
+                        if (night && waiting.isNotEmpty()) Text("天黑了：活着的真人轮流看一眼（没事的人看完直接挡上），别让别人看到。",
+                            style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
+                        if (callOut.isEmpty()) Text(waitText(live.copy(thinking = thinking), r), style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
+                        for (s in callOut.distinctBy { it.no }) {
+                            val a = waiting.firstOrNull { it.seat == s.no }
+                            Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Column(Modifier.weight(1f)) {
+                                    Text(if (night) "${s.no}号 ${s.name}" else "轮到 ${s.no}号 ${s.name}：${a?.what.orEmpty()}", style = MaterialTheme.typography.titleSmall)
+                                    Text("把设备交给 ${s.name}，别人别看。", style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
+                                }
+                                Button(onClick = { viewer = s.no; seen += s.no }) { Text("我是 ${s.no}号") }
+                            }
+                        }
+                    }
+                    me != null -> {
+                        MyRoleBar(me, r)
+                        val mine = live.asks.firstOrNull { it.seat == me.no }
+                        if (mine != null) AskPanel(ctl, mine, r) { c -> send(c); if (humans.size > 1) viewer = 0 }
+                        else {
+                            Text(if (!me.alive) "你已经出局了，可以接着看。" else if (night && humans.size > 1) "今晚你没有要做的事。" else waitText(live.copy(thinking = thinking), r), style = MaterialTheme.typography.bodySmall,
+                                color = Ext.c.subtle, modifier = Modifier.padding(top = 6.dp))
+                            if (humans.size > 1) TextButton(onClick = { viewer = 0 }) { Text("看完了，挡住屏幕") }
                         }
                     }
                 }
-                me != null -> {
-                    MyRoleCard(me, r)
-                    Spacer(Modifier.height(8.dp))
-                    if (myAsk != null) AskPanel(myAsk, r) { cmd ->
-                        scope.launch { ctl.backend.call(cmd) }
-                        if (humans.size > 1) viewer = 0
-                    } else Text(if (!me.alive) "你已经出局了，可以接着看。" else "等别人……", style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
-                    if (humans.size > 1 && myAsk == null) TextButton(onClick = { viewer = 0 }) { Text("挡住屏幕") }
-                }
             }
-            Spacer(Modifier.height(24.dp))
         }
     }
 }
 
-private fun roleVisible(s: WolfSeat, me: WolfSeat?, god: Boolean, r: WolfGameRecord): Boolean =
-    god || (me != null && (s.no == me.no || (me.role.wolf && s.role.wolf)))
-
-private fun eventVisible(e: WolfEvent, me: WolfSeat?, god: Boolean): Boolean =
-    god || e.visibleTo.isEmpty() || (me != null && me.no in e.visibleTo)
-
-@Composable
-private fun SeatChip(s: WolfSeat, showRole: Boolean, thinking: Boolean, isMe: Boolean) {
-    val c = if (!s.alive) Ext.c.subtle else if (showRole && s.role.wolf) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
-    Column(Modifier.clip(RoundedCornerShape(10.dp)).background(c.copy(alpha = if (s.alive) 0.10f else 0.05f))
-        .border(if (isMe || thinking) 1.5.dp else 0.dp, if (isMe || thinking) c else Color.Transparent, RoundedCornerShape(10.dp))
-        .padding(horizontal = 10.dp, vertical = 6.dp)) {
-        Text("${s.no}号 ${s.name}" + if (!s.alive) "（出局）" else "", style = MaterialTheme.typography.labelLarge, color = c)
-        Text((if (s.human) "真人" else "AI") + if (showRole) " · ${s.role.label}" else "", style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
-    }
+private fun waitText(live: WolfLive, r: WolfGameRecord): String = when {
+    live.paused -> "已暂停"
+    live.thinking.isNotEmpty() -> "等 " + live.thinking.joinToString("、") { n -> r.seats.firstOrNull { it.no == n }?.let { "${it.no}号 ${it.name}" } ?: "${n}号" } + "……"
+    live.asks.isNotEmpty() -> "等 " + live.asks.joinToString("、") { a -> if (a.seat == 0) "主持人" else "${a.seat}号" } + "……"
+    else -> "……"
 }
 
+/** 顶上一排座位：头像、几号、名字、看得到的身份；出局变灰，正在想的有圈。 */
 @Composable
-private fun EventLine(e: WolfEvent, r: WolfGameRecord, god: Boolean = true) {
-    val name = r.seats.firstOrNull { it.no == e.actor }?.let { "${it.no}号 ${it.name}" }.orEmpty()
-    val private = e.visibleTo.isNotEmpty()
-    when (e.kind) {
-        "speech", "lastWords" -> Column(Modifier.fillMaxWidth().padding(vertical = 4.dp).clip(RoundedCornerShape(10.dp))
-            .background(MaterialTheme.colorScheme.surfaceContainerLow).padding(10.dp)) {
-            Text(name + if (e.kind == "lastWords") " · 遗言" else "", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
-            Text(e.text, style = MaterialTheme.typography.bodyMedium)
+private fun SeatStrip(r: WolfGameRecord, state: AppState, showRole: (WolfSeat) -> Boolean, thinking: List<Int>, viewer: Int, wide: Boolean) {
+    LazyRow(Modifier.fillMaxWidth().padding(bottom = 6.dp), horizontalArrangement = Arrangement.spacedBy(6.dp),
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = if (wide) 24.dp else 12.dp)) {
+        items(r.seats) { s ->
+            val c = if (showRole(s) && s.role.wolf) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
+            val ring = s.no in thinking || s.no == viewer
+            Column(Modifier.width(64.dp).clip(RoundedCornerShape(12.dp))
+                .background(if (s.alive) c.copy(alpha = 0.06f) else Color.Transparent)
+                .border(if (ring) 1.5.dp else 0.dp, if (ring) c else Color.Transparent, RoundedCornerShape(12.dp))
+                .padding(vertical = 6.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                Box(contentAlignment = Alignment.Center) {
+                    SeatAvatar(s, state, 34)
+                    if (!s.alive) Text("✕", color = MaterialTheme.colorScheme.error, fontWeight = FontWeight.Bold, fontSize = 22.sp)
+                }
+                Text("${s.no}号", style = MaterialTheme.typography.labelSmall, color = if (s.alive) c else Ext.c.subtle, fontWeight = FontWeight.SemiBold)
+                Text(s.name, style = MaterialTheme.typography.labelSmall, color = if (s.alive) MaterialTheme.colorScheme.onSurface else Ext.c.subtle,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(if (showRole(s)) "${s.role.icon}${s.role.label}" else if (s.no in thinking) "思考中" else " ",
+                    style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
         }
-        "vote" -> Text(e.text, style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
-        else -> Text((if (!private) "" else if (god) "（私下）" else "（只有你看得到）") + e.text, style = MaterialTheme.typography.bodyMedium,
-            fontWeight = if (e.kind == "death" || e.kind == "exile" || e.kind == "end" || e.kind == "peace") FontWeight.SemiBold else FontWeight.Normal,
-            color = if (private) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.onSurface,
-            modifier = Modifier.padding(vertical = 3.dp))
     }
 }
 
 @Composable
-private fun MyRoleCard(me: WolfSeat, r: WolfGameRecord) {
-    SectionCard {
-        Text("你是 ${me.no}号 ${me.name}，身份：${me.role.label}", style = MaterialTheme.typography.titleSmall,
-            color = if (me.role.wolf) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary)
-        if (me.role.wolf) Text("狼队友：" + r.seats.filter { it.role.wolf && it.no != me.no }.joinToString("、") { "${it.no}号${it.name}" }.ifEmpty { "没有" },
-            style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
+private fun SeatAvatar(s: WolfSeat?, state: AppState, size: Int) {
+    val m = s?.memberId?.takeIf { it.isNotBlank() }?.let { state.member(it) }
+    Box(Modifier.alpha(if (s?.alive == false) 0.4f else 1f)) {
+        MemberAvatar(m, size.dp, emoji = if (m == null) (if (s?.human == true) "🙋" else "🎙️") else null, color = if (m == null) 0xFFF59E0B else null)
     }
 }
 
-/** 真人这一步怎么交：发言打字；选人点号码；女巫点救不救、毒谁。 */
+/** 聊天流里的一行怎么画。 */
+@Composable
+private fun LineView(l: WolfLine, r: WolfGameRecord, state: AppState, god: Boolean) {
+    fun seat(n: Int) = r.seats.firstOrNull { it.no == n }
+    when (l) {
+        is WolfLine.Sys -> {
+            val e = l.e
+            val private = e.visibleTo.isNotEmpty()
+            val icon = when (e.kind) {
+                "death" -> "💀"; "exile" -> "🗳️"; "peace" -> if (e.night || "平安夜" in e.text) "🌤️" else "⚖️"; "end" -> "🏆"
+                "skill" -> "⚡"; "seerResult" -> "🔮"; "witchInfo" -> "🧪"; "wolfTalk" -> "🐺"
+                else -> if (e.night) "🌙" else if ("天亮" in e.text) "☀️" else "📢"
+            }
+            val label = when {
+                !private -> ""
+                0 in e.visibleTo -> "法官记录 · "
+                e.kind == "wolfTalk" || (e.visibleTo.size > 1) -> "狼队 · "
+                god -> "${e.visibleTo.joinToString("、") { "${it}号" }}知道 · "
+                else -> "只有你知道 · "
+            }
+            Box(Modifier.fillMaxWidth().padding(vertical = 4.dp), contentAlignment = Alignment.Center) {
+                Text("$icon $label${e.text}", textAlign = TextAlign.Center,
+                    style = if (e.kind in setOf("death", "exile", "end", "skill")) MaterialTheme.typography.bodyMedium else MaterialTheme.typography.bodySmall,
+                    fontWeight = if (e.kind in setOf("death", "exile", "end", "skill", "peace")) FontWeight.SemiBold else FontWeight.Normal,
+                    color = if (private) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.clip(RoundedCornerShape(10.dp))
+                        .background(if (private) MaterialTheme.colorScheme.tertiary.copy(alpha = 0.08f) else MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.6f))
+                        .padding(horizontal = 12.dp, vertical = 5.dp))
+            }
+        }
+        is WolfLine.Votes -> {
+            val by = l.list.filter { it.target != 0 }.groupBy { it.target }.entries.sortedByDescending { it.value.size }
+            val none = l.list.filter { it.target == 0 }.map { it.actor }
+            Column(Modifier.fillMaxWidth().padding(vertical = 4.dp).clip(RoundedCornerShape(12.dp))
+                .background(MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.6f)).padding(10.dp)) {
+                Text("🗳️ 第 ${l.list.first().day} 天投票", style = MaterialTheme.typography.labelLarge)
+                for ((t, vs) in by) Text("${t}号 ${seat(t)?.name.orEmpty()}  ←  ${vs.joinToString("、") { "${it.actor}号" }}（${vs.size} 票）",
+                    style = MaterialTheme.typography.bodySmall)
+                if (none.isNotEmpty()) Text("弃票：${none.joinToString("、") { "${it}号" }}", style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
+            }
+        }
+        is WolfLine.Talk -> {
+            val e = l.e
+            if (e.kind == "host") {
+                Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.End) {
+                    Column(Modifier.widthIn(max = 560.dp).clip(RoundedCornerShape(14.dp)).background(MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)).padding(10.dp)) {
+                        Text("主持人", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+                        Text(e.text, style = MaterialTheme.typography.bodyMedium)
+                    }
+                }
+                return
+            }
+            val s = seat(e.actor)
+            Bubble(s, state, (when (e.kind) { "pk" -> "PK"; "lastWords" -> "遗言"; "review" -> "复盘"; else -> "" }), e.text, god)
+        }
+        is WolfLine.Typing -> Bubble(seat(l.seat), state, "", l.text.ifBlank { "正在想…" }, god, typing = true)
+        is WolfLine.Thought -> {
+            val n = l.n
+            Text("💭 ${n.seat}号 " + (if (n.kind == "judge") "判断（最怀疑 ${n.most}号，把握 ${n.confidence}%）" else if (n.kind == "exp") "总结的经验" else n.stage) + "：" + n.text,
+                style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle, modifier = Modifier.padding(start = 46.dp, top = 1.dp, bottom = 3.dp))
+        }
+    }
+}
+
+@Composable
+private fun Bubble(s: WolfSeat?, state: AppState, tag: String, text: String, god: Boolean, typing: Boolean = false) {
+    Row(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+        SeatAvatar(s, state, 34)
+        Spacer(Modifier.width(8.dp))
+        Column(Modifier.weight(1f, fill = false)) {
+            Text(listOfNotNull(s?.let { "${it.no}号 ${it.name}" }, tag.takeIf { it.isNotBlank() }, s?.takeIf { god }?.role?.let { "${it.icon}${it.label}" }).joinToString(" · "),
+                style = MaterialTheme.typography.labelMedium, color = Ext.c.subtle)
+            Text(text, style = MaterialTheme.typography.bodyMedium, color = if (typing) Ext.c.subtle else MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier.padding(top = 2.dp).clip(RoundedCornerShape(topStart = 4.dp, topEnd = 14.dp, bottomEnd = 14.dp, bottomStart = 14.dp))
+                    .background(MaterialTheme.colorScheme.surfaceContainerLow).padding(horizontal = 12.dp, vertical = 8.dp))
+        }
+    }
+}
+
+@Composable
+private fun MyRoleBar(me: WolfSeat, r: WolfGameRecord) {
+    var open by remember { mutableStateOf(false) }
+    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp))
+        .background((if (me.role.wolf) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary).copy(alpha = 0.08f))
+        .clickable { open = !open }.padding(horizontal = 12.dp, vertical = 8.dp)) {
+        Text("你是 ${me.no}号 ${me.name} · ${me.role.icon} ${me.role.label}" + (me.origRole?.let { "（本来是${it.label}）" } ?: "") +
+            (if (me.role.wolf) " · 狼队友：" + r.seats.filter { it.role.wolf && it.no != me.no }.joinToString("、") { "${it.no}号${it.name}" }.ifEmpty { "没有" } else "") +
+            (if (open) "" else "  （点开看技能）"),
+            style = MaterialTheme.typography.labelLarge, color = if (me.role.wolf) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary)
+        if (open) Text(me.role.desc, style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle, modifier = Modifier.padding(top = 2.dp))
+    }
+}
+
+/** 主持人能做的：一步一步时点「下一步」；某个 AI 调不通时选重试还是跳过。 */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun AskPanel(a: WolfAsk, r: WolfGameRecord, send: (Command.WolfAnswer) -> Unit) {
-    SectionCard {
-        Text(a.what, style = MaterialTheme.typography.titleSmall)
-        Text(a.text, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(top = 2.dp, bottom = 8.dp))
-        fun seatName(n: Int) = r.seats.firstOrNull { it.no == n }?.let { "${it.no}号 ${it.name}" } ?: "${n}号"
+private fun HostAskCard(a: WolfAsk, send: (Command) -> Unit) {
+    Row(Modifier.fillMaxWidth().padding(bottom = 8.dp).clip(RoundedCornerShape(12.dp))
+        .background(if (a.kind == "error") MaterialTheme.colorScheme.error.copy(alpha = 0.08f) else MaterialTheme.colorScheme.primary.copy(alpha = 0.08f))
+        .padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text(if (a.kind == "error") "⚠️ ${a.what}" else a.text, style = MaterialTheme.typography.titleSmall)
+            if (a.kind == "error") Text(a.text, style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle, maxLines = 3, overflow = TextOverflow.Ellipsis)
+        }
+        if (a.kind == "error") {
+            Button(onClick = { send(Command.WolfAnswer(a.id, text = "retry")) }) { Text("重试") }
+            Spacer(Modifier.width(6.dp))
+            OutlinedButton(onClick = { send(Command.WolfAnswer(a.id, text = "skip")) }) { Text("跳过") }
+        } else Button(onClick = { send(Command.WolfAnswer(a.id)) }) { Text("下一步") }
+    }
+}
+
+/** 主持人插话（全 AI 的局）：大家都看得到，AI 之后每一步都会看到。 */
+@Composable
+private fun HostSay(live: WolfLive, say: (String) -> Unit) {
+    var text by remember { mutableStateOf("") }
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        AppTextField(text, { text = it }, Modifier.weight(1f), placeholder = "以主持人身份说一句（比如「3号你为什么改票？」），AI 都看得到")
+        Spacer(Modifier.width(8.dp))
+        Button(enabled = text.isNotBlank(), onClick = { say(text.trim()); text = "" }) { Text("说") }
+    }
+}
+
+/** 真人这一步怎么交：发言打字或说话（下面可以顺带自爆、决斗）；选人点头像；女巫点救不救、毒谁；商人选人和送什么。 */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun AskPanel(ctl: AppController, a: WolfAsk, r: WolfGameRecord, send: (Command.WolfAnswer) -> Unit) {
+    fun seatName(n: Int) = r.seats.firstOrNull { it.no == n }?.let { "${it.no}号 ${it.name}" } ?: "${n}号"
+    Column(Modifier.fillMaxWidth().padding(top = 8.dp).clip(RoundedCornerShape(14.dp))
+        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.06f))
+        .border(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.4f), RoundedCornerShape(14.dp)).padding(12.dp)) {
+        Text("轮到你：${a.what}", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
+        if (a.text.isNotBlank()) Text(a.text, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(top = 2.dp, bottom = 8.dp))
         when (a.kind) {
             "speech", "lastWords" -> {
                 var text by remember(a.id) { mutableStateOf("") }
-                AppTextField(text, { text = it }, singleLine = false, minLines = 3, placeholder = if (a.kind == "speech") "说你的判断和理由" else "遗言")
+                var skill by remember(a.id) { mutableStateOf("") }
+                var target by remember(a.id) { mutableStateOf(0) }
+                Row(verticalAlignment = Alignment.Bottom) {
+                    AppTextField(text, { text = it }, Modifier.weight(1f), singleLine = false, minLines = 2,
+                        placeholder = if (a.kind == "lastWords") "遗言" else "说你的判断和理由")
+                    Spacer(Modifier.width(6.dp))
+                    VoiceButton(ctl) { heard -> text = if (text.isBlank()) heard else "$text $heard" }
+                }
+                if (a.options.isNotEmpty()) {
+                    FlowRow(Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        ChoiceChip("不用技能", skill == "") { skill = ""; target = 0 }
+                        if ("explode" in a.options) ChoiceChip("💥 说完自爆", skill == "explode") { skill = "explode"; target = 0 }
+                        if ("whiteExplode" in a.options) ChoiceChip("🤍 自爆并带走一个人", skill == "whiteExplode") { skill = "whiteExplode" }
+                        if ("duel" in a.options) ChoiceChip("⚔️ 和一个人决斗", skill == "duel") { skill = "duel" }
+                    }
+                    if (skill == "whiteExplode" || skill == "duel") FlowRow(Modifier.padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        for (n in a.allowed) ChoiceChip(seatName(n), target == n) { target = n }
+                    }
+                }
                 Row(Modifier.padding(top = 8.dp)) {
-                    Button(onClick = { send(Command.WolfAnswer(a.id, text = text)) }) { Text("说完了") }
+                    Button(enabled = (skill != "whiteExplode" && skill != "duel") || target != 0,
+                        onClick = { send(Command.WolfAnswer(a.id, text = text, skill = skill, target = target)) }) { Text("说完了") }
                     Spacer(Modifier.width(8.dp))
                     TextButton(onClick = { send(Command.WolfAnswer(a.id, text = "过。")) }) { Text("过") }
                 }
             }
-            "witch" -> {
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    if (a.canSave) Button(onClick = { send(Command.WolfAnswer(a.id, save = true)) }) { Text("用解药救") }
-                    for (n in a.poisonable) OutlinedButton(onClick = { send(Command.WolfAnswer(a.id, poison = n)) }) { Text("毒 " + seatName(n)) }
-                    TextButton(onClick = { send(Command.WolfAnswer(a.id)) }) { Text("今晚都不用") }
+            "witch" -> FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (a.canSave) Button(onClick = { send(Command.WolfAnswer(a.id, save = true)) }) { Text("🧪 用解药救") }
+                for (n in a.poisonable) OutlinedButton(onClick = { send(Command.WolfAnswer(a.id, poison = n)) }) { Text("☠️ 毒 " + seatName(n)) }
+                TextButton(onClick = { send(Command.WolfAnswer(a.id)) }) { Text("今晚都不用") }
+            }
+            "merchant" -> {
+                var gift by remember(a.id) { mutableStateOf("check") }
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    ChoiceChip("🔮 查验", gift == "check") { gift = "check" }
+                    ChoiceChip("🛡️ 护盾", gift == "shield") { gift = "shield" }
+                    ChoiceChip("☠️ 毒药", gift == "poison") { gift = "poison" }
+                }
+                FlowRow(Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    for (n in a.allowed) OutlinedButton(onClick = { send(Command.WolfAnswer(a.id, target = n, gift = gift)) }) { Text("送给 " + seatName(n)) }
+                    TextButton(onClick = { send(Command.WolfAnswer(a.id, target = 0)) }) { Text("今晚先不送") }
                 }
             }
             else -> FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 for (n in a.allowed) OutlinedButton(onClick = { send(Command.WolfAnswer(a.id, target = n)) }) { Text(seatName(n)) }
-                if (a.allowZero) TextButton(onClick = { send(Command.WolfAnswer(a.id, target = 0)) }) { Text(if (a.what == "投票") "弃票" else "不选") }
+                if (a.allowZero) TextButton(onClick = { send(Command.WolfAnswer(a.id, target = 0)) }) {
+                    Text(when (a.what) { "投票" -> "弃票"; "开枪" -> "不开枪"; "守护" -> "今晚不守"; "下毒" -> "不用"; "复制" -> "不复制，当平民"; else -> "不选" })
+                }
             }
         }
     }
+}
+
+/** 说话代替打字：点一下开始录，再点一下停，认出来的字接在输入框后面（用本机的听写模型，和聊天输入框一样）。 */
+@Composable
+private fun VoiceButton(ctl: AppController, onText: (String) -> Unit) {
+    val platform = LocalPlatform.current
+    val scope = rememberCoroutineScope()
+    var recording by remember { mutableStateOf(false) }
+    var busy by remember { mutableStateOf(false) }
+    IconButton(enabled = !busy, onClick = {
+        scope.launch {
+            if (!recording) {
+                val err = platform.startRecording()
+                if (err == null) recording = true else ctl.toast(err)
+            } else {
+                recording = false
+                val wav = platform.stopRecording() ?: run { ctl.toast("没有录到声音，再试一次"); return@launch }
+                busy = true
+                val r = ctl.hub.local.call(Command.Transcribe(kotlin.io.encoding.Base64.encode(wav)))
+                busy = false
+                if (!r.ok || r.data.isBlank()) ctl.toast(r.message.ifBlank { "没听清，再试一次" }) else onText(r.data.trim())
+            }
+        }
+    }) {
+        Icon(if (recording) Icons.Rounded.Stop else Icons.Rounded.Mic, if (recording) "停下并认字" else "说话",
+            tint = if (recording) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+    androidx.compose.runtime.DisposableEffect(Unit) { onDispose { if (recording) platform.cancelRecording() } }
 }
 
 // ———————————————— 复盘 ————————————————
 
 @Composable
-private fun WolfReplay(ctl: AppController, id: String, wide: Boolean) {
+private fun WolfReplay(ctl: AppController, state: AppState, id: String, wide: Boolean) {
     val live by ctl.backend.store.wolf.collectAsState()
     val games = rememberWolfGames(ctl, id to live?.over)
     val r = games.firstOrNull { it.id == id }
     var thoughts by remember(id) { mutableStateOf(true) }
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = if (wide) 24.dp else 16.dp, vertical = 16.dp)) {
-        Column(Modifier.widthIn(max = 760.dp)) {
-            if (r == null) { Text("读取中…", color = Ext.c.subtle); return@Column }
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text("复盘 · " + WolfText.time(r.startedAt), style = MaterialTheme.typography.titleMedium)
-                    Text(r.board.label + " · " + when (r.winner) { "good" -> "好人赢"; "wolf" -> "狼人赢"; else -> r.error.ifBlank { "没打完" } } +
-                        (if (r.calls > 0) " · 调了 ${r.calls} 次模型" else ""), style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
-                }
-                TextButton(onClick = { thoughts = !thoughts }) { Text(if (thoughts) "收起心里话" else "显示心里话") }
+    if (r == null) { Text("读取中…", color = Ext.c.subtle, modifier = Modifier.padding(24.dp)); return }
+    val lines = remember(r, thoughts) { linesOf(r, { true }, if (thoughts) r.notes.filter { it.kind == "think" || it.kind == "judge" || it.kind == "exp" } else emptyList()) }
+    Column(Modifier.fillMaxSize()) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = if (wide) 24.dp else 12.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("复盘 · " + resultText(r), style = MaterialTheme.typography.titleMedium)
+                Text(r.label + " · " + WolfUiText.time(r.startedAt) + (if (r.calls > 0) " · 调了 ${r.calls} 次模型" else ""),
+                    style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
-            Spacer(Modifier.height(8.dp))
-            for (s in r.seats) Text("${s.no}号 ${s.name}：${s.role.label}" + (if (s.human) "（真人）" else if (s.modelLabel.isNotBlank()) "（${s.modelLabel}）" else ""),
-                style = MaterialTheme.typography.bodySmall)
-            Spacer(Modifier.height(10.dp))
-            // 事件和私下想法按时间排在一起
-            val items = r.events.map { it.at to (it as Any) } + (if (thoughts) r.notes.filter { it.kind == "think" || it.kind == "judge" }.map { it.at to (it as Any) } else emptyList())
-            for ((_, x) in items.sortedBy { it.first }) when (x) {
-                is WolfEvent -> EventLine(x, r)
-                is com.guixing.jixunying.model.WolfNote -> {
-                    val s = r.seats.firstOrNull { it.no == x.seat }
-                    Text("心里话 · ${x.seat}号${s?.name.orEmpty()}" + (if (x.kind == "judge") "（最怀疑 ${x.most}号，把握 ${x.confidence}%）" else "（${x.stage}）") + "：" + x.text,
-                        style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle, modifier = Modifier.padding(start = 12.dp, top = 2.dp, bottom = 2.dp))
-                }
-            }
-            Spacer(Modifier.height(24.dp))
+            TextButton(onClick = { thoughts = !thoughts }) { Text(if (thoughts) "收起心里话" else "显示心里话") }
+            TextButton(onClick = { ctl.wolfView = ""; ctl.wolfShowLast = false }) { Text("开一局") }
+        }
+        SeatStrip(r, state, { true }, emptyList(), 0, wide)
+        HorizontalDivider(color = Ext.c.border)
+        LazyColumn(Modifier.weight(1f).fillMaxWidth(),
+            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = if (wide) 24.dp else 12.dp, vertical = 10.dp)) {
+            items(lines.size) { i -> Box(Modifier.widthIn(max = 820.dp)) { LineView(lines[i], r, state, true) } }
         }
     }
-}
-
-object WolfText {
-    /** 「3 小时前」「10月27日」这种（公共代码里没有时区库，用 Devices.kt 的 formatTime）。 */
-    fun time(ms: Long): String = if (ms <= 0) "" else formatTime(ms)
 }

@@ -805,36 +805,62 @@ class ShotsTest {
         tmp.deleteRecursively()
     }
 
-    /** 集训场：开局页、几个真人轮流时挡住的样子、轮到某个真人投票的样子（全是真人座位，不联网）。 */
+    /** 集训场：开局页、主持人看 AI 打（暂停在第一天发言中）、真人轮到发言、打完的复盘（AI 用 WolfFakeLlm，不联网）。 */
     @Test
     fun wolfShots() {
         val dir = out ?: return
         dir.mkdirs()
         val tmp = tempDir("jxy-wolfshots")
-        val e = seed(File(tmp, "data"), File(tmp, "文档").apply { mkdirs() })
-        val hub = Hub(e)
-        val desktop = DesktopPlatform(fileLog = false) { null }
-        val phone = PhonePlatform()
-        shoot("desktop-wolf-lobby", 1280, 1000, 1f, hub, desktop, "wolf")
-        shoot("phone-wolf-lobby", 824, 1784, 2f, hub, phone, "wolf")
-        kotlinx.coroutines.runBlocking {
-            val names = listOf("我", "小明", "阿芳", "老王", "小李", "阿强")
-            e.call(com.guixing.jixunying.model.Command.WolfStart(com.guixing.jixunying.model.WolfBoard.SIX, names.map { com.guixing.jixunying.model.WolfSeatPick(humanName = it) }))
-            // 一直交到白天发言（夜里的都随便选第一个）
-            kotlinx.coroutines.withTimeout(10_000) {
-                while (true) {
-                    val l = com.guixing.jixunying.model.AppJson.decodeFromString(com.guixing.jixunying.model.WolfLive.serializer(), e.call(com.guixing.jixunying.model.Command.WolfCurrent).data)
-                    val a = l.asks.firstOrNull() ?: run { kotlinx.coroutines.delay(5); null } ?: continue
-                    if (a.kind == "speech" && l.record.events.count { it.kind == "speech" } >= 2) break
-                    e.call(com.guixing.jixunying.model.Command.WolfAnswer(a.id, text = "我觉得 ${a.allowed.firstOrNull() ?: 3}号发言有点怪，先听听后面的。", target = a.allowed.firstOrNull() ?: 0))
+        val fake = WolfFakeLlm()
+        try {
+            val names = listOf("阿德", "阿麦", "阿智", "阿米", "阿千", "阿珈", "阿苗")
+            WolfFakeLlm.seed(File(tmp, "data"), fake.base, names)
+            val e = Engine(Storage(File(tmp, "data")))
+            val hub = Hub(e)
+            val desktop = DesktopPlatform(fileLog = false) { null }
+            val phone = PhonePlatform()
+            shoot("desktop-wolf-lobby", 1280, 1400, 1f, hub, desktop, "wolf")
+            shoot("phone-wolf-lobby", 824, 1784, 2f, hub, phone, "wolf")
+            fun live() = kotlinx.coroutines.runBlocking { e.call(com.guixing.jixunying.model.Command.WolfCurrent).data }
+                .let { com.guixing.jixunying.model.AppJson.decodeFromString(com.guixing.jixunying.model.WolfLive.serializer(), it) }
+            // 主持人：7 个 AI，第一天说了三个人就暂停
+            fake.delayMs = 30
+            kotlinx.coroutines.runBlocking {
+                val roles = com.guixing.jixunying.model.WolfPresets.all.first { it.name == "经典标配" }.list.take(7)
+                e.call(com.guixing.jixunying.model.Command.WolfStart(roles, names.indices.map { com.guixing.jixunying.model.WolfSeatPick(memberId = "m$it") }, "经典标配"))
+                kotlinx.coroutines.withTimeout(30_000) { while (live().record.events.count { it.kind == "speech" } < 3) kotlinx.coroutines.delay(10) }
+                e.call(com.guixing.jixunying.model.Command.WolfControl("pause"))
+                e.call(com.guixing.jixunying.model.Command.WolfSay("3号，你昨晚为什么那么安静？"))
+                kotlinx.coroutines.delay(500)
+            }
+            shoot("desktop-wolf-host", 1280, 900, 1f, hub, desktop, "wolf")
+            shoot("phone-wolf-host", 824, 1784, 2f, hub, phone, "wolf")
+            // 打完：复盘
+            kotlinx.coroutines.runBlocking {
+                e.call(com.guixing.jixunying.model.Command.WolfControl("resume"))
+                kotlinx.coroutines.withTimeout(60_000) { while (live().let { !it.over || it.reviewing }) kotlinx.coroutines.delay(10) }
+            }
+            shoot("desktop-wolf-over", 1280, 900, 1f, hub, desktop, "wolf")
+            // 真人 + AI：轮到我发言
+            kotlinx.coroutines.runBlocking {
+                val picks = listOf(com.guixing.jixunying.model.WolfSeatPick(humanName = "我")) + (0..4).map { com.guixing.jixunying.model.WolfSeatPick(memberId = "m$it") }
+                e.call(com.guixing.jixunying.model.Command.WolfStart(com.guixing.jixunying.model.WolfBoard.SIX.roles, picks, judge = false))
+                kotlinx.coroutines.withTimeout(30_000) {
+                    while (true) {
+                        val a = live().asks.firstOrNull { it.seat == 1 } ?: run { kotlinx.coroutines.delay(10); null } ?: continue
+                        if (a.kind == "speech") break
+                        e.call(com.guixing.jixunying.model.Command.WolfAnswer(a.id, target = a.allowed.firstOrNull() ?: 0))
+                        kotlinx.coroutines.delay(20)
+                    }
                 }
             }
+            shoot("desktop-wolf-play", 1280, 900, 1f, hub, desktop, "wolf")
+            shoot("phone-wolf-play", 824, 1784, 2f, hub, phone, "wolf")
+            kotlinx.coroutines.runBlocking { e.call(com.guixing.jixunying.model.Command.WolfStop) }
+            e.close()
+        } finally {
+            fake.stop()
         }
-        shoot("desktop-wolf-table", 1280, 1000, 1f, hub, desktop, "wolf")
-        shoot("phone-wolf-table", 824, 1784, 2f, hub, phone, "wolf")
-        kotlinx.coroutines.runBlocking { e.call(com.guixing.jixunying.model.Command.WolfStop) }
-        shoot("desktop-wolf-over", 1280, 1000, 1f, hub, desktop, "wolf")
-        e.close()
     }
 
     @Test

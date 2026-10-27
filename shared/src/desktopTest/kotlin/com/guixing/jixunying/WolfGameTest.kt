@@ -26,10 +26,12 @@ class WolfGameTest {
             "要守护谁" in ask -> "guard"
             "要查验谁" in ask -> "check"
             "你手里" in ask -> "witch"
-            "轮到你发言" in ask -> "speak"
+            "轮到你发言" in ask || "PK 发言" in ask -> "speak"
             "留遗言" in ask -> "lastWords"
             "说说你现在的判断" in ask -> "judge"
-            "现在投票" in ask -> "vote"
+            "可以开枪带走" in ask -> "shoot"
+            "魅惑" in ask -> "charm"
+            "现在投票" in ask || "重新投票" in ask -> "vote"
             else -> error("认不出这一步：$ask")
         }
     }
@@ -75,10 +77,10 @@ class WolfGameTest {
 
         // 看得到的：平民的记录里没有狼队商量、验人结果、女巫刀口
         for ((no, _, text) in prompts.filter { it.first in listOf(5, 6) }) {
-            assertFalse("（狼队）" in text || "（你验人）" in text || "（法官告诉你）" in text, "$no 号看到了私密")
+            assertFalse("（狼队）" in text || "（查验结果）" in text || "（法官告诉你）" in text || "（只有你知道）" in text || "（法官记录）" in text, "$no 号看到了私密")
         }
         // 预言家看得到自己的验人；狼看得到队友的提刀
-        assertTrue(prompts.any { it.first == 3 && "（你验人）1号是狼人" in it.third })
+        assertTrue(prompts.any { it.first == 3 && "（查验结果）1号是狼人" in it.third })
         assertTrue(prompts.any { it.first == 2 && "（狼队）1号想刀" in it.third })
         // 私下想法、私下判断不进任何人的记录
         assertFalse(prompts.any { "想好了" in it.third.substringAfter("【到现在你看得到的记录】") || "直觉" in it.third })
@@ -136,14 +138,17 @@ class WolfGameTest {
                 "witch" -> "{\"save\": true, \"poison\": 0}"
                 "speak", "lastWords" -> "<发言>嗯</发言>"
                 "judge" -> "{\"most\": 1, \"confidence\": 50}"
-                // 第 1 天活 7 人：1、2、3 投 7，4、5、7 投 8，8 弃票 → 3 比 3 平票
-                "vote" -> target(when (seat.no) { 1, 2, 3 -> 7; 4, 5, 7 -> 8; else -> 0 })
+                // 第 1 天活 7 人：1、2、3 投 7，4、5、7 投 8，8 弃票 → 3 比 3 平票；PK 后 1、2 投 7，4、5 投 8，3 弃票 → 还是平票
+                "vote" -> if ("重新投票" in user) target(when (seat.no) { 1, 2 -> 7; 4, 5 -> 8; else -> 0 })
+                    else target(when (seat.no) { 1, 2, 3 -> 7; 4, 5, 7 -> 8; else -> 0 })
                 else -> "?"
             }
         }
         val out = WolfGame(r, { brain }, onUpdate = { r = it }, maxDays = 1).run()
         assertTrue(out.events.any { it.kind == "death" && it.day == 1 && "6号" in it.text }, "同守同救：6 号还是死了")
-        assertTrue(out.events.any { it.kind == "peace" && it.day == 1 && "平票" in it.text }, out.events.filter { it.day == 1 }.toString())
+        assertTrue(out.events.any { it.kind == "note" && it.day == 1 && "平票" in it.text }, out.events.filter { it.day == 1 }.toString())
+        assertEquals(listOf(7, 8), out.events.filter { it.kind == "pk" }.map { it.actor }, "平票的两个人 PK 发言")
+        assertTrue(out.events.any { it.kind == "peace" && it.day == 1 && "还是平票" in it.text }, out.events.filter { it.day == 1 }.toString())
         assertTrue(out.seats.filter { it.no in listOf(7, 8) }.all { it.alive })
     }
 
@@ -169,6 +174,64 @@ class WolfGameTest {
         assertTrue("不能用解药" in witchSaw && "解药 1 瓶" in witchSaw, witchSaw)
         assertFalse(out.seats.first { it.no == 4 }.alive)
         assertTrue(out.notes.any { it.seat == 4 && it.kind == "abstain" && it.stage == "用药" })
+    }
+
+    /** 猎人被刀天亮开枪带走狼；白痴被投出去翻牌免死、以后不能投票。 */
+    @Test
+    fun hunterShootsAndIdiotSurvives() = runBlocking {
+        val roles = listOf(WolfRole.WOLF, WolfRole.WOLF, WolfRole.SEER, WolfRole.IDIOT, WolfRole.HUNTER, WolfRole.VILLAGER, WolfRole.VILLAGER)
+        var r = WolfGameRecord("t", seats = roles.mapIndexed { i, x -> WolfSeat(i + 1, x, "m${i + 1}") }, roles = roles)
+        val voteSeen = mutableMapOf<Int, String>()
+        val brain = WolfBrain { seat, _, user ->
+            when (stepOf(user)) {
+                "knife" -> target(5)
+                "check" -> target(1)
+                "shoot" -> target(1)
+                "speak", "lastWords" -> "<发言>嗯</发言>"
+                "judge" -> "{\"most\": 2}"
+                "vote" -> { voteSeen[seat.no] = user; target(if (seat.no == 4) 2 else 4) }
+                else -> "?"
+            }
+        }
+        val out = WolfGame(r, { brain }, onUpdate = { r = it }, maxDays = 1).run()
+        assertFalse(out.seats.first { it.no == 5 }.alive)
+        assertEquals("被开枪带走", out.seats.first { it.no == 1 }.deathReason)
+        assertTrue(out.events.any { it.kind == "skill" && "开枪带走了 1号" in it.text })
+        val idiot = out.seats.first { it.no == 4 }
+        assertTrue(idiot.alive && idiot.revealed && !idiot.canVote, idiot.toString())
+        assertTrue(out.events.any { it.kind == "skill" && "白痴" in it.text })
+    }
+
+    /** 骑士决斗狼美人：狼美人出局，被魅惑的人跟着出局，白天直接结束；第二天白狼王自爆带人。 */
+    @Test
+    fun knightBeautyAndWhiteWolf() = runBlocking {
+        val roles = listOf(WolfRole.WHITE_WOLF, WolfRole.BEAUTY_WOLF, WolfRole.KNIGHT, WolfRole.SEER, WolfRole.VILLAGER, WolfRole.VILLAGER, WolfRole.VILLAGER)
+        var r = WolfGameRecord("t", seats = roles.mapIndexed { i, x -> WolfSeat(i + 1, x, "m${i + 1}") }, roles = roles)
+        val brain = WolfBrain { seat, _, user ->
+            val day = Regex("【现在】第(\\d+)").find(user)?.groupValues?.get(1)?.toIntOrNull() ?: 1
+            when (stepOf(user)) {
+                "charm" -> target(5)
+                "knife" -> target(if (day == 1) 6 else 4)
+                "check" -> target(1)
+                "speak" -> when {
+                    seat.no == 3 && day == 1 -> "<发言>我是骑士</发言><技能>决斗 2</技能>"
+                    seat.no == 1 && day == 2 -> "<发言>再见</发言><技能>带走 3</技能>"
+                    // 普通狼也能自爆，但这里不用；乱写的技能不算
+                    else -> "<发言>嗯</发言><技能>决斗 1</技能>"
+                }
+                "lastWords" -> "<发言>嗯</发言>"
+                "judge" -> "{\"most\": 1}"
+                "vote" -> target(0)
+                else -> "?"
+            }
+        }
+        val out = WolfGame(r, { brain }, onUpdate = { r = it }, maxDays = 3).run()
+        assertEquals("被骑士决斗", out.seats.first { it.no == 2 }.deathReason)
+        assertEquals("狼美人殉情", out.seats.first { it.no == 5 }.deathReason)
+        assertTrue(out.events.none { it.kind == "vote" && it.day == 1 }, "决斗出狼，第一天不投票")
+        assertEquals("被白狼王带走", out.seats.first { it.no == 3 }.deathReason)
+        assertEquals("自爆", out.seats.first { it.no == 1 }.deathReason)
+        assertEquals("good", out.winner, out.endReason)
     }
 
     @Test

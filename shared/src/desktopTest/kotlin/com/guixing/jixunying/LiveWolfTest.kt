@@ -26,7 +26,7 @@ class LiveWolfTest {
             val names = (System.getenv("JXY_LIVE_WOLF_SEATS") ?: "阿德,阿米,阿智,阿德,阿米,阿智").split(",").map { it.trim() }
             val ids = names.map { n -> e.state.members.first { it.name == n }.id }
             val board = if (ids.size == 8) WolfBoard.EIGHT else WolfBoard.SIX
-            val r = e.playWolf(board, ids, seed = System.getenv("JXY_LIVE_WOLF_SEED")?.toLongOrNull() ?: 7L) { g ->
+            val r = e.playWolf(board.roles, ids, seed = System.getenv("JXY_LIVE_WOLF_SEED")?.toLongOrNull() ?: 7L) { g ->
                 g.events.lastOrNull()?.let { ev -> if (ev.at > 0 && ev.kind != "note") println("[${ev.day}${if (ev.night) "夜" else "天"}] ${ev.kind} ${ev.text.take(120)}") }
             }
             File(outDir, "wolf-game.txt").writeText(replay(r), Charsets.UTF_8)
@@ -39,7 +39,7 @@ class LiveWolfTest {
 
     /** 整局复盘：座位、事件（带谁看得到）、私下想法和判断、指标。 */
     private fun replay(r: WolfGameRecord): String = buildString {
-        appendLine("${r.board.label}  结果：${r.winner}（${r.endReason}）  调用 ${r.calls} 次  首轮分歧 ${r.firstDivergence}")
+        appendLine("${r.label}  结果：${r.winner}（${r.endReason}）  调用 ${r.calls} 次  首轮分歧 ${r.firstDivergence}")
         r.seats.forEach { appendLine("${it.no}号 ${it.role.label} ${it.name} ${it.modelLabel} ${if (it.alive) "活" else "死"}") }
         appendLine()
         val all = (r.events.map { it.at to "事件 [${it.day}${if (it.night) "夜" else "天"}] ${it.kind} ${if (it.visibleTo.isEmpty()) "" else "（只给 ${it.visibleTo}）"}${it.text}" } +

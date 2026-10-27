@@ -1,6 +1,8 @@
 package com.guixing.jixunying.engine.wolf
 
+import com.guixing.jixunying.model.WolfEvent
 import com.guixing.jixunying.model.WolfGameRecord
+import com.guixing.jixunying.model.WolfText
 import com.guixing.jixunying.model.WolfRole
 import com.guixing.jixunying.model.WolfSeat
 import com.guixing.jixunying.model.WolfSeatMetric
@@ -12,56 +14,64 @@ import com.guixing.jixunying.model.WolfSeatMetric
 object WolfPrompts {
 
     fun system(r: WolfGameRecord, me: WolfSeat): String = buildString {
+        val roles = r.roleList.toSet()
         appendLine("你在玩一局狼人杀，你是 ${me.no}号。法官是程序。")
         appendLine()
         appendLine("【这局的规则】")
-        appendLine("- ${r.board.label}，座位 1～${r.seats.size} 号。")
-        appendLine("- 胜负：狼人全部出局，好人赢；神职（预言家、女巫" + (if (r.board.roles.contains(WolfRole.GUARD)) "、守卫" else "") +
-            "）全部出局或平民全部出局，狼人赢（屠边）；活着的狼人数不少于好人数，狼人也赢。")
-        appendLine("- 夜里：" + (if (r.board.roles.contains(WolfRole.GUARD)) "守卫守一人（不能连守同一人，同守同救也会死）→ " else "") +
-            "狼人一起刀一人 → 预言家验一人是好人还是狼 → 女巫知道刀口，解药、毒药各一瓶，一晚最多用一瓶，不能救自己。")
-        appendLine("- 白天：公布昨晚死讯（第一夜死的有遗言）→ 活着的人按顺序各发言一次（每天换起点）→ 所有人同时投票，投完一起公布 → 票最多的出局并留遗言；平票当天没人出局。")
-        appendLine("- 没有警长，没有自爆。")
+        appendLine("- ${r.seats.size} 个人，座位 1～${r.seats.size} 号。身份：${WolfText.roles(r.roleList)}。")
+        appendLine("- 胜负：狼人全部出局，好人赢；神职全部出局或平民全部出局，狼人赢（屠边）；活着的狼人数不少于好人数，狼人也赢。")
+        appendLine("- 夜里：有技能的人按顺序行动，天亮一起结算，只公布谁死了、不公布怎么死的。")
+        appendLine("- 白天：公布昨晚死讯（只有第一夜死的有遗言）→ 活着的人按顺序各发言一次（每天换起点）→ 所有人同时投票，投完一起公布 → " +
+            "票最多的出局并留遗言；平票的几个人各 PK 发言一次，其他人在他们里面再投一次，还平就当天没人出局。")
         appendLine()
-        appendLine("【你的身份】${me.role.label}")
-        when (me.role) {
-            WolfRole.WOLF -> {
-                val mates = r.seats.filter { it.role.wolf && it.no != me.no }.map { it.no }
-                appendLine("你的狼队友：${mates.joinToString("、") { "${it}号" }.ifEmpty { "没有" }}。你们的目标是屠边，白天要藏好身份。")
-            }
-            WolfRole.SEER -> appendLine("每晚可以验一人。你的验人结果在记录里（只有你看得到）。")
-            WolfRole.WITCH -> appendLine("每晚法官会告诉你刀口。解药、毒药各一瓶。")
-            WolfRole.GUARD -> appendLine("每晚守一人，不能连续两晚守同一人。")
-            WolfRole.VILLAGER -> appendLine("没有技能，靠发言和投票找狼。")
+        appendLine("【这局有的身份】")
+        for (role in WolfRole.entries) if (role in roles) appendLine("- ${role.label}：${role.desc}")
+        appendLine()
+        appendLine("【你的身份】${me.role.label}" + (me.origRole?.let { "（你本来是${it.label}，第一夜复制成了${me.role.label}）" } ?: ""))
+        appendLine(me.role.desc)
+        if (me.role.wolf) {
+            val mates = r.seats.filter { it.role.wolf && it.no != me.no }
+            appendLine("你的狼队友：${mates.joinToString("、") { "${it.no}号" + if (!it.alive) "（已出局）" else "" }.ifEmpty { "没有" }}。你们的目标是屠边，白天要藏好身份。")
         }
+        if (!me.alive) appendLine("你已经出局了。")
         appendLine()
-        appendLine("别的玩家可能是 AI，也可能是真人，你只知道他们的座位号。按你的身份尽力让自己的阵营赢。")
+        append("别的玩家可能是 AI，也可能是真人，你只知道他们的座位号。按你的身份尽力让自己的阵营赢。")
+    }
+
+    private fun line(e: WolfEvent, god: Boolean): String {
+        val time = if (e.day == 0) "" else "第${e.day}${if (e.night) "夜" else "天"} "
+        val who = if (e.actor > 0) "${e.actor}号" else ""
+        return when (e.kind) {
+            "speech" -> "$time$who 发言：${e.text}"
+            "pk" -> "$time$who PK 发言：${e.text}"
+            "lastWords" -> "$time$who 遗言：${e.text}"
+            "vote" -> "$time${e.text}"
+            "wolfTalk" -> "$time（狼队）${e.text}"
+            "seerResult" -> "$time（查验结果）${e.text}"
+            "witchInfo" -> "$time（法官告诉你）${e.text}"
+            "act" -> "$time" + (if (god || 0 in e.visibleTo) "（法官记录）" else "（只有你知道）") + e.text
+            "host" -> "${time}主持人说：${e.text}"
+            "review" -> "复盘 $who：${e.text}"
+            else -> "$time${e.text}"
+        }
     }
 
     fun user(r: WolfGameRecord, me: WolfSeat, day: Int, night: Boolean, ask: String): String = buildString {
         appendLine("【到现在你看得到的记录】")
         val seen = r.events.filter { it.visibleTo.isEmpty() || me.no in it.visibleTo }
         if (seen.isEmpty()) appendLine("（还没有）")
-        for (e in seen) {
-            val time = if (e.day == 0) "" else "第${e.day}${if (e.night) "夜" else "天"} "
-            val who = if (e.actor > 0) "${e.actor}号" else ""
-            val line = when (e.kind) {
-                "speech" -> "$time$who 发言：${e.text}"
-                "lastWords" -> "$time$who 遗言：${e.text}"
-                "vote" -> "$time${e.text}"
-                "wolfTalk" -> "$time（狼队）${e.text}"
-                "seerResult" -> "$time（你验人）${e.text}"
-                "witchInfo" -> "$time（法官告诉你）${e.text}"
-                else -> "$time${e.text}"
-            }
-            appendLine(line)
-        }
+        for (e in seen) appendLine(line(e, false))
         appendLine()
+        val revealed = r.seats.filter { it.revealed }
         appendLine("【现在】第$day${if (night) "夜" else "天"}。活着的：${r.seats.filter { it.alive }.joinToString("、") { "${it.no}号" }}。" +
+            (if (revealed.isNotEmpty()) "翻过牌的白痴（不能投票）：${revealed.joinToString("、") { "${it.no}号" }}。" else "") +
             (if (!me.alive) "你已经出局。" else ""))
         appendLine()
         append(ask)
     }
+
+    /** 整局记录，夜里谁做了什么也在（复盘用）。 */
+    fun fullLog(r: WolfGameRecord): String = r.events.filter { it.kind != "review" }.joinToString("\n") { line(it, true) }
 }
 
 /** 局后指标（设计说明第 4 节）。只看记录，不调模型。 */

@@ -72,6 +72,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.withLock
@@ -1642,6 +1643,9 @@ class Engine(
         is Command.WolfStart -> startWolf(c)
         is Command.WolfAnswer -> answerWolf(c)
         is Command.WolfStop -> stopWolf()
+        is Command.WolfControl -> controlWolf(c)
+        is Command.WolfSay -> wolfRun?.takeIf { !it.over && it.game.record.seats.none { s -> s.human } }?.let { it.game.hostSay(c.text); CommandResult() }
+            ?: CommandResult(false, "只有全是 AI 的局才能以主持人身份说话")
         is Command.WolfCurrent -> CommandResult(data = wolfLive()?.let { AppJson.encodeToString(com.guixing.jixunying.model.WolfLive.serializer(), it) }.orEmpty())
         is Command.WolfList -> CommandResult(data = AppJson.encodeToString(kotlinx.serialization.builtins.ListSerializer(com.guixing.jixunying.model.WolfGameRecord.serializer()), wolfStore.all()))
         is Command.StanceDelete -> {
@@ -2205,30 +2209,61 @@ class Engine(
     private val wolfStore = com.guixing.jixunying.engine.wolf.WolfStore(java.io.File(storage.root, "wolf"))
 
     /**
-     * 打一局全 AI 的狼人杀：memberIds 按座位顺序（1 号起），身份按 seed 随机发。每一步存盘并交给 onUpdate。
-     * 第一期只有引擎和测试（LiveWolfTest）在用；界面、真人座位是第二期。
+     * 打一局全 AI 的狼人杀（测试用，LiveWolfTest）：memberIds 按座位顺序（1 号起），身份按 seed 随机发。每一步存盘并交给 onUpdate。
      */
-    internal suspend fun playWolf(board: com.guixing.jixunying.model.WolfBoard, memberIds: List<String>, seed: Long = System.nanoTime(),
+    internal suspend fun playWolf(roles: List<com.guixing.jixunying.model.WolfRole>, memberIds: List<String>, seed: Long = System.nanoTime(),
                                   onUpdate: (com.guixing.jixunying.model.WolfGameRecord) -> Unit = {}): com.guixing.jixunying.model.WolfGameRecord {
-        require(memberIds.size == board.roles.size) { "${board.label} 要 ${board.roles.size} 个座位，给了 ${memberIds.size} 个" }
-        val roles = com.guixing.jixunying.engine.wolf.WolfRules.deal(board.roles, kotlin.random.Random(seed))
+        require(memberIds.size == roles.size) { "${roles.size} 个身份，给了 ${memberIds.size} 个座位" }
+        val dealt = com.guixing.jixunying.engine.wolf.WolfRules.deal(roles, kotlin.random.Random(seed))
         val seats = memberIds.mapIndexed { i, id ->
             val m = state.member(id) ?: throw IllegalArgumentException("没有这位 AI 成员：$id")
-            com.guixing.jixunying.model.WolfSeat(i + 1, roles[i], id, name = m.name, modelLabel = Prompts.modelLabel(state, m), modelId = m.modelId)
+            com.guixing.jixunying.model.WolfSeat(i + 1, dealt[i], id, name = m.name, modelLabel = Prompts.modelLabel(state, m), modelId = m.modelId)
         }
-        val start = com.guixing.jixunying.model.WolfGameRecord("wolf-" + newId().take(12), board, seats)
-        val game = com.guixing.jixunying.engine.wolf.WolfGame(start, { wolfBrain() }, ::now, { r -> wolfStore.save(r); onUpdate(r) })
+        val start = com.guixing.jixunying.model.WolfGameRecord("wolf-" + newId().take(12), seats = seats, roles = roles)
+        val ai = wolfBrain()
+        val game = com.guixing.jixunying.engine.wolf.WolfGame(start, { ai }, ::now, { r -> wolfStore.save(r); onUpdate(r) })
         return game.run()
     }
 
     internal fun wolfGames() = wolfStore.all()
 
-    // ---- 集训场界面开的局（2026-10-27 用户：「我要的是几个人和几个人 AI 来玩」）：真人在界面上发言、选人 ----
+    /** AI 座位问一次模型（不带工具）；onText 是边出边给的正文。网络出错等 3 秒再试一次，还不行抛出去（界面上问主持人重试还是跳过）。 */
+    private suspend fun wolfCall(seat: com.guixing.jixunying.model.WolfSeat, system: String, user: String, onText: (String) -> Unit = {}): String {
+        val m = state.member(seat.memberId) ?: throw IllegalStateException("${seat.no}号的 AI 成员不在了")
+        val p = state.provider(m.providerId) ?: throw IllegalStateException("${m.name} 的模型服务不在了")
+        val msgs = listOf(buildJsonObject { put("role", "system"); put("content", system) }, userMsg(user))
+        var last: Exception? = null
+        repeat(2) { attempt ->
+            try {
+                val got = StringBuilder()
+                val r = withContext(Dispatchers.IO + UsageTag("wolf", m.id)) {
+                    llm.chat(p, m.modelId, msgs, m.temperature, null) { d, _ -> if (d.isNotEmpty()) { got.append(d); onText(got.toString()) } }
+                }
+                return r.content
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                last = e
+                if (attempt == 0) kotlinx.coroutines.delay(3000)
+            }
+        }
+        throw IllegalStateException("${seat.no}号（${m.name}）调用失败：${friendlyError(last!!)}")
+    }
 
-    private class WolfRun(val job: Job, val game: com.guixing.jixunying.engine.wolf.WolfGame) {
+    private fun wolfBrain() = com.guixing.jixunying.engine.wolf.WolfBrain { seat, system, user -> wolfCall(seat, system, user) }
+
+    // ---- 集训场界面开的局（2026-10-27 用户：「我要的是几个人和几个人 AI 来玩」；同日照第一代重做：主持人、14 种身份、复盘和经验） ----
+
+    private class WolfRun(val game: com.guixing.jixunying.engine.wolf.WolfGame) {
+        lateinit var job: Job
         val asks = ConcurrentHashMap<String, Pair<com.guixing.jixunying.model.WolfAsk, CompletableDeferred<String>>>()
         val thinking = java.util.concurrent.ConcurrentSkipListSet<Int>()
+        val paused = MutableStateFlow(false)
+        val stepMode = MutableStateFlow(false)
+        /** 主持人点了「跳过」的座位：它下一次被问直接交空（法官记弃权），不再调模型。 */
+        val skipOnce = ConcurrentHashMap.newKeySet<Int>()
         @Volatile var over = false
+        @Volatile var reviewing = false
     }
 
     @Volatile private var wolfRun: WolfRun? = null
@@ -2236,63 +2271,161 @@ class Engine(
 
     private fun wolfLive(): com.guixing.jixunying.model.WolfLive? = wolfRun?.let { r ->
         // 私下想法不推（每一步都推整局，越打越大；复盘从 WolfList 读）
-        com.guixing.jixunying.model.WolfLive(r.game.record.copy(notes = emptyList()), r.asks.values.map { it.first }.sortedBy { it.seat }, r.thinking.toList(), r.over)
+        com.guixing.jixunying.model.WolfLive(r.game.record.copy(notes = emptyList()), r.asks.values.map { it.first }.sortedBy { it.seat },
+            // 几个 AI 同时在想（狼队、投票）：边改边读，先拷成数组（toList 读到一半被清空会抛 NoSuchElement）
+            r.thinking.toTypedArray().toList(), r.over, r.paused.value, r.stepMode.value, r.reviewing)
     } ?: wolfLast
 
     private fun pushWolf() { wolfLive()?.let { wolfLast = it; emit(Event.Wolf(it)) } }
 
-    /** 开一局：座位按给的顺序，身份随机发。已经有一局在打就不开。 */
+    /** 挂一步出来等人交（真人座位，或者 seat = 0 给主持人）。 */
+    private suspend fun wolfWait(run: WolfRun, step: com.guixing.jixunying.model.WolfAsk): String {
+        val id = newId()
+        val d = CompletableDeferred<String>()
+        run.asks[id] = step.copy(id = id) to d
+        pushWolf()
+        try { return d.await() } finally { run.asks.remove(id); pushWolf() }
+    }
+
+    /** 以前打狼人杀总结的经验：<数据>/wolf/exp.json，成员编号 → 最近 10 条。 */
+    private val wolfExpFile get() = java.io.File(storage.root, "wolf/exp.json")
+    private val wolfExpSer = kotlinx.serialization.serializer<Map<String, List<String>>>()
+
+    private fun wolfExp(): Map<String, List<String>> = runCatching {
+        AppJson.decodeFromString(wolfExpSer, wolfExpFile.readText(Charsets.UTF_8))
+    }.getOrDefault(emptyMap())
+
+    private fun saveWolfExp(add: Map<String, String>) {
+        if (add.isEmpty()) return
+        val all = wolfExp().toMutableMap()
+        for ((id, e) in add) all[id] = ((all[id] ?: emptyList()) + e).takeLast(10)
+        wolfExpFile.parentFile.mkdirs()
+        wolfExpFile.writeText(AppJson.encodeToString(wolfExpSer, all), Charsets.UTF_8)
+    }
+
+    /** 开一局：座位按给的顺序，指定了身份的按指定，其余随机发。已经有一局在打就不开。 */
     private fun startWolf(c: Command.WolfStart): CommandResult {
         if (wolfRun?.let { !it.over } == true) return CommandResult(false, "已经有一局在打，先停掉那局")
-        if (c.seats.size != c.board.roles.size) return CommandResult(false, "${c.board.label} 要 ${c.board.roles.size} 个座位，现在是 ${c.seats.size} 个")
+        if (c.seats.size != c.roles.size) return CommandResult(false, "${c.roles.size} 个身份，${c.seats.size} 个座位，对不上")
+        com.guixing.jixunying.model.WolfPresets.warnings(c.roles).firstOrNull { "至少" in it || "没有狼" in it }?.let { return CommandResult(false, it) }
+        // 指定的身份不能超过身份表里的个数
+        val fixed = c.seats.mapIndexedNotNull { i, p -> p.role?.let { i + 1 to it } }.toMap()
+        for ((r, n) in fixed.values.groupingBy { it }.eachCount()) if (n > c.roles.count { it == r }) return CommandResult(false, "指定了 $n 个${r.label}，身份表里只有 ${c.roles.count { it == r }} 个")
         val s = state
-        val roles = com.guixing.jixunying.engine.wolf.WolfRules.deal(c.board.roles, kotlin.random.Random(System.nanoTime()))
+        val dealt = com.guixing.jixunying.engine.wolf.WolfRules.deal(c.roles, kotlin.random.Random(System.nanoTime()), fixed)
         val seats = c.seats.mapIndexed { i, pick ->
-            if (pick.memberId.isBlank()) com.guixing.jixunying.model.WolfSeat(i + 1, roles[i], human = true, name = pick.humanName.trim().ifBlank { "玩家${i + 1}" })
+            if (pick.memberId.isBlank()) com.guixing.jixunying.model.WolfSeat(i + 1, dealt[i], human = true, name = pick.humanName.trim().ifBlank { "玩家${i + 1}" })
             else {
                 val m = s.member(pick.memberId) ?: return CommandResult(false, "${i + 1}号选的 AI 成员不在了")
-                com.guixing.jixunying.model.WolfSeat(i + 1, roles[i], m.id, name = m.name, modelLabel = Prompts.modelLabel(s, m), modelId = m.modelId)
+                com.guixing.jixunying.model.WolfSeat(i + 1, dealt[i], m.id, name = m.name, modelLabel = Prompts.modelLabel(s, m), modelId = m.modelId)
             }
         }
-        val start = com.guixing.jixunying.model.WolfGameRecord("wolf-" + newId().take(12), c.board, seats)
+        val start = com.guixing.jixunying.model.WolfGameRecord("wolf-" + newId().take(12), seats = seats, roles = c.roles,
+            setupName = c.setupName, startedAt = now())
+        val exp = if (c.useExp) wolfExp() else emptyMap()
         lateinit var run: WolfRun
-        val ai = wolfBrain()
-        // 真人：把这一步挂出来等界面交；AI：问模型，问的时候标「正在想」
         val brain = object : com.guixing.jixunying.engine.wolf.WolfBrain {
-            override suspend fun ask(seat: com.guixing.jixunying.model.WolfSeat, system: String, user: String) = ai.ask(seat, system, user)
+            override suspend fun ask(seat: com.guixing.jixunying.model.WolfSeat, system: String, user: String) = wolfCall(seat, system, user)
             override suspend fun act(seat: com.guixing.jixunying.model.WolfSeat, system: String, user: String, step: com.guixing.jixunying.model.WolfAsk): String {
-                if (!seat.human) {
+                if (seat.human) return wolfWait(run, step)
+                if (run.skipOnce.remove(seat.no)) return ""
+                // 发言、遗言、复盘边出边显示（只显示 <发言> 里面的，想法不显示）
+                val shows = step.kind in setOf("speech", "lastWords", "review")
+                var lastPush = 0L
+                while (true) {
                     run.thinking += seat.no; pushWolf()
-                    try { return ai.ask(seat, system, user) } finally { run.thinking -= seat.no; pushWolf() }
+                    try {
+                        return wolfCall(seat, system, user) { text ->
+                            if (!shows) return@wolfCall
+                            val t = System.currentTimeMillis()
+                            if (t - lastPush < 250) return@wolfCall
+                            lastPush = t
+                            val shown = if (step.kind == "review") "" else text.substringAfter("<发言>", "").substringBefore("</发言>").trim()
+                            if (shown.isNotEmpty()) emit(Event.WolfTyping(seat.no, shown))
+                        }
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        // 调不通：问主持人（或桌上的真人）重试还是跳过，不让整局白打
+                        val a = wolfWait(run, com.guixing.jixunying.model.WolfAsk(kind = "error", what = "${seat.no}号 ${seat.name} 出错了",
+                            text = (e.message ?: e.toString()).take(300)))
+                        if (a == "skip") { run.skipOnce += seat.no; return "" }
+                    } finally {
+                        run.thinking -= seat.no
+                        if (shows) emit(Event.WolfTyping(seat.no, ""))
+                        pushWolf()
+                    }
                 }
-                val id = newId()
-                val d = CompletableDeferred<String>()
-                run.asks[id] = step.copy(id = id) to d
-                pushWolf()
-                try { return d.await() } finally { run.asks.remove(id); pushWolf() }
             }
         }
-        val game = com.guixing.jixunying.engine.wolf.WolfGame(start, { brain }, ::now, { r -> wolfStore.save(r); pushWolf() })
-        val job = scope.launch(start = kotlinx.coroutines.CoroutineStart.LAZY) {
-            try { game.run() } finally { run.over = true; run.asks.clear(); run.thinking.clear(); pushWolf() }
+        val gate = com.guixing.jixunying.engine.wolf.WolfGate { label ->
+            run.paused.first { !it }
+            if (run.stepMode.value) wolfWait(run, com.guixing.jixunying.model.WolfAsk(kind = "next", what = label, text = "下一步：$label"))
         }
-        run = WolfRun(job, game)
+        val extra = { seat: com.guixing.jixunying.model.WolfSeat ->
+            exp[seat.memberId].orEmpty().takeIf { it.isNotEmpty() }?.let { list ->
+                "【你以前打狼人杀自己总结的经验（仅供参考，以这局的实际情况为准）】\n" + list.mapIndexed { i, e -> "${i + 1}. $e" }.joinToString("\n")
+            }.orEmpty()
+        }
+        val game = com.guixing.jixunying.engine.wolf.WolfGame(start, { brain }, ::now, { r -> wolfStore.save(r); pushWolf() },
+            gate = gate, judge = c.judge, systemExtra = extra)
+        run = WolfRun(game)
+        run.stepMode.value = c.stepMode
+        run.job = scope.launch(start = kotlinx.coroutines.CoroutineStart.LAZY) {
+            try {
+                val r = game.run()
+                if (r.winner.isNotBlank() && r.seats.any { !it.human }) {
+                    // 复盘：每个 AI 说一句感想、总结一句经验（照第一代）
+                    run.reviewing = true; pushWolf()
+                    val got = game.review()
+                    saveWolfExp(got.mapNotNull { (no, e) -> r.seats.firstOrNull { it.no == no }?.memberId?.takeIf { it.isNotBlank() }?.let { it to e } }.toMap())
+                    wolfStore.save(game.record)
+                }
+            } finally {
+                run.over = true; run.reviewing = false; run.asks.clear(); run.thinking.clear(); pushWolf()
+            }
+        }
         wolfRun = run
-        job.start()
+        run.job.start()
         pushWolf()
         return CommandResult(data = start.id)
     }
 
-    /** 真人交了一步：按 AI 的格式拼好交给法官（法官照常解析）。 */
+    /** 真人（或主持人）交了一步：按 AI 的格式拼好交给法官（法官照常解析）。 */
     private fun answerWolf(c: Command.WolfAnswer): CommandResult {
         // 马上摘掉：同一步点两下（或者两台设备同时交）只算第一次
         val (ask, d) = wolfRun?.asks?.remove(c.askId) ?: return CommandResult(false, "这一步已经过了")
         val raw = when (ask.kind) {
-            "speech", "lastWords" -> "<发言>" + c.text.trim().ifBlank { "过。" } + "</发言>"
+            "speech", "lastWords" -> "<发言>" + c.text.trim().ifBlank { "过。" } + "</发言>" + when (c.skill) {
+                "explode" -> "<技能>自爆</技能>"
+                "whiteExplode" -> "<技能>带走 ${c.target}</技能>"
+                "duel" -> "<技能>决斗 ${c.target}</技能>"
+                else -> ""
+            }
             "witch" -> "{\"save\": ${c.save && ask.canSave}, \"poison\": ${if (c.poison in ask.poisonable) c.poison else 0}}"
+            "merchant" -> "{\"target\": ${c.target}, \"gift\": \"${c.gift}\"}"
+            "next" -> "next"
+            "error" -> if (c.text == "skip") "skip" else "retry"
             else -> "{\"target\": ${c.target}}"
         }
         d.complete(raw)
+        return CommandResult()
+    }
+
+    private fun controlWolf(c: Command.WolfControl): CommandResult {
+        val r = wolfRun?.takeIf { !it.over } ?: return CommandResult(false, "没有正在打的局")
+        when (c.action) {
+            "pause" -> r.paused.value = true
+            "resume" -> r.paused.value = false
+            "step" -> r.stepMode.value = true
+            "auto" -> {
+                r.stepMode.value = false
+                // 正在等「下一步」的那一下直接放行
+                r.asks.entries.filter { it.value.first.kind == "next" }.forEach { (id, v) -> r.asks.remove(id); v.second.complete("next") }
+            }
+            else -> return CommandResult(false, "不认识：${c.action}")
+        }
+        pushWolf()
         return CommandResult()
     }
 
@@ -2307,26 +2440,6 @@ class Engine(
             emit(Event.Wolf(wolfLast!!))
         }
         return CommandResult()
-    }
-
-    /** AI 座位：用这位成员的模型问一次（不带工具）。网络出错等 3 秒再试一次，还不行整局记出错。 */
-    private fun wolfBrain() = com.guixing.jixunying.engine.wolf.WolfBrain { seat, system, user ->
-        val m = state.member(seat.memberId) ?: throw IllegalStateException("${seat.no}号的 AI 成员不在了")
-        val p = state.provider(m.providerId) ?: throw IllegalStateException("${m.name} 的模型服务不在了")
-        val msgs = listOf(buildJsonObject { put("role", "system"); put("content", system) }, userMsg(user))
-        var last: Exception? = null
-        repeat(2) { attempt ->
-            try {
-                val r = withContext(Dispatchers.IO + UsageTag("wolf", m.id)) { llm.chat(p, m.modelId, msgs, m.temperature, null) { _, _ -> } }
-                return@WolfBrain r.content
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                last = e
-                if (attempt == 0) kotlinx.coroutines.delay(3000)
-            }
-        }
-        throw IllegalStateException("${seat.no}号（${m.name}）调用失败：${friendlyError(last!!)}")
     }
 
     // ———————————————— 记忆 ————————————————

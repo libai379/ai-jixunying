@@ -49,6 +49,8 @@ class ClientStore {
 
     /** 集训场正在打的那一局（没有就是 null）。 */
     val wolf = MutableStateFlow<com.guixing.jixunying.model.WolfLive?>(null)
+    /** 集训场：AI 正在说的话（座位号 → 已经出来的字）。 */
+    val wolfTyping = MutableStateFlow<Map<Int, String>>(emptyMap())
 
     fun apply(event: Event) {
         when (event) {
@@ -75,7 +77,13 @@ class ClientStore {
             }
             is Event.ConversationRemoved -> _messages.update { it - event.convId }
             is Event.Notice -> _notices.tryEmit(event)
-            is Event.Wolf -> wolf.value = event.live
+            is Event.Wolf -> {
+                wolf.value = event.live
+                // 记录里已经有的发言就不用再显示「正在说」了
+                if (event.live.thinking.isEmpty()) wolfTyping.value = emptyMap()
+                else wolfTyping.update { m -> m.filterKeys { it in event.live.thinking } }
+            }
+            is Event.WolfTyping -> wolfTyping.update { if (event.text.isEmpty()) it - event.seat else it + (event.seat to event.text) }
         }
     }
 
