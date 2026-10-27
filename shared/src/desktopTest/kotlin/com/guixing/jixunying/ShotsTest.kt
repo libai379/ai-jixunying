@@ -997,7 +997,7 @@ class ShotsTest {
         // 设置 → Code 栏（深色）：顶上的 1 GB 提醒、备份大小、错误提示在深色下都要看得清
         shoot("desktop-dark-settings-code", 1280, 820, 1f, hub, desktop, "settings:CODE")
         shoot("phone-dark-settings-code", 824, 1784, 2f, hub, phone, "settings:CODE")
-        shoot("desktop-costs-tall", 1280, 2000, 1f, hub, desktop, "costs")
+        shoot("desktop-costs-tall", 1280, 3400, 1f, hub, desktop, "costs")
         shoot("desktop-office-tall", 1280, 2600, 1f, hub, desktop, "settings:OFFICE")
         // Code 设置页整页画出来：备份大小那一行要能看到
         shoot("desktop-settings-code-tall", 1280, 1300, 1f, hub, desktop, "settings:CODE")

@@ -322,6 +322,44 @@ class DesktopPlatform(private val fileLog: Boolean = true, private val window: (
         if (value == null) prefs.remove(key) else prefs.put(key, value)
     }
 
+    // ---- 开机自动启动（2026-10-27）：写当前用户的 Run 注册表项（HKCU，不要管理员）。
+    //      只有装好的程序才有：jpackage 打的启动器会设 jpackage.app-path；开发时 gradle run 没有，不显示这个开关。
+
+    private val exePath: String? get() = System.getProperty("jpackage.app-path")?.takeIf { it.isNotBlank() && java.io.File(it).isFile }
+
+    private fun reg(vararg args: String): Pair<Int, String> = runCatching {
+        val p = ProcessBuilder(listOf("reg") + args).redirectErrorStream(true).start()
+        // reg 按系统代码页（中文 Windows 是 GBK）输出，路径里有中文时按 UTF-8 读会对不上
+        val cs = runCatching { charset(System.getProperty("sun.jnu.encoding") ?: "UTF-8") }.getOrDefault(Charsets.UTF_8)
+        val out = p.inputStream.readBytes().toString(cs)
+        p.waitFor(10, java.util.concurrent.TimeUnit.SECONDS)
+        p.exitValue() to out
+    }.getOrElse { -1 to it.toString() }
+
+    override val autoStart: Boolean?
+        get() {
+            val exe = exePath ?: return null
+            val (code, out) = reg("query", RUN_KEY, "/v", RUN_NAME)
+            return code == 0 && out.contains(exe, ignoreCase = true)
+        }
+
+    override fun setAutoStart(on: Boolean): String? {
+        val exe = exePath ?: return "开发时直接跑的程序不能设开机启动"
+        val (code, out) = if (on) reg("add", RUN_KEY, "/v", RUN_NAME, "/t", "REG_SZ", "/d", "\"$exe\"", "/f")
+        else reg("delete", RUN_KEY, "/v", RUN_NAME, "/f")
+        setPref("autostart.chosen", "1")
+        return if (code == 0 || (!on && autoStart == false)) null else "没设上：${out.trim().take(80)}"
+    }
+
+    /** 用户要了「开机就自动同步」（10-27），装好的程序第一次打开时替他打开一次；之后以开关为准，关了不再自动打开。 */
+    fun autoStartOnce() {
+        if (exePath == null || getPref("autostart.chosen") != null) return
+        setAutoStart(true)
+    }
+
+    private val RUN_KEY = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run"
+    private val RUN_NAME = "AI集训营"
+
     // ---- 读出来（放音）和听写（录音）：用 Java 自带的 javax.sound。
     //      统一是 wav、16 位 PCM；录的时候 16000 Hz 单声道（设计说明第 5 节）。
 

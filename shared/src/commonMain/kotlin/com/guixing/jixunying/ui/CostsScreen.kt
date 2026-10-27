@@ -122,6 +122,11 @@ fun CostsScreen(ctl: AppController, wide: Boolean, openDrawer: () -> Unit) {
                         ModelBreakdown(r, onEdit = { editing = it })
                         Spacer(Modifier.height(12.dp))
                         Breakdown("按用途", null, r.byKind, r.usdRate, icon = null)
+                        // 手机和电脑同步了账本（2026-10-27）才有这一块：同一个 Key 两边花的分开看
+                        if (r.byDevice.isNotEmpty()) {
+                            Spacer(Modifier.height(12.dp))
+                            Breakdown("按设备", "和配对的手机 / 电脑同步过来的账也算在上面的合计里", r.byDevice, r.usdRate, icon = null)
+                        }
                     }
                 }
                 Spacer(Modifier.height(12.dp))
@@ -533,45 +538,45 @@ private fun PriceDialog(ctl: AppController, line: CostLine, current: ModelPrice?
  * 货币换算（2026-10-24 用户：「不仅是美元，新币港币英镑也有汇率，而且还能跟人民币都可以跟人民币换算，互相之间也可以换算」）。
  * 汇率和美元汇率同一次联网取（engine/UsdRate，ExchangeRate-API 或欧洲央行），存在 costs.fx（1 美元换多少）；任意两种之间按美元中转算。
  */
-private val currencyNames = linkedMapOf("CNY" to "人民币", "USD" to "美元", "HKD" to "港币", "SGD" to "新加坡元", "GBP" to "英镑", "EUR" to "欧元", "JPY" to "日元")
+private val currencyNames = linkedMapOf(
+    "CNY" to "人民币", "USD" to "美元", "HKD" to "港币", "TWD" to "新台币", "SGD" to "新加坡元", "GBP" to "英镑", "EUR" to "欧元", "JPY" to "日元",
+    "KRW" to "韩元", "AUD" to "澳元", "CAD" to "加元", "CHF" to "瑞士法郎", "MYR" to "林吉特", "THB" to "泰铢",
+)
 
+/**
+ * 每一行都是输入框（2026-10-27 用户：「上面只能填美元……这些币里边可以随意换算」）：在哪一行填，就以那一行为准换出别的行。
+ * 以前是一个金额框 + 一排小标签选货币，看着像只能填美元。
+ */
 @Composable
 private fun ConverterCard(ctl: AppController, costs: com.guixing.jixunying.model.CostSettings) {
     // 美元对人民币用页面上那个（可能是手填的）；别的用联网取的
     val perUsd = costs.fx + ("USD" to 1.0) + ("CNY" to costs.usdRate)
-    var from by remember { mutableStateOf("USD") }
+    var from by remember { mutableStateOf("CNY") }
     var amountText by remember { mutableStateOf("100") }
     var busy by remember { mutableStateOf(false) }
     val amount = amountText.toDoubleOrNull()
+    val fromRate = perUsd[from]
     SectionCard {
-        FieldLabel("货币换算", "人民币、美元、港币、新加坡元、英镑、欧元、日元，任意两种之间都能换")
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            AppTextField(amountText, { amountText = it.filter { c -> c.isDigit() || c == '.' }.take(12) }, modifier = Modifier.width(140.dp),
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
-            Spacer(Modifier.width(8.dp))
-            Text(currencyNames[from].orEmpty(), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
-        }
-        Spacer(Modifier.height(6.dp))
-        FlowRowCompat {
-            currencyNames.forEach { (code, name) ->
-                androidx.compose.material3.FilterChip(selected = from == code, onClick = { from = code },
-                    label = { Text(name) }, modifier = Modifier.padding(end = 6.dp))
-            }
-        }
-        Spacer(Modifier.height(6.dp))
-        val fromRate = perUsd[from]
+        FieldLabel("货币换算", "在任意一种货币那一行填数，别的几种跟着换算")
         currencyNames.forEach { (code, name) ->
-            if (code == from) return@forEach
             val to = perUsd[code]
-            val v = if (amount != null && fromRate != null && to != null) amount / fromRate * to else null
-            Row(Modifier.fillMaxWidth().padding(vertical = 3.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text(name, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.width(80.dp))
-                Text(v?.let { fmtMoney(it) } ?: "还没取到汇率", style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = if (v != null) FontWeight.SemiBold else FontWeight.Normal, color = if (v != null) MaterialTheme.colorScheme.onSurface else Ext.c.subtle,
-                    modifier = Modifier.weight(1f))
-                if (fromRate != null && to != null) Text("1 ${currencyNames[from]} = ${fmtRate(to / fromRate)} $name",
-                    style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
+            val shown = when {
+                code == from -> amountText
+                amount != null && fromRate != null && to != null -> plainMoney(amount / fromRate * to)
+                else -> ""
             }
+            Row(Modifier.fillMaxWidth().padding(vertical = 3.dp), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.width(96.dp)) {
+                    Text(name, style = MaterialTheme.typography.bodyMedium, fontWeight = if (code == from) FontWeight.SemiBold else FontWeight.Normal, maxLines = 2)
+                    Text(code, style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
+                }
+                Spacer(Modifier.width(8.dp))
+                if (to == null) Text("还没取到汇率", style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle, modifier = Modifier.weight(1f))
+                else AppTextField(shown, { t -> from = code; amountText = t.filter { c -> c.isDigit() || c == '.' }.take(14) },
+                    modifier = Modifier.weight(1f), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
+            }
+            if (code != from && fromRate != null && to != null) Text("1 ${currencyNames[from]} = ${fmtRate(to / fromRate)} $name",
+                style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, modifier = Modifier.padding(start = 104.dp))
         }
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(if (costs.fx.isEmpty()) "别的货币的汇率还没取到，点「现在更新」联网取。" else if (costs.usdRateAt > 0) "汇率 ${formatTime(costs.usdRateAt)} 从 ${costs.usdRateFrom} 取的，每 12 小时自动更新。" else "",
@@ -585,4 +590,6 @@ private fun ConverterCard(ctl: AppController, costs: com.guixing.jixunying.model
 }
 
 private fun fmtMoney(v: Double): String = if (v >= 1000) "%,.2f".format(v) else if (v >= 1) "%.2f".format(v) else "%.4f".format(v)
+/** 换算出来填进输入框的数：不带千分位（不然接着改会读不出来）。 */
+private fun plainMoney(v: Double): String = if (v >= 1) "%.2f".format(v) else "%.4f".format(v)
 private fun fmtRate(v: Double): String = if (v >= 100) "%.2f".format(v) else if (v >= 1) "%.4f".format(v) else "%.6f".format(v)

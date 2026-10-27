@@ -244,7 +244,7 @@ class Engine(
     internal var usdRates = UsdRate({ state.settings.proxy.trim().ifEmpty { null } })
 
     /** 记录员后台活出错时记下来、提示用户（以前悄悄停掉）。 */
-    private val bg = BackgroundWatch({ state }, { f -> updateState(f) }, { emit(Event.Notice(it, error = true)) })
+    private val bg = BackgroundWatch({ state }, { f -> updateState(f) }, { emit(Event.Notice(it, error = true)) }, log = { storage.log("JxyBg", it) })
 
     /** 本机文档库（AI 能搜、能读）。 */
     private val docs = DocLibrary(java.io.File(storage.root, "docindex").apply { mkdirs() })
@@ -1574,6 +1574,14 @@ class Engine(
             }
             CommandResult(data = AppJson.encodeToString(MemoryBundle.serializer(), out))
         }
+        is Command.SyncLedger -> {
+            val added = importLedger(c.push, c.origin)
+            CommandResult(data = AppJson.encodeToString(com.guixing.jixunying.model.LedgerBatch.serializer(), exportLedger(c.pullSince, c.limit).copy(added = added)))
+        }
+        is Command.SyncChannel -> {
+            val added = importChannel(c.push, c.origin)
+            CommandResult(data = AppJson.encodeToString(com.guixing.jixunying.model.ChannelBatch.serializer(), exportChannel(c.push.channel, c.pullSince, c.limit).copy(added = added)))
+        }
         is Command.SearchHistory -> CommandResult(data = AppJson.encodeToString(
             kotlinx.serialization.builtins.ListSerializer(HistoryHit.serializer()), searchHistory(c.query, c.limit).hits))
         is Command.WeixinLogin -> weixin?.login() ?: CommandResult(false, "这台设备没有接微信助理")
@@ -2901,6 +2909,114 @@ class Engine(
             return c.id
         }
         return newChannelConversation(channel, title, memberIds, webSearch)
+    }
+
+    // ---- 手机和电脑互相同步账本、微信对话（2026-10-27，model/DeviceSync.kt、engine/DeviceSync.kt） ----
+
+    private fun keyFp(key: String): String = if (key.isBlank()) "" else java.security.MessageDigest.getInstance("SHA-256")
+        .digest(key.trim().toByteArray()).take(8).joinToString("") { "%02x".format(it) }
+
+    /** 一批同步数据最多多大（编码后的字节）：公共中转切片发，太大一条慢、容易超时。 */
+    private val syncBatchBytes = 48_000
+
+    /** 本机自己记的账（origin 空的）since（含）以后的一批。 */
+    fun exportLedger(since: Long, limit: Int): com.guixing.jixunying.model.LedgerBatch {
+        val all = ledger.since(since).filter { it.origin.isBlank() }
+        val out = mutableListOf<UsageRecord>()
+        var bytes = 0
+        for (r in all) {
+            if (out.size >= limit.coerceAtLeast(1) || (out.isNotEmpty() && bytes > syncBatchBytes)) break
+            out += r
+            bytes += 200
+        }
+        val s = state
+        return com.guixing.jixunying.model.LedgerBatch(
+            records = out,
+            providers = out.map { it.providerId }.distinct().mapNotNull { id ->
+                s.provider(id)?.let { p -> id to com.guixing.jixunying.model.SyncProviderRef(ConfigMerge.normUrl(p.baseUrl), keyFp(p.apiKey), p.name) }
+            }.toMap(),
+            members = out.map { it.memberId }.filter { it.isNotBlank() }.distinct().mapNotNull { id -> s.member(id)?.let { id to it.name } }.toMap(),
+            more = all.size > out.size,
+            until = out.lastOrNull()?.at ?: since,
+        )
+    }
+
+    private fun usageKey(r: UsageRecord) = "${r.at}|${r.kind}|${r.model}|${r.prompt}|${r.cached}|${r.completion}|${r.images}|${r.units}"
+
+    /**
+     * 合进别的设备发来的账：记成 origin 那台的；服务商按「同一个地址 + 同一个 Key」对到本机那家（对不上按地址），
+     * 这样「手填余额」的估算把两台花的都扣上（用户 10-27：「这边花了一点，那边花了一点」）。同一条只记一次。
+     * @return 新记了几条
+     */
+    fun importLedger(b: com.guixing.jixunying.model.LedgerBatch, origin: String): Int {
+        if (b.records.isEmpty() || origin.isBlank()) return 0
+        val s = state
+        val pMap = b.providers.mapValues { (_, ref) ->
+            s.providers.firstOrNull { ConfigMerge.normUrl(it.baseUrl) == ref.url && ref.keyFp.isNotBlank() && keyFp(it.apiKey) == ref.keyFp }
+                ?: s.providers.firstOrNull { ConfigMerge.normUrl(it.baseUrl) == ref.url }
+        }
+        val mMap = b.members.mapValues { (_, name) -> s.members.firstOrNull { it.name == name }?.id }
+        val have = ledger.since(b.records.minOf { it.at }).filter { it.origin == origin }.map(::usageKey).toHashSet()
+        val add = b.records.filter { have.add(usageKey(it)) }.map { r ->
+            val p = pMap[r.providerId]
+            r.copy(origin = origin, providerId = p?.id ?: r.providerId, provider = p?.name ?: r.provider,
+                memberId = if (r.memberId.isBlank()) "" else mMap[r.memberId] ?: r.memberId, convId = "")
+        }
+        if (add.isNotEmpty()) ledger.addAll(add)
+        return add.size
+    }
+
+    /** 这个渠道（几个对话加起来）里本机自己的消息 since（含）以后的一批；正在写的不发。 */
+    fun exportChannel(channel: String, since: Long, limit: Int): com.guixing.jixunying.model.ChannelBatch {
+        val s = state
+        val cs = s.conversations.filter { it.channel == channel }
+        val all = cs.flatMap { snapshot(it.id) }
+            .filter { it.syncedFrom.isBlank() && it.createdAt >= since && it.status != MsgStatus.PENDING && it.status != MsgStatus.STREAMING }
+            .sortedBy { it.createdAt }
+        val out = mutableListOf<Message>()
+        var bytes = 0
+        for (m in all) {
+            if (out.size >= limit.coerceAtLeast(1) || (out.isNotEmpty() && bytes > syncBatchBytes)) break
+            // 只带文字：附件的文件在原来那台上，工具步骤太大（搜到的网页全文），想法留个开头
+            val note = m.attachments.joinToString("") { "\n（附件「${it.name}」在原来那台设备上）" }
+            val slim = m.copy(content = m.content + note, attachments = emptyList(), tools = emptyList(), reasoning = m.reasoning.take(2000))
+            bytes += AppJson.encodeToString(Message.serializer(), slim).length
+            out += slim
+        }
+        return com.guixing.jixunying.model.ChannelBatch(
+            channel = channel,
+            title = cs.maxByOrNull { it.updatedAt }?.title.orEmpty(),
+            messages = out,
+            members = out.map { it.senderId }.filter { it != USER_ID }.distinct().mapNotNull { id -> s.member(id)?.let { id to it.name } }.toMap(),
+            more = all.size > out.size,
+            until = out.lastOrNull()?.createdAt ?: since,
+        )
+    }
+
+    /**
+     * 合进别的设备发来的微信对话记录（用户 10-27：「手机一个记录，电脑一个记录」）：并进本机这个渠道最近的那个对话，
+     * 按编号去重、按时间排；本机还没有这个渠道的对话就新建一个。@return 新加了几条
+     */
+    fun importChannel(b: com.guixing.jixunying.model.ChannelBatch, origin: String): Int {
+        if (b.messages.isEmpty() || origin.isBlank() || b.channel.isBlank()) return 0
+        val s = state
+        val mMap = b.members.mapValues { (_, name) -> s.members.firstOrNull { it.name == name }?.id }
+        val existing = s.conversations.filter { it.channel == b.channel }
+        val have = existing.flatMap { snapshot(it.id) }.map { it.id }.toHashSet()
+        val fresh = b.messages.filter { have.add(it.id) }
+        if (fresh.isEmpty()) return 0
+        val convId = existing.maxByOrNull { it.updatedAt }?.id
+            ?: newChannelConversation(b.channel, b.title.ifBlank { "微信" }, mMap.values.filterNotNull().distinct(), webSearch = true)
+        val list = messages(convId)
+        synchronized(list) {
+            fresh.forEach { m -> list += m.copy(convId = convId, syncedFrom = origin, senderId = if (m.senderId == USER_ID) m.senderId else mMap[m.senderId] ?: m.senderId) }
+            list.sortBy { it.createdAt }
+        }
+        val last = fresh.maxOf { it.createdAt }
+        updateState { st -> st.copy(conversations = st.conversations.map { if (it.id == convId && it.updatedAt < last) it.copy(updatedAt = last) else it }) }
+        save(convId)
+        emit(Event.Messages(convId, snapshot(convId)))
+        return fresh.size
     }
 
     fun newChannelConversation(channel: String, title: String, memberIds: List<String>, webSearch: Boolean): String {

@@ -209,6 +209,13 @@ sealed interface Command {
     /** 手机和电脑互相同步记忆（2026-10-24）：发来对方的记忆和删除记录，合进本机，data 回合好的 MemoryBundle JSON。 */
     @Serializable data class SyncMemories(val bundle: MemoryBundle) : Command
     /**
+     * 手机和电脑互相同步账本（2026-10-27，model/DeviceSync.kt）：合进对方发来的 push（记成 origin 那台的），
+     * data 回本机自己 pullSince（含）以后的一批 LedgerBatch JSON，最多 limit 条。
+     */
+    @Serializable data class SyncLedger(val push: LedgerBatch, val origin: String, val pullSince: Long, val limit: Int = 200) : Command
+    /** 同步一个微信对话（渠道）的记录，规则同 SyncLedger；data 回 ChannelBatch JSON。 */
+    @Serializable data class SyncChannel(val push: ChannelBatch, val origin: String, val pullSince: Long, val limit: Int = 40) : Command
+    /**
      * 手机的 GitHub 登录换令牌交给电脑做（2026-10-24 方案一）：手机拿到授权码后经加密线路发来，电脑去 GitHub 换令牌、查用户资料，
      * data 回 GitHub 用户资料 JSON（login、id、name、avatar），令牌电脑上也不留、不绑到电脑自己的账号上。
      */

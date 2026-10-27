@@ -26,6 +26,11 @@ class Hub(
 
     val canPair: Boolean get() = pairer != null
 
+    /** 和电脑同步记忆、账本、微信对话的情况（engine/DeviceSync 在手机上填；电脑上一直是空的）。 */
+    val sync = MutableStateFlow(com.guixing.jixunying.model.SyncInfo())
+    /** 点「现在同步」。手机上由 DeviceSyncer 设置；null = 这台设备不同步（电脑）。 */
+    var syncNow: (() -> Unit)? = null
+
     fun attach(host: PairedHost) {
         val factory = linkFactory ?: return
         _remote.value?.stop()

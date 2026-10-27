@@ -64,8 +64,11 @@ class UsdRate(
         /** 两家都是 {"rates":{"CNY":数}}；ExchangeRate-API 另有 "result":"success"。 */
         fun cny(o: JsonObject): Double? = (o["rates"] as? JsonObject)?.get("CNY")?.jsonPrimitive?.doubleOrNull
 
-        /** 换算要的几种（2026-10-24）：人民币、港币、新加坡元、英镑、欧元、日元；美元自己是 1。 */
-        val CURRENCIES = listOf("CNY", "HKD", "SGD", "GBP", "EUR", "JPY")
+        /**
+         * 换算要的几种（2026-10-24 六种；10-27 加了新台币、韩元、澳元、加元、瑞士法郎、林吉特、泰铢）；美元自己是 1。
+         * 欧洲央行没有新台币，Frankfurter 那一路取不到 TWD，界面上那行就写「还没取到汇率」。
+         */
+        val CURRENCIES = listOf("CNY", "HKD", "TWD", "SGD", "GBP", "EUR", "JPY", "KRW", "AUD", "CAD", "CHF", "MYR", "THB")
 
         fun perUsd(o: JsonObject): Map<String, Double> {
             val rates = o["rates"] as? JsonObject ?: return emptyMap()
@@ -76,7 +79,7 @@ class UsdRate(
             Source("ExchangeRate-API", "https://open.er-api.com/v6/latest/USD") { o ->
                 if (o["result"]?.jsonPrimitive?.content == "success") cny(o) else null
             },
-            Source("Frankfurter（欧洲央行）", "https://api.frankfurter.dev/v1/latest?base=USD&symbols=CNY,HKD,SGD,GBP,EUR,JPY") { o -> cny(o) },
+            Source("Frankfurter（欧洲央行）", "https://api.frankfurter.dev/v1/latest?base=USD&symbols=CNY,HKD,SGD,GBP,EUR,JPY,KRW,AUD,CAD,CHF,MYR,THB") { o -> cny(o) },
         )
     }
 }

@@ -20,6 +20,14 @@ fun main() {
         System.setProperty("skiko.renderApi", "OPENGL")
     }
     val storage = Storage(Storage.defaultRoot())
+    // 只许开一个（2026-10-27 用户：「电脑能开多个」）：两个窗口共用一份数据，会各连一次微信和中转、重复回答、互相覆盖存档。
+    // 已经开着就叫它到前面来，这个直接退出
+    var frame: Frame? = null
+    val single = SingleInstance.claim(storage.root) { java.awt.EventQueue.invokeLater { frame?.let { f ->
+        if (f.extendedState and Frame.ICONIFIED != 0) f.extendedState = f.extendedState and Frame.ICONIFIED.inv()
+        f.isVisible = true; f.toFront(); f.requestFocus()
+    } } }
+    if (single == null) { storage.log("JxySingle", "已经开着一个，叫它到前面，这个退出"); return }
     val engine = Engine(storage)
     // Code 栏跑命令的执行器（安全核心在 engine/code/CodeShell.kt）：只在电脑上有，手机上是空的（手机不在本机跑命令）
     engine.codeRunner = com.guixing.jixunying.engine.code.CodeShell()
@@ -37,8 +45,8 @@ fun main() {
     engine.weixin = weixin
     weixin.start()
 
-    var frame: Frame? = null
     val platform = DesktopPlatform { frame }
+    Thread { platform.autoStartOnce() }.start()
     val hub = Hub(engine)
 
     application {

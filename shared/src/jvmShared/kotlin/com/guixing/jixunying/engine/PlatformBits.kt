@@ -17,3 +17,17 @@ expect fun docAccessMissing(): Boolean
 
 /** AI 做的 Word / Excel 默认另存到哪：电脑是「文档\AI集训营」，手机返回 null（存在应用自己的目录里）。 */
 expect fun defaultSaveFolder(): java.io.File?
+
+/**
+ * 这台设备上网忙不忙（两端同步避让用，2026-10-27 用户：「后台占的带宽或者流量太大……有其他运行的东西就要学会避让」）。
+ * otherBytesPerSec：别的应用最近每秒收发多少字节（不算我们自己）；-1 = 量不了。metered：用的是按流量计费的网（手机流量、热点）。
+ */
+class NetLoad(val otherBytesPerSec: Long, val metered: Boolean)
+
+expect fun networkLoad(): NetLoad
+
+/**
+ * 日志另抄一份到系统日志（安卓 logcat，tag 前加 Jxy）：手机装的是正式包，run-as 读不到 jxy.log，
+ * 只读的 adb logcat -d 能看到后台活出错的原因（2026-10-27 手机记忆连续出错 21 次，当时什么也看不到）。电脑上不抄。
+ */
+expect fun platformLog(tag: String, text: String)

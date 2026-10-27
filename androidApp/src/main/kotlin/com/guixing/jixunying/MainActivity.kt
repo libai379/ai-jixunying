@@ -138,6 +138,8 @@ class JxyApp : Application() {
         com.guixing.jixunying.engine.WeixinHandover(hub, engine, weixin, backupFile = File(filesDir, "data/weixin/backup-phone.txt")).start()
         // 长期记忆：连着电脑时两边互相同步（2026-10-24）
         com.guixing.jixunying.engine.MemorySyncer(hub, engine).start()
+        // 账本、微信对话：连上电脑那一下、之后每 10 分钟、点「现在同步」时对一遍，别的应用大量上网时让路（2026-10-27）
+        com.guixing.jixunying.engine.DeviceSyncer(hub, engine, "手机 " + deviceName(), File(filesDir, "data")).start()
         // GitHub：连着电脑就用电脑上登录的；手机自己登录时换令牌也交给电脑（2026-10-24）
         com.guixing.jixunying.engine.GitHubViaHost(hub, engine).start()
         com.guixing.jixunying.engine.HostModels(hub, engine).start()

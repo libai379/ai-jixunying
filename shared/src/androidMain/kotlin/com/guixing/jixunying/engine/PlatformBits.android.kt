@@ -54,3 +54,30 @@ actual fun extractPdfText(bytes: ByteArray): Pair<String?, String> {
 }
 
 actual fun defaultSaveFolder(): java.io.File? = null
+
+private var lastTraffic: Triple<Long, Long, Long>? = null
+
+/**
+ * 整机收发字节减去我们自己（TrafficStats，按 uid 算），和上一次量的比出每秒多少；第一次量返回 -1。
+ * 按流量计费看 ConnectivityManager.isActiveNetworkMetered（手机流量、标了计费的 Wi-Fi 都算）。
+ */
+actual fun networkLoad(): NetLoad {
+    val ctx = AndroidEnv.context
+    val metered = runCatching {
+        (ctx?.getSystemService(Context.CONNECTIVITY_SERVICE) as? android.net.ConnectivityManager)?.isActiveNetworkMetered ?: false
+    }.getOrDefault(false)
+    val uid = android.os.Process.myUid()
+    val all = android.net.TrafficStats.getTotalRxBytes() + android.net.TrafficStats.getTotalTxBytes()
+    val mine = android.net.TrafficStats.getUidRxBytes(uid) + android.net.TrafficStats.getUidTxBytes(uid)
+    val now = android.os.SystemClock.elapsedRealtime()
+    if (all < 0 || mine < 0) return NetLoad(-1, metered)
+    val prev = lastTraffic
+    lastTraffic = Triple(now, all, mine)
+    if (prev == null || now - prev.first < 200) return NetLoad(-1, metered)
+    val other = ((all - prev.second) - (mine - prev.third)).coerceAtLeast(0)
+    return NetLoad(other * 1000 / (now - prev.first), metered)
+}
+
+actual fun platformLog(tag: String, text: String) {
+    runCatching { android.util.Log.i(if (tag.startsWith("Jxy")) tag else "Jxy$tag", text.take(3000)) }
+}

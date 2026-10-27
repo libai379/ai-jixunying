@@ -48,6 +48,7 @@ class CostReporter(private val ledger: Ledger, private val stateOf: () -> AppSta
         val models = LinkedHashMap<String, Acc>()
         val kinds = LinkedHashMap<String, Acc>()
         val days = LinkedHashMap<String, Acc>()
+        val devices = LinkedHashMap<String, Acc>()
 
         for (r in recs) {
             val p = s.provider(r.providerId)
@@ -93,6 +94,7 @@ class CostReporter(private val ledger: Ledger, private val stateOf: () -> AppSta
             add(kinds.getOrPut(r.kind) { Acc(r.kind, UsageKinds.label(r.kind)) })
             val d = Instant.ofEpochMilli(r.at).atZone(Ledger.BEIJING).toLocalDate().toString()
             add(days.getOrPut(d) { Acc(d, d) })
+            add(devices.getOrPut(r.origin) { Acc(r.origin.ifBlank { "this" }, r.origin.ifBlank { "这台设备" }) })
         }
         val rate = s.settings.costs.usdRate
         fun List<CostLine>.byMoney() = sortedWith(compareByDescending<CostLine> { it.total(rate) }.thenByDescending { it.calls })
@@ -106,6 +108,7 @@ class CostReporter(private val ledger: Ledger, private val stateOf: () -> AppSta
             usdRate = rate,
             firstAt = all.firstOrNull()?.at ?: 0L,
             backfillUntil = all.lastOrNull { it.backfill }?.at ?: 0L,
+            byDevice = if (devices.size > 1) devices.values.map { it.line() }.byMoney() else emptyList(),
         )
     }
 

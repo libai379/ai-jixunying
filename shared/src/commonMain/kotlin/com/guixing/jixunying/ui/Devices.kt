@@ -285,6 +285,13 @@ fun HostDevicesPage(ctl: AppController, state: AppState) {
         SwitchRow("允许手机用 Code 栏", PHONE_CODE_NOTE, state.settings.code.allowPhone) { v ->
             ctl.updateSettings { it.copy(code = it.code.copy(allowPhone = v)) }
         }
+        ctl.platform.autoStart?.let { on ->
+            var auto by remember { mutableStateOf(on) }
+            SwitchRow("开机自动启动", "电脑开机后自己打开 AI集训营，手机连上就自动同步记忆、花费和微信记录，微信助理也接着答", auto) { v ->
+                val err = ctl.platform.setAutoStart(v)
+                if (err == null) auto = v else ctl.toast(err)
+            }
+        }
     }
     Spacer(Modifier.height(12.dp))
     SectionCard {
@@ -395,6 +402,23 @@ fun PhoneDevicesPage(ctl: AppController) {
             }
             Text("同步后手机不连电脑也能直接用这些模型（Key 加密传过来，只存在这台手机上）。手机上已有的不会重复添加，也不会被覆盖，只补电脑上多出来的。",
                 style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, modifier = Modifier.padding(top = 6.dp))
+            ctl.hub.syncNow?.let { now ->
+                val info by ctl.hub.sync.collectAsState()
+                Spacer(Modifier.height(14.dp))
+                FieldLabel("和电脑同步", "长期记忆、花费账本、微信对话的记录：连上电脑就自动对一遍，之后每 10 分钟一次")
+                Text(when {
+                    info.running && info.yielding.isNotBlank() -> "正在同步（${info.yielding}）"
+                    info.running -> "正在同步…"
+                    info.error.isNotBlank() -> "上次没同步完：${info.error}"
+                    info.lastAt > 0 -> "${formatTime(info.lastAt)}同步过" + (if (info.summary.isNotBlank()) "：${info.summary}" else "")
+                    else -> "还没同步过"
+                }, style = MaterialTheme.typography.bodySmall, color = if (info.error.isNotBlank() && !info.running) MaterialTheme.colorScheme.error else Ext.c.subtle)
+                OutlinedButton(enabled = conn is ConnState.Connected && !info.running, onClick = now, modifier = Modifier.padding(top = 6.dp)) {
+                    Text(if (info.running) "正在同步…" else "现在同步")
+                }
+                Text("别的应用在大量上网、或者用的是手机流量时，自动放慢、一小批一小批地传。",
+                    style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, modifier = Modifier.padding(top = 4.dp))
+            }
             Spacer(Modifier.height(12.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(onClick = { ctl.hub.useRemote.value = true }) { Text("切到电脑") }

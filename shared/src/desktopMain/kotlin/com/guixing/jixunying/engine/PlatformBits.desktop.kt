@@ -62,3 +62,8 @@ actual fun extractPdfText(bytes: ByteArray): Pair<String?, String> {
 }
 
 actual fun defaultSaveFolder(): java.io.File? = java.io.File(documentsDirs().firstOrNull() ?: java.io.File(home, "Documents"), "AI集训营")
+
+/** 电脑上不量（同步由手机发起、手机那边避让）；电脑一般是宽带，不按流量算。 */
+actual fun networkLoad(): NetLoad = NetLoad(-1, false)
+
+actual fun platformLog(tag: String, text: String) {}

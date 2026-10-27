@@ -30,6 +30,8 @@ data class UsageRecord(
     val backfill: Boolean = false,
     val units: Double = 0.0,
     val unit: String = "",
+    /** 在哪台设备上花的：空 = 本机；同步来的写对方的名字（「手机 samsung SM-S9480」「电脑 …」），2026-10-27。 */
+    val origin: String = "",
 )
 
 object UsageKinds {
@@ -154,6 +156,8 @@ data class CostReport(
     /** 账本里最早一条的时间；补记的老记录最晚到哪天（那之前没有记录员后台活的账）。 */
     val firstAt: Long = 0,
     val backfillUntil: Long = 0,
+    /** 按设备（本机 / 同步来的别的设备），只有一台时是空的（2026-10-27）。 */
+    val byDevice: List<CostLine> = emptyList(),
 )
 
 /**

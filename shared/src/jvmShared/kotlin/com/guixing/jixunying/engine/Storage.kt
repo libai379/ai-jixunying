@@ -56,6 +56,7 @@ class Storage(val root: File) {
      * 和界面层 DesktopPlatform.log 写同一个文件 <数据目录>\logs\jxy.log，同样超过 2MB 从头写；不写 Key、不写文件内容。
      */
     fun log(tag: String, text: String) {
+        platformLog(tag, text)
         runCatching {
             val dir = File(root, "logs").apply { mkdirs() }
             val f = File(dir, "jxy.log")

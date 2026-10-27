@@ -15,6 +15,8 @@ internal class BackgroundWatch(
     private val update: ((AppState) -> AppState) -> Unit,
     private val notice: (String) -> Unit,
     private val clock: () -> Long = System::currentTimeMillis,
+    /** 每次出错都记一行日志（手机上同时进 logcat，2026-10-27：手机连续出错 21 次时什么记录都看不到）。 */
+    private val log: (String) -> Unit = {},
 ) {
     private val lastNotice = ConcurrentHashMap<BgJob, Long>()
 
@@ -26,6 +28,7 @@ internal class BackgroundWatch(
 
     fun failed(job: BgJob, reason: String, convTitle: String = "", raw: String = "") {
         val now = clock()
+        log("${job.name}「$convTitle」：$reason" + if (raw.isNotBlank()) " ｜ 原话：$raw" else "")
         var problem: BgProblem? = null
         update { s ->
             val old = s.bgProblems.firstOrNull { it.job == job }

@@ -529,6 +529,8 @@ data class Message(
     val usage: Usage? = null,
     /** 会审模式里这是哪一步："" 普通回答，"review" 匿名互评，"chair" 主席汇总。 */
     val stage: String = "",
+    /** 从别的设备同步来的（那台的名字），空 = 本机的；同步时只发本机的（2026-10-27，engine/DeviceSync）。 */
+    val syncedFrom: String = "",
 )
 
 /** 和这台电脑配对过的手机。key 是两边共享的加密密钥（Base64），只存在电脑和那台手机上。 */

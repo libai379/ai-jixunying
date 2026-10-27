@@ -33,6 +33,13 @@ interface Platform {
     /** 安卓的返回键（电脑上没有）。 */
     @androidx.compose.runtime.Composable
     fun BackHandler(enabled: Boolean, onBack: () -> Unit) {}
+    /**
+     * 开机自动启动（电脑，2026-10-27 用户：「我开机的时候它会自动同步」——电脑开机后程序自己起来，手机连上就同步）。
+     * null = 这台设备不支持（手机、开发时直接跑的）。
+     */
+    val autoStart: Boolean? get() = null
+    /** 打开 / 关掉开机自动启动；返回出错原因，null = 成功。 */
+    fun setAutoStart(on: Boolean): String? = "这台设备不支持"
     fun getPref(key: String): String? = null
     fun setPref(key: String, value: String?) {}
     /** 用系统默认程序打开本机文件。 */
