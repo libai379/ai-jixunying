@@ -820,13 +820,15 @@ class Engine(
         is Command.SaveProvider -> {
             updateState { s ->
                 val old = s.provider(c.provider.id)
-                val p = if (old != null && isMaskedKey(c.provider.apiKey)) c.provider.copy(apiKey = old.apiKey) else c.provider
-                s.copy(providers = if (old == null) s.providers + p else s.providers.map { if (it.id == p.id) p else it })
+                val p = (if (old != null && isMaskedKey(c.provider.apiKey)) c.provider.copy(apiKey = old.apiKey) else c.provider).copy(updatedAt = now())
+                s.copy(providers = if (old == null) s.providers + p else s.providers.map { if (it.id == p.id) p else it },
+                    configDeleted = s.configDeleted.filterNot { it.id == p.id })
             }
             CommandResult()
         }
         is Command.DeleteProvider -> {
-            updateState { s -> s.copy(providers = s.providers.filterNot { it.id == c.id }) }
+            updateState { s -> s.copy(providers = s.providers.filterNot { it.id == c.id },
+                configDeleted = s.configDeleted.filterNot { it.id == c.id } + com.guixing.jixunying.model.MemoryTombstone(c.id, now())) }
             CommandResult()
         }
         is Command.FetchModels -> {
@@ -991,7 +993,9 @@ class Engine(
         is Command.SaveMember -> {
             updateState { s ->
                 val exists = s.member(c.member.id) != null
-                s.copy(members = if (exists) s.members.map { if (it.id == c.member.id) c.member else it } else s.members + c.member)
+                val m = c.member.copy(updatedAt = now())
+                s.copy(members = if (exists) s.members.map { if (it.id == m.id) m else it } else s.members + m,
+                    configDeleted = s.configDeleted.filterNot { it.id == m.id })
             }
             CommandResult()
         }
@@ -1000,6 +1004,7 @@ class Engine(
                 s.copy(
                     members = s.members.filterNot { it.id == c.id },
                     conversations = s.conversations.map { it.copy(memberIds = it.memberIds - c.id) },
+                    configDeleted = s.configDeleted.filterNot { it.id == c.id } + com.guixing.jixunying.model.MemoryTombstone(c.id, now()),
                 )
             }
             CommandResult()
@@ -1136,7 +1141,7 @@ class Engine(
         }
         is Command.UpdateConversation -> {
             updateState { s -> s.copy(conversations = s.conversations.map { if (it.id == c.conversation.id) c.conversation.copy(updatedAt = it.updatedAt,
-                memoryTopic = it.memoryTopic, memoryTopicByUser = it.memoryTopicByUser) else it }) }
+                memoryTopic = it.memoryTopic, memoryTopicByUser = it.memoryTopicByUser, editedAt = now()) else it }) }
             CommandResult()
         }
         is Command.DeleteConversation -> {
@@ -1155,7 +1160,10 @@ class Engine(
                 gitHub()?.run("git worktree remove --force \"${sp.folder}\"", File(sp.worktreeOf), 120)
             }
             if (synchronized(stanceBook) { stanceBook.removeAll { it.convId == c.id } }) storage.saveStances(synchronized(stanceBook) { stanceBook.toList() })
-            updateState { s -> s.copy(conversations = s.conversations.filterNot { it.id == c.id }) }
+            updateState { s -> s.copy(conversations = s.conversations.filterNot { it.id == c.id },
+                // 两端同步：微信对话删光了另一边也跟着删（按渠道记；普通聊天不同步，不记）
+                convDeleted = s.conversation(c.id)?.channel?.takeIf { ch -> ch.startsWith("weixin:") && s.conversations.none { it.id != c.id && it.channel == ch } }
+                    ?.let { ch -> s.convDeleted.filterNot { it.id == ch } + com.guixing.jixunying.model.MemoryTombstone(ch, now()) } ?: s.convDeleted) }
             emit(Event.ConversationRemoved(c.id))
             CommandResult()
         }
@@ -1584,6 +1592,10 @@ class Engine(
             CommandResult(data = AppJson.encodeToString(com.guixing.jixunying.model.LedgerBatch.serializer(), exportLedger(c.pullSince, c.limit).copy(added = added)))
         }
         is Command.SyncDone -> CommandResult()
+        is Command.SyncConfig -> {
+            val out = mergePeerConfig { mine -> ConfigSync.merge(mine, c.bundle, preferB = true) }
+            CommandResult(data = AppJson.encodeToString(com.guixing.jixunying.model.PeerConfig.serializer(), out))
+        }
         is Command.RequestPhoneSync -> { updateState { it.copy(syncRequestAt = now()) }; CommandResult(message = "已经通知在线的手机") }
         is Command.SyncChannel -> {
             val added = importChannel(c.push, c.origin)
@@ -2979,10 +2991,22 @@ class Engine(
         return add.size
     }
 
-    /** 这个渠道（几个对话加起来）里本机自己的消息 since（含）以后的一批；正在写的不发。 */
+    /**
+     * 同步用的对话钥匙：只同步微信助理的对话（用户 10-27：「聊天记录只同步微信助手」），按渠道对（两边各自建的对得上）；
+     * 普通聊天、Code 会话各管各的。
+     */
+    fun syncKeyOf(c: Conversation): String? = c.channel.takeIf { it.startsWith("weixin:") && !c.isCode }
+
+    private fun convsOfKey(s: AppState, key: String) =
+        if (key.startsWith("conv:")) s.conversations.filter { it.id == key.removePrefix("conv:") && !it.isCode } else s.conversations.filter { it.channel == key }
+
+    /** 对话本身最后改的时间（新消息或改标题、置顶……）。 */
+    fun convChangedAt(c: Conversation) = maxOf(c.updatedAt, c.editedAt)
+
+    /** 这个对话（渠道的话是几个对话加起来）里本机自己的消息 since（含）以后的一批；正在写的不发。 */
     fun exportChannel(channel: String, since: Long, limit: Int): com.guixing.jixunying.model.ChannelBatch {
         val s = state
-        val cs = s.conversations.filter { it.channel == channel }
+        val cs = convsOfKey(s, channel)
         val all = cs.flatMap { snapshot(it.id) }
             .filter { it.syncedFrom.isBlank() && it.createdAt >= since && it.status != MsgStatus.PENDING && it.status != MsgStatus.STREAMING }
             .sortedBy { it.createdAt }
@@ -2996,40 +3020,142 @@ class Engine(
             bytes += AppJson.encodeToString(Message.serializer(), slim).length
             out += slim
         }
+        val latest = cs.maxByOrNull { convChangedAt(it) }
         return com.guixing.jixunying.model.ChannelBatch(
             channel = channel,
-            title = cs.maxByOrNull { it.updatedAt }?.title.orEmpty(),
+            title = latest?.title.orEmpty(),
             messages = out,
-            members = out.map { it.senderId }.filter { it != USER_ID }.distinct().mapNotNull { id -> s.member(id)?.let { id to it.name } }.toMap(),
+            members = (out.map { it.senderId } + latest?.memberIds.orEmpty()).filter { it != USER_ID }.distinct()
+                .mapNotNull { id -> s.member(id)?.let { id to it.name } }.toMap(),
             more = all.size > out.size,
             until = out.lastOrNull()?.createdAt ?: since,
+            // 本机才有意义的不带：批准过的文件夹、后台命令
+            meta = latest?.copy(grantedPaths = emptyList(), background = emptyList()),
         )
     }
 
     /**
-     * 合进别的设备发来的微信对话记录（用户 10-27：「手机一个记录，电脑一个记录」）：并进本机这个渠道最近的那个对话，
-     * 按编号去重、按时间排；本机还没有这个渠道的对话就新建一个。@return 新加了几条
+     * 合进另一台发来的对话（2026-10-27：微信记录起头，后来所有对话都两边一样）：按编号去重、按时间排；
+     * 本机没有这个对话就照对方的建（另一边删过的不建）；对话本身（标题、置顶、归档、成员……）谁改得晚听谁的。@return 新加了几条消息
      */
     fun importChannel(b: com.guixing.jixunying.model.ChannelBatch, origin: String): Int {
-        if (b.messages.isEmpty() || origin.isBlank() || b.channel.isBlank()) return 0
+        if (origin.isBlank() || b.channel.isBlank()) return 0
         val s = state
-        val mMap = b.members.mapValues { (_, name) -> s.members.firstOrNull { it.name == name }?.id }
-        val existing = s.conversations.filter { it.channel == b.channel }
-        val have = existing.flatMap { snapshot(it.id) }.map { it.id }.toHashSet()
-        val fresh = b.messages.filter { have.add(it.id) }
+        fun mapMember(id: String) = if (id == USER_ID || s.member(id) != null) id else b.members[id]?.let { n -> s.members.firstOrNull { it.name == n }?.id } ?: id
+        val existing = convsOfKey(s, b.channel)
+        val meta = b.meta
+        var convId = existing.maxByOrNull { convChangedAt(it) }?.id
+        if (convId == null) {
+            if (b.channel.startsWith("conv:")) {
+                if (meta == null || meta.isCode) return 0
+                if (s.convDeleted.any { it.id == meta.id && it.deletedAt >= convChangedAt(meta) }) return 0
+                val conv = meta.copy(memberIds = meta.memberIds.map(::mapMember).filter { s.member(it) != null }.distinct(),
+                    grantedPaths = emptyList(), background = emptyList())
+                convs[conv.id] = mutableListOf()
+                updateState { st -> if (st.conversation(conv.id) != null) st else st.copy(conversations = listOf(conv) + st.conversations) }
+                emit(Event.Messages(conv.id, emptyList()))
+                convId = conv.id
+            } else {
+                val gone = s.convDeleted.firstOrNull { it.id == b.channel }?.deletedAt ?: 0
+                if (b.messages.none { it.createdAt > gone }) return 0
+                convId = newChannelConversation(b.channel, b.title.ifBlank { "微信" },
+                    b.members.keys.map(::mapMember).filter { s.member(it) != null }.distinct(), webSearch = true)
+            }
+        } else if (meta != null && meta.editedAt > (state.conversation(convId)?.editedAt ?: 0)) {
+            // 对方改过标题、置顶、归档、成员这些：照对方的
+            val id = convId
+            updateState { st -> st.copy(conversations = st.conversations.map { c -> if (c.id != id) c else c.copy(
+                title = meta.title, pinned = meta.pinned, archived = meta.archived, replyMode = meta.replyMode, webSearch = meta.webSearch,
+                council = meta.council, memberIds = meta.memberIds.map(::mapMember).filter { st.member(it) != null }.distinct().ifEmpty { c.memberIds },
+                editedAt = meta.editedAt) }) }
+        }
+        val id = convId
+        val have = convsOfKey(state, b.channel).flatMap { snapshot(it.id) }.map { it.id }.toHashSet()
+        // 这边删过这个微信对话：删之前的不再搬回来
+        val gone = state.convDeleted.firstOrNull { it.id == b.channel }?.deletedAt ?: 0
+        val fresh = b.messages.filter { it.createdAt > gone && have.add(it.id) }
         if (fresh.isEmpty()) return 0
-        val convId = existing.maxByOrNull { it.updatedAt }?.id
-            ?: newChannelConversation(b.channel, b.title.ifBlank { "微信" }, mMap.values.filterNotNull().distinct(), webSearch = true)
-        val list = messages(convId)
+        val list = messages(id)
         synchronized(list) {
-            fresh.forEach { m -> list += m.copy(convId = convId, syncedFrom = origin, senderId = if (m.senderId == USER_ID) m.senderId else mMap[m.senderId] ?: m.senderId) }
+            fresh.forEach { m -> list += m.copy(convId = id, syncedFrom = origin, senderId = mapMember(m.senderId)) }
             list.sortBy { it.createdAt }
         }
         val last = fresh.maxOf { it.createdAt }
-        updateState { st -> st.copy(conversations = st.conversations.map { if (it.id == convId && it.updatedAt < last) it.copy(updatedAt = last) else it }) }
-        save(convId)
-        emit(Event.Messages(convId, snapshot(convId)))
+        updateState { st -> st.copy(conversations = st.conversations.map { if (it.id == id && it.updatedAt < last) it.copy(updatedAt = last) else it }) }
+        save(id)
+        emit(Event.Messages(id, snapshot(id)))
         return fresh.size
+    }
+
+    // ---- 两端同步配置（2026-10-27 用户：「除了本地模型用不了，没法同步之外，其他的都一样」） ----
+
+    /** 只在这台设备上能用的服务商：电脑上本机地址的（Ollama），手机上借电脑问的。 */
+    private fun localOnly(p: ProviderConfig) = p.viaHost || HostChatCodec.isLoopback(p.baseUrl)
+
+    fun peerConfig(s: AppState = state): com.guixing.jixunying.model.PeerConfig {
+        val local = s.providers.filter(::localOnly).map { it.id }.toSet()
+        return com.guixing.jixunying.model.PeerConfig(s.providers.filterNot(::localOnly), s.members.filter { it.providerId !in local },
+            s.configDeleted, s.convDeleted)
+    }
+
+    /**
+     * 把本机的配置换成 f(本机的) 合出来的那份（本机才能用的服务商和成员留着），返回合好的。
+     * 另一边删掉的对话这里跟着删（删了以后这边又聊过的留着）。
+     */
+    suspend fun mergePeerConfig(f: (com.guixing.jixunying.model.PeerConfig) -> com.guixing.jixunying.model.PeerConfig): com.guixing.jixunying.model.PeerConfig {
+        var out = com.guixing.jixunying.model.PeerConfig()
+        updateState { s ->
+            val m = f(peerConfig(s))
+            out = m
+            val localP = s.providers.filter(::localOnly)
+            val localIds = localP.map { it.id }.toSet()
+            val providers = m.providers.filter { it.id !in localIds }.map { p ->
+                val old = s.provider(p.id)
+                if (old != null && isMaskedKey(p.apiKey)) p.copy(apiKey = old.apiKey) else p
+            } + localP
+            val members = m.members.filter { it.providerId !in localIds } + s.members.filter { it.providerId in localIds }
+            val keep = members.map { it.id }.toSet()
+            s.copy(providers = providers, members = members,
+                conversations = s.conversations.map { c -> if (c.memberIds.all { it in keep }) c else c.copy(memberIds = c.memberIds.filter { it in keep }) },
+                configDeleted = m.deleted, convDeleted = m.convDeleted)
+        }
+        for (t in out.convDeleted) {
+            for (c in state.conversations.filter { it.channel == t.id && convChangedAt(it) <= t.deletedAt }) handle(Command.DeleteConversation(c.id))
+        }
+        return out
+    }
+
+    /**
+     * 手机上、合之前：以前两边各自建的同一个服务商 / 成员编号不一样，先把本机的改成对方的编号（服务商：同一个地址 + 同一个 Key；
+     * 成员：名字、模型、服务商都一样），不然一合就成了两份。编号出现在设置、对话成员、聊天发言人里，一起改。
+     */
+    fun alignToPeer(peer: com.guixing.jixunying.model.PeerConfig) {
+        val memberRenames = LinkedHashMap<String, String>()
+        val allRenames = LinkedHashMap<String, String>()
+        updateState { s ->
+            val renames = LinkedHashMap<String, String>()
+            val peerP = peer.providers.map { it.id }.toSet()
+            for (p in peer.providers) {
+                if (s.providers.any { it.id == p.id }) continue
+                val l = s.providers.firstOrNull { it.id !in peerP && it.id !in renames && !localOnly(it) && ConfigMerge.sameAccount(it, p) } ?: continue
+                renames[l.id] = p.id
+            }
+            val peerM = peer.members.map { it.id }.toSet()
+            for (m in peer.members) {
+                if (s.members.any { it.id == m.id }) continue
+                val l = s.members.firstOrNull { it.id !in peerM && it.id !in renames && it.name.trim() == m.name.trim() &&
+                    it.modelId.trim() == m.modelId.trim() && (renames[it.providerId] ?: it.providerId) == m.providerId } ?: continue
+                renames[l.id] = m.id; memberRenames[l.id] = m.id
+            }
+            allRenames.putAll(renames)
+            if (renames.isEmpty()) s else {
+                var j = AppJson.encodeToString(AppState.serializer(), s)
+                renames.forEach { (o, n) -> j = j.replace("\"$o\"", "\"$n\"") }
+                AppJson.decodeFromString(AppState.serializer(), j)
+            }
+        }
+        if (memberRenames.isNotEmpty()) remapSenders(memberRenames)
+        if (allRenames.isNotEmpty()) runCatching { ledger.remap(allRenames) }
     }
 
     fun newChannelConversation(channel: String, title: String, memberIds: List<String>, webSearch: Boolean): String {

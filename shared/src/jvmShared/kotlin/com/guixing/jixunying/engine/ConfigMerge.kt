@@ -18,9 +18,9 @@ object ConfigMerge {
 
     fun normUrl(u: String) = u.trim().trimEnd('/').lowercase().removeSuffix("/v1").trimEnd('/')
 
-    private fun sameService(a: ProviderConfig, b: ProviderConfig) = normUrl(a.baseUrl) == normUrl(b.baseUrl)
+    internal fun sameService(a: ProviderConfig, b: ProviderConfig) = normUrl(a.baseUrl) == normUrl(b.baseUrl)
 
-    private fun sameAccount(a: ProviderConfig, b: ProviderConfig) =
+    internal fun sameAccount(a: ProviderConfig, b: ProviderConfig) =
         sameService(a, b) && (a.apiKey.trim() == b.apiKey.trim() || a.apiKey.isBlank() || b.apiKey.isBlank())
 
     private fun mergeModels(a: List<ModelInfo>, b: List<ModelInfo>) = a + b.filter { m -> a.none { it.id == m.id } }

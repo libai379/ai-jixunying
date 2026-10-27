@@ -31,14 +31,28 @@ data class LedgerBatch(
 
 @Serializable
 data class ChannelBatch(
-    /** 哪个渠道，比如 weixin:<微信用户编号>。 */
+    /** 哪个对话：微信这类渠道写渠道（weixin:<微信用户编号>，两边各自建的按渠道对上），普通对话写 conv:<对话编号>。 */
     val channel: String,
     val title: String = "",
     val messages: List<Message> = emptyList(),
     val members: Map<String, String> = emptyMap(),
+    /** 对话本身（标题、成员、置顶、归档……）：对方没有这个对话就照它建，有就谁改得晚听谁的。 */
+    val meta: Conversation? = null,
     val more: Boolean = false,
     val until: Long = 0,
     val added: Int = 0,
+)
+
+/**
+ * 两端同步的「配置」：服务商、成员、删除记录。谁改得晚听谁的（updatedAt），删了的另一边跟着删。
+ * 本机地址的服务商（电脑上的 Ollama、手机上借电脑问的）不在里面；界面、个性化、设置不同步（用户 10-27）。
+ */
+@Serializable
+data class PeerConfig(
+    val providers: List<ProviderConfig> = emptyList(),
+    val members: List<Member> = emptyList(),
+    val deleted: List<MemoryTombstone> = emptyList(),
+    val convDeleted: List<MemoryTombstone> = emptyList(),
 )
 
 /** 同步的情况（手机 连接电脑 页显示）。 */

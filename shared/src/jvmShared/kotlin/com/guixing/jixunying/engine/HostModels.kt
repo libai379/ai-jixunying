@@ -139,7 +139,7 @@ class HostModels(
             if (old != null && !old.viaHost) continue   // 手机上自己建过同号的，不碰
             val copy = ProviderConfig(id = hp.id, presetId = hp.presetId, name = hp.name.removeSuffix("（电脑）") + "（电脑）",
                 baseUrl = hp.baseUrl, models = hp.models, enabled = hp.enabled, viaHost = true)
-            if (old == copy) continue
+            if (old?.copy(updatedAt = 0) == copy) continue   // 改的时间（两端同步用）不算变
             engine.call(Command.SaveProvider(copy))
             changed = true
             if (old == null) {

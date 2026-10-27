@@ -219,6 +219,8 @@ sealed interface Command {
     /** 同步一个微信对话（渠道）的记录，规则同 SyncLedger；data 回 ChannelBatch JSON。 */
     /** 手机同步完一遍告诉电脑（电脑联机页显示每台手机什么时候同步过）；RelayHost 按是哪台手机记。 */
     @Serializable data class SyncDone(val summary: String) : Command
+    /** 两端同步配置（PeerConfig）：合进本机（打平时听发来的），data 回合好的 PeerConfig JSON。发空的就是只取对方的。 */
+    @Serializable data class SyncConfig(val bundle: PeerConfig) : Command
     /** 电脑上点「让手机现在同步」：记下时间，在线的手机看到状态里的 syncRequestAt 变了就同步一遍。 */
     @Serializable data object RequestPhoneSync : Command
     @Serializable data class SyncChannel(val push: ChannelBatch, val origin: String, val pullSince: Long, val limit: Int = 40) : Command

@@ -269,12 +269,12 @@ fun HostDevicesPage(ctl: AppController, state: AppState) {
                 TextButton(onClick = { ctl.run(Command.RemoveDevice(d.id)) }) { Text("取消配对", color = MaterialTheme.colorScheme.error) }
             }
         }
-        // 双向同步（2026-10-27 用户：「电脑也要同步手机的一些东西」）：记忆、花费、微信记录两边互相补，模型服务和成员也互相补
+        // 两边一样（2026-10-27 用户：「除了本地模型用不了，没法同步之外，其他的都一样」；界面和个性化不同步）
         if (state.devices.isNotEmpty()) {
             Spacer(Modifier.height(6.dp))
             OutlinedButton(enabled = online > 0, onClick = { ctl.run(Command.RequestPhoneSync) }) { Text("让手机现在同步") }
-            Text("两边互相补：长期记忆、花费账本、微信对话的记录、模型服务和成员（只补没有的，不覆盖）。手机连上电脑时也会自动对记录，每 10 分钟一次。" +
-                "删服务商或成员要两边都删，不然下次手动同步会被另一边补回来。",
+            Text("手机连上电脑就两边保持一样：模型服务、成员、长期记忆、花费账本、微信助理的聊天记录，在哪边改、在哪边删，另一边跟着变（之后每 2 分钟对一次）。" +
+                "不同步的：这台电脑本机的模型（手机用不了）、普通聊天、Code 会话、界面和个性化（各管各的）。",
                 style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, modifier = Modifier.padding(top = 4.dp))
         }
         renaming?.let { d ->
@@ -397,28 +397,10 @@ fun PhoneDevicesPage(ctl: AppController) {
                         color = if (conn is ConnState.Connected) Ext.c.success else MaterialTheme.colorScheme.error)
                 }
             }
-            Spacer(Modifier.height(12.dp))
-            Button(enabled = conn is ConnState.Connected && !busy, onClick = {
-                busy = true
-                scope.launch {
-                    // 两边互相补（2026-10-27）：电脑的补进手机，手机的也补进电脑
-                    val exp = r.call(Command.ExportConfig)
-                    val res = if (exp.ok) ctl.hub.local.call(Command.ImportConfig(exp.data, fromPeer = true)) else exp
-                    val mine = if (res.ok) ctl.hub.local.call(Command.ExportConfig) else res
-                    val back = if (mine.ok) r.call(Command.ImportConfig(mine.data, fromPeer = true)) else mine
-                    busy = false
-                    ctl.toast(if (res.ok && back.ok) "手机：${res.message.ifBlank { "已导入" }}；电脑：${back.message.ifBlank { "已导入" }}" else if (!res.ok) res.message else back.message)
-                }
-            }) {
-                Icon(Icons.Rounded.Download, null, Modifier.size(16.dp)); Spacer(Modifier.width(4.dp))
-                Text(if (busy) "正在同步…" else "两边互相补上模型服务和成员")
-            }
-            Text("电脑上有、手机没有的补进手机，手机上有、电脑没有的补进电脑（Key 走加密线路）。已有的不会重复添加，也不会被覆盖；电脑本机地址的（比如 Ollama）不补进手机。",
-                style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, modifier = Modifier.padding(top = 6.dp))
             ctl.hub.syncNow?.let { now ->
                 val info by ctl.hub.sync.collectAsState()
                 Spacer(Modifier.height(14.dp))
-                FieldLabel("和电脑同步", "长期记忆、花费账本、微信对话的记录：连上电脑就自动对一遍，之后每 10 分钟一次")
+                FieldLabel("和电脑同步", "两边保持一样：模型服务、成员、长期记忆、花费账本、微信助理的聊天记录。连上电脑就对一遍，之后每 2 分钟一次")
                 Text(when {
                     info.running && info.yielding.isNotBlank() -> "正在同步（${info.yielding}）"
                     info.running -> "正在同步…"
@@ -429,7 +411,8 @@ fun PhoneDevicesPage(ctl: AppController) {
                 OutlinedButton(enabled = conn is ConnState.Connected && !info.running, onClick = now, modifier = Modifier.padding(top = 6.dp)) {
                     Text(if (info.running) "正在同步…" else "现在同步")
                 }
-                Text("别的应用在大量上网、或者用的是手机流量时，自动放慢、一小批一小批地传。",
+                Text("在哪边改、在哪边删，另一边跟着变。不同步的：电脑本机的模型（手机用不了）、普通聊天、Code 会话、界面和个性化（各管各的）。" +
+                    "别的应用在大量上网、或者用的是手机流量时，自动放慢、一小批一小批地传。",
                     style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, modifier = Modifier.padding(top = 4.dp))
             }
             Spacer(Modifier.height(12.dp))

@@ -18,6 +18,8 @@ data class ProviderConfig(
      * 每次调用经加密线路交给配对的电脑去问（HostModels，2026-10-24）。电脑开着、手机连上电脑才能用。
      */
     val viaHost: Boolean = false,
+    /** 最后改的时间（两端同步谁新听谁的，2026-10-27）；0 = 以前建的、没记。 */
+    val updatedAt: Long = 0,
 )
 
 @Serializable
@@ -43,6 +45,8 @@ data class Member(
     val temperature: Double? = null,
     /** 快速（关掉思考）/ 深度（想透再答）/ 默认（不传参数，按模型自己的习惯）。各家怎么切换见 Thinking.kt。 */
     val thinking: ThinkingMode = ThinkingMode.AUTO,
+    /** 最后改的时间（两端同步谁新听谁的，2026-10-27）。 */
+    val updatedAt: Long = 0,
 )
 
 /** 用户自己（主持人）。 */
@@ -418,6 +422,8 @@ data class Conversation(
     /** 这个对话属于哪个记忆话题（记忆二期）：记录员自动认；用户在对话设置里改过就以用户的为准（memoryTopicByUser）。 */
     val memoryTopic: String = "",
     val memoryTopicByUser: Boolean = false,
+    /** 对话本身（标题、成员、置顶、归档……）最后改的时间（两端同步用，2026-10-27）；updatedAt 是最后一条消息的时间。 */
+    val editedAt: Long = 0,
 ) {
     val isGroup: Boolean get() = memberIds.size > 1
 
@@ -578,6 +584,10 @@ data class AppState(
     val weixinBackup: String = "",
     /** 电脑上点「让手机现在同步」的时间（2026-10-27）：手机看到它变大就同步一遍。 */
     val syncRequestAt: Long = 0,
+    /** 删掉的服务商、成员（编号 + 删的时间），两端同步时另一边跟着删，留 90 天（2026-10-27）。 */
+    val configDeleted: List<MemoryTombstone> = emptyList(),
+    /** 删掉的对话，同上。 */
+    val convDeleted: List<MemoryTombstone> = emptyList(),
     /** 记录员后台活出的错（成功一次就清掉），见 Background.kt。 */
     val bgProblems: List<BgProblem> = emptyList(),
     /** 按意思搜的补算进度（聊天记录、我的文档各一份），见 model/Semantic.kt。 */

@@ -40,6 +40,25 @@ class Ledger(private val dir: File) {
             .sortedBy { it.at }
     }
 
+    /** 服务商、成员改了编号（两端同步对齐编号，2026-10-27）：账本里的旧编号一起换掉，「手填余额」的估算才对得上。 */
+    fun remap(ids: Map<String, String>) = synchronized(lock) {
+        if (ids.isEmpty()) return@synchronized
+        for (f in dir.listFiles { x -> x.name.endsWith(".jsonl") } ?: emptyArray()) {
+            val lines = f.readLines(Charsets.UTF_8)
+            var changed = false
+            val out = lines.map { line ->
+                val r = runCatching { json.decodeFromString(UsageRecord.serializer(), line) }.getOrNull() ?: return@map line
+                val n = r.copy(providerId = ids[r.providerId] ?: r.providerId, memberId = ids[r.memberId] ?: r.memberId)
+                if (n == r) line else { changed = true; json.encodeToString(UsageRecord.serializer(), n) }
+            }
+            if (changed) {
+                val tmp = File(dir, f.name + ".tmp")
+                tmp.writeText(out.joinToString("\n", postfix = "\n"), Charsets.UTF_8)
+                java.nio.file.Files.move(tmp.toPath(), f.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+            }
+        }
+    }
+
     /** 以前的聊天记录补记过没有（只补一次）。 */
     var backfilled: Boolean
         get() = File(dir, ".backfilled").exists()
