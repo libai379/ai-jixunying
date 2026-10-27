@@ -197,7 +197,10 @@ sealed interface Command {
     /** 手机从电脑导入服务商（含 Key）、成员、个人资料、搜索和画图设置。结果 data 是 ConfigBundle 的 JSON。 */
     @Serializable data object ExportConfig : Command
     /** 手机把电脑导出的配置并入本机。 */
-    @Serializable data class ImportConfig(val bundleJson: String) : Command
+    /**
+     * fromPeer（2026-10-27 双向同步）：是配对的另一台发来的——本机代理不动、本机地址（127.0.0.1 这类）的服务商不要、记忆不在这里合（MemorySync 管）。
+     */
+    @Serializable data class ImportConfig(val bundleJson: String, val fromPeer: Boolean = false) : Command
 
     /** 长期记忆：新增或修改一条。 */
     @Serializable data class SaveMemory(val item: MemoryItem) : Command
@@ -214,6 +217,10 @@ sealed interface Command {
      */
     @Serializable data class SyncLedger(val push: LedgerBatch, val origin: String, val pullSince: Long, val limit: Int = 200) : Command
     /** 同步一个微信对话（渠道）的记录，规则同 SyncLedger；data 回 ChannelBatch JSON。 */
+    /** 手机同步完一遍告诉电脑（电脑联机页显示每台手机什么时候同步过）；RelayHost 按是哪台手机记。 */
+    @Serializable data class SyncDone(val summary: String) : Command
+    /** 电脑上点「让手机现在同步」：记下时间，在线的手机看到状态里的 syncRequestAt 变了就同步一遍。 */
+    @Serializable data object RequestPhoneSync : Command
     @Serializable data class SyncChannel(val push: ChannelBatch, val origin: String, val pullSince: Long, val limit: Int = 40) : Command
     /**
      * 手机的 GitHub 登录换令牌交给电脑做（2026-10-24 方案一）：手机拿到授权码后经加密线路发来，电脑去 GitHub 换令牌、查用户资料，

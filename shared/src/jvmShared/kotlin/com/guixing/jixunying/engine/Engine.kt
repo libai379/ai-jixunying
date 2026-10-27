@@ -550,6 +550,11 @@ class Engine(
         }
     }
 
+    /** 手机同步完报上来的（RelayHost 知道是哪台）。 */
+    fun noteSync(deviceId: String, summary: String) {
+        updateState { s -> s.copy(devices = s.devices.map { if (it.id == deviceId) it.copy(lastSyncAt = now(), lastSyncNote = summary.take(120)) else it }) }
+    }
+
     fun touchDevice(id: String) {
         updateState { s -> s.copy(devices = s.devices.map { if (it.id == id) it.copy(lastSeen = now()) else it }) }
     }
@@ -1578,6 +1583,8 @@ class Engine(
             val added = importLedger(c.push, c.origin)
             CommandResult(data = AppJson.encodeToString(com.guixing.jixunying.model.LedgerBatch.serializer(), exportLedger(c.pullSince, c.limit).copy(added = added)))
         }
+        is Command.SyncDone -> CommandResult()
+        is Command.RequestPhoneSync -> { updateState { it.copy(syncRequestAt = now()) }; CommandResult(message = "已经通知在线的手机") }
         is Command.SyncChannel -> {
             val added = importChannel(c.push, c.origin)
             CommandResult(data = AppJson.encodeToString(com.guixing.jixunying.model.ChannelBatch.serializer(), exportChannel(c.push.channel, c.pullSince, c.limit).copy(added = added)))
@@ -1663,14 +1670,20 @@ class Engine(
             CommandResult(data = AppJson.encodeToString(ConfigBundle.serializer(), bundle))
         }
         is Command.ImportConfig -> {
-            val b = runCatching { AppJson.decodeFromString(ConfigBundle.serializer(), c.bundleJson) }.getOrNull()
+            val b0 = runCatching { AppJson.decodeFromString(ConfigBundle.serializer(), c.bundleJson) }.getOrNull()
                 ?: return CommandResult(false, "配置数据损坏")
+            // 另一台发来的：它本机地址的服务商（电脑上的 Ollama 之类）到这台用不了，记忆由 MemorySync 合
+            val b = if (!c.fromPeer) b0 else b0.copy(
+                providers = b0.providers.filterNot { HostChatCodec.isLoopback(it.baseUrl) },
+                members = b0.members.filter { m -> b0.providers.none { it.id == m.providerId && HostChatCodec.isLoopback(it.baseUrl) } },
+                memories = emptyList(),
+            )
             // 按内容比对：同一个账号的服务商、同名同模型的成员不重复加；本机已有的重复项顺便合并
             var r: ConfigMerge.ImportResult? = null
-            updateState { s -> ConfigMerge.import(s, b, keepLocalProxy = isPhone).also { r = it }.state }
+            updateState { s -> ConfigMerge.import(s, b, keepLocalProxy = isPhone || c.fromPeer).also { r = it }.state }
             val res = r!!
             remapSenders(res.memberMap)
-            val msg = if (res.nothingNew) "电脑和这台设备的模型服务、成员已经一样，没有要导入的"
+            val msg = if (res.nothingNew) (if (c.fromPeer) "两边的模型服务、成员已经一样" else "电脑和这台设备的模型服务、成员已经一样，没有要导入的")
             else buildList {
                 if (res.addedProviders > 0) add("新增 ${res.addedProviders} 个服务商")
                 if (res.addedMembers > 0) add("新增 ${res.addedMembers} 位成员")

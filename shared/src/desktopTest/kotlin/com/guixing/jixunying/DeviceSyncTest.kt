@@ -44,11 +44,11 @@ class DeviceSyncTest {
     private val ch = "weixin:u1"
 
     /** 一台设备的数据：同一个 DeepSeek 账号（两边编号不同）、一位阿德、一个微信对话。 */
-    private fun seed(root: File, pid: String, mid: String, convId: String, msgs: List<Pair<String, Long>>, usage: List<Long>) {
+    private fun seed(root: File, pid: String, mid: String, convId: String, msgs: List<Pair<String, Long>>, usage: List<Long>, extra: List<ProviderConfig> = emptyList()) {
         root.mkdirs()
         val st = Storage(root)
         st.saveState(AppState(
-            providers = listOf(ProviderConfig(pid, name = "DeepSeek", baseUrl = "https://api.deepseek.com/v1", apiKey = "sk-same")),
+            providers = listOf(ProviderConfig(pid, name = "DeepSeek", baseUrl = "https://api.deepseek.com/v1", apiKey = "sk-same")) + extra,
             members = listOf(Member(mid, "阿德", providerId = pid, modelId = "deepseek-v4.1-flash")),
             conversations = listOf(Conversation(convId, "微信 小明", listOf(mid), createdAt = 1, updatedAt = 1, channel = ch)),
         ))
@@ -69,9 +69,11 @@ class DeviceSyncTest {
             setProperty("data_path", File(dir, "mqtt").absolutePath)
         }))
         val t = 1_800_000_000_000L
-        seed(File(dir, "pc"), "p-pc", "m-pc", "c-pc", listOf("u1" to t + 1, "a1" to t + 2), listOf(t + 10, t + 11, t + 12))
+        seed(File(dir, "pc"), "p-pc", "m-pc", "c-pc", listOf("u1" to t + 1, "a1" to t + 2), listOf(t + 10, t + 11, t + 12),
+            listOf(ProviderConfig("p-ollama", name = "Ollama（本机）", baseUrl = "http://127.0.0.1:11434/v1")))
         // 手机：电脑关着时接了微信，答了一轮；也花了钱（50 条，逼它分几批）
-        seed(File(dir, "phone"), "p-ph", "m-ph", "c-ph", listOf("u2" to t + 100, "a2" to t + 101), (0 until 50).map { t + 200 + it })
+        seed(File(dir, "phone"), "p-ph", "m-ph", "c-ph", listOf("u2" to t + 100, "a2" to t + 101), (0 until 50).map { t + 200 + it },
+            listOf(ProviderConfig("p-kimi", name = "Kimi", baseUrl = "https://api.moonshot.cn/v1", apiKey = "sk-kimi")))
         val pc = Engine(Storage(File(dir, "pc"))).also { engines += it }
         pc.call(Command.SaveSettings(pc.state.settings.copy(relay = RelaySettings(true, listOf("tcp://127.0.0.1:$mqttPort"), "测试电脑"))))
         val relay = RelayHost(pc)
@@ -109,7 +111,18 @@ class DeviceSyncTest {
             assertEquals(53, Ledger(File(dir, "pc/usage")).since(0).size)
             assertEquals(53, Ledger(File(dir, "phone/usage")).since(0).size)
             assertEquals(4, msgs(pc, "c-pc").size)
-            assertEquals("两边已经一样", hub.sync.value.summary)
+            assertEquals("记录两边已经一样", hub.sync.value.summary)
+
+            // 手动（或电脑上点了）：模型服务两边互相补；电脑本机地址的不补进手机
+            phone.call(Command.SaveSettings(phone.state.settings.copy(proxy = "http://127.0.0.1:2080")))
+            val pcProxy = pc.state.settings.proxy
+            assertTrue(syncer.runOnce(hub.remote.value!!, withConfig = true), hub.sync.value.error)
+            assertTrue(pc.state.providers.any { it.name == "Kimi" && it.apiKey == "sk-kimi" }, "手机的 Kimi 补进电脑，Key 是真的")
+            assertTrue(phone.state.providers.none { it.baseUrl.contains("127.0.0.1") }, "电脑的 Ollama 不补进手机")
+            assertEquals(1, pc.state.providers.count { it.baseUrl.contains("deepseek") }, "同一个账号不重复")
+            withTimeout(10_000) { while (pc.state.devices.first().lastSyncAt == 0L) delay(100) }
+            assertTrue("电脑" in pc.state.devices.first().lastSyncNote, pc.state.devices.first().lastSyncNote)
+            assertEquals(pcProxy, pc.state.settings.proxy, "电脑的代理不被手机的改掉")
         } finally {
             relay.stop(); broker.stopServer()
         }

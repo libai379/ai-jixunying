@@ -541,6 +541,9 @@ data class PairedDevice(
     val key: String,
     val pairedAt: Long,
     val lastSeen: Long = 0,
+    /** 这台手机最近一次和电脑同步完的时间、结果（2026-10-27）。 */
+    val lastSyncAt: Long = 0,
+    val lastSyncNote: String = "",
 )
 
 /** 除聊天记录以外的全部状态，体积小，变化时整体推送。 */
@@ -573,6 +576,8 @@ data class AppState(
      * 不定的话电脑一关，几台开着微信助理的手机会一起回。默认是最后一台从电脑拿微信绑定的；电脑 设置 → 微信 里能换。"none" = 都不接。
      */
     val weixinBackup: String = "",
+    /** 电脑上点「让手机现在同步」的时间（2026-10-27）：手机看到它变大就同步一遍。 */
+    val syncRequestAt: Long = 0,
     /** 记录员后台活出的错（成功一次就清掉），见 Background.kt。 */
     val bgProblems: List<BgProblem> = emptyList(),
     /** 按意思搜的补算进度（聊天记录、我的文档各一份），见 model/Semantic.kt。 */

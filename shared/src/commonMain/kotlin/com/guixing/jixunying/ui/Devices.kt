@@ -262,10 +262,20 @@ fun HostDevicesPage(ctl: AppController, state: AppState) {
                     Text(d.name, style = MaterialTheme.typography.bodyMedium)
                     Text(if (on) "在线" else if (d.lastSeen > 0) "最近在线：" + formatTime(d.lastSeen) else "配对后还没连过",
                         style = MaterialTheme.typography.labelSmall, color = if (on) Ext.c.success else Ext.c.subtle)
+                    if (d.lastSyncAt > 0) Text("${formatTime(d.lastSyncAt)}同步过" + (if (d.lastSyncNote.isNotBlank()) "：${d.lastSyncNote}" else ""),
+                        style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
                 }
                 TextButton(onClick = { renaming = d }) { Text("改名") }
                 TextButton(onClick = { ctl.run(Command.RemoveDevice(d.id)) }) { Text("取消配对", color = MaterialTheme.colorScheme.error) }
             }
+        }
+        // 双向同步（2026-10-27 用户：「电脑也要同步手机的一些东西」）：记忆、花费、微信记录两边互相补，模型服务和成员也互相补
+        if (state.devices.isNotEmpty()) {
+            Spacer(Modifier.height(6.dp))
+            OutlinedButton(enabled = online > 0, onClick = { ctl.run(Command.RequestPhoneSync) }) { Text("让手机现在同步") }
+            Text("两边互相补：长期记忆、花费账本、微信对话的记录、模型服务和成员（只补没有的，不覆盖）。手机连上电脑时也会自动对记录，每 10 分钟一次。" +
+                "删服务商或成员要两边都删，不然下次手动同步会被另一边补回来。",
+                style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, modifier = Modifier.padding(top = 4.dp))
         }
         renaming?.let { d ->
             var name by remember(d.id) { mutableStateOf(d.name) }
@@ -391,16 +401,19 @@ fun PhoneDevicesPage(ctl: AppController) {
             Button(enabled = conn is ConnState.Connected && !busy, onClick = {
                 busy = true
                 scope.launch {
+                    // 两边互相补（2026-10-27）：电脑的补进手机，手机的也补进电脑
                     val exp = r.call(Command.ExportConfig)
-                    val res = if (exp.ok) ctl.hub.local.call(Command.ImportConfig(exp.data)) else exp
+                    val res = if (exp.ok) ctl.hub.local.call(Command.ImportConfig(exp.data, fromPeer = true)) else exp
+                    val mine = if (res.ok) ctl.hub.local.call(Command.ExportConfig) else res
+                    val back = if (mine.ok) r.call(Command.ImportConfig(mine.data, fromPeer = true)) else mine
                     busy = false
-                    ctl.toast(if (res.ok) res.message.ifBlank { "已导入" } else res.message)
+                    ctl.toast(if (res.ok && back.ok) "手机：${res.message.ifBlank { "已导入" }}；电脑：${back.message.ifBlank { "已导入" }}" else if (!res.ok) res.message else back.message)
                 }
             }) {
                 Icon(Icons.Rounded.Download, null, Modifier.size(16.dp)); Spacer(Modifier.width(4.dp))
-                Text(if (busy) "正在同步…" else "同步电脑上的模型服务和成员")
+                Text(if (busy) "正在同步…" else "两边互相补上模型服务和成员")
             }
-            Text("同步后手机不连电脑也能直接用这些模型（Key 加密传过来，只存在这台手机上）。手机上已有的不会重复添加，也不会被覆盖，只补电脑上多出来的。",
+            Text("电脑上有、手机没有的补进手机，手机上有、电脑没有的补进电脑（Key 走加密线路）。已有的不会重复添加，也不会被覆盖；电脑本机地址的（比如 Ollama）不补进手机。",
                 style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, modifier = Modifier.padding(top = 6.dp))
             ctl.hub.syncNow?.let { now ->
                 val info by ctl.hub.sync.collectAsState()

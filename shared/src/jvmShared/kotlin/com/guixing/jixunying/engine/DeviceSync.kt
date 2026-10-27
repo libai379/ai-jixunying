@@ -55,12 +55,16 @@ class DeviceSyncer(
         scope.launch {
             var wasConnected = false
             var lastRun = 0L
+            var handledRequest = -1L
             while (isActive) {
                 val remote = hub.remote.value
                 val connected = remote != null && remote.conn.value is ConnState.Connected
-                val manual = withTimeoutOrNull(if (connected && !wasConnected) 1 else 5_000L) { kick.receive() } != null
+                var manual = withTimeoutOrNull(if (connected && !wasConnected) 1 else 5_000L) { kick.receive() } != null
+                // 电脑上点了「让手机现在同步」（第一次看到的不算，那是以前点的）
+                val req = remote?.store?.state?.value?.syncRequestAt ?: 0L
+                if (connected) { if (handledRequest >= 0 && req > handledRequest) manual = true; handledRequest = req }
                 if (connected && remote != null && (manual || !wasConnected || clock() - lastRun > EVERY_MS)) {
-                    runCatching { runOnce(remote, firstThisSession = !wasConnected) }
+                    runCatching { runOnce(remote, firstThisSession = !wasConnected, withConfig = manual) }
                         .onFailure { e -> hub.sync.value = hub.sync.value.copy(running = false, yielding = "", error = (e.message ?: e.toString()).take(120)) }
                     lastRun = clock()
                 }
@@ -80,7 +84,10 @@ class DeviceSyncer(
     }
 
     /** 跑一遍；返回 false = 电脑是旧版不认识（不报错）。 */
-    internal suspend fun runOnce(remote: RemoteBackend, firstThisSession: Boolean = true): Boolean {
+    /**
+     * @param withConfig 模型服务和成员也两边互相补（只在手动、电脑上点了的时候：自动补的话，一边删掉的会被另一边补回来）
+     */
+    internal suspend fun runOnce(remote: RemoteBackend, firstThisSession: Boolean = true, withConfig: Boolean = false): Boolean {
         hub.sync.value = hub.sync.value.copy(running = true, error = "", yielding = "")
         val hostId = remote.host.hostId
         val hostLabel = "电脑 " + remote.host.hostName.ifBlank { "电脑" }
@@ -90,6 +97,19 @@ class DeviceSyncer(
         var sent = 0
         var got = 0
         val pacer = Pacer()
+        var configNote = ""
+
+        // 模型服务和成员：电脑的补进手机，手机的补进电脑（2026-10-27 用户：「电脑也要同步手机的一些东西」）
+        if (withConfig) {
+            val pc = remote.call(Command.ExportConfig)
+            if (!pc.ok) return finish(pc.message, 0, 0)
+            val here = engine.call(Command.ImportConfig(pc.data, fromPeer = true))
+            val mine = engine.call(Command.ExportConfig)
+            val there = remote.call(Command.ImportConfig(mine.data, fromPeer = true))
+            if (!there.ok) return finish(there.message, 0, 0)
+            configNote = listOf("手机" to here.message, "电脑" to there.message)
+                .filter { !it.second.contains("已经一样") && it.second.isNotBlank() }.joinToString("；") { "${it.first}：${it.second}" }
+        }
 
         // 账本
         var cur = p.ledger.let { Cursor(back(it.push), back(it.pull)) }
@@ -128,18 +148,20 @@ class DeviceSyncer(
                 pacer.after(clock() - t0)
             }
         }
-        finish("", sent, got)
+        finish("", sent, got, configNote)
+        runCatching { remote.call(Command.SyncDone(hub.sync.value.summary)) }
         return true
     }
 
     /** 下一批从哪要：这批最后一条的时间；整批都在同一毫秒、还有更多时往后挪 1 毫秒，免得原地打转。 */
     private fun advance(from: Long, until: Long, more: Boolean) = if (more && until <= from) from + 1 else maxOf(from, until)
 
-    private fun finish(error: String, sent: Int, got: Int): Boolean {
+    private fun finish(error: String, sent: Int, got: Int, configNote: String = ""): Boolean {
         val old = error.contains("不认识") || error.contains("Unknown", ignoreCase = true) || error.contains("unknown", ignoreCase = true)
         hub.sync.value = SyncInfo(
             running = false, lastAt = if (error.isBlank()) clock() else hub.sync.value.lastAt,
-            summary = if (sent + got == 0) "两边已经一样" else "发过去 $sent 条、收到 $got 条（重复的不算）",
+            summary = (if (sent + got == 0) "记录两边已经一样" else "记录发过去 $sent 条、收到 $got 条（重复的不算）") +
+                (if (configNote.isNotBlank()) "；$configNote" else ""),
             error = when { error.isBlank() -> ""; old -> "电脑上的 AI集训营 版本太老，不认识同步账本和微信记录，换新版后自动同步"; else -> error.take(120) },
         )
         return error.isBlank()

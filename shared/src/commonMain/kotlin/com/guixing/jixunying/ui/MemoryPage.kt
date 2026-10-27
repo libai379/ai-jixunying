@@ -16,6 +16,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Edit
+import androidx.compose.material.icons.rounded.ExpandLess
+import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.PushPin
 import androidx.compose.material.icons.rounded.Psychology
 import androidx.compose.material3.Button
@@ -143,11 +145,24 @@ fun MemoryPage(ctl: AppController, state: AppState) {
         val order = compareByDescending<MemoryItem> { it.pinned }.thenByDescending { it.updatedAt }
         val groups = state.memories.groupBy { it.topic }.entries
             .sortedWith(compareBy<Map.Entry<String, List<MemoryItem>>> { it.key.isNotBlank() }.thenByDescending { e -> e.value.maxOf { it.updatedAt } })
+        // 每一组能收起（2026-10-27 用户：「记忆下面这一串要有一个收起的栏」）：默认都收着，只显示组名和条数，点一下展开
+        var open by remember { mutableStateOf(setOf<String>()) }
+        if (groups.size > 1) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+            val allOpen = groups.all { it.key in open }
+            TextButton({ open = if (allOpen) emptySet() else groups.map { it.key }.toSet() }) { Text(if (allOpen) "全部收起" else "全部展开", style = MaterialTheme.typography.labelMedium) }
+        }
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
           groups.forEach { (topic, list) ->
-            Text(if (topic.isBlank()) "关于你（所有对话都带上）· ${list.size} 条" else "话题「$topic」（聊这个话题时带上）· ${list.size} 条",
-                style = MaterialTheme.typography.labelMedium, color = Ext.c.subtle, modifier = Modifier.padding(top = 6.dp))
-            list.sortedWith(order).forEach { m ->
+            val expanded = topic in open
+            Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).clickable { open = if (expanded) open - topic else open + topic }
+                .padding(vertical = 8.dp, horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                Icon(if (expanded) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore, if (expanded) "收起" else "展开", Modifier.size(18.dp), tint = Ext.c.subtle)
+                Spacer(Modifier.width(6.dp))
+                Text(if (topic.isBlank()) "关于你（所有对话都带上）· ${list.size} 条" else "话题「$topic」（聊这个话题时带上）· ${list.size} 条",
+                    style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurface, modifier = Modifier.weight(1f))
+                Text(if (expanded) "收起" else "展开", style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
+            }
+            if (expanded) list.sortedWith(order).forEach { m ->
                 @Composable
                 fun actions() {
                     IconButton(onClick = { ctl.run(Command.SaveMemory(m.copy(pinned = !m.pinned)), quiet = true) }) {
