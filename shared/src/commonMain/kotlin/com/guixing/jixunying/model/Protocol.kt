@@ -323,6 +323,17 @@ sealed interface Command {
     /** 立场档案：删掉一个议题（记录员认错了的）。 */
     @Serializable data class StanceDelete(val topicId: String) : Command
 
+    /** 集训场：开一局狼人杀（座位按给的顺序，身份随机发；同一时间只打一局）。结果 data 是局编号。 */
+    @Serializable data class WolfStart(val board: WolfBoard, val seats: List<WolfSeatPick>) : Command
+    /** 集训场：真人座位交这一步（askId 见 WolfAsk）。发言、遗言填 text；选座位填 target（0 = 不选）；女巫填 save / poison。 */
+    @Serializable data class WolfAnswer(val askId: String, val text: String = "", val target: Int = 0, val save: Boolean = false, val poison: Int = 0) : Command
+    /** 集训场：停掉正在打的那一局。 */
+    @Serializable data object WolfStop : Command
+    /** 集训场：正在打的那一局。结果 data 是 WolfLive 的 JSON，没有就是空。 */
+    @Serializable data object WolfCurrent : Command
+    /** 集训场：打过的局（新的在前）。结果 data 是 List<WolfGameRecord> 的 JSON。 */
+    @Serializable data object WolfList : Command
+
     /** 换一个新的配对二维码（旧的立即失效）。 */
     @Serializable data object NewPairingCode : Command
     @Serializable data class RemoveDevice(val id: String) : Command
@@ -398,6 +409,8 @@ sealed interface Event {
     @Serializable data class MessageRemoved(val convId: String, val messageId: String) : Event
     @Serializable data class ConversationRemoved(val convId: String) : Event
     @Serializable data class Notice(val text: String, val error: Boolean = false) : Event
+    /** 集训场正在打的那一局变了（每一步都推）。 */
+    @Serializable data class Wolf(val live: WolfLive) : Event
 }
 
 /** 手机和电脑之间的一帧（加密前的明文）。 */

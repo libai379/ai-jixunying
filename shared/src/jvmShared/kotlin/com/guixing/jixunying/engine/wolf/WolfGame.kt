@@ -1,6 +1,7 @@
 package com.guixing.jixunying.engine.wolf
 
 import com.guixing.jixunying.engine.Json
+import com.guixing.jixunying.model.WolfAsk
 import com.guixing.jixunying.model.WolfEvent
 import com.guixing.jixunying.model.WolfGameRecord
 import com.guixing.jixunying.model.WolfNote
@@ -20,6 +21,9 @@ import kotlin.random.Random
  */
 fun interface WolfBrain {
     suspend fun ask(seat: WolfSeat, system: String, user: String): String
+
+    /** 法官实际调的这个：多带一份「这一步要做什么」（真人座位按它出界面，AI 座位不用）。 */
+    suspend fun act(seat: WolfSeat, system: String, user: String, step: WolfAsk): String = ask(seat, system, user)
 }
 
 /**
@@ -85,7 +89,8 @@ class WolfGame(
             val allowed = aliveNos().filter { it != lastGuard }
             guarded = pickTarget(g, day, true, "守护",
                 "今晚你要守护谁？被守护的人今晚不会被狼刀死。不能连续两晚守同一个人（昨晚守的是 ${if (lastGuard == 0) "没有" else "${lastGuard}号"}），可以守自己。" +
-                    "也可以不守（target 写 0）。", allowed, allowZero = true)
+                    "也可以不守（target 写 0）。", allowed, allowZero = true,
+                human = "今晚守护谁？不能连着两晚守同一个人" + (if (lastGuard == 0) "。" else "（昨晚守的是 ${lastGuard}号）。"))
             lastGuard = guarded
         }
         // 狼人：各自提，不一样再商量一次，还不一样按第一只活狼的
@@ -97,14 +102,16 @@ class WolfGame(
             val first = wolves.map { w ->
                 w.no to pickTarget(w, day, true, "刀人",
                     "今晚狼队要刀谁？你的狼队友是：${wolfNos.filter { it != w.no }.joinToString("、") { "${it}号" }.ifEmpty { "（只剩你自己）" }}。" +
-                        "在 reason 里简单说理由，队友能看到。", targets, allowZero = false, wolfTalk = true)
+                        "在 reason 里简单说理由，队友能看到。", targets, allowZero = false, wolfTalk = true,
+                    human = "今晚刀谁？狼队友：${wolfNos.filter { it != w.no }.joinToString("、") { "${it}号" }.ifEmpty { "只剩你自己" }}。")
             }
             val picks = first.map { it.second }.filter { it != 0 }
             knife = if (picks.distinct().size <= 1) picks.firstOrNull() ?: 0 else {
                 val second = wolves.map { w ->
                     pickTarget(w, day, true, "刀人",
                         "狼队意见不一样：" + first.joinToString("；") { (n, t) -> "${n}号想刀 ${if (t == 0) "没说" else "${t}号"}" } +
-                            "。再定一次，尽量统一。", targets, allowZero = false, wolfTalk = true)
+                            "。再定一次，尽量统一。", targets, allowZero = false, wolfTalk = true,
+                        human = "狼队意见不一样：" + first.joinToString("；") { (n, t) -> "${n}号想刀 ${if (t == 0) "没说" else "${t}号"}" } + "。再定一次。")
                 }.filter { it != 0 }
                 if (second.distinct().size == 1) second.first() else second.firstOrNull() ?: picks.first()
             }
@@ -112,7 +119,8 @@ class WolfGame(
         }
         // 预言家
         alive().firstOrNull { it.role == WolfRole.SEER }?.let { s ->
-            val checked = pickTarget(s, day, true, "查验", "今晚你要查验谁？会告诉你他是好人还是狼人。", aliveNos().filter { it != s.no }, allowZero = false)
+            val checked = pickTarget(s, day, true, "查验", "今晚你要查验谁？会告诉你他是好人还是狼人。", aliveNos().filter { it != s.no }, allowZero = false,
+                human = "今晚查验谁？会告诉你他是好人还是狼人。")
             if (checked != 0) emit(WolfEvent(day, true, "seerResult", s.no, checked,
                 "${checked}号是${if (seat(checked).role.wolf) "狼人" else "好人"}。", visibleTo = listOf(s.no)))
         }
@@ -150,7 +158,9 @@ class WolfGame(
             if (!canSave) append("（今晚不能用解药。）")
         }
         repeat(2) { attempt ->
-            val raw = brainOf(w).ask(w, systemFor(w), userFor(w, day, true, ask))
+            val raw = brainOf(w).act(w, systemFor(w), userFor(w, day, true, ask),
+                WolfAsk(seat = w.no, kind = "witch", what = "用药", text = if (knife == 0) "今晚没人被刀。" else "今晚 ${knife}号被刀了。",
+                    canSave = canSave, poisonable = poisonable))
             countCall()
             val (think, obj) = WolfParse.split(raw)
             note(WolfNote(day, w.no, "think", "用药", think))
@@ -185,7 +195,7 @@ class WolfGame(
             voters.map { v ->
                 async {
                     v.no to pickTarget(v, day, false, "投票", "现在投票放逐一个人。所有人同时投，投完一起公布。可以弃票（target 写 0）。",
-                        aliveNos().filter { it != v.no }, allowZero = true)
+                        aliveNos().filter { it != v.no }, allowZero = true, human = "投票放逐谁？大家同时投，投完一起公布。")
                 }
             }.awaitAll()
         }
@@ -205,8 +215,9 @@ class WolfGame(
 
     private suspend fun speak(s: WolfSeat, day: Int) {
         repeat(2) { attempt ->
-            val raw = brainOf(s).ask(s, systemFor(s), userFor(s, day, false,
-                "轮到你发言了。像真人在桌上一样说，说你的判断和理由。格式：先写 <想法>你的私下想法（别人看不到）</想法>，再写 <发言>你要公开说的话</发言>。"))
+            val raw = brainOf(s).act(s, systemFor(s), userFor(s, day, false,
+                "轮到你发言了。像真人在桌上一样说，说你的判断和理由。格式：先写 <想法>你的私下想法（别人看不到）</想法>，再写 <发言>你要公开说的话</发言>。"),
+                WolfAsk(seat = s.no, kind = "speech", what = "发言", text = "轮到你发言了。"))
             countCall()
             val (think, speech) = WolfParse.speech(raw)
             if (think.isNotBlank()) note(WolfNote(day, s.no, "think", "发言", think))
@@ -217,8 +228,9 @@ class WolfGame(
     }
 
     private suspend fun lastWords(s: WolfSeat, day: Int) {
-        val raw = brainOf(s).ask(s, systemFor(s), userFor(s, day, false,
-            "你出局了，请留遗言。格式：<想法>私下想法</想法><发言>遗言</发言>。"))
+        val raw = brainOf(s).act(s, systemFor(s), userFor(s, day, false,
+            "你出局了，请留遗言。格式：<想法>私下想法</想法><发言>遗言</发言>。"),
+            WolfAsk(seat = s.no, kind = "lastWords", what = "遗言", text = "你出局了，留一句遗言。"))
         countCall()
         val (think, speech) = WolfParse.speech(raw)
         if (think.isNotBlank()) note(WolfNote(day, s.no, "think", "遗言", think))
@@ -227,7 +239,8 @@ class WolfGame(
 
     /** 私下判断：每个活着的人对每个别人是狼的把握。只记录，不进任何人的记录。 */
     private suspend fun judgeAll(day: Int, stage: String) = coroutineScope {
-        alive().map { s -> async { judgeOne(s, day, stage) } }.awaitAll()
+        // 真人不交（这是给 AI 的测评题，真人填太烦）
+        alive().filter { !it.human }.map { s -> async { judgeOne(s, day, stage) } }.awaitAll()
     }
 
     private suspend fun judgeOne(s: WolfSeat, day: Int, stage: String) {
@@ -262,17 +275,18 @@ class WolfGame(
      * 不合法重问一次，还不行记弃权、返回 0（绝不随机替它选，设计说明第 3 节）。
      */
     private suspend fun pickTarget(s: WolfSeat, day: Int, night: Boolean, what: String, ask: String, allowed: List<Int>,
-                                   allowZero: Boolean, wolfTalk: Boolean = false): Int {
+                                   allowZero: Boolean, wolfTalk: Boolean = false, human: String = ask): Int {
         val full = ask + "可选：${allowed.joinToString("、") { "${it}号" }}。格式：先写 <想法>私下想法</想法>，再输出 JSON：{\"target\": 座位号, \"reason\": \"一句话\"}。"
         for (attempt in 0..1) {
-            val raw = brainOf(s).ask(s, systemFor(s), userFor(s, day, night, full))
+            val raw = brainOf(s).act(s, systemFor(s), userFor(s, day, night, full),
+                WolfAsk(seat = s.no, kind = "target", what = what, text = human, allowed = allowed, allowZero = allowZero))
             countCall()
             val (think, obj) = WolfParse.split(raw)
             if (think.isNotBlank()) note(WolfNote(day, s.no, "think", what, think))
             val t = (obj?.get("target") as? JsonPrimitive)?.contentOrNull?.filter { it.isDigit() }?.toIntOrNull()
             if (t != null && (t in allowed || (allowZero && t == 0))) {
                 if (wolfTalk) emit(WolfEvent(day, true, "wolfTalk", s.no, t,
-                    "${s.no}号想刀 ${if (t == 0) "没人" else "${t}号"}：" + ((obj["reason"] as? JsonPrimitive)?.contentOrNull.orEmpty()).take(300),
+                    "${s.no}号想刀 ${if (t == 0) "没人" else "${t}号"}" + ((obj["reason"] as? JsonPrimitive)?.contentOrNull.orEmpty()).take(300).let { if (it.isBlank()) "。" else "：$it" },
                     visibleTo = alive().filter { it.role.wolf }.map { it.no }))
                 return t
             }

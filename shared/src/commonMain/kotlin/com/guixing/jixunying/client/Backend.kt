@@ -47,6 +47,9 @@ class ClientStore {
     private val _notices = MutableSharedFlow<Event.Notice>(extraBufferCapacity = 16)
     val notices: SharedFlow<Event.Notice> = _notices.asSharedFlow()
 
+    /** 集训场正在打的那一局（没有就是 null）。 */
+    val wolf = MutableStateFlow<com.guixing.jixunying.model.WolfLive?>(null)
+
     fun apply(event: Event) {
         when (event) {
             is Event.State -> _state.value = event.state
@@ -72,6 +75,7 @@ class ClientStore {
             }
             is Event.ConversationRemoved -> _messages.update { it - event.convId }
             is Event.Notice -> _notices.tryEmit(event)
+            is Event.Wolf -> wolf.value = event.live
         }
     }
 

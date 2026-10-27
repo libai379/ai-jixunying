@@ -113,3 +113,37 @@ data class WolfGameRecord(
     val calls: Int = 0,
     val day: Int = 0,
 )
+
+/**
+ * 法官要真人座位做的一步（集训场界面上填，2026-10-27）。kind：speech 发言 / lastWords 遗言 / target 选一个座位（what 是守护 / 刀人 / 查验 / 投票）/ witch 用药。
+ * 真人不交私下判断（那是给 AI 的测评题）。
+ */
+@Serializable
+data class WolfAsk(
+    val id: String = "",
+    val seat: Int = 0,
+    val kind: String = "",
+    val what: String = "",
+    /** 给人看的一句：要做什么。 */
+    val text: String = "",
+    val allowed: List<Int> = emptyList(),
+    /** 可以不选（守卫不守、弃票）。 */
+    val allowZero: Boolean = false,
+    /** 女巫：今晚能不能用解药、能毒谁。 */
+    val canSave: Boolean = false,
+    val poisonable: List<Int> = emptyList(),
+)
+
+/** 开局时一个座位坐谁：AI 成员（memberId）或真人（humanName）。 */
+@Serializable
+data class WolfSeatPick(val memberId: String = "", val humanName: String = "")
+
+/** 正在打的那一局（Event.Wolf 推给界面）：记录、等真人做的事、哪几个 AI 正在想。 */
+@Serializable
+data class WolfLive(
+    val record: WolfGameRecord,
+    val asks: List<WolfAsk> = emptyList(),
+    val thinking: List<Int> = emptyList(),
+    /** 打完了或者被停了。 */
+    val over: Boolean = false,
+)

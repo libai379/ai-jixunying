@@ -86,7 +86,7 @@ enum class MainPage { DOCS, STANCES, COSTS }
  * 侧栏顶上的两栏（docs/Code栏设计说明.md 第 1、11 节，2026-10-12）：
  * 「对话」是现在的聊天，「Code」是对着一个项目文件夹写代码的会话。两边各列各的，互不掺和。
  */
-enum class SidebarTab(val label: String) { CHAT("对话"), CODE("Code") }
+enum class SidebarTab(val label: String) { CHAT("对话"), CODE("Code"), WOLF("集训场") }
 
 /** 要放进某个对话输入框的文件：别的 App 发来的（还没上传），或者文档库里转成的附件。 */
 class Incoming(val files: List<PickedFile> = emptyList(), val attachments: List<com.guixing.jixunying.model.Attachment> = emptyList()) {
@@ -110,6 +110,10 @@ class AppController(
 
     var currentConvId by mutableStateOf<String?>(null)
     var page by mutableStateOf<MainPage?>(null)
+    /** 集训场：看哪一局的复盘（空 = 开局页或正在打的那局）。 */
+    var wolfView by mutableStateOf("")
+    /** 集训场：刚打完的那局还停在桌面上（点「再开一局」才回开局页）。 */
+    var wolfShowLast by mutableStateOf(true)
     /** 等用户选「发到哪个对话」的文件。 */
     var incoming by mutableStateOf<Incoming?>(null)
     /** 已经选好对话、等那个对话的输入框收下的文件。 */
@@ -285,6 +289,7 @@ fun App(hub: Hub, platform: Platform, debugStart: String? = null) {
                             if (s == "docs") c.page = MainPage.DOCS
                             if (s == "stances") c.page = MainPage.STANCES
                             if (s == "costs") c.page = MainPage.COSTS
+                            if (s == "wolf") c.sidebarTab = SidebarTab.WOLF
                             if (s == "settingshome") c.openSettings()
                             if (s == "newcode") { c.sidebarTab = SidebarTab.CODE; c.showNewCode = true }
                             // code / code:会话编号 / code:会话编号#diff = 侧栏切到 Code，必要时打开这个会话（#diff 再打开改动查看器）
@@ -503,6 +508,7 @@ private fun MainContent(ctl: AppController, wide: Boolean, openDrawer: () -> Uni
                 ctl.page == MainPage.DOCS -> DocsScreen(ctl, wide, openDrawer)
                 ctl.page == MainPage.STANCES -> StancesScreen(ctl, wide, openDrawer)
                 ctl.page == MainPage.COSTS -> CostsScreen(ctl, wide, openDrawer)
+                ctl.sidebarTab == SidebarTab.WOLF -> WolfScreen(ctl, wide, openDrawer)
                 state.providers.isEmpty() || (state.members.isEmpty() && ctl.sidebarTab != SidebarTab.CODE) -> WelcomeScreen(ctl, wide, openDrawer)
                 // Code 会话打开时主区域是 CodeScreen（不是聊天），不管侧栏在哪一栏
                 ctl.currentConvId?.let { state.conversation(it) }?.isCode == true -> CodeScreen(ctl, ctl.currentConvId!!, wide, openDrawer)

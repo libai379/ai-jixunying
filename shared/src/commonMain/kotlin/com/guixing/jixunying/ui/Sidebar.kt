@@ -141,12 +141,18 @@ fun Sidebar(ctl: AppController, modifier: Modifier, onNavigate: () -> Unit, onCo
                     CollapseButton(Icons.AutoMirrored.Rounded.MenuOpen, "收起侧栏（Ctrl+B）", onCollapse)
                 }
             }
-            Row(Modifier.fillMaxWidth().padding(start = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+            // 三个标签（加了集训场，10-27）+ 设备下拉：一行放得下就标签靠左、下拉靠右；窄窗口、大字时放不下，下拉换到下一行（phoneSettingsFit 量的）
+            @OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+            androidx.compose.foundation.layout.FlowRow(Modifier.fillMaxWidth().padding(start = 4.dp),
+                horizontalArrangement = Arrangement.SpaceBetween, verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 // 手机本机跑不了 Code 栏，不给这个标签（2026-10-23），切到电脑才有
-                val tabs = if (codeAccess == CodeAccess.NO_LOCAL) listOf(SidebarTab.CHAT) else SidebarTab.entries
-                SidebarTabs(tabs, ctl.sidebarTab) { if (it != ctl.sidebarTab) { ctl.sidebarTab = it; query = "" } }
-                Spacer(Modifier.weight(1f))
-                DeviceMenu(ctl, state, onNavigate)
+                val tabs = if (codeAccess == CodeAccess.NO_LOCAL) SidebarTab.entries - SidebarTab.CODE else SidebarTab.entries
+                SidebarTabs(tabs, ctl.sidebarTab) {
+                    if (it != ctl.sidebarTab) { ctl.sidebarTab = it; query = "" }
+                    // 集训场的主区域跟着这一栏走：点进来就把文档、花费这些页关掉
+                    if (it == SidebarTab.WOLF) { ctl.page = null; ctl.settingsTab = null; onNavigate() }
+                }
+                Box(Modifier.align(Alignment.CenterVertically)) { DeviceMenu(ctl, state, onNavigate) }
             }
             Spacer(Modifier.height(10.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -157,7 +163,14 @@ fun Sidebar(ctl: AppController, modifier: Modifier, onNavigate: () -> Unit, onCo
                     Spacer(Modifier.width(8.dp))
                     Box(
                         Modifier.size(40.dp).clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.primary)
-                            .clickable { if (code) ctl.newCode(isDesktopHere) else ctl.showNewChat = true; onNavigate() },
+                            .clickable {
+                                when {
+                                    code -> ctl.newCode(isDesktopHere)
+                                    ctl.sidebarTab == SidebarTab.WOLF -> { ctl.wolfView = ""; ctl.wolfShowLast = false; ctl.page = null; ctl.settingsTab = null }
+                                    else -> ctl.showNewChat = true
+                                }
+                                onNavigate()
+                            },
                         contentAlignment = Alignment.Center,
                     ) {
                         Icon(Icons.Rounded.Add, if (code) "新建 Code 会话" else "新对话", Modifier.size(22.dp), tint = MaterialTheme.colorScheme.onPrimary)
@@ -179,6 +192,7 @@ fun Sidebar(ctl: AppController, modifier: Modifier, onNavigate: () -> Unit, onCo
             }
             Spacer(Modifier.height(4.dp))
             if (code) CodeSessionSidebar(ctl, state, query, codeAccess, onNavigate)
+            else if (ctl.sidebarTab == SidebarTab.WOLF) WolfSidebar(ctl, Modifier.weight(1f), onNavigate)
             else ChatSessionSidebar(ctl, state, query, onNavigate)
         }
         HorizontalDivider(color = Ext.c.border)

@@ -1639,6 +1639,11 @@ class Engine(
             scope.launch { verifyTopic(topic.id) }
             CommandResult(message = "正在让裁判核实…")
         }
+        is Command.WolfStart -> startWolf(c)
+        is Command.WolfAnswer -> answerWolf(c)
+        is Command.WolfStop -> stopWolf()
+        is Command.WolfCurrent -> CommandResult(data = wolfLive()?.let { AppJson.encodeToString(com.guixing.jixunying.model.WolfLive.serializer(), it) }.orEmpty())
+        is Command.WolfList -> CommandResult(data = AppJson.encodeToString(kotlinx.serialization.builtins.ListSerializer(com.guixing.jixunying.model.WolfGameRecord.serializer()), wolfStore.all()))
         is Command.StanceDelete -> {
             val convId = synchronized(stanceBook) {
                 stanceBook.firstOrNull { it.id == c.topicId }?.also { t -> stanceBook.removeAll { it.id == t.id } }?.convId
@@ -2217,6 +2222,92 @@ class Engine(
     }
 
     internal fun wolfGames() = wolfStore.all()
+
+    // ---- 集训场界面开的局（2026-10-27 用户：「我要的是几个人和几个人 AI 来玩」）：真人在界面上发言、选人 ----
+
+    private class WolfRun(val job: Job, val game: com.guixing.jixunying.engine.wolf.WolfGame) {
+        val asks = ConcurrentHashMap<String, Pair<com.guixing.jixunying.model.WolfAsk, CompletableDeferred<String>>>()
+        val thinking = java.util.concurrent.ConcurrentSkipListSet<Int>()
+        @Volatile var over = false
+    }
+
+    @Volatile private var wolfRun: WolfRun? = null
+    @Volatile private var wolfLast: com.guixing.jixunying.model.WolfLive? = null
+
+    private fun wolfLive(): com.guixing.jixunying.model.WolfLive? = wolfRun?.let { r ->
+        // 私下想法不推（每一步都推整局，越打越大；复盘从 WolfList 读）
+        com.guixing.jixunying.model.WolfLive(r.game.record.copy(notes = emptyList()), r.asks.values.map { it.first }.sortedBy { it.seat }, r.thinking.toList(), r.over)
+    } ?: wolfLast
+
+    private fun pushWolf() { wolfLive()?.let { wolfLast = it; emit(Event.Wolf(it)) } }
+
+    /** 开一局：座位按给的顺序，身份随机发。已经有一局在打就不开。 */
+    private fun startWolf(c: Command.WolfStart): CommandResult {
+        if (wolfRun?.let { !it.over } == true) return CommandResult(false, "已经有一局在打，先停掉那局")
+        if (c.seats.size != c.board.roles.size) return CommandResult(false, "${c.board.label} 要 ${c.board.roles.size} 个座位，现在是 ${c.seats.size} 个")
+        val s = state
+        val roles = com.guixing.jixunying.engine.wolf.WolfRules.deal(c.board.roles, kotlin.random.Random(System.nanoTime()))
+        val seats = c.seats.mapIndexed { i, pick ->
+            if (pick.memberId.isBlank()) com.guixing.jixunying.model.WolfSeat(i + 1, roles[i], human = true, name = pick.humanName.trim().ifBlank { "玩家${i + 1}" })
+            else {
+                val m = s.member(pick.memberId) ?: return CommandResult(false, "${i + 1}号选的 AI 成员不在了")
+                com.guixing.jixunying.model.WolfSeat(i + 1, roles[i], m.id, name = m.name, modelLabel = Prompts.modelLabel(s, m), modelId = m.modelId)
+            }
+        }
+        val start = com.guixing.jixunying.model.WolfGameRecord("wolf-" + newId().take(12), c.board, seats)
+        lateinit var run: WolfRun
+        val ai = wolfBrain()
+        // 真人：把这一步挂出来等界面交；AI：问模型，问的时候标「正在想」
+        val brain = object : com.guixing.jixunying.engine.wolf.WolfBrain {
+            override suspend fun ask(seat: com.guixing.jixunying.model.WolfSeat, system: String, user: String) = ai.ask(seat, system, user)
+            override suspend fun act(seat: com.guixing.jixunying.model.WolfSeat, system: String, user: String, step: com.guixing.jixunying.model.WolfAsk): String {
+                if (!seat.human) {
+                    run.thinking += seat.no; pushWolf()
+                    try { return ai.ask(seat, system, user) } finally { run.thinking -= seat.no; pushWolf() }
+                }
+                val id = newId()
+                val d = CompletableDeferred<String>()
+                run.asks[id] = step.copy(id = id) to d
+                pushWolf()
+                try { return d.await() } finally { run.asks.remove(id); pushWolf() }
+            }
+        }
+        val game = com.guixing.jixunying.engine.wolf.WolfGame(start, { brain }, ::now, { r -> wolfStore.save(r); pushWolf() })
+        val job = scope.launch(start = kotlinx.coroutines.CoroutineStart.LAZY) {
+            try { game.run() } finally { run.over = true; run.asks.clear(); run.thinking.clear(); pushWolf() }
+        }
+        run = WolfRun(job, game)
+        wolfRun = run
+        job.start()
+        pushWolf()
+        return CommandResult(data = start.id)
+    }
+
+    /** 真人交了一步：按 AI 的格式拼好交给法官（法官照常解析）。 */
+    private fun answerWolf(c: Command.WolfAnswer): CommandResult {
+        // 马上摘掉：同一步点两下（或者两台设备同时交）只算第一次
+        val (ask, d) = wolfRun?.asks?.remove(c.askId) ?: return CommandResult(false, "这一步已经过了")
+        val raw = when (ask.kind) {
+            "speech", "lastWords" -> "<发言>" + c.text.trim().ifBlank { "过。" } + "</发言>"
+            "witch" -> "{\"save\": ${c.save && ask.canSave}, \"poison\": ${if (c.poison in ask.poisonable) c.poison else 0}}"
+            else -> "{\"target\": ${c.target}}"
+        }
+        d.complete(raw)
+        return CommandResult()
+    }
+
+    private fun stopWolf(): CommandResult {
+        val r = wolfRun ?: return CommandResult()
+        if (!r.over) {
+            r.job.cancel()
+            val rec = r.game.record.let { if (it.winner.isBlank() && it.error.isBlank()) it.copy(error = "中途停了", endedAt = now()) else it }
+            wolfStore.save(rec)
+            wolfLast = com.guixing.jixunying.model.WolfLive(rec.copy(notes = emptyList()), over = true)
+            wolfRun = null
+            emit(Event.Wolf(wolfLast!!))
+        }
+        return CommandResult()
+    }
 
     /** AI 座位：用这位成员的模型问一次（不带工具）。网络出错等 3 秒再试一次，还不行整局记出错。 */
     private fun wolfBrain() = com.guixing.jixunying.engine.wolf.WolfBrain { seat, system, user ->

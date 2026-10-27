@@ -805,6 +805,38 @@ class ShotsTest {
         tmp.deleteRecursively()
     }
 
+    /** 集训场：开局页、几个真人轮流时挡住的样子、轮到某个真人投票的样子（全是真人座位，不联网）。 */
+    @Test
+    fun wolfShots() {
+        val dir = out ?: return
+        dir.mkdirs()
+        val tmp = tempDir("jxy-wolfshots")
+        val e = seed(File(tmp, "data"), File(tmp, "文档").apply { mkdirs() })
+        val hub = Hub(e)
+        val desktop = DesktopPlatform(fileLog = false) { null }
+        val phone = PhonePlatform()
+        shoot("desktop-wolf-lobby", 1280, 1000, 1f, hub, desktop, "wolf")
+        shoot("phone-wolf-lobby", 824, 1784, 2f, hub, phone, "wolf")
+        kotlinx.coroutines.runBlocking {
+            val names = listOf("我", "小明", "阿芳", "老王", "小李", "阿强")
+            e.call(com.guixing.jixunying.model.Command.WolfStart(com.guixing.jixunying.model.WolfBoard.SIX, names.map { com.guixing.jixunying.model.WolfSeatPick(humanName = it) }))
+            // 一直交到白天发言（夜里的都随便选第一个）
+            kotlinx.coroutines.withTimeout(10_000) {
+                while (true) {
+                    val l = com.guixing.jixunying.model.AppJson.decodeFromString(com.guixing.jixunying.model.WolfLive.serializer(), e.call(com.guixing.jixunying.model.Command.WolfCurrent).data)
+                    val a = l.asks.firstOrNull() ?: run { kotlinx.coroutines.delay(5); null } ?: continue
+                    if (a.kind == "speech" && l.record.events.count { it.kind == "speech" } >= 2) break
+                    e.call(com.guixing.jixunying.model.Command.WolfAnswer(a.id, text = "我觉得 ${a.allowed.firstOrNull() ?: 3}号发言有点怪，先听听后面的。", target = a.allowed.firstOrNull() ?: 0))
+                }
+            }
+        }
+        shoot("desktop-wolf-table", 1280, 1000, 1f, hub, desktop, "wolf")
+        shoot("phone-wolf-table", 824, 1784, 2f, hub, phone, "wolf")
+        kotlinx.coroutines.runBlocking { e.call(com.guixing.jixunying.model.Command.WolfStop) }
+        shoot("desktop-wolf-over", 1280, 1000, 1f, hub, desktop, "wolf")
+        e.close()
+    }
+
     @Test
     fun shots() {
         val dir = out ?: return
