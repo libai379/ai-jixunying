@@ -1882,10 +1882,10 @@ private fun CodeComposer(ctl: AppController, conv: Conversation, running: Boolea
                             ComposerIcon(Icons.Rounded.Image, "图片") { pick(true) }
                             Spacer(Modifier.width(6.dp))
                             if (running) {
-                                // 2026-10-28 用户：「我再给他输入命令，他听不到了……我也不知道从哪暂停他」——自己的模型下一步就看到插话；
-                                // 外部 Claude Code / Codex / Gemini 插不进去，说清楚要马上改方向就先停
+                                // 2026-10-28 用户：「我再给他输入命令，他听不到了……我也不知道从哪暂停他」——自己的模型下一步就看到插话，
+                                // 外部 Claude Code 先喊停再接着说（和终端里按 Esc 再打字一样）；Codex / Gemini、一条龙插不进去，说清楚要马上改方向就先停
                                 val spec = conv.code
-                                val hears = spec != null && !spec.flowOn && !spec.isClaudeCode && !spec.isCliAgent
+                                val hears = spec != null && !spec.flowOn && !spec.isCliAgent
                                 Text(if (hears) "它在做，你说的话下一步就交给它" else "它在做，这句话等这一轮做完再交给它；要马上改方向先点停",
                                     style = MaterialTheme.typography.labelSmall, color = Ext.c.warning, maxLines = 2, overflow = TextOverflow.Ellipsis)
                             }

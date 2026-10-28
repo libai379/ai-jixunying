@@ -56,4 +56,39 @@ class LiveClaudeCodeTest {
         }
         Unit
     }
+
+    /**
+     * 2026-10-28 用户：「为什么 Claude Code 用终端的时候……我可以随时打断你呢？」——真的 Claude Code 走一遍插话：
+     * 它在写长文的时候插一句，程序先喊停、再在同一个进程里交给它；看它停了、接着答、记得前面在写什么。
+     * 设 JXY_LIVE_CLAUDE=1 才跑（haiku，用户的订阅，几十个词元）。
+     */
+    @Test
+    fun realClaudeHearsInterjection() = runBlocking {
+        if (System.getenv("JXY_LIVE_CLAUDE") != "1") { println("没设 JXY_LIVE_CLAUDE=1，跳过"); return@runBlocking }
+        val dir = kotlin.io.path.createTempDirectory("jxy-live-claude-int").toFile()
+        try {
+            val project = File(dir, "proj").apply { mkdirs() }
+            val e = Engine(Storage(File(dir, "data")))
+            e.codeRunner = com.guixing.jixunying.engine.code.CodeShell()
+            e.call(Command.SaveSettings(e.state.settings.copy(code = CodeSettings(shell = "powershell"))))
+            val conv = e.call(Command.CodeCreate(project.absolutePath, CodeSpec.CLAUDE_CODE, "haiku", CodeMode.ACCEPT_EDITS)).data
+            fun msgs() = e.store.messages.value[conv].orEmpty()
+            fun ais() = msgs().filter { it.role == Role.AI && it.senderId == CODE_ID }
+            e.call(Command.CodeSend(conv, "不用任何工具，直接在回答里用中文写一篇两千字的文章，题目是《茶的历史》，从唐朝写到今天，分十段。"))
+            // 等它开始写（有字或者有思考）再插话
+            withTimeout(120_000) { while (ais().firstOrNull()?.let { it.content.isNotBlank() || it.reasoning.isNotBlank() } != true) delay(200) }
+            val t0 = System.currentTimeMillis()
+            e.call(Command.CodeSend(conv, "先别写了。用一句话告诉我：你刚才在写什么题目？"))
+            withTimeout(180_000) { while (ais().size < 2 || ais().last().status == MsgStatus.STREAMING) delay(200) }
+            val all = msgs()
+            println("插话后 ${System.currentTimeMillis() - t0} 毫秒答完\n" + all.joinToString("\n") { "${it.role} ${it.status} ${it.error} | ${it.content.take(160).replace("\n", "⏎")}" })
+            assertEquals(listOf(Role.USER, Role.AI, Role.USER, Role.AI), all.map { it.role })
+            assertEquals(MsgStatus.DONE, all[1].status, "被喊停的那段不算出错：" + all[1].error)
+            assertEquals(MsgStatus.DONE, all[3].status, all[3].error)
+            assertTrue("茶" in all[3].content, "记得前面在写什么：" + all[3].content)
+        } finally {
+            dir.deleteRecursively()
+        }
+        Unit
+    }
 }

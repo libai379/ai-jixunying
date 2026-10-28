@@ -132,6 +132,15 @@ object ClaudeCli {
         }
     }.toString()
 
+    /**
+     * 喊停这一轮（2026-10-28，用户：「为什么 Claude Code 用终端的时候……我可以随时打断你呢？」）。官方 streaming input 模式支持中途喊停、接着说
+     * （https://code.claude.com/docs/en/agent-sdk/streaming-vs-single-mode）；本机 2.1.312 实测：它马上回 control_response success，
+     * 这一轮出一条 result（error_during_execution），进程不退；接着发 user 它在同一个会话里接着说、记得前面。
+     */
+    fun interruptRequest(requestId: String): String = buildJsonObject {
+        put("type", "control_request"); put("request_id", requestId); putJsonObject("request") { put("subtype", "interrupt") }
+    }.toString()
+
     fun allow(requestId: String, input: JsonObject): String = response(requestId, buildJsonObject {
         put("behavior", "allow"); put("updatedInput", input)
     })

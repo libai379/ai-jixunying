@@ -97,8 +97,10 @@ class CodeAgent(private val host: CodeHost) {
         synchronized(run) {
             if (run.running) {
                 run.queued.add(task)
-                if (hearsMidway(convId)) waitings.values.filter { it.convId == convId }.forEach { w ->
-                    if (w.done.complete(false to INTERJECT)) putDown += convId
+                if (hearsMidway(convId)) {
+                    waitings.values.filter { it.convId == convId }.forEach { w -> if (w.done.complete(false to INTERJECT)) putDown += convId }
+                    // 外部 Claude Code：先喊停这一轮，停下以后在同一个进程里把这句话交给它（claudeRound）
+                    claudeInterrupts[convId]?.invoke()
                 }
                 return
             }
@@ -107,11 +109,17 @@ class CodeAgent(private val host: CodeHost) {
         start(run, task)
     }
 
-    /** 这个会话跑的是自己的模型（不是外部 agent、不是一条龙）：做事中途能插话。 */
+    /**
+     * 做事中途能插话：自己的模型（下一步就看到），外部 Claude Code（先喊停、再在同一个会话里接着说，2026-10-28 本机实测通了）。
+     * Codex / Gemini CLI、一条龙插不进去，照旧排队。
+     */
     private fun hearsMidway(convId: String): Boolean {
         val spec = host.state.conversation(convId)?.code ?: return false
-        return !spec.flowOn && !spec.isClaudeCode && !spec.isCliAgent
+        return !spec.flowOn && !spec.isCliAgent
     }
+
+    /** 正在跑的外部 Claude Code 主会话：用户插话时调它喊停（claudeRound 里登记，跑完拿掉）。 */
+    private val claudeInterrupts = ConcurrentHashMap<String, () -> Unit>()
 
     /**
      * 停下这个会话正在跑的循环：等批准的按拒绝处理（先把等的都拒掉，再取消协程；
@@ -1078,7 +1086,8 @@ class CodeAgent(private val host: CodeHost) {
     private class ExtStep(val stepId: String, val file: File? = null, val rel: String = "", val before: String = "",
                           val created: Boolean = false, val closed: Boolean = false)
 
-    private class ClaudeRound(val error: String? = null, val stale: Boolean = false, val usage: Usage = Usage())
+    /** msgId：最后一段回答（用户中途插话时回答分段，收尾要落在最后那段上）；空 = 没分段。 */
+    private class ClaudeRound(val error: String? = null, val stale: Boolean = false, val usage: Usage = Usage(), val msgId: String = "")
 
     /** Claude Code 当团队角色（2026-10-19）：这张任务单的文字、--model、要不要只看不改；它说的话收在 out 里。 */
     private class ClaudeWorker(val text: String, val modelId: String, val readOnly: Boolean) { val out = StringBuilder() }
@@ -1137,7 +1146,8 @@ class CodeAgent(private val host: CodeHost) {
                     val left = session?.let { commander.close(it.token) }.orEmpty()
                     val tail = if (left.isEmpty()) "" else "\n\n（" + left.joinToString("、") { "${it.id} ${TeamSeat.label(it.role)}：${it.name}" } + " 没等到结果这一轮就结束了，已经停下。）"
                     val err = r.error
-                    host.updateMessage(convId, msg.id) {
+                    // 中途插过话的：收尾落在最后那段回答上（前面几段在分段时已经收好）
+                    host.updateMessage(convId, r.msgId.ifBlank { msg.id }) {
                         if (err != null) it.copy(status = MsgStatus.ERROR, error = err, usage = usage)
                         else it.copy(content = (it.content.trim() + tail).trim(), status = MsgStatus.DONE, usage = usage)
                     }
@@ -1146,15 +1156,20 @@ class CodeAgent(private val host: CodeHost) {
                 }
             }
         } catch (e: CancellationException) {
-            withContext(NonCancellable) { host.updateMessage(convId, msg.id) { it.copy(status = MsgStatus.STOPPED) } }
+            // 中途插过话的：停在最后那段回答上
+            withContext(NonCancellable) { host.updateMessage(convId, claudeSegments[convId] ?: msg.id) { it.copy(status = MsgStatus.STOPPED) } }
             throw e
         } catch (e: Throwable) {
-            host.updateMessage(convId, msg.id) { it.copy(status = MsgStatus.ERROR, error = host.friendlyError(e)) }
+            host.updateMessage(convId, claudeSegments[convId] ?: msg.id) { it.copy(status = MsgStatus.ERROR, error = host.friendlyError(e)) }
         } finally {
+            claudeSegments.remove(convId)
             instr?.delete()
             mcp?.delete()
         }
     }
+
+    /** 外部 Claude Code 主会话中途插话后、现在在写的那段回答（停止、出错时落在它上面）。 */
+    private val claudeSegments = ConcurrentHashMap<String, String>()
 
     /**
      * 一条龙（2026-10-22，设计说明第 19 节）：程序按流程转——开发 → 审查和测试同时看 → 有没过的把意见交回开发 → 都过了提交。
@@ -1283,6 +1298,12 @@ class CodeAgent(private val host: CodeHost) {
         var wrote = false
         var hookRan = false
         var usage = Usage()
+        // 用户做事中途插话（2026-10-28，照终端里按 Esc 再打字）：主会话登记一个「喊停」，submit 收到插话时调；
+        // 停下来那条 result 到了，这一段回答收尾，把话在同一个进程里交给它（它记得前面），后面的步骤记在新的一段回答上
+        var mid = msgId
+        val main = worker == null
+        val stopAsked = java.util.concurrent.atomic.AtomicBoolean(false)
+        if (main) claudeInterrupts[convId] = { if (stopAsked.compareAndSet(false, true)) proc.send(ClaudeCli.interruptRequest("int-" + host.newId())) }
         try {
             val (text, images) = if (worker != null) worker.text to emptyList() else claudeTaskText(convId, task!!, resume.isBlank())
             proc.send(ClaudeCli.initRequest())
@@ -1292,48 +1313,72 @@ class CodeAgent(private val host: CodeHost) {
                     is ClaudeCli.Init -> if (worker == null && ev.sessionId.isNotBlank()) host.updateCode(convId) { it.copy(externalSession = ev.sessionId) }
                     is ClaudeCli.Text -> if (!ev.sub) {
                         if (worker != null) worker.out.append(if (wrote) "\n\n" else "").append(ev.text)
-                        else host.appendDelta(convId, msgId, (if (wrote) "\n\n" else "") + ev.text, "")
+                        else host.appendDelta(convId, mid, (if (wrote) "\n\n" else "") + ev.text, "")
                         wrote = true
                     }
-                    is ClaudeCli.Thinking -> if (worker == null) host.appendDelta(convId, msgId, "", ev.text)
-                    is ClaudeCli.ToolUse -> claudeToolUse(convId, msgId, ev, uses, steps)
-                    is ClaudeCli.Permission -> proc.send(claudePermission(convId, msgId, ev, steps, backup))
-                    is ClaudeCli.ToolResult -> claudeToolResult(convId, msgId, ev, uses, steps)
+                    is ClaudeCli.Thinking -> if (worker == null) host.appendDelta(convId, mid, "", ev.text)
+                    is ClaudeCli.ToolUse -> claudeToolUse(convId, mid, ev, uses, steps)
+                    is ClaudeCli.Permission -> proc.send(claudePermission(convId, mid, ev, steps, backup))
+                    is ClaudeCli.ToolResult -> claudeToolResult(convId, mid, ev, uses, steps)
                     is ClaudeCli.Limit -> if (ev.status.isNotBlank() && ev.status != "allowed" && ev.status != "allowed_warning") {
                         val at = if (ev.resetsAt > 0) java.time.Instant.ofEpochSecond(ev.resetsAt).atZone(java.time.ZoneId.systemDefault())
                             .format(java.time.format.DateTimeFormatter.ofPattern("M月d日 HH:mm")) else ""
-                        addStep(convId, msgId, ToolStep("run", "Claude 订阅额度", id = host.newId(), ok = false,
+                        addStep(convId, mid, ToolStep("run", "Claude 订阅额度", id = host.newId(), ok = false,
                             note = "用到上限了" + if (at.isNotEmpty()) "，$at 恢复" else ""))
                     }
                     is ClaudeCli.Done -> {
                         usage = Usage(usage.prompt + ev.usage.prompt, usage.completion + ev.usage.completion, usage.cached + ev.usage.cached, usage.millis + ev.usage.millis)
+                        // 用户插了话（喊停了这一轮，或者正好做完）：这一段收尾，在同一个会话里接着把话交给它
+                        val said = if (main) takeInterjections(convId) else emptyList()
+                        if (said.isNotEmpty()) {
+                            host.updateMessage(convId, mid) { it.copy(content = it.content.trim(), status = MsgStatus.DONE, usage = usage) }
+                            usage = Usage()
+                            val next = Message(host.newId(), convId, Role.AI, CODE_ID, status = MsgStatus.STREAMING, createdAt = host.now(),
+                                modelLabel = host.messagesOf(convId).firstOrNull { it.id == mid }?.modelLabel.orEmpty())
+                            host.addMessage(next)
+                            mid = next.id
+                            claudeSegments[convId] = mid
+                            wrote = false
+                            stopAsked.set(false)
+                            val head = if (putDown.remove(convId)) "（你刚才等批准的那一步因为我插话先放下了，没做。）\n" else ""
+                            val parts = said.map { claudeTaskText(convId, it, fresh = false) }
+                            proc.send(ClaudeCli.userMessage(head + parts.joinToString("\n\n") { it.first }, parts.flatMap { it.second }))
+                            continue
+                        }
+                        // 喊停了、话却没了（用户紧接着点了停止，队列清空）：不算出错
+                        if (ev.isError && stopAsked.get()) {
+                            proc.closeInput()
+                            return ClaudeRound(usage = usage, msgId = mid)
+                        }
                         if (ev.isError) {
                             val stale = resume.isNotBlank() && Regex("(?i)no conversation found|session.{0,40}not found").containsMatchIn(ev.text)
-                            return ClaudeRound(claudeError(ev.text), stale, usage)
+                            return ClaudeRound(claudeError(ev.text), stale, usage, mid)
                         }
                         // 任务做完后的钩子：没过就再交给它改一轮（只一轮），和自己的循环一样
                         val hook = host.state.settings.code.hookAfterTask.trim()
                         val again = if (worker != null || hook.isEmpty() || hookRan) false else {
                             hookRan = true
-                            "报错了" in runHook(convId, msgId, hook, "任务做完后的钩子", File(cur.folder)).also { out ->
+                            "报错了" in runHook(convId, mid, hook, "任务做完后的钩子", File(cur.folder)).also { out ->
                                 if ("报错了" in out) proc.send(ClaudeCli.userMessage("（程序自动跑了用户设的检查，没过，改好它：）$out"))
                             }
                         }
                         if (!again) {
                             if (!wrote && ev.text.isNotBlank()) {
-                                if (worker != null) worker.out.append(ev.text) else host.appendDelta(convId, msgId, ev.text, "")
+                                if (worker != null) worker.out.append(ev.text) else host.appendDelta(convId, mid, ev.text, "")
                             }
+                            if (main) claudeInterrupts.remove(convId)
                             proc.closeInput()
                             withContext(Dispatchers.IO) { proc.waitExit(5_000) }
-                            return ClaudeRound(usage = usage)
+                            return ClaudeRound(usage = usage, msgId = mid)
                         }
                     }
                 }
             }
             // 输出完了却没有做完的消息：它自己退出了（没登录、参数不认、崩了）
             val err = proc.stderrTail()
-            return ClaudeRound(claudeError(err.ifBlank { "Claude Code 没做完就退出了（退出码 ${proc.exitCode() ?: "?"}）" }), usage = usage)
+            return ClaudeRound(claudeError(err.ifBlank { "Claude Code 没做完就退出了（退出码 ${proc.exitCode() ?: "?"}）" }), usage = usage, msgId = mid)
         } finally {
+            if (main) claudeInterrupts.remove(convId)
             withContext(NonCancellable + Dispatchers.IO) { proc.close() }
         }
     }

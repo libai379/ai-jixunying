@@ -82,6 +82,27 @@ class ClaudeCodeTest {
 
     private fun runs() = argsLog.readLines(Charsets.UTF_8).filter { it.isNotBlank() }
 
+    /**
+     * 2026-10-28 用户：「为什么 Claude Code 用终端的时候……我可以随时打断你呢？为什么在那个软件就做不到呢？」——
+     * 做事中途插话：先喊停这一轮（control_request interrupt），停下以后在同一个进程里把话交给它；回答在插话处分两段，被喊停的那段不算出错。
+     */
+    @Test
+    fun interjectionInterruptsAndContinuesInSameProcess() = runBlocking {
+        if (!hasPython()) { println("没有 python，跳过"); return@runBlocking }
+        val e = engine()
+        val conv = claudeConv(e, CodeMode.ACCEPT_EDITS)
+        assertTrue(e.call(Command.CodeSend(conv, "慢活")).ok)
+        await { "开始干慢活" in ai(e, conv)?.content.orEmpty() }
+        assertTrue(e.call(Command.CodeSend(conv, "插一句：先汇报进度")).ok)
+        awaitDone(e, conv, count = 2)
+        val ms = msgs(e, conv)
+        assertEquals(listOf(Role.USER, Role.AI, Role.USER, Role.AI), ms.map { it.role })
+        assertEquals(MsgStatus.DONE, ms[1].status, "被喊停的那段不算出错：" + ms[1].error)
+        assertTrue("收到你插的话：插一句：先汇报进度" in ms[3].content, ms[3].content)
+        assertEquals(1, runs().size, "同一个进程里接着说，没另起一个")
+        assertTrue("\"interrupt\"" in inLog.readText(), "发了喊停")
+    }
+
     /** 2026-10-22：它读了一张图（工作区外面的截图，像试用记账本时读 %TEMP% 里的模拟器截图）——步骤上挂一份副本给用户看。 */
     @Test
     fun imageItReadIsKeptOnTheStep() = runBlocking {
@@ -337,6 +358,16 @@ while True:
         result(tid, 'hi' if r.get('behavior') == 'allow' else r.get('message', ''), r.get('behavior') != 'allow')
         say('做完了。')
         done('做完了。')
+    elif '慢活' in task:
+        # 2026-10-28：一直干不完，等喊停（照真 claude 2.1.312：回 control_response 带 still_queued，这一轮出一条 error_during_execution 的 result）
+        say('开始干慢活。')
+        while True:
+            c = read()
+            if c.get('type') == 'control_request' and c.get('request', {}).get('subtype') == 'interrupt':
+                out({'type': 'control_response', 'response': {'subtype': 'success', 'request_id': c['request_id'], 'response': {'still_queued': []}}})
+                out({'type': 'result', 'subtype': 'error_during_execution', 'is_error': True, 'session_id': SID, 'duration_ms': 5,
+                     'errors': ['[ede_diagnostic] result_type=user last_content_type=n/a stop_reason=null']})
+                break
     elif '看截图' in task:
         shot = os.path.join(os.path.dirname(os.getcwd()), 'shot.png')
         free('Read', {'file_path': shot}, '')
@@ -347,6 +378,9 @@ while True:
         result(tid, r.get('message', ''), True)
         say('PLAN_DENIED' if r.get('behavior') == 'deny' else 'PLAN_ALLOWED')
         done('ok')
+    elif '插一句' in task:
+        say('收到你插的话：' + task)
+        done('收到你插的话。')
     else:
         free('Read', {'file_path': path}, '1\told')
         say('看完了。')
