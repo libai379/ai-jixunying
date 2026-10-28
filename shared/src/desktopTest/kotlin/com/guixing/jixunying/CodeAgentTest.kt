@@ -96,6 +96,9 @@ class CodeAgentTest {
                         ?.let { (it["content"] as? JsonPrimitive)?.contentOrNull }.orEmpty()
                     val toolResults = msgs.map { it.jsonObject }.filter { it["role"]?.jsonPrimitive?.content == "tool" }
                         .map { (it["content"] as? JsonPrimitive)?.contentOrNull.orEmpty() }
+                    // 所有 user 说过的话（无人值守接着做时最后一条是「这一轮走满了，接着做」，任务在前面）
+                    val allUser = msgs.map { it.jsonObject }.filter { it["role"]?.jsonPrimitive?.content == "user" }
+                        .joinToString("\n") { (it["content"] as? JsonPrimitive)?.contentOrNull.orEmpty() }
                     call.respondTextWriter(ContentType.Text.EventStream) {
                         fun chunk(delta: String) { write("data: {\"choices\":[{\"index\":0,\"delta\":$delta}]}\n\n"); flush() }
                         fun say(text: String) = chunk(Json.encodeToString(JsonObject.serializer(), JsonObject(mapOf("content" to JsonPrimitive(text)))))
@@ -216,7 +219,7 @@ class CodeAgentTest {
                                 callTool("run_command", mapOf("command" to task.removePrefix("跑命令 ").trim()))
                             else say("跑完了。")
                             // 一直在读，不停下来（测走满最多步数）
-                            "一直读" in task -> callTool("read_file", mapOf("path" to "a.txt"))
+                            "一直读" in task || ("一直读" in allUser && "这一轮走满" in task) -> callTool("read_file", mapOf("path" to "a.txt"))
                             // 慢一点再回答（测同一个会话里第二条排队）
                             "排队测试" in task -> {
                                 Thread.sleep(700)
@@ -1028,6 +1031,38 @@ class CodeAgentTest {
         assertEquals("第一条做完了。", ai[0].content.trim())
         assertEquals("第二条做完了。", ai[1].content.trim())
         assertTrue(ai[0].createdAt <= ai[1].createdAt)
+    }
+
+    /**
+     * 2026-10-28 用户：「我给他一系列的任务让他自己去干，我全程一天不带管的，我不需要点任何一个允许」——无人值守：
+     * 危险命令不等人（记一步「没跑」、告诉它换个办法）；一轮走满最多步数不停，接着下一轮，最多 UNATTENDED_ROUNDS 轮。
+     */
+    @Test
+    fun unattendedNeverWaitsAndKeepsGoing() = runBlocking {
+        val e = engine()
+        val conv = codeConv(e)
+        assertTrue(e.call(Command.CodeSetMode(conv, CodeMode.ACCEPT_EDITS, unattended = true)).ok)
+        val spec = e.state.conversation(conv)!!.code!!
+        assertTrue(spec.unattended && spec.openAll, "无人值守连带全部放开")
+        e.call(Command.CodeSend(conv, "跑命令 Remove-Item x -Recurse"))
+        awaitStatus(e, conv, MsgStatus.DONE)
+        val run = aiOf(e, conv)!!.tools.single { it.kind == "run" }
+        assertEquals("denied", run.approval)
+        assertTrue("无人值守" in run.note, run.note)
+        assertTrue("换个不危险的办法" in lastToolTexts(), "回给模型的话：" + lastToolTexts().takeLast(300))
+        // 一直读：走满 10 步不停，接着下一轮，一共 11 轮（第一轮 + 接着的 10 轮）
+        val n = sendTask(e, conv, "一直读")
+        awaitStatus(e, conv, MsgStatus.DONE, minAi = n, timeoutMs = 120_000)
+        val ai = aiOf(e, conv)!!
+        assertEquals(110, ai.tools.count { it.kind == "read" })
+        assertTrue("无人值守走满了 11 轮" in ai.content, ai.content.takeLast(200))
+        // 切回手动：危险命令照样停下来等批准
+        assertTrue(e.call(Command.CodeSetMode(conv, CodeMode.MANUAL)).ok)
+        assertFalse(e.state.conversation(conv)!!.code!!.unattended)
+        sendTask(e, conv, "跑命令 Remove-Item x -Recurse")
+        assertEquals("run", awaitWaiting(e, conv, "run").kind)
+        e.call(Command.CodeStop(conv))
+        Unit
     }
 
     /**

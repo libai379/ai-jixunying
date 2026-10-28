@@ -76,7 +76,7 @@ fun GlassTuningPage(ctl: AppController, tuning: GlassTuning, onBack: (() -> Unit
     var target by remember { mutableStateOf(GlassTarget.CARD) }
     // 草稿：拖的时候改它（预览跟着变），松手 / 点开关时存进设置
     var draft by remember(tuning, target) { mutableStateOf(tuning.paramsFor(target)) }
-    fun commit(p: GlassParams = draft) { draft = p; ctl.updateSettings { it.copy(glassTuning = it.glassTuning.with(target, p)) } }
+    fun commit(p: GlassParams = draft) { draft = p; ctl.updateLocalSettings { it.copy(glassTuning = it.glassTuning.with(target, p)) } }
     fun change(p: GlassParams) { draft = p }
 
     if (onBack != null) Row(verticalAlignment = Alignment.CenterVertically) {
@@ -85,7 +85,7 @@ fun GlassTuningPage(ctl: AppController, tuning: GlassTuning, onBack: (() -> Unit
     // embedded = 放在 外观 页里（10-24 用户：「液态玻璃和外观，这不是一个东西吗？为什么要分两栏？」——并回外观，标题和总开关外观页自己有）
     if (!embedded) {
         PageHeader("液态玻璃调节", "每个位置各调各的；上面是预览，下面拖一拖马上看到，松手就存，界面上同时变。调乱了点「恢复默认」或者应用一个预设。")
-        SwitchRow("液态玻璃", "关掉就是原来的纯色界面", LocalGlass.current.on) { v -> ctl.updateSettings { it.copy(glass = v) } }
+        SwitchRow("液态玻璃", "关掉就是原来的纯色界面", LocalGlass.current.on) { v -> ctl.updateLocalSettings { it.copy(glass = v) } }
     } else Hint("每个位置各调各的；上面是预览，拖一拖马上看到，松手就存，界面上同时变。调乱了点「恢复默认」或者应用一个预设。")
     Spacer(Modifier.height(8.dp))
     FlowRowCompat {
@@ -171,7 +171,7 @@ fun GlassTuningPage(ctl: AppController, tuning: GlassTuning, onBack: (() -> Unit
         }
     }
     androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        OutlinedButton({ ctl.updateSettings { it.copy(glassTuning = it.glassTuning.reset(target)) }; ctl.toast("「${target.label}」已恢复默认") }) { Text("恢复默认") }
+        OutlinedButton({ ctl.updateLocalSettings { it.copy(glassTuning = it.glassTuning.reset(target)) }; ctl.toast("「${target.label}」已恢复默认") }) { Text("恢复默认") }
         OutlinedButton({
             clipboard.setText(AnnotatedString(AppJson.encodeToString(GlassParams.serializer(), draft)))
             ctl.toast("已复制「${target.label}」的参数（JSON）")
@@ -247,10 +247,10 @@ private fun Presets(ctl: AppController, tuning: GlassTuning) {
         val builtIn = pr.id.startsWith("builtin-")
         Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
             Text(pr.name + if (builtIn) "（自带）" else "", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
-            OutlinedButton({ ctl.updateSettings { it.copy(glassTuning = it.glassTuning.apply(pr)) }; ctl.toast("已应用「${pr.name}」") }) { Text("应用") }
+            OutlinedButton({ ctl.updateLocalSettings { it.copy(glassTuning = it.glassTuning.apply(pr)) }; ctl.toast("已应用「${pr.name}」") }) { Text("应用") }
             if (!builtIn) {
                 TextButton({ renaming = pr }) { Text("改名") }
-                TextButton({ ctl.updateSettings { s -> s.copy(glassTuning = s.glassTuning.copy(presets = s.glassTuning.presets.filterNot { it.id == pr.id })) } }) {
+                TextButton({ ctl.updateLocalSettings { s -> s.copy(glassTuning = s.glassTuning.copy(presets = s.glassTuning.presets.filterNot { it.id == pr.id })) } }) {
                     Text("删除", color = MaterialTheme.colorScheme.error)
                 }
             }
@@ -261,7 +261,7 @@ private fun Presets(ctl: AppController, tuning: GlassTuning) {
     if (saving) NameDialog("存成预设", "") { name ->
         saving = false
         if (name != null) {
-            ctl.updateSettings { s -> s.copy(glassTuning = s.glassTuning.copy(presets = s.glassTuning.presets +
+            ctl.updateLocalSettings { s -> s.copy(glassTuning = s.glassTuning.copy(presets = s.glassTuning.presets +
                 GlassPreset("p" + com.guixing.jixunying.ui.nowMillis().toString(36), name, s.glassTuning.snapshot()))) }
             ctl.toast("已存「$name」")
         }
@@ -269,7 +269,7 @@ private fun Presets(ctl: AppController, tuning: GlassTuning) {
     renaming?.let { pr ->
         NameDialog("预设改名", pr.name) { name ->
             renaming = null
-            if (name != null) ctl.updateSettings { s -> s.copy(glassTuning = s.glassTuning.copy(presets = s.glassTuning.presets.map { if (it.id == pr.id) it.copy(name = name) else it })) }
+            if (name != null) ctl.updateLocalSettings { s -> s.copy(glassTuning = s.glassTuning.copy(presets = s.glassTuning.presets.map { if (it.id == pr.id) it.copy(name = name) else it })) }
         }
     }
 }
@@ -331,7 +331,7 @@ fun BackgroundSection(ctl: AppController, bg: com.guixing.jixunying.model.AppBac
     val scope = androidx.compose.runtime.rememberCoroutineScope()
     var draft by remember(bg) { mutableStateOf(bg) }
     var busy by remember { mutableStateOf(false) }
-    fun commit(b: com.guixing.jixunying.model.AppBackground = draft) { draft = b; ctl.updateSettings { it.copy(background = b) } }
+    fun commit(b: com.guixing.jixunying.model.AppBackground = draft) { draft = b; ctl.updateLocalSettings { it.copy(background = b) } }
     FlowRowCompat {
         com.guixing.jixunying.model.BgMode.entries.forEach { m ->
             FilterChip(selected = draft.mode == m, onClick = { commit(draft.copy(mode = m)) }, label = { Text(m.label) }, modifier = Modifier.padding(end = 6.dp))
@@ -356,7 +356,7 @@ fun BackgroundSection(ctl: AppController, bg: com.guixing.jixunying.model.AppBac
         }
         com.guixing.jixunying.model.BgMode.IMAGE -> {
             if (draft.imageId.isNotBlank()) {
-                val img = rememberImage(ctl, draft.imageId)
+                val img = rememberLocalImage(ctl, draft.imageId)
                 if (img != null) androidx.compose.foundation.Image(img, null, Modifier.fillMaxWidth().height(120.dp).clip(RoundedCornerShape(10.dp)),
                     contentScale = androidx.compose.ui.layout.ContentScale.Crop, alpha = draft.alpha,
                     colorFilter = androidx.compose.ui.graphics.ColorFilter.colorMatrix(com.guixing.jixunying.ui.glass.bgColorMatrix(draft.brightness, draft.contrast, draft.saturation)))
@@ -367,7 +367,7 @@ fun BackgroundSection(ctl: AppController, bg: com.guixing.jixunying.model.AppBac
                 scope.launch {
                     val f = platform.pickFiles(imagesOnly = true).firstOrNull()
                     if (f != null) {
-                        val att = ctl.backend.upload(f.name, f.mime.ifBlank { "image/jpeg" }, f.bytes)
+                        val att = ctl.hub.local.upload(f.name, f.mime.ifBlank { "image/jpeg" }, f.bytes)
                         if (att != null) commit(draft.copy(mode = com.guixing.jixunying.model.BgMode.IMAGE, imageId = att.id)) else ctl.toast("图片存不进去")
                     }
                     busy = false

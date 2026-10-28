@@ -227,7 +227,10 @@ private fun tabSummary(t: SettingsTab, s: AppState, ctl: AppController): String 
     SettingsTab.CODE -> shellLabel(s.settings.code.shell) + if (s.settings.code.allowPhone) " · 手机能用" else " · 手机不能用"
     SettingsTab.WEIXIN -> if (!s.weixinCapable) "在电脑上设置" else if (s.weixin.bound) "已绑定" else "未绑定"
     SettingsTab.DEVICES -> if (ctl.hub.remote.value != null) "已配对" else if (s.devices.isNotEmpty()) "${s.devices.size} 台" else "未配对"
-    SettingsTab.APPEARANCE -> listOf("跟随系统", "浅色", "深色").getOrElse(s.settings.darkMode) { "" } + if (s.settings.glass) " · 液态玻璃" else ""
+    // 外观也是这台设备自己的（2026-10-28），看本机
+    SettingsTab.APPEARANCE -> ctl.hub.local.store.state.value.settings.let { ls ->
+        listOf("跟随系统", "浅色", "深色").getOrElse(ls.darkMode) { "" } + if (ls.glass) " · 液态玻璃" else ""
+    }
     SettingsTab.ABOUT -> com.guixing.jixunying.model.APP_VERSION
 }
 
@@ -932,6 +935,13 @@ private fun ImagePage(ctl: AppController, state: AppState) {
     fun save(f: (com.guixing.jixunying.model.ImageGenSettings) -> com.guixing.jixunying.model.ImageGenSettings) = ctl.updateSettings { it.copy(imageGen = f(it.imageGen)) }
 
     PageHeader("画图和视频", "不用专门设置：在任何对话里说「画一张……」「做一段……的视频」，AI 会自己调用画图 / 视频模型。输入框上的「直接画图」则不经过 AI，直接把你写的话当画面描述。")
+    // 2026-10-28 用户：「GPT，还有生图功能吧，没有加上吧，忘了吧」——用 ChatGPT 登录这条路 OpenAI 官方不让画图
+    // （developers.openai.com/siwc/token-sharing-open-source/preview-limitations：不支持的第一项就是 Image generation），写明白
+    if (state.providers.any { com.guixing.jixunying.model.Presets.isChatGpt(it) }) {
+        Text("「用 ChatGPT 登录」那家不能画图：OpenAI 官方规定这种登录不开放画图。想用 GPT 画图（gpt-image），在「模型服务」再加一家 OpenAI，填它的 API Key（按张收费），这里会自动认出来。",
+            style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
+        Spacer(Modifier.height(8.dp))
+    }
     if (candidates.isEmpty()) {
         SectionCard {
             Text("还没有能画图的服务商", style = MaterialTheme.typography.titleSmall)
@@ -1136,15 +1146,19 @@ private fun DevicesPage(ctl: AppController, state: AppState) {
 @Composable
 private fun AppearancePage(ctl: AppController, state: AppState) {
     val s = state.settings
+    // 主题、背景、液态玻璃是这台设备自己的（2026-10-28 用户：「手机端切换到控制电脑……我调的主题怎么这么卡……它这个主题是跟随电脑吗？不应该跟随电脑的」）：
+    // 手机遥控电脑时也读写手机本机，不走中转、不改电脑的
+    val local by ctl.hub.local.store.state.collectAsState()
+    val ls = local.settings
     // 10-24 用户：「液态玻璃和外观，这不是一个东西吗？为什么要分两栏？」——主题、背景、液态玻璃（开关和全套调节）都在这一页
-    PageHeader("外观", "主题、背景、液态玻璃。改了马上生效。")
+    PageHeader("外观", "主题、背景、液态玻璃，每台设备各管各的。改了马上生效。")
     SectionCard {
         FieldLabel("主题")
         FlowRowCompat {
             listOf(0 to "跟随系统", 1 to "浅色", 2 to "深色").forEach { (v, t) ->
-                Row(Modifier.clip(RoundedCornerShape(10.dp)).clickable { ctl.updateSettings { it.copy(darkMode = v) } }.padding(end = 12.dp),
+                Row(Modifier.clip(RoundedCornerShape(10.dp)).clickable { ctl.updateLocalSettings { it.copy(darkMode = v) } }.padding(end = 12.dp),
                     verticalAlignment = Alignment.CenterVertically) {
-                    RadioButton(s.darkMode == v, { ctl.updateSettings { it.copy(darkMode = v) } }); Text(t)
+                    RadioButton(ls.darkMode == v, { ctl.updateLocalSettings { it.copy(darkMode = v) } }); Text(t)
                 }
             }
         }
@@ -1152,15 +1166,15 @@ private fun AppearancePage(ctl: AppController, state: AppState) {
     Spacer(Modifier.height(12.dp))
     SectionCard {
         FieldLabel("背景", "整个界面最底下那一层；液态玻璃折射的就是它")
-        BackgroundSection(ctl, s.background)
+        BackgroundSection(ctl, ls.background)
     }
     Spacer(Modifier.height(12.dp))
     SectionCard {
         SwitchRow("液态玻璃", "侧栏、输入框、卡片、弹窗、开关、发送键用癸星科技那套玻璃和弹簧动画；关掉就是原来的纯色界面",
-            s.glass) { v -> ctl.updateSettings { it.copy(glass = v) } }
-        if (s.glass) {
+            ls.glass) { v -> ctl.updateLocalSettings { it.copy(glass = v) } }
+        if (ls.glass) {
             Spacer(Modifier.height(6.dp))
-            GlassTuningPage(ctl, s.glassTuning, null, embedded = true)
+            GlassTuningPage(ctl, ls.glassTuning, null, embedded = true)
         }
     }
     Spacer(Modifier.height(12.dp))

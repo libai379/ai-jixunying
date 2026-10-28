@@ -60,6 +60,17 @@ class CodeUiNotifyTest {
         assertEquals(CodeMode.entries.toList(), CodeUi.modesFor(CodeAccess.FULL, spec(CodeMode.MANUAL)))
     }
 
+    /** 2026-10-28 新对话首页那句问候：按北京时间几点说早上好 / 晚上好 / 夜深了，第二句是暖心话；名字空就叫「你」。 */
+    @Test
+    fun homeGreetingFollowsBeijingTime() {
+        val h = 3_600_000L
+        assertEquals("早上好，小白", com.guixing.jixunying.ui.HomeGreeting.now("小白", 0).first, "UTC 0 点 = 北京 8 点")
+        assertEquals("晚上好，小白", com.guixing.jixunying.ui.HomeGreeting.now("小白", 12 * h).first, "北京 20 点")
+        assertEquals("夜深了，你", com.guixing.jixunying.ui.HomeGreeting.now(" ", 17 * h).first, "北京凌晨 1 点、名字空")
+        assertEquals("夜深了，你", com.guixing.jixunying.ui.HomeGreeting.now("我", 17 * h).first, "没改过名字（默认「我」）也叫「你」")
+        assertTrue(com.guixing.jixunying.ui.HomeGreeting.now("小白", 6 * h).second.isNotBlank())
+    }
+
     @Test
     fun phoneListsAllModesLikePc() {
         // 2026-10-28 起手机遥控电脑时和电脑上一样（以前只列手动、计划，自动档切走就回不来）；手机建的会话也一样

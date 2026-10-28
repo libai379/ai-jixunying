@@ -103,6 +103,34 @@ class ClaudeCodeTest {
         assertTrue("\"interrupt\"" in inLog.readText(), "发了喊停")
     }
 
+    /**
+     * 2026-10-28 用户：「开额度重置后自己自动起跑」——无人值守时订阅额度用完：回答里写明几点恢复，等到点在同一个会话里接着做（--resume），
+     * 等的时候会话上记着 resumeAt，接着做了就清掉。
+     */
+    @Test
+    fun unattendedWaitsForQuotaThenResumes() = runBlocking {
+        if (!hasPython()) { println("没有 python，跳过"); return@runBlocking }
+        val margin = com.guixing.jixunying.engine.CodeAgent.limitMarginMs
+        com.guixing.jixunying.engine.CodeAgent.limitMarginMs = 0
+        try {
+            val e = engine()
+            val conv = claudeConv(e)
+            assertTrue(e.call(Command.CodeSetMode(conv, CodeMode.ACCEPT_EDITS, unattended = true)).ok)
+            assertTrue(e.call(Command.CodeSend(conv, "额度")).ok)
+            await { "额度用完了" in ai(e, conv)?.content.orEmpty() }
+            assertTrue(e.state.conversation(conv)!!.code!!.resumeAt > 0, "在等的时候记着几点接着做")
+            await { ai(e, conv)?.status == MsgStatus.DONE }
+            val m = ai(e, conv)!!
+            assertTrue("接着做完了" in m.content, m.content)
+            assertEquals(0L, e.state.conversation(conv)!!.code!!.resumeAt)
+            assertEquals(2, runs().size, "到点又开了一次，接着同一个会话")
+            assertTrue("--resume" in runs().last(), runs().last())
+        } finally {
+            com.guixing.jixunying.engine.CodeAgent.limitMarginMs = margin
+        }
+        Unit
+    }
+
     /** 2026-10-22：它读了一张图（工作区外面的截图，像试用记账本时读 %TEMP% 里的模拟器截图）——步骤上挂一份副本给用户看。 */
     @Test
     fun imageItReadIsKeptOnTheStep() = runBlocking {
@@ -378,6 +406,14 @@ while True:
         result(tid, r.get('message', ''), True)
         say('PLAN_DENIED' if r.get('behavior') == 'deny' else 'PLAN_ALLOWED')
         done('ok')
+    elif '额度恢复了' in task:
+        say('接着做完了。')
+        done('接着做完了。')
+    elif '额度' in task:
+        # 2026-10-28：订阅额度用完（照真 claude：先来一条 rate_limit_event，再是出错的 result）
+        import time
+        out({'type': 'rate_limit_event', 'rate_limit_info': {'status': 'rejected', 'resetsAt': int(time.time()) + 2}})
+        out({'type': 'result', 'subtype': 'success', 'is_error': True, 'result': "You've hit your session limit · resets 4:10pm", 'session_id': SID, 'duration_ms': 5})
     elif '插一句' in task:
         say('收到你插的话：' + task)
         done('收到你插的话。')

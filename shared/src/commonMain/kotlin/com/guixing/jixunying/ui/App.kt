@@ -271,10 +271,14 @@ fun App(hub: Hub, platform: Platform, debugStart: String? = null) {
     val remote by hub.remote.collectAsState()
     val backend: Backend = remote?.takeIf { useRemote } ?: hub.local
     val state by backend.store.state.collectAsState()
+    // 外观（主题、背景、液态玻璃）是这台设备自己的（2026-10-28 用户：手机遥控电脑时「我调的主题怎么这么卡……不应该跟随电脑的」）：
+    // 一直读本机的设置，遥控电脑时也一样，改了不走中转
+    val localState by hub.local.store.state.collectAsState()
+    val look = localState.settings
     // 点了 Code 栏的通知（安卓）或者托盘图标（电脑）要打开哪个会话。放在 key(backend) 外面：
     // 要打开的是电脑上的会话而现在看的是本机时，切过去以后这个还得留着（第二期 2026-10-13）
     var pendingConv by remember { mutableStateOf<String?>(null) }
-    AppTheme(state.settings.darkMode) {
+    AppTheme(look.darkMode) {
         val snackbar = remember { SnackbarHostState() }
         CompositionLocalProvider(LocalPlatform provides platform, LocalSnackbar provides snackbar) {
             val scope = rememberCoroutineScope()
@@ -353,22 +357,17 @@ fun App(hub: Hub, platform: Platform, debugStart: String? = null) {
                         platform.clearIncoming()
                     }
                 }
-                // 默认打开最近的对话。跳过 Code 会话（主会话审查 10-12 补）：新建的 Code 会话排在最前面，
-                // 启动时侧栏在「对话」那一栏，主区域却打开 Code 会话就对不上了
-                LaunchedEffect(backend, state.conversations.isNotEmpty()) {
-                    if (ctl.currentConvId == null) state.conversations.firstOrNull { !it.isCode }?.let {
-                        ctl.currentConvId = it.id
-                        if (!backend.store.hasMessages(it.id)) ctl.run(Command.LoadMessages(it.id))
-                    }
-                }
+                // 以前一打开就自动进最近的对话；2026-10-28 用户：「每次打开这个软件，它是一个新对话、新页面，不要直接弹出旧页面。
+                // 除非一直在后台运行」——新开进程时 currentConvId 是空的，主区域就是新对话首页（HomeScreens.EmptyChatScreen）；
+                // 一直在后台开着的，状态还在，回来照旧停在原来那页
                 // 液态玻璃（2026-10-22，docs/界面换装说明.md）：壁纸在最底下、和界面是兄弟（不能是界面的上层，安卓上会原生崩溃），
                 // 界面里的玻璃面经 LocalGlass 采样它；设置里关掉就是原来的纯色
-                val glassOn = state.settings.glass
+                val glassOn = look.glass
                 val dark = MaterialTheme.colorScheme.background.luminance() < 0.5f
                 val wallpaper = com.kashif_e.backdrop.backdrops.rememberLayerBackdrop()
                 // 界面背景（2026-10-24）：默认 = 开着玻璃是那几团柔光、关着是主题底色；纯色 / 渐变 / 自己的图片照 设置 → 外观 → 背景
-                val bg = state.settings.background
-                val bgImage = if (bg.mode == com.guixing.jixunying.model.BgMode.IMAGE && bg.imageId.isNotBlank()) rememberImage(ctl, bg.imageId) else null
+                val bg = look.background
+                val bgImage = if (bg.mode == com.guixing.jixunying.model.BgMode.IMAGE && bg.imageId.isNotBlank()) rememberLocalImage(ctl, bg.imageId) else null
                 val baseColor = MaterialTheme.colorScheme.background
                 val paint: androidx.compose.ui.graphics.drawscope.DrawScope.() -> Unit = remember(bg, bgImage, dark, glassOn, baseColor) {
                     { drawBackground(bg, bgImage) { if (glassOn) drawWallpaper(dark) else drawRect(baseColor) } }
@@ -393,7 +392,7 @@ fun App(hub: Hub, platform: Platform, debugStart: String? = null) {
                         com.guixing.jixunying.ui.glass.AppWallpaper(if (glassOn) wallpaper else null, bg, bgImage,
                             { if (glassOn) drawWallpaper(dark) else drawRect(baseColor) }, Modifier.matchParentSize())
                     CompositionLocalProvider(com.guixing.jixunying.ui.glass.LocalGlass provides
-                        com.guixing.jixunying.ui.glass.GlassEnv(if (glassOn) wallpaper else null, glassOn, dark, state.settings.glassTuning, paint)) {
+                        com.guixing.jixunying.ui.glass.GlassEnv(if (glassOn) wallpaper else null, glassOn, dark, look.glassTuning, paint)) {
                         MainLayout(ctl)
                     }
                     // 开发截图用：-Djxy.start=…#toast 打开就弹一条提示，看它挡不挡东西

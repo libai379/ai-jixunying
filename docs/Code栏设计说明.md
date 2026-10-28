@@ -313,3 +313,13 @@
 4. 停止键：在做的时候，输入框发送键旁边一直有停止键（以前只在顶栏，手机上会被提示条挡住）。
 5. 新建会话的权限档：五档都列，默认照最近建的那个会话的档（用户上次选了全部放开，下次就默认全部放开）。
 6. 测试：PhoneGateTest 改成手机任意文件夹、五档、改工作区都放行，开关关着照样都拦；CodeAgentTest.interjectionReachesModelMidway（等批准时插话：那一步放下、模型收到原话、回答分两段、做完不再另起一轮）；ChatFilesTest 加了开关开着时手机发起的命令照跑；AgentCliTest 手机发来的也交给 Codex；ClaudeCodeTest.interjectionInterruptsAndContinuesInSameProcess（假 claude：喊停、同一个进程接着说、回答两段）；LiveClaudeCodeTest.realClaudeHearsInterjection（真 claude，插话后 8 秒答完、记得题目）。
+
+## 22 无人值守（2026-10-28，用户：「现在能不能做到我给他一系列的任务让他自己去干，我全程一天不带管的，我不需要点任何一个允许，能不能做到？开额度重置后自己自动起跑」）
+
+权限档多一档「无人值守」= 全部放开 + 下面四样（CodeSpec.unattended，和 openAll 一样不做成 CodeMode 新值）。新建会话时就能选，手机上也能选。
+1. 危险命令（CodeCommands.dangerous：递归删除、格式化、改注册表……）不等人：步骤上记「无人值守：危险命令没跑」，回给模型「换个不危险的办法；绕不开就跳过，在最后的汇报里写明要用户回来做什么」。自己的模型（runCommand）和 Claude Code（claudePermission）都这样。不选「自动放行」：没人看着的时候删错了救不回来。
+2. 自己的模型一轮走满 maxSteps 步不停：这一轮剩下的调用各回一句「先没做」（接口要求每个调用都有结果），再补一句「这一轮走满了，接着做」进下一轮；最多 UNATTENDED_ROUNDS（10）轮，免得原地打转烧钱。
+3. 模型一时调不通（429 限流——不含智谱那种「余额不足」也报 429 的、408、5xx、网络）：记一步「模型暂时调不通」，30 秒起翻倍、最长等半小时，最多 8 次。Key 不对、没钱照旧直接报错。
+4. Claude Code 订阅额度用完（rate_limit_event 不是 allowed，或者报错里有 usage limit / session limit / hit your … limit）：回答里写「北京时间几点前后恢复，到点自动接着做」，会话上记 resumeAt，等到点用 --resume 在同一个会话里发「额度恢复了，接着刚才没做完的事做完」；没说几点就半小时后再试，最多等 6 回。等的时候点停止照样停（清掉 resumeAt）。程序重开时还记着 resumeAt 的，电脑端接上执行器后（Engine.codeRunner 的 set）CodeAgent.resumePending 到点照样接着做。排队的下一件任务在这一件做完以后接着跑。
+测试：CodeAgentTest.unattendedNeverWaitsAndKeepsGoing（危险命令不等、一直读走满 11 轮、切回手动又会等）；ClaudeCodeTest.unattendedWaitsForQuotaThenResumes（假 claude 报额度用完，2 秒后到点、第二个进程带 --resume 接着做完、resumeAt 清掉）。
+没做：Codex / Gemini CLI 的额度等待；手机上看不到「几点接着做」以外的倒计时。

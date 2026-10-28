@@ -343,12 +343,14 @@ private fun CodeTopBar(ctl: AppController, state: AppState, conv: Conversation, 
             base.filter { it.mode == CodeMode.MANUAL }.forEach { add(it) }
             base.filter { it.mode == CodeMode.ACCEPT_EDITS }.forEach { add(it) }
             if (canOpen || spec.openAll) add(ModeOpt(CodeMode.ACCEPT_EDITS, open = true))
+            if (canOpen || spec.unattended) add(ModeOpt(CodeMode.ACCEPT_EDITS, open = true, unattended = true))
             base.filter { it.mode == CodeMode.PLAN }.forEach { add(it) }
         }
-        val current = ModeOpt(spec.mode, open = spec.openAll && spec.mode != CodeMode.PLAN, auto = spec.autoMode && spec.mode != CodeMode.PLAN && !spec.openAll)
+        val current = ModeOpt(spec.mode, open = spec.openAll && spec.mode != CodeMode.PLAN, auto = spec.autoMode && spec.mode != CodeMode.PLAN && !spec.openAll,
+            unattended = spec.unattended && spec.mode != CodeMode.PLAN)
         // 开发截图用：-Djxy.start=code:会话编号#modes 把这个菜单打开
         CodeModePicker(current, options, enabled = access.canAct, debugOpen = ctl.debugDialog == "modes") { o ->
-            ctl.run(Command.CodeSetMode(conv.id, o.mode, openAll = o.open, auto = o.auto), okText = "权限档换成「${o.label}」")
+            ctl.run(Command.CodeSetMode(conv.id, o.mode, openAll = o.open, auto = o.auto, unattended = o.unattended), okText = "权限档换成「${o.label}」")
         }
     }
     HorizontalDivider(color = Ext.c.border)
@@ -849,8 +851,8 @@ private fun PhoneMadeMark() {
  * modes 是这台设备上能选的档（手机上只有手动、计划，见 CodeUi.modesFor）。
  */
 /** 权限档的一个选项：「自动」「全部放开」是「接受编辑 + 开关」（不做成 CodeMode 新值，旧手机读不坏）。 */
-private data class ModeOpt(val mode: CodeMode, val open: Boolean = false, val auto: Boolean = false) {
-    val label: String get() = if (auto) "自动" else if (open) "全部放开" else mode.label
+private data class ModeOpt(val mode: CodeMode, val open: Boolean = false, val auto: Boolean = false, val unattended: Boolean = false) {
+    val label: String get() = if (unattended) "无人值守" else if (auto) "自动" else if (open) "全部放开" else mode.label
 }
 
 @Composable
@@ -891,6 +893,8 @@ private fun CodeModePicker(mode: ModeOpt, modes: List<ModeOpt>, enabled: Boolean
 
 private fun modeOptDesc(m: ModeOpt) = when {
     m.auto -> "读、改项目里的文件直接做；别的先让检查员（裁判模型）看一眼，它拦下的再问你"
+    // 2026-10-28 用户：「我给他一系列的任务让他自己去干，我全程一天不带管的，我不需要点任何一个允许」
+    m.unattended -> "一整天不用管：改文件、跑命令都不问；危险命令不等你，直接让它换个办法；一轮步数用完接着做；模型调不通过会儿再试；Claude 额度用完等恢复了自动接着做"
     m.open -> "改文件、跑命令都不问；删整个文件夹、格式化这类危险命令照样问"
     else -> modeDesc(m.mode)
 }
@@ -1995,11 +1999,11 @@ fun NewCodeDialog(ctl: AppController) {
     var picked by remember { mutableStateOf("") }
     // 权限档五样都能选（2026-10-28，以前新建只有手动 / 接受编辑 / 计划，手机上只有手动 / 计划）；默认照最近建的那个会话
     val modeOpts = listOf(ModeOpt(CodeMode.ACCEPT_EDITS, auto = true), ModeOpt(CodeMode.MANUAL), ModeOpt(CodeMode.ACCEPT_EDITS),
-        ModeOpt(CodeMode.ACCEPT_EDITS, open = true), ModeOpt(CodeMode.PLAN))
+        ModeOpt(CodeMode.ACCEPT_EDITS, open = true), ModeOpt(CodeMode.ACCEPT_EDITS, open = true, unattended = true), ModeOpt(CodeMode.PLAN))
     var mode by remember {
         val last = state.conversations.filter { it.code != null }.maxByOrNull { it.createdAt }?.code
         mutableStateOf(if (last == null) ModeOpt(CodeMode.MANUAL) else ModeOpt(last.mode, open = last.openAll && last.mode != CodeMode.PLAN,
-            auto = last.autoMode && !last.openAll && last.mode != CodeMode.PLAN))
+            auto = last.autoMode && !last.openAll && last.mode != CodeMode.PLAN, unattended = last.unattended && last.mode != CodeMode.PLAN))
     }
     var error by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
@@ -2016,7 +2020,7 @@ fun NewCodeDialog(ctl: AppController) {
                     busy = true
                     error = ""
                     if (!platform.isDesktop) platform.askNotifyPermission()
-                    ctl.run(Command.CodeCreate(folder.trim(), p.id, m.id, mode.mode, auto = mode.auto, openAll = mode.open), quiet = true) { r ->
+                    ctl.run(Command.CodeCreate(folder.trim(), p.id, m.id, mode.mode, auto = mode.auto, openAll = mode.open, unattended = mode.unattended), quiet = true) { r ->
                         busy = false
                         if (r.ok) { ctl.showNewCode = false; ctl.openConversation(r.data) }
                         else error = r.message.ifBlank { "建不了这个会话" }

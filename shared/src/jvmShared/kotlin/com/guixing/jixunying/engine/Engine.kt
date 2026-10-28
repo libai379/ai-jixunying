@@ -273,6 +273,8 @@ class Engine(
      * 手机上是 null —— 手机不在本机跑命令，手机上看到的 Code 会话第一期只读。
      */
     var codeRunner: com.guixing.jixunying.engine.code.CodeRunner? = null
+        // 电脑端接上执行器时（Main.kt 启动时设一次）：上次关程序前还在等额度恢复的无人值守会话，到点接着做（2026-10-28）
+        set(v) { field = v; if (v != null) codeAgent.resumePending() }
 
     /**
      * 本机 MCP 服务的端口（2026-10-22，Claude Code 当总指挥，docs/Code栏设计说明.md 第 18 节）。
@@ -1229,9 +1231,11 @@ class Engine(
                     // 电脑上点「+」直接开的（没给文件夹）默认「自动」：照 Claude Code，auto 是新会话的默认档；
                     // 独立副本开的照原会话的档（c.auto，2026-10-22：以前写死「接受编辑」、丢了自动）；
                     // 2026-10-28 起新建时就能选「全部放开」，手机上也能开自动、全部放开（PhoneGate 不再拦）
-                    mode = if (c.folder.isBlank() || ((c.auto || c.openAll) && c.mode != CodeMode.PLAN)) CodeMode.ACCEPT_EDITS else c.mode,
-                    autoMode = (c.folder.isBlank() || c.auto) && !c.openAll && c.mode != CodeMode.PLAN,
-                    openAll = c.openAll && c.mode != CodeMode.PLAN,
+                    mode = if (c.folder.isBlank() || ((c.auto || c.openAll || c.unattended) && c.mode != CodeMode.PLAN)) CodeMode.ACCEPT_EDITS else c.mode,
+                    autoMode = (c.folder.isBlank() || c.auto) && !c.openAll && !c.unattended && c.mode != CodeMode.PLAN,
+                    openAll = (c.openAll || c.unattended) && c.mode != CodeMode.PLAN,
+                    // 无人值守（2026-10-28）：全部放开 + 危险命令不等人、步数用完接着做、额度用完等恢复（CodeAgent）
+                    unattended = c.unattended && c.mode != CodeMode.PLAN,
                     fromPhone = c.fromPhone, pcMode = c.mode),
             )
             convs[conv.id] = mutableListOf()
@@ -1311,8 +1315,9 @@ class Engine(
             val conv = state.conversation(c.convId) ?: return CommandResult(false, "对话不存在")
             val spec = conv.code ?: return CommandResult(false, "这不是 Code 会话")
             // 电脑上选的档记下来：手机能切到哪档以它为准（PhoneGate）
-            val next = spec.copy(mode = c.mode, pcMode = if (c.fromPhone) spec.pcMode else c.mode, openAll = c.openAll && c.mode != CodeMode.PLAN,
-                autoMode = c.auto && !c.openAll && c.mode != CodeMode.PLAN)
+            val next = spec.copy(mode = c.mode, pcMode = if (c.fromPhone) spec.pcMode else c.mode, openAll = (c.openAll || c.unattended) && c.mode != CodeMode.PLAN,
+                autoMode = c.auto && !c.openAll && !c.unattended && c.mode != CodeMode.PLAN,
+                unattended = c.unattended && c.mode != CodeMode.PLAN, resumeAt = if (c.unattended) spec.resumeAt else 0)
             if (next == spec) return CommandResult()
             updateState { s ->
                 s.copy(conversations = s.conversations.map { if (it.id == conv.id) it.copy(code = next, updatedAt = now()) else it })

@@ -208,24 +208,22 @@ private fun WolfLobby(ctl: AppController, state: AppState, wide: Boolean) {
                     for (p in WolfPresets.all) ChoiceChip("${p.name} ${p.players}人", presetName == p.name) { presetName = p.name; counts.value = p.roles }
                     ChoiceChip("自定义", presetName == "自定义") { presetName = "自定义" }
                 }
-                Spacer(Modifier.height(10.dp))
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    for (r in WolfRole.entries) RoleCounter(r, counts.value[r] ?: 0) { n ->
-                        counts.value = (counts.value + (r to n)).filterValues { it > 0 }
-                        presetName = WolfPresets.all.firstOrNull { it.roles == counts.value }?.name ?: "自定义"
-                    }
-                }
                 Text("一共 ${roles.size} 人：" + com.guixing.jixunying.model.WolfText.roles(roles).ifBlank { "还没选" }, style = MaterialTheme.typography.bodySmall,
                     color = Ext.c.subtle, modifier = Modifier.padding(top = 8.dp))
                 for (w in warns) Text("⚠️ $w", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
-                TextButton(onClick = { guide = !guide }) { Text(if (guide) "收起角色图鉴" else "角色图鉴：每个身份能干什么") }
-                if (guide) for (r in WolfRole.entries) Row(Modifier.padding(vertical = 3.dp)) {
-                    Text(r.icon, modifier = Modifier.width(28.dp))
-                    Column {
-                        Text(r.label + "  " + when (r.faction) { "wolf" -> "狼人阵营"; "good" -> if (r.god) "好人·神职" else "好人"; else -> "第三方" },
-                            style = MaterialTheme.typography.labelLarge)
-                        Text(r.desc, style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
-                    }
+                Spacer(Modifier.height(8.dp))
+                // 每个身份一行：名字、阵营、能干什么直接写在下面，旁边加减人数（2026-10-28 用户：「每个角色的说明在哪儿？」——以前藏在「角色图鉴」按钮里）。
+                // 这局用到的排前面；没用到的收在「其余身份」里，点开也是一样带说明
+                val used = WolfRole.entries.filter { (counts.value[it] ?: 0) > 0 }
+                val unused = WolfRole.entries.filter { (counts.value[it] ?: 0) == 0 }
+                for (r in used) RoleCounter(r, counts.value[r] ?: 0) { n ->
+                    counts.value = (counts.value + (r to n)).filterValues { it > 0 }
+                    presetName = WolfPresets.all.firstOrNull { it.roles == counts.value }?.name ?: "自定义"
+                }
+                TextButton(onClick = { guide = !guide }) { Text(if (guide) "收起其余身份" else "其余 ${unused.size} 种身份（点开看说明、往局里加）") }
+                if (guide) for (r in unused) RoleCounter(r, 0) { n ->
+                    counts.value = (counts.value + (r to n)).filterValues { it > 0 }
+                    presetName = WolfPresets.all.firstOrNull { it.roles == counts.value }?.name ?: "自定义"
                 }
             }
             Spacer(Modifier.height(12.dp))
@@ -281,12 +279,17 @@ private fun ChoiceChip(text: String, on: Boolean, onClick: () -> Unit) {
     }
 }
 
-/** 一种身份的加减：「🐺 普通狼  − 2 ＋」。 */
+/** 一种身份一行：「🐺 普通狼 · 狼人阵营」，下面一句能干什么，右边「− 2 ＋」。 */
 @Composable
 private fun RoleCounter(r: WolfRole, n: Int, onChange: (Int) -> Unit) {
-    Row(Modifier.clip(RoundedCornerShape(10.dp)).background(if (n > 0) MaterialTheme.colorScheme.primary.copy(alpha = 0.08f) else Color.Transparent)
-        .border(1.dp, Ext.c.border, RoundedCornerShape(10.dp)).padding(start = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text("${r.icon} ${r.label}", style = MaterialTheme.typography.labelLarge)
+    Row(Modifier.fillMaxWidth().padding(vertical = 3.dp).clip(RoundedCornerShape(10.dp))
+        .background(if (n > 0) MaterialTheme.colorScheme.primary.copy(alpha = 0.08f) else Color.Transparent)
+        .border(1.dp, Ext.c.border, RoundedCornerShape(10.dp)).padding(start = 10.dp, top = 6.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text("${r.icon} ${r.label} · " + when (r.faction) { "wolf" -> "狼人阵营"; "good" -> if (r.god) "好人·神职" else "好人"; else -> "第三方" },
+                style = MaterialTheme.typography.labelLarge)
+            Text(r.desc, style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
+        }
         TextButton(onClick = { if (n > 0) onChange(n - 1) }, enabled = n > 0) { Text("−") }
         Text("$n", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
         TextButton(onClick = { if (n < 8) onChange(n + 1) }) { Text("＋") }
@@ -585,13 +588,14 @@ private fun Bubble(s: WolfSeat?, state: AppState, tag: String, text: String, god
 
 @Composable
 private fun MyRoleBar(me: WolfSeat, r: WolfGameRecord) {
-    var open by remember { mutableStateOf(false) }
+    // 技能说明默认就摊开（2026-10-28 用户找不到每个身份的说明），点一下收起
+    var open by remember { mutableStateOf(true) }
     Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp))
         .background((if (me.role.wolf) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary).copy(alpha = 0.08f))
         .clickable { open = !open }.padding(horizontal = 12.dp, vertical = 8.dp)) {
         Text("你是 ${me.no}号 ${me.name} · ${me.role.icon} ${me.role.label}" + (me.origRole?.let { "（本来是${it.label}）" } ?: "") +
             (if (me.role.wolf) " · 狼队友：" + r.seats.filter { it.role.wolf && it.no != me.no }.joinToString("、") { "${it.no}号${it.name}" }.ifEmpty { "没有" } else "") +
-            (if (open) "" else "  （点开看技能）"),
+            (if (open) "" else "  （点开看技能说明）"),
             style = MaterialTheme.typography.labelLarge, color = if (me.role.wolf) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary)
         if (open) Text(me.role.desc, style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle, modifier = Modifier.padding(top = 2.dp))
     }

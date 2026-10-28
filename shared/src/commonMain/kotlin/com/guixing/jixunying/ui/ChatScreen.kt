@@ -829,6 +829,16 @@ fun rememberImage(ctl: AppController, id: String): ImageBitmap? {
     return img
 }
 
+/** 这台设备自己存的图（界面背景，2026-10-28 起外观各台设备自己管）：手机遥控电脑时也从手机本机读，不走中转。 */
+@Composable
+fun rememberLocalImage(ctl: AppController, id: String): ImageBitmap? {
+    val platform = LocalPlatform.current
+    val img by produceState<ImageBitmap?>(null, id) {
+        value = ImageCache.get(id) ?: ctl.hub.local.fileBytes(id)?.let { platform.decodeImage(it) }?.also { ImageCache.put(id, it) }
+    }
+    return img
+}
+
 object ImageCache {
     private val map = LinkedHashMap<String, ImageBitmap>()
     fun get(id: String) = map[id]

@@ -195,14 +195,18 @@ class CodeAgent(private val host: CodeHost) {
             var steps = 0
             var reachedMax = false
             var taskHookRan = false
+            // 无人值守（2026-10-28）：一轮走满 maxSteps 步不停，接着下一轮，最多 UNATTENDED_ROUNDS 轮
+            var rounds = 0
             while (true) {
                 val mode = host.state.conversation(convId)?.code?.mode ?: spec.mode
                 val team = host.state.conversation(convId)?.code?.team ?: spec.team
                 val settings = host.state.settings.code
                 val mcp = runCatching { host.mcpToolDefs() }.getOrDefault(emptyList())
-                val r = withContext(UsageTag(UsageKinds.CODE, convId = convId)) {
-                    host.llmClient.chat(p, spec.modelId, working, null, toolsFor(mode, mcp = mcp, team = team), null, {}, null) { c, rs ->
-                        host.appendDelta(convId, msg.id, c, rs)
+                val r = patiently(convId, { msg.id }) {
+                    withContext(UsageTag(UsageKinds.CODE, convId = convId)) {
+                        host.llmClient.chat(p, spec.modelId, working, null, toolsFor(mode, mcp = mcp, team = team), null, {}, null) { c, rs ->
+                            host.appendDelta(convId, msg.id, c, rs)
+                        }
                     }
                 }
                 usage = Usage(usage.prompt + r.usage.prompt, usage.completion + r.usage.completion,
@@ -232,8 +236,14 @@ class CodeAgent(private val host: CodeHost) {
                         }
                     }.mapValues { it.value.await() }
                 }
+                val goOn = unattended(convId) && rounds < UNATTENDED_ROUNDS
                 for (tc in r.toolCalls) {
-                    if (steps >= settings.maxSteps) { full = true; break }
+                    if (steps >= settings.maxSteps) {
+                        full = true
+                        // 无人值守：这一轮剩下的先不做，每个调用回一句（接口要求每个调用都有结果），下一轮接着
+                        if (goOn) { working += toolMsg(tc.id, "（这一步先没做：这一轮走满了，下一轮接着）"); continue }
+                        break
+                    }
                     steps++
                     subResults[tc.id]?.let { working += toolMsg(tc.id, it); continue }
                     // 工作区每一步重新取：上一步刚批准「把这个文件夹加进来」，这一步就算工作区里了
@@ -242,19 +252,23 @@ class CodeAgent(private val host: CodeHost) {
                     working += toolMsg(tc.id, step(convId, msg.id, tc, mode, cur, guard, backup, if (vision) seen else null))
                 }
                 // 用户做事中途说的话（2026-10-28）：这一段回答收尾，用户的话排在它后面，模型下一步就看到；之后的步骤记在新的一段上
-                // 到了最多步数就不取：这一轮要停了，留在队列里，停下以后照旧另起一轮去答
-                val said = if (full) emptyList() else takeInterjections(convId)
+                // 到了最多步数、又不接着做就不取：这一轮要停了，留在队列里，停下以后照旧另起一轮去答
+                val continuing = full && goOn
+                val said = if (full && !continuing) emptyList() else takeInterjections(convId)
                 if (said.isNotEmpty()) {
                     host.updateMessage(convId, msg.id) { it.copy(content = it.content.trim(), status = MsgStatus.DONE, usage = usage) }
                     usage = Usage()
                     msg = Message(host.newId(), convId, Role.AI, CODE_ID, status = MsgStatus.STREAMING, createdAt = host.now(), modelLabel = msg.modelLabel)
                     host.addMessage(msg)
                 }
-                if (seen.isNotEmpty() || said.isNotEmpty()) working += afterToolsMsg(convId, seen, said, vision)
+                val more = if (continuing) "（这一轮走满 ${settings.maxSteps} 步了。用户不在，接着做；做完了就直接汇报做了什么、还剩什么。）" else ""
+                if (seen.isNotEmpty() || said.isNotEmpty() || more.isNotEmpty()) working += afterToolsMsg(convId, seen, said, vision, more)
+                if (continuing) { rounds++; steps = 0; trimWorking(working); continue }
                 if (full) { reachedMax = true; break }
                 trimWorking(working)
             }
-            val tail = if (reachedMax) "\n\n（到了最多 ${host.state.settings.code.maxSteps} 步，停下了）" else ""
+            val tail = if (!reachedMax) "" else if (rounds > 0) "\n\n（无人值守走满了 ${rounds + 1} 轮、每轮 ${host.state.settings.code.maxSteps} 步，停下了）"
+                else "\n\n（到了最多 ${host.state.settings.code.maxSteps} 步，停下了）"
             host.updateMessage(convId, msg.id) { it.copy(content = (it.content + tail).trim(), status = MsgStatus.DONE, usage = usage) }
         } catch (e: CancellationException) {
             withContext(NonCancellable) { host.updateMessage(convId, msg.id) { it.copy(status = MsgStatus.STOPPED) } }
@@ -1043,6 +1057,11 @@ class CodeAgent(private val host: CodeHost) {
         val step = ToolStep("run", command, id = stepId, ok = true,
             note = if (by != null) "「$by」开头的命令这个会话里不再问" else "",
             prefix = if (by == null) CodeCommands.prefixOf(command).orEmpty() else "")
+        // 无人值守（2026-10-28）：危险命令没人能批准，不等——记一步「没跑」，告诉它换个办法
+        if (CodeCommands.dangerous(command) && by == null && unattended(convId)) {
+            addStep(convId, msgId, step.copy(ok = false, approval = "denied", note = UNATTENDED_DANGER_NOTE))
+            return UNATTENDED_DANGER
+        }
         // 全部放开：不问；只有危险命令（递归删除、格式化、改注册表……）照样问一次
         val ask = when {
             CodeCommands.dangerous(command) && by == null -> true
@@ -1087,7 +1106,9 @@ class CodeAgent(private val host: CodeHost) {
                           val created: Boolean = false, val closed: Boolean = false)
 
     /** msgId：最后一段回答（用户中途插话时回答分段，收尾要落在最后那段上）；空 = 没分段。 */
-    private class ClaudeRound(val error: String? = null, val stale: Boolean = false, val usage: Usage = Usage(), val msgId: String = "")
+    private class ClaudeRound(val error: String? = null, val stale: Boolean = false, val usage: Usage = Usage(), val msgId: String = "",
+                              /** 是订阅额度用完了（无人值守时等到 resetAt 接着做）；resetAt 是它说的恢复时刻（毫秒），0 = 没说。 */
+                              val limited: Boolean = false, val resetAt: Long = 0)
 
     /** Claude Code 当团队角色（2026-10-19）：这张任务单的文字、--model、要不要只看不改；它说的话收在 out 里。 */
     private class ClaudeWorker(val text: String, val modelId: String, val readOnly: Boolean) { val out = StringBuilder() }
@@ -1142,6 +1163,24 @@ class CodeAgent(private val host: CodeHost) {
                         r = claudeRound(convId, msg.id, task, spec, exe, "", instr, backup, mcp = mcp)
                         usage = Usage(usage.prompt + r.usage.prompt, usage.completion + r.usage.completion, usage.cached + r.usage.cached, usage.millis + r.usage.millis)
                     }
+                    // 无人值守（2026-10-28 用户：「开额度重置后自己自动起跑」）：订阅额度用完了，回答里写明几点恢复，等到点在同一个会话里接着做；
+                    // 等的时候点停止照样停得下（这个协程跟着会话）。它没说几点恢复就半小时后再试
+                    var waits = 0
+                    while (r.limited && unattended(convId) && waits < UNATTENDED_LIMIT_WAITS) {
+                        waits++
+                        val seg = r.msgId.ifBlank { msg.id }
+                        val at = (if (r.resetAt > host.now()) r.resetAt else host.now() + 30 * 60_000L) + limitMarginMs
+                        host.updateCode(convId) { it.copy(resumeAt = at) }
+                        host.updateMessage(convId, seg) {
+                            it.copy(content = (it.content.trim() + "\n\n（Claude 额度用完了，北京时间 ${beijingClock(at)} 前后恢复，到点自动接着做。）").trim())
+                        }
+                        kotlinx.coroutines.delay(maxOf(0L, at - host.now()))
+                        host.updateCode(convId) { it.copy(resumeAt = 0) }
+                        val cur = host.state.conversation(convId)?.code ?: spec
+                        val again = Message(host.newId(), convId, Role.USER, com.guixing.jixunying.model.USER_ID, RESUME_TEXT, createdAt = host.now())
+                        r = claudeRound(convId, seg, again, cur, exe, cur.externalSession, instr, backup, mcp = mcp)
+                        usage = Usage(usage.prompt + r.usage.prompt, usage.completion + r.usage.completion, usage.cached + r.usage.cached, usage.millis + r.usage.millis)
+                    }
                     // 它没等结果就收尾了的单子：停掉，回答里写明
                     val left = session?.let { commander.close(it.token) }.orEmpty()
                     val tail = if (left.isEmpty()) "" else "\n\n（" + left.joinToString("、") { "${it.id} ${TeamSeat.label(it.role)}：${it.name}" } + " 没等到结果这一轮就结束了，已经停下。）"
@@ -1156,8 +1195,11 @@ class CodeAgent(private val host: CodeHost) {
                 }
             }
         } catch (e: CancellationException) {
-            // 中途插过话的：停在最后那段回答上
-            withContext(NonCancellable) { host.updateMessage(convId, claudeSegments[convId] ?: msg.id) { it.copy(status = MsgStatus.STOPPED) } }
+            // 中途插过话的：停在最后那段回答上；无人值守在等额度恢复时点了停止，不再等
+            withContext(NonCancellable) {
+                host.updateCode(convId) { if (it.resumeAt != 0L) it.copy(resumeAt = 0) else it }
+                host.updateMessage(convId, claudeSegments[convId] ?: msg.id) { it.copy(status = MsgStatus.STOPPED) }
+            }
             throw e
         } catch (e: Throwable) {
             host.updateMessage(convId, claudeSegments[convId] ?: msg.id) { it.copy(status = MsgStatus.ERROR, error = host.friendlyError(e)) }
@@ -1302,6 +1344,8 @@ class CodeAgent(private val host: CodeHost) {
         // 停下来那条 result 到了，这一段回答收尾，把话在同一个进程里交给它（它记得前面），后面的步骤记在新的一段回答上
         var mid = msgId
         val main = worker == null
+        // 订阅额度到上限时它说的恢复时刻（rate_limit_event 的 resetsAt，毫秒）
+        var limitResetAt = 0L
         val stopAsked = java.util.concurrent.atomic.AtomicBoolean(false)
         if (main) claudeInterrupts[convId] = { if (stopAsked.compareAndSet(false, true)) proc.send(ClaudeCli.interruptRequest("int-" + host.newId())) }
         try {
@@ -1321,6 +1365,7 @@ class CodeAgent(private val host: CodeHost) {
                     is ClaudeCli.Permission -> proc.send(claudePermission(convId, mid, ev, steps, backup))
                     is ClaudeCli.ToolResult -> claudeToolResult(convId, mid, ev, uses, steps)
                     is ClaudeCli.Limit -> if (ev.status.isNotBlank() && ev.status != "allowed" && ev.status != "allowed_warning") {
+                        if (ev.resetsAt > 0) limitResetAt = ev.resetsAt * 1000
                         val at = if (ev.resetsAt > 0) java.time.Instant.ofEpochSecond(ev.resetsAt).atZone(java.time.ZoneId.systemDefault())
                             .format(java.time.format.DateTimeFormatter.ofPattern("M月d日 HH:mm")) else ""
                         addStep(convId, mid, ToolStep("run", "Claude 订阅额度", id = host.newId(), ok = false,
@@ -1352,7 +1397,8 @@ class CodeAgent(private val host: CodeHost) {
                         }
                         if (ev.isError) {
                             val stale = resume.isNotBlank() && Regex("(?i)no conversation found|session.{0,40}not found").containsMatchIn(ev.text)
-                            return ClaudeRound(claudeError(ev.text), stale, usage, mid)
+                            val limited = limitResetAt > 0 || CLAUDE_LIMIT.containsMatchIn(ev.text)
+                            return ClaudeRound(claudeError(ev.text), stale, usage, mid, limited, limitResetAt)
                         }
                         // 任务做完后的钩子：没过就再交给它改一轮（只一轮），和自己的循环一样
                         val hook = host.state.settings.code.hookAfterTask.trim()
@@ -1465,7 +1511,7 @@ class CodeAgent(private val host: CodeHost) {
      * 工具结果之后补的一条 user 消息：这一轮 read_file 读到的图片，加上用户做事中途说的话。
      * 合成一条：有的接口不认连着两条 user。
      */
-    private fun afterToolsMsg(convId: String, seen: List<Pair<String, String>>, said: List<Message>, vision: Boolean): JsonObject {
+    private fun afterToolsMsg(convId: String, seen: List<Pair<String, String>>, said: List<Message>, vision: Boolean, note: String = ""): JsonObject {
         val text = StringBuilder()
         val images = mutableListOf<String>()
         if (seen.isNotEmpty()) {
@@ -1482,7 +1528,70 @@ class CodeAgent(private val host: CodeHost) {
                 images += imgs
             }
         }
+        // 无人值守走满一轮接着做的那句（2026-10-28）
+        if (note.isNotEmpty()) { if (text.isNotEmpty()) text.append("\n\n"); text.append(note) }
         return contentMsg("user", text.toString(), images)
+    }
+
+    // ———————————————— 无人值守（2026-10-28） ————————————————
+
+    /** 这个会话开着「无人值守」（计划档不算）。 */
+    private fun unattended(convId: String): Boolean = host.state.conversation(convId)?.code?.let { it.unattended && it.mode != CodeMode.PLAN } == true
+
+    /**
+     * 无人值守时模型一时调不通（限流、服务商 5xx、网断了）：记一步、等一会儿再试（30 秒起翻倍，最长等半小时，最多 UNATTENDED_RETRIES 次）。
+     * 不是无人值守、或者是 Key 不对 / 没钱这类等也没用的，照旧直接报错。
+     */
+    private suspend fun <T> patiently(convId: String, msgId: () -> String, block: suspend () -> T): T {
+        var wait = 30_000L
+        var tries = 0
+        while (true) {
+            try {
+                return block()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                if (!unattended(convId) || tries >= UNATTENDED_RETRIES || !transient(e)) throw e
+                tries++
+                addStep(convId, msgId(), ToolStep("run", "模型暂时调不通", id = host.newId(), ok = false,
+                    note = "无人值守：${wait / 1000} 秒后再试（第 $tries 次）：${host.friendlyError(e).take(120)}"))
+                kotlinx.coroutines.delay(wait)
+                wait = minOf(wait * 2, 30 * 60_000L)
+            }
+        }
+    }
+
+    /** 等一会儿可能就好的错：限流（不含智谱那种「余额不足」也报 429 的）、超时、服务商 5xx、网络。 */
+    private fun transient(e: Throwable): Boolean = when (e) {
+        is ApiException -> (e.status == 429 && !Regex("(?i)余额|insufficient|balance|quota|1113").containsMatchIn(e.body)) || e.status == 408 || e.status >= 500
+        is java.io.IOException -> true
+        else -> e::class.simpleName.orEmpty().contains("Timeout")
+    }
+
+    /** 北京时间「HH:mm」（用户在国内，额度恢复时刻写在回答里给手机上看）。 */
+    private fun beijingClock(ms: Long): String = java.time.Instant.ofEpochMilli(ms).atZone(java.time.ZoneId.of("Asia/Shanghai"))
+        .format(java.time.format.DateTimeFormatter.ofPattern("M月d日 HH:mm"))
+
+    /**
+     * 程序重开时还在等额度恢复的无人值守会话（2026-10-28）：到点照样接着做（插一条「额度恢复了，接着做」当任务）。
+     * 电脑端引擎启动后调一次。
+     */
+    fun resumePending() {
+        for (c in host.state.conversations) {
+            val spec = c.code ?: continue
+            if (spec.resumeAt <= 0 || !spec.unattended) continue
+            host.launch(c.id) {
+                try {
+                    kotlinx.coroutines.delay(maxOf(0L, spec.resumeAt - host.now()))
+                } finally {
+                    // 等到了、或者用户点了停止：都不再等
+                    host.updateCode(c.id) { it.copy(resumeAt = 0) }
+                }
+                val m = Message(host.newId(), c.id, Role.USER, com.guixing.jixunying.model.USER_ID, RESUME_TEXT, createdAt = host.now())
+                host.addMessage(m)
+                submit(c.id, m)
+            }
+        }
     }
 
     /** 给它的话：用户的自定义指令 + 任务；只读时说一声（它改不了文件，交回做法）。 */
@@ -1674,7 +1783,7 @@ class CodeAgent(private val host: CodeHost) {
         return when {
             Regex("(?i)not logged in|/login|please log ?in|invalid api key|authentication|oauth").containsMatchIn(t) ->
                 "Claude Code 还没登录，或者登录过期了：到 设置 → Code 栏 点「打开 Claude Code 登录」，在弹出的窗口里登录好再发一次。\n（它说：${t.take(300)}）"
-            Regex("(?i)usage limit|rate limit|limit reached|out of (extra )?usage").containsMatchIn(t) ->
+            CLAUDE_LIMIT.containsMatchIn(t) ->
                 "Claude 订阅的额度用完了，等恢复了再发；或者点会话标题下面的「谁来干活」先换成别的模型。\n（它说：${t.take(300)}）"
             t.isEmpty() -> "Claude Code 出错了，没说原因"
             else -> "Claude Code 报错：${t.take(800)}"
@@ -1797,6 +1906,12 @@ class CodeAgent(private val host: CodeHost) {
                 val step = ToolStep("run", command, id = stepId, ok = true,
                     note = if (by != null) "「$by」开头的命令这个会话里不再问" else "",
                     prefix = if (by == null) CodeCommands.prefixOf(command).orEmpty() else "")
+                // 无人值守（2026-10-28）：危险命令不等人批准，直接回它「换个办法」
+                if (CodeCommands.dangerous(command) && by == null && unattended(convId)) {
+                    addStep(convId, msgId, step.copy(ok = false, approval = "denied", note = UNATTENDED_DANGER_NOTE))
+                    steps[ev.toolUseId] = ExtStep(stepId, closed = true)
+                    return deny(UNATTENDED_DANGER)
+                }
                 val ask = when {
                     CodeCommands.dangerous(command) && by == null -> true
                     openAll(convId) -> false
@@ -2131,6 +2246,22 @@ class CodeAgent(private val host: CodeHost) {
         private const val UI_TEXT_LIMIT = 20_000
         /** 等批准的那一步因为用户插话先放下（放在 Waiting 结果的 remember 里，见 submit）。 */
         private const val INTERJECT = "interject"
+        /** 无人值守（2026-10-28）：危险命令没人能批准，不等——步骤上写这句，回给模型下面那句。 */
+        private const val UNATTENDED_DANGER_NOTE = "无人值守：危险命令没跑（没人能批准）"
+        private const val UNATTENDED_DANGER = "这条命令没跑：现在是无人值守，删整个文件夹、格式化、改注册表这类危险命令不跑，也没人能批准。" +
+            "换个不危险的办法；实在绕不开就跳过这一步，在最后的汇报里写明要用户回来做什么。"
+        /** 无人值守：一件事最多接着走几轮（每轮 maxSteps 步），免得原地打转烧钱。 */
+        private const val UNATTENDED_ROUNDS = 10
+        /** 无人值守：模型一时调不通最多再试几次。 */
+        private const val UNATTENDED_RETRIES = 8
+        /** 无人值守：Claude 额度用完最多等几回（一回等到它说的恢复时刻）。 */
+        private const val UNATTENDED_LIMIT_WAITS = 6
+        /** Claude Code 说订阅额度用完了（2026-10-22 用户电脑上见过「You've hit your session limit · resets 4:10pm」）。 */
+        private val CLAUDE_LIMIT = Regex("(?i)usage limit|rate limit|limit reached|out of (extra )?usage|session limit|hit your .{0,30}limit")
+        /** 额度恢复时刻再多等这么久才接着做（它说的时刻有时差一点）；测试里改成 0。 */
+        internal var limitMarginMs = 60_000L
+        /** 额度恢复后接着做时交给它的那句话。 */
+        internal const val RESUME_TEXT = "（额度恢复了，接着刚才没做完的事做完；做完了汇报做了什么、还剩什么。）"
         /** 一条龙（第 19 节）：给开发的前面对话最多多少字、交回开发的意见最多多少字；开发交回的话开头有这些就是没做成。 */
         private const val FLOW_CONTEXT_LIMIT = 6000
         private const val FLOW_FEEDBACK_LIMIT = 12_000

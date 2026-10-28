@@ -805,6 +805,27 @@ class ShotsTest {
         tmp.deleteRecursively()
     }
 
+    /**
+     * 2026-10-28：新开软件的新对话首页（logo + 问候 + 选人 + 输入框）、Code 会话的权限档菜单（多了「无人值守」）、
+     * 外观页（手机遥控时读本机）。
+     */
+    @Test
+    fun homeShots() {
+        val dir = out ?: return
+        dir.mkdirs()
+        val tmp = tempDir("jxy-homeshots")
+        val docs = File(tmp, "文档").apply { mkdirs() }
+        val e = seed(File(tmp, "data"), docs)
+        val hub = Hub(e)
+        val desktop = DesktopPlatform(fileLog = false) { null }
+        val phone = PhonePlatform()
+        shoot("desktop-home", 1280, 820, 1f, hub, desktop, "home")
+        shoot("phone-home", 824, 1784, 2f, hub, phone, "home")
+        shoot("phone-home-360", 720, 1560, 2f, hub, phone, "home")
+        shoot("desktop-code-modes", 1280, 820, 1f, hub, desktop, "code:c8#modes")
+        shoot("phone-settings-appearance", 824, 1784, 2f, hub, phone, "settings:APPEARANCE")
+    }
+
     /** 集训场：开局页、主持人看 AI 打（暂停在第一天发言中）、真人轮到发言、打完的复盘（AI 用 WolfFakeLlm，不联网）。 */
     @Test
     fun wolfShots() {

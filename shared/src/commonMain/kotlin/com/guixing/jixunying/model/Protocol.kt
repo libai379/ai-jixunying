@@ -60,6 +60,8 @@ sealed interface Command {
         val auto: Boolean = false,
         /** 2026-10-28：开「全部放开」（新建时就能选，以前要建好再切；手机上也能选）。 */
         val openAll: Boolean = false,
+        /** 2026-10-28：开「无人值守」（CodeSpec.unattended，连带全部放开）。 */
+        val unattended: Boolean = false,
     ) : Command
     /**
      * Code 栏：换这个会话的项目文件夹 / 模型（2026-10-17，新建不再先选，开起来以后随时换）。空字符串 = 这一样不换。
@@ -121,7 +123,9 @@ sealed interface Command {
         /** 2026-10-17：「全部放开」（CodeSpec.openAll）。2026-10-28 起手机上也能开。 */
         val openAll: Boolean = false,
         /** 2026-10-17：「自动」（CodeSpec.autoMode）。2026-10-28 起手机上也能开。 */
-        val auto: Boolean = false) : Command
+        val auto: Boolean = false,
+        /** 2026-10-28：「无人值守」（CodeSpec.unattended，连带全部放开）。 */
+        val unattended: Boolean = false) : Command
     /** Code 栏：发一条任务，开始跑编码循环（同一个会话已经在跑就排队，前一个跑完接着跑）。 */
     @Serializable data class CodeSend(
         val convId: String,
