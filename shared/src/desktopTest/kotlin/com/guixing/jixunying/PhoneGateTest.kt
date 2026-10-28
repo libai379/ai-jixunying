@@ -71,75 +71,66 @@ class PhoneGateTest {
         assertNull(PhoneGate.check(Command.CodeBackupSize, s).refusal)
     }
 
+    /**
+     * 2026-10-28 用户在手机上遥控修服务器：只能挂在电脑上建过的文件夹、只能选手动 / 计划，点了 51 次允许。
+     * 改成手机和电脑一样：任意存在的文件夹、五档都能选，标成手机发起。
+     */
     @Test
-    fun phoneCreatesOnlyInKnownFolders() = runBlocking {
+    fun phoneCreatesAnywhereWithAnyMode() = runBlocking {
         val e = engine(allowPhone = true)
-        // 电脑上还没建过任何 Code 会话：手机一个文件夹都用不了
-        val none = e.fromPhone(Command.CodeCreate(project.absolutePath, "p1", "code-model"))
-        assertFalse(none.ok)
-        assertTrue("已经建过" in none.message, none.message)
-        assertTrue(e.state.conversations.none { it.code != null })
+        // 电脑上一个会话都没建过：手机照样能用电脑上任意文件夹；手机自己填 fromPhone = false 不算
+        val first = e.fromPhone(Command.CodeCreate(other.absolutePath, "p1", "code-model", fromPhone = false))
+        assertTrue(first.ok, first.message)
+        assertTrue(e.state.conversation(first.data)!!.code!!.fromPhone)
 
-        val pcId = e.call(Command.CodeCreate(project.absolutePath, "p1", "code-model")).data
-        assertFalse(e.state.conversation(pcId)!!.code!!.fromPhone)
+        // 电脑上建过的文件夹换个写法（大小写、结尾斜杠）：存电脑上原来那个写法
+        e.call(Command.CodeCreate(project.absolutePath, "p1", "code-model"))
+        val same = e.fromPhone(Command.CodeCreate(project.absolutePath.uppercase() + "\\", "p1", "code-model"))
+        assertEquals(project.absolutePath, e.state.conversation(same.data)!!.code!!.folder)
 
-        // 同一个文件夹（换个写法：大小写、结尾斜杠、绕一圈的 ..）能建，标成手机发起；手机自己填 fromPhone = false 不算
-        val ok = e.fromPhone(Command.CodeCreate(project.absolutePath.uppercase() + "\\", "p1", "code-model", fromPhone = false))
-        assertTrue(ok.ok, ok.message)
-        val spec = e.state.conversation(ok.data)!!.code!!
-        assertTrue(spec.fromPhone)
-        assertEquals(project.absolutePath, spec.folder, "存电脑上原来那个写法")
-        assertNull(spec.pcMode)
-        assertTrue(e.fromPhone(Command.CodeCreate(File(other, "..\\proj").path, "p1", "code-model")).ok)
+        // 不存在的文件夹由引擎报错
+        assertFalse(e.fromPhone(Command.CodeCreate(File(dir, "没有这个").absolutePath, "p1", "code-model")).ok)
 
-        // 别的文件夹、项目里面的子文件夹、上一级：都不行
-        for (p in listOf(other.absolutePath, File(project, "sub").apply { mkdirs() }.absolutePath, dir.absolutePath, "", "C:\\")) {
-            val r = e.fromPhone(Command.CodeCreate(p, "p1", "code-model"))
-            assertFalse(r.ok, "「$p」不该能建")
+        // 新建就能选「全部放开」「自动」「接受编辑」；计划档带着全部放开也还是计划
+        suspend fun create(c: Command.CodeCreate): com.guixing.jixunying.model.CodeSpec {
+            val r = e.fromPhone(c)
+            assertTrue(r.ok, r.message)
+            return e.state.conversation(r.data)!!.code!!
         }
-        // 「接受编辑」不能在手机上新建
-        val loose = e.fromPhone(Command.CodeCreate(project.absolutePath, "p1", "code-model", CodeMode.ACCEPT_EDITS))
-        assertFalse(loose.ok)
-        assertTrue("接受编辑" in loose.message, loose.message)
-        // 计划档可以
-        assertTrue(e.fromPhone(Command.CodeCreate(project.absolutePath, "p1", "code-model", CodeMode.PLAN)).ok)
+        val open = create(Command.CodeCreate(project.absolutePath, "p1", "code-model", openAll = true))
+        assertTrue(open.openAll); assertFalse(open.autoMode); assertEquals(CodeMode.ACCEPT_EDITS, open.mode)
+        val auto = create(Command.CodeCreate(project.absolutePath, "p1", "code-model", auto = true))
+        assertTrue(auto.autoMode); assertFalse(auto.openAll); assertEquals(CodeMode.ACCEPT_EDITS, auto.mode)
+        assertEquals(CodeMode.ACCEPT_EDITS, create(Command.CodeCreate(project.absolutePath, "p1", "code-model", CodeMode.ACCEPT_EDITS)).mode)
+        val plan = create(Command.CodeCreate(project.absolutePath, "p1", "code-model", CodeMode.PLAN, openAll = true))
+        assertEquals(CodeMode.PLAN, plan.mode); assertFalse(plan.openAll)
     }
 
     @Test
-    fun phoneCannotLoosenMode() = runBlocking {
+    fun phoneChangesModeAndWorkspaceLikePc() = runBlocking {
         val e = engine(allowPhone = true)
         val pc = e.call(Command.CodeCreate(project.absolutePath, "p1", "code-model")).data
-        assertEquals(CodeMode.MANUAL, e.state.conversation(pc)!!.code!!.pcMode)
-
-        // 电脑上选的是手动：手机切到计划、再切回手动都行，切到接受编辑不行
-        assertTrue(e.fromPhone(Command.CodeSetMode(pc, CodeMode.PLAN)).ok)
+        fun spec() = e.state.conversation(pc)!!.code!!
+        // 自动、全部放开、接受编辑、手动：手机上都能切（以前切走自动就回不来）
+        assertTrue(e.fromPhone(Command.CodeSetMode(pc, CodeMode.ACCEPT_EDITS, auto = true)).ok)
+        assertTrue(spec().autoMode)
+        assertTrue(e.fromPhone(Command.CodeSetMode(pc, CodeMode.ACCEPT_EDITS, openAll = true)).ok)
+        assertTrue(spec().openAll)
         assertTrue(e.fromPhone(Command.CodeSetMode(pc, CodeMode.MANUAL)).ok)
-        assertFalse(e.fromPhone(Command.CodeSetMode(pc, CodeMode.ACCEPT_EDITS)).ok)
-        assertEquals(CodeMode.MANUAL, e.state.conversation(pc)!!.code!!.mode)
-        // 手机换档不改 pcMode（手机自己填 fromPhone = false 也不算）
-        assertTrue(e.fromPhone(Command.CodeSetMode(pc, CodeMode.PLAN, fromPhone = false)).ok)
-        assertEquals(CodeMode.MANUAL, e.state.conversation(pc)!!.code!!.pcMode)
-
-        // 电脑上给它选了接受编辑：手机也能切过去
-        assertTrue(e.call(Command.CodeSetMode(pc, CodeMode.ACCEPT_EDITS)).ok)
-        assertTrue(e.fromPhone(Command.CodeSetMode(pc, CodeMode.MANUAL)).ok)
-        assertTrue(e.fromPhone(Command.CodeSetMode(pc, CodeMode.ACCEPT_EDITS)).ok)
-        assertEquals(CodeMode.ACCEPT_EDITS, e.state.conversation(pc)!!.code!!.mode)
-
-        // 手机建的会话：电脑上没选过，切不到接受编辑；电脑上切过以后就行
-        val ph = e.fromPhone(Command.CodeCreate(project.absolutePath, "p1", "code-model")).data
-        assertFalse(e.fromPhone(Command.CodeSetMode(ph, CodeMode.ACCEPT_EDITS)).ok)
-        assertTrue(e.call(Command.CodeSetMode(ph, CodeMode.ACCEPT_EDITS)).ok)
-        assertTrue(e.fromPhone(Command.CodeSetMode(ph, CodeMode.ACCEPT_EDITS)).ok)
-    }
-
-    @Test
-    fun oldSessionsWithoutPcMode() {
-        // 1.7.0 建的会话没有 pcMode：电脑上建的按它现在的档算，手机建的不算
-        val pcSpec = com.guixing.jixunying.model.CodeSpec("G:\\p", "p1", "m", CodeMode.ACCEPT_EDITS)
-        assertTrue(com.guixing.jixunying.model.CodePhone.mayAcceptEdits(pcSpec))
-        assertFalse(com.guixing.jixunying.model.CodePhone.mayAcceptEdits(pcSpec.copy(mode = CodeMode.MANUAL)))
-        assertFalse(com.guixing.jixunying.model.CodePhone.mayAcceptEdits(pcSpec.copy(fromPhone = true)))
+        assertEquals(CodeMode.MANUAL, spec().mode); assertFalse(spec().openAll); assertFalse(spec().autoMode)
+        // 加工作区、「不再问」的命令
+        assertTrue(e.fromPhone(Command.CodeSetAccess(pc, listOf(other.absolutePath), listOf("git status"))).ok)
+        assertEquals(listOf(other.absolutePath), spec().extraPaths)
+        // 批准时「顺便加进工作区 / 不再问」照原样交给引擎（以前手机上一律当成只允许这一次）
+        val d = PhoneGate.check(Command.CodeDecide(pc, "s1", true, remember = "dir"), e.state)
+        assertNull(d.refusal)
+        assertEquals("dir", (d.command as Command.CodeDecide).remember)
+        // 换项目文件夹和模型、团队、一条龙：放行
+        for (c in listOf(Command.CodeSetProject(pc, folder = other.absolutePath), Command.CodeSetTeam(pc, "review", "p1", "code-model"),
+            Command.CodeSetFlow(pc, ""))) assertNull(PhoneGate.check(c, e.state).refusal, "$c 应该放行")
+        // 开关关了：照样都拦
+        e.call(Command.SaveSettings(e.state.settings.copy(code = CodeSettings(allowPhone = false))))
+        assertEquals(PhoneGate.OFF, PhoneGate.check(Command.CodeSetMode(pc, CodeMode.ACCEPT_EDITS, openAll = true), e.state).refusal?.message)
     }
 
     @Test

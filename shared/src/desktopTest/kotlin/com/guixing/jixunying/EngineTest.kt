@@ -85,6 +85,7 @@ class EngineTest {
     private val uploadPolicies = Collections.synchronizedList(mutableListOf<String>())
     private val ossUploads = Collections.synchronizedList(mutableListOf<Pair<Map<String, String>, Triple<String, String, ByteArray>?>>())
     private val kimiSearches = Collections.synchronizedList(mutableListOf<JsonObject>())
+    private val deepseekSearches = Collections.synchronizedList(mutableListOf<JsonObject>())
     // 假微信
     private val wxInbox = java.util.concurrent.ConcurrentLinkedQueue<String>()
     private val wxSent = Collections.synchronizedList(mutableListOf<String>())
@@ -224,8 +225,9 @@ class EngineTest {
                             hasTool("read_document") && latest.contains("偷看") && !sawTool -> callTool("read_document", mapOf("path" to latest.substringAfter("偷看").trim()))
                             toolTexts.any { "文档库里没有" in it || "用户拒绝了" in it } -> say("读不了。")
                             // Kimi：用我们的 web_search 工具，搜索由客户端去调 Kimi 官方搜索接口（/v1/tools/search）
-                            model == "kimi-fake" && hasFnSearch && !sawTool -> callTool("web_search", mapOf("query" to "最新消息"))
+                            (model == "kimi-fake" || model == "deepseek-fake") && hasFnSearch && !sawTool -> callTool("web_search", mapOf("query" to "最新消息"))
                             model == "kimi-fake" -> say("Kimi 搜到了。")
+                            model == "deepseek-fake" -> say("搜到了：" + toolTexts.joinToString(" | "))
                             // 智谱官方搜索：出处放在 web_search 字段
                             model == "zhipu-fake" -> {
                                 chunk("""{"content":""}""", """"web_search":[{"title":"智谱来源","link":"https://zhipu.example/a","content":"摘要"}],""")
@@ -296,7 +298,14 @@ class EngineTest {
                 }
                 // Kimi 官方搜索接口（格式照 https://platform.kimi.com/docs/api/tools-search）
                 post("/v1/tools/search") {
-                    kimiSearches += Json.parseToJsonElement(call.receiveText()).jsonObject
+                    val body = Json.parseToJsonElement(call.receiveText()).jsonObject
+                    // DeepSeek 官方搜索接口（同一个路径，请求用 query、回 results，格式照 https://api-docs.deepseek.com/zh-cn/guides/search）
+                    if ("query" in body) {
+                        deepseekSearches += body
+                        if (call.request.headers["Authorization"] != "Bearer dk") return@post call.respondText("""{"error":{"message":"Insufficient Balance","type":"invalid_request_error","param":null,"code":"invalid_request_error"}}""", ContentType.Application.Json, HttpStatusCode.PaymentRequired)
+                        return@post call.respondText("""{"results":[{"rerank_score":2.1,"title":"DeepSeek 来源","url":"https://ds.example/a","snippet":"短摘要","summary":"给模型读的长摘要","content":"","site_name":"示例","site_icon":null,"date":null,"authority":3}]}""", ContentType.Application.Json)
+                    }
+                    kimiSearches += body
                     if (call.request.headers["Authorization"] != "Bearer k") return@post call.respondText("", status = HttpStatusCode.Unauthorized)
                     call.respondText("""{"search_results":[{"authority":"S","date":"2026-10-10","icon":"","mime":"text/html","site_name":"示例","snippet":"Kimi 搜到的摘要","text":"","title":"Kimi 来源","url":"https://kimi.example/a"}]}""", ContentType.Application.Json)
                 }
@@ -591,7 +600,9 @@ class EngineTest {
         assertTrue(requests.first().containsKey("temperature"))
         assertTrue(requests.drop(1).none { it.containsKey("temperature") })
         val toolMsg = requests.last()["messages"]!!.jsonArray.map { it.jsonObject }.first { it["role"]?.jsonPrimitive?.content == "tool" }
-        assertTrue("搜索失败" in toolMsg["content"]!!.jsonPrimitive.content)
+        // 2026-10-28：交给模型的话只说怎么答，不再叫它「告诉用户没搜到」（以前它就在回答开头先念一段搜索失败）
+        val said = toolMsg["content"]!!.jsonPrimitive.content
+        assertTrue("搜索没成功" in said && "告诉用户" !in said, said)
     }
 
     /** 快速 / 深度：按这家的写法带参数，默认什么都不传；模型不认就去掉重试、标签恢复、提示一次，之后不再传。 */
@@ -921,6 +932,54 @@ class EngineTest {
         assertTrue(requests.first()["tools"].toString().contains("\"web_search\""))
         assertTrue(kimiSearches.isEmpty())
         assertFalse("Kimi" in viaEngine.tools.single { it.kind == "search" }.note)
+    }
+
+    /**
+     * DeepSeek 官方搜索（10-17 上线）：DeepSeek 成员用自家的；设置里是免费必应时，别家成员也借用户已有的 DeepSeek
+     * （免费必应搜中文只按第一个字搜，2026-10-28 实测「达拉干沉香」回「达」字字典）。
+     */
+    @Test
+    fun deepSeekOfficialSearch() = runBlocking {
+        val (e, _) = engineWithMembers("小智")
+        e.call(Command.SaveProvider(ProviderConfig("pd", "deepseek", "DeepSeek", "${base()}/v1", "dk", listOf(ModelInfo("deepseek-fake")))))
+        e.call(Command.SaveProvider(ProviderConfig("po", "custom", "别家", "${base()}/v1", "k", listOf(ModelInfo("deepseek-fake")))))
+        e.call(Command.SaveMember(Member("md", "深", providerId = "pd", modelId = "deepseek-fake")))
+        e.call(Command.SaveMember(Member("mo", "别", providerId = "po", modelId = "deepseek-fake")))
+        suspend fun ask(memberId: String): com.guixing.jixunying.model.Message {
+            val conv = e.call(Command.CreateConversation(listOf(memberId))).data
+            e.call(Command.SendMessage(conv, "最新消息"))
+            waitIdle(e, conv, 1)
+            return e.store.messages.value[conv]!!.last()
+        }
+
+        // 自家：地址带 /v1 也拼成 /v1/tools/search；模型读到的是给模型看的长摘要（summary），不是 snippet
+        deepseekSearches.clear()
+        val own = ask("md")
+        assertEquals("最新消息", deepseekSearches.single()["query"]!!.jsonPrimitive.content)
+        assertEquals("https://ds.example/a", own.tools.single { it.kind == "search" }.sources.single().url)
+        assertTrue("给模型读的长摘要" in own.content, own.content)
+
+        // 别家成员：设置里是免费必应 → 借用户已有的 DeepSeek 搜
+        e.call(Command.SaveSettings(e.state.settings.copy(search = e.state.settings.search.copy(engine = SearchEngine.BING_FREE))))
+        deepseekSearches.clear()
+        val other = ask("mo")
+        assertEquals(1, deepseekSearches.size)
+        assertEquals("https://ds.example/a", other.tools.single { it.kind == "search" }.sources.single().url)
+
+        // 用户选了别的引擎就照选的来，不借（没填 Key 的博查，不真去联网）
+        e.call(Command.SaveSettings(e.state.settings.copy(search = e.state.settings.search.copy(engine = SearchEngine.BOCHA))))
+        deepseekSearches.clear()
+        val chosen = ask("mo").tools.single { it.kind == "search" }
+        assertTrue(deepseekSearches.isEmpty())
+        assertTrue("博查" in chosen.note, chosen.note)
+
+        // DeepSeek 余额不足（402）：退回设置里的引擎，步骤上写明；交给模型的话不再叫它「告诉用户没搜到」（以前它就在开头先念一段搜索失败）
+        e.call(Command.SaveProvider(e.state.providers.first { it.id == "pd" }.copy(apiKey = "poor")))
+        val poor = ask("md")
+        val step = poor.tools.single { it.kind == "search" }
+        assertFalse(step.ok)
+        assertTrue("DeepSeek 官方搜索出错" in step.note && "博查" in step.note, step.note)
+        assertTrue("回答里不用讲" in poor.content && "告诉用户" !in poor.content, poor.content)
     }
 
     @Test

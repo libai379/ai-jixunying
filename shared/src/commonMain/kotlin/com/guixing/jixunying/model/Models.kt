@@ -62,7 +62,10 @@ enum class SearchEngine { BING_FREE, BOCHA, TAVILY, ZHIPU, BRAVE }
 
 @Serializable
 enum class SearchMode {
-    /** 模型所在平台有官方内置搜索（智谱、千问）就用内置的；Kimi 的 web_search 走 Kimi 官方搜索接口；其余模型调用下面选的搜索引擎。 */
+    /**
+     * 模型所在平台有官方内置搜索（智谱、千问）就用内置的；Kimi、DeepSeek 的 web_search 走自家官方搜索接口；
+     * 其余模型调用下面选的搜索引擎，选的是免费必应时借用户已有的 DeepSeek / Kimi 官方搜索（2026-10-28）。
+     */
     AUTO,
     /** 所有模型都用下面选的搜索引擎（出处显示最统一）。 */
     ENGINE_ONLY,

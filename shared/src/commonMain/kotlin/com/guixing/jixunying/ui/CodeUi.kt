@@ -39,20 +39,14 @@ object CodeUi {
         else -> CodeAccess.LOCKED
     }
 
-    /** 新建会话时能选的档：电脑上三档全列，手机上只有「手动」「计划」（CodePhone.createModes）。 */
-    fun createModesFor(access: CodeAccess): List<CodeMode> =
-        if (access == CodeAccess.FULL) CodeMode.entries.toList() else CodePhone.createModes.toList()
-
     /**
-     * 会话页上权限档那几个按钮列哪几档：电脑上三档全列；手机上只列「手动」「计划」，
-     * 「接受编辑」只在电脑上给这个会话选过（CodePhone.mayAcceptEdits）时才出现——
-     * 电脑上没选过的话手机切过去也会被 PhoneGate 拒，界面就不给这个按钮。
+     * 新建会话、会话页上权限档能选哪几档：能动手就全列（2026-10-28 起手机遥控电脑时和电脑上一样，
+     * 用户：「不要限制……我一直点上百次允许吗？」；以前手机上只有手动、计划，自动档切走就回不来）。
      */
-    fun modesFor(access: CodeAccess, spec: CodeSpec): List<CodeMode> {
-        val list = createModesFor(access).toMutableList()
-        if (access != CodeAccess.FULL && CodePhone.mayAcceptEdits(spec)) list += CodeMode.ACCEPT_EDITS
-        return list
-    }
+    fun createModesFor(access: CodeAccess): List<CodeMode> = CodeMode.entries.toList()
+
+    @Suppress("UNUSED_PARAMETER")
+    fun modesFor(access: CodeAccess, spec: CodeSpec): List<CodeMode> = createModesFor(access)
 
     /** 手机上遥控电脑、电脑上没打开开关时，会话页底下那一句（要写清去哪儿打开）。 */
     const val LOCKED_NOTE = "电脑上没打开「允许手机用 Code 栏」（在电脑上 设置 → Code 栏 打开），现在只能看。"

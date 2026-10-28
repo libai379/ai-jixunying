@@ -1227,10 +1227,12 @@ class Engine(
                 createdAt = now(), updatedAt = now(),
                 code = CodeSpec(folder = workFolder.absolutePath, providerId = pick.first, modelId = pick.second, worktreeOf = wtOf, worktreeBranch = wtBranch,
                     // 电脑上点「+」直接开的（没给文件夹）默认「自动」：照 Claude Code，auto 是新会话的默认档；
-                    // 独立副本开的照原会话的档（c.auto，2026-10-22：以前写死「接受编辑」、丢了自动）；手机上不许开自动
-                    mode = if (c.folder.isBlank() && !c.fromPhone) CodeMode.ACCEPT_EDITS else c.mode,
-                    autoMode = (c.folder.isBlank() || c.auto) && !c.fromPhone && c.mode != CodeMode.PLAN,
-                    fromPhone = c.fromPhone, pcMode = if (c.fromPhone) null else c.mode),
+                    // 独立副本开的照原会话的档（c.auto，2026-10-22：以前写死「接受编辑」、丢了自动）；
+                    // 2026-10-28 起新建时就能选「全部放开」，手机上也能开自动、全部放开（PhoneGate 不再拦）
+                    mode = if (c.folder.isBlank() || ((c.auto || c.openAll) && c.mode != CodeMode.PLAN)) CodeMode.ACCEPT_EDITS else c.mode,
+                    autoMode = (c.folder.isBlank() || c.auto) && !c.openAll && c.mode != CodeMode.PLAN,
+                    openAll = c.openAll && c.mode != CodeMode.PLAN,
+                    fromPhone = c.fromPhone, pcMode = c.mode),
             )
             convs[conv.id] = mutableListOf()
             updateState { it.copy(conversations = listOf(conv) + it.conversations) }
@@ -1801,7 +1803,10 @@ class Engine(
         return CommandResult()
     }
 
-    /** 这一轮是手机发起的（2026-10-17）：AI 不许读收录范围外的文件。放在协程上下文里，往下调的工具都看得到。 */
+    /**
+     * 这一轮是手机发起的（2026-10-17）。放在协程上下文里，往下调的工具都看得到。
+     * 电脑上没打开「允许手机用 Code 栏」时，AI 不许读收录范围外的、不许改文件、不许跑命令（phoneLocked，2026-10-28 起只看这个开关）。
+     */
     private class PhoneTurn : kotlin.coroutines.AbstractCoroutineContextElement(PhoneTurn) {
         companion object Key : kotlin.coroutines.CoroutineContext.Key<PhoneTurn>
     }
@@ -1828,7 +1833,7 @@ class Engine(
 
     /**
      * 对话页 AI 要读 f。2026-10-17 用户：「比 Claude 更开放」——电脑上发起的，哪儿都能读，不问；
-     * 微信对话、手机发起的这一轮不许读收录范围外的（手机、微信丢了就等于整台电脑的文件被人读）。
+     * 微信对话不许读收录范围外的；手机发起的这一轮，电脑上打开了「允许手机用 Code 栏」就和电脑上一样（2026-10-28），没打开就不许。
      * 返回 null = 可以读；返回文字 = 不读，把这句话回给模型。
      */
     private suspend fun askToRead(convId: String, msgId: String, f: File): String? {
@@ -1838,25 +1843,31 @@ class Engine(
         return null
     }
 
-    /** 微信对话、手机发起的这一轮：收录范围外的不许碰。返回不为空就是拒绝的说法。 */
+    /**
+     * 微信对话、手机发起的这一轮：收录范围外的不许碰。返回不为空就是拒绝的说法。
+     * 2026-10-28：电脑上打开了「允许手机用 Code 栏」时，手机发起的和电脑上一样（用户：「不要限制」；Code 栏同一天放开，两边对齐）。
+     */
     private suspend fun remoteRefusal(convId: String, what: String, f: File): String? {
         if (state.conversation(convId)?.channel?.startsWith("weixin:") == true)
             return "这是微信里发来的，收录范围外的文件不能$what（${f.path}）。如实告诉用户：要${what}就在电脑上的 AI集训营 里说。"
-        if (kotlin.coroutines.coroutineContext[PhoneTurn] != null)
-            return "这一轮是手机上发起的，收录范围外的文件不能$what（${f.path}）。如实告诉用户：要${what}就在电脑上说，或者把它加进「我的文档」。"
+        if (phoneLocked())
+            return "这一轮是手机上发起的，收录范围外的文件不能$what（${f.path}）。如实告诉用户：要${what}就在电脑上说，或者在电脑上打开「允许手机用 Code 栏」。"
         return null
     }
 
+    /** 这一轮是手机发起的，而且电脑上没打开「允许手机用 Code 栏」：动电脑上的文件、跑命令一律不许。 */
+    private suspend fun phoneLocked() = kotlin.coroutines.coroutineContext[PhoneTurn] != null && !state.settings.code.allowPhone
+
     /**
      * 对话页 AI 要改 / 新建 f（2026-10-17，对话栏 = Chat + Cowork）：
-     * 微信、手机发起的一律不许改；开了「全部放开」或者在拖进来 / 不用再问的文件夹里，直接改；别处的停下来问（卡片上带差异）。
+     * 微信发起的不许改，手机发起的看电脑上「允许手机用 Code 栏」（2026-10-28）；开了「全部放开」或者在拖进来 / 不用再问的文件夹里，直接改；别处的停下来问（卡片上带差异）。
      * 返回 null = 可以改；返回文字 = 不改。stepId 是这一步的编号（改完把改动挂在它上面）。
      */
     private suspend fun askToWrite(convId: String, msgId: String, f: File, stepId: String, diff: String, note: String): String? {
         if (f.path.startsWith("\\\\") || f.path.startsWith("//")) return "网络路径不能改：${f.path}"
         val conv = state.conversation(convId)
         if (conv?.channel?.startsWith("weixin:") == true) return "这是微信里发来的，不能改电脑上的文件（${f.path}）。如实告诉用户：要改就在电脑上的 AI集训营 里说。"
-        if (kotlin.coroutines.coroutineContext[PhoneTurn] != null) return "这一轮是手机上发起的，不能改电脑上的文件（${f.path}）。如实告诉用户：要改就在电脑上说。"
+        if (phoneLocked()) return "这一轮是手机上发起的，不能改电脑上的文件（${f.path}）。如实告诉用户：要改就在电脑上说，或者在电脑上打开「允许手机用 Code 栏」。"
         val step = ToolStep(if (note.startsWith("替换")) "edit" else "write", f.absolutePath, id = stepId, output = diff, ok = true, note = note,
             scopeDir = (f.absoluteFile.parentFile ?: f).absolutePath)
         if (conv?.fileOpen == true || grantedForWrite(convId, f)) {
@@ -1957,14 +1968,14 @@ class Engine(
     }
 
     /**
-     * 对话页要动手（跑命令、删东西）之前看要不要问（2026-10-17）：微信、手机发起的一律不许；
+     * 对话页要动手（跑命令、删东西）之前看要不要问（2026-10-17）：微信发起的不许，手机发起的看电脑上「允许手机用 Code 栏」（2026-10-28）；
      * 开了「全部放开」不问（危险命令照样问）；删东西在拖进来 / 不再问的文件夹里不问；其余的停下来问。返回 null = 可以做。
      */
     private suspend fun askToAct(convId: String, msgId: String, step: ToolStep, skipIfGranted: File?, dangerous: Boolean): String? {
         val conv = state.conversation(convId)
         val what = if (step.kind == "run") "跑命令" else "删电脑上的东西"
         if (conv?.channel?.startsWith("weixin:") == true) return "这是微信里发来的，不能$what。如实告诉用户：要做就在电脑上的 AI集训营 里说。"
-        if (kotlin.coroutines.coroutineContext[PhoneTurn] != null) return "这一轮是手机上发起的，不能$what。如实告诉用户：要做就在电脑上说。"
+        if (phoneLocked()) return "这一轮是手机上发起的，不能$what。如实告诉用户：要做就在电脑上说，或者在电脑上打开「允许手机用 Code 栏」。"
         val free = !dangerous && (conv?.fileOpen == true || (skipIfGranted != null && grantedForWrite(convId, skipIfGranted)))
         if (free) {
             updateMessage(convId, msgId) { it.copy(tools = it.tools + step) }
@@ -3762,9 +3773,9 @@ class Engine(
         val linkInAsk = snapshot(convId).lastOrNull { it.role == Role.USER }?.content?.contains("http") == true
         val toolsOk = model.tools && !llm.toolsDropped(provider, model.id)
         // 平台有官方内置搜索就用内置的（智谱、千问），否则用我们自己的搜索工具。
-        // Kimi 的内置 $web_search 2026-10-20 下线：Kimi 成员也用我们的 web_search 工具，只是搜索走 Kimi 官方搜索接口（同一个 Key）
+        // Kimi 的内置 $web_search 2026-10-20 下线：Kimi 成员也用我们的 web_search 工具，只是搜索走 Kimi 官方搜索接口（同一个 Key）；DeepSeek 同理（10-17 上线）
         val native = if (wantSearch && toolsOk) nativeSearchOf(provider, model.id) else NativeSearch.NONE
-        val kimiSearch = provider.takeIf { wantSearch && state.settings.search.mode == com.guixing.jixunying.model.SearchMode.AUTO && isKimi(it) }
+        val officialSearch = if (wantSearch) officialSearchFor(provider) else null
         val fnSearch = wantSearch && native == NativeSearch.NONE
         val memOn = state.settings.memory.enabled
         val docsOn = docsUsable()
@@ -3792,7 +3803,7 @@ class Engine(
                 // 模型不会调工具：替它搜一次
                 val q = lastUserText(convId, cutoffId).take(120)
                 if (q.isNotBlank()) {
-                    val step = runSearch(q, sources, kimiSearch)
+                    val step = runSearch(q, sources, officialSearch)
                     updateMessage(convId, msg.id, persist = false) { it.copy(tools = it.tools + step.first) }
                     if (step.second.isNotEmpty()) working.add(1, buildJsonObject { put("role", "system"); put("content", Prompts.searchDigest(q, step.second)) })
                 }
@@ -3857,7 +3868,7 @@ class Engine(
                     // 一次回答最多用 MAX_TOOL_USES 次工具，超过就让它根据已有结果直接回答
                     val result = if (toolUses >= MAX_TOOL_USES)
                         "这次回答已经用了 $MAX_TOOL_USES 次工具，不能再用了。请直接根据前面的结果回答；没做完的如实说。"
-                    else { toolUses++; runTool(convId, msg.id, tc, sources, kimiSearch, if (model.vision) seen else null) }
+                    else { toolUses++; runTool(convId, msg.id, tc, sources, officialSearch, if (model.vision) seen else null) }
                     working += buildJsonObject {
                         put("role", "tool"); put("tool_call_id", tc.id)
                         put("content", result)
@@ -3901,6 +3912,22 @@ class Engine(
     private fun isKimi(p: ProviderConfig): Boolean {
         val u = p.baseUrl.lowercase()
         return p.presetId.startsWith("moonshot") || "moonshot" in u || "api.kimi" in u
+    }
+
+    private fun isDeepSeek(p: ProviderConfig) = p.presetId == "deepseek" || "api.deepseek.com" in p.baseUrl.lowercase()
+
+    /**
+     * 搜索走哪家的官方搜索接口（用那家的 Key）：成员自己是 Kimi / DeepSeek 就用自己那家。
+     * 设置里还是免费必应时，别家成员也借用户已有的 DeepSeek（便宜，其次 Kimi）：免费必应搜中文常只按第一个字搜
+     * （2026-10-28 实测「达拉干沉香」回来全是「达」字字典），手机上不走代理 DuckDuckGo 又连不上，等于没得搜。
+     */
+    private fun officialSearchFor(p: ProviderConfig): ProviderConfig? {
+        val s = state.settings.search
+        if (s.mode != com.guixing.jixunying.model.SearchMode.AUTO) return null
+        fun usable(x: ProviderConfig) = x.enabled && !x.viaHost && x.apiKey.isNotBlank() && (isKimi(x) || isDeepSeek(x))
+        if (usable(p)) return p
+        if (s.engine != com.guixing.jixunying.model.SearchEngine.BING_FREE) return null
+        return state.providers.firstOrNull { usable(it) && isDeepSeek(it) } ?: state.providers.firstOrNull { usable(it) }
     }
 
     private fun nativeSearchOf(p: ProviderConfig, model: String): NativeSearch {
@@ -4664,18 +4691,20 @@ class Engine(
         return s.copy(apiKeys = s.apiKeys + (s.engine.name to p.apiKey))
     }
 
-    /** kimi 不为空：用这家 Kimi 的官方搜索接口；它出错就退回设置里的搜索引擎，并在步骤上注明。 */
-    private suspend fun runSearch(query: String, sources: MutableList<SearchSource>, kimi: ProviderConfig? = null): Pair<ToolStep, List<SearchSource>> {
+    /** official 不为空：用这家（Kimi / DeepSeek）的官方搜索接口；它出错就退回设置里的搜索引擎，并在步骤上注明。 */
+    private suspend fun runSearch(query: String, sources: MutableList<SearchSource>, official: ProviderConfig? = null): Pair<ToolStep, List<SearchSource>> {
         var note = ""
-        if (kimi != null) {
+        if (official != null) {
+            val ds = isDeepSeek(official)
             try {
-                val res = search.kimi(query, kimi.baseUrl, kimi.apiKey, state.settings.search)
+                val res = if (ds) search.deepseek(query, official.baseUrl, official.apiKey, proxyFor(official.useProxy), state.settings.search.maxResults)
+                    else search.kimi(query, official.baseUrl, official.apiKey, state.settings.search)
                 sources += res
                 return ToolStep("search", query, res, ok = true) to res
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Throwable) {
-                note = "Kimi 官方搜索出错（${friendlyError(e, kimi)}），这次改用 ${WebSearch.engineName(state.settings.search.engine)}"
+                note = "${if (ds) "DeepSeek" else "Kimi"} 官方搜索出错（${friendlyError(e, official)}），这次改用 ${WebSearch.engineName(state.settings.search.engine)}"
             }
         }
         return try {
@@ -4689,17 +4718,19 @@ class Engine(
         }
     }
 
-    private suspend fun runTool(convId: String, msgId: String, tc: ToolCall, sources: MutableList<SearchSource>, kimiSearch: ProviderConfig? = null,
+    private suspend fun runTool(convId: String, msgId: String, tc: ToolCall, sources: MutableList<SearchSource>, officialSearch: ProviderConfig? = null,
                                 seen: MutableList<Pair<String, String>>? = null): String {
         val args = runCatching { Json.parse(tc.arguments.ifBlank { "{}" }).jsonObject }.getOrNull() ?: JsonObject(emptyMap())
         return when (tc.name) {
             "web_search" -> {
                 val q = args.str("query").orEmpty().ifBlank { return "参数错误：缺少 query" }
                 val start = sources.size
-                val (step, res) = runSearch(q, sources, kimiSearch)
+                val (step, res) = runSearch(q, sources, officialSearch)
                 updateMessage(convId, msgId, persist = false) { it.copy(tools = it.tools + step) }
-                if (!step.ok) "搜索失败：${step.note}。请如实告诉用户没搜到，不要编造。"
-                else if (res.isEmpty()) "没有搜到结果。请如实告诉用户。"
+                // 以前写「请如实告诉用户没搜到」，模型就在回答开头先念一段「搜索失败了、返回的是……」（2026-10-28 用户截图）；
+                // 界面上搜索步骤本来就标着成败，这里只交代怎么答
+                if (!step.ok) "搜索没成功（${step.note}）。用你自己知道的回答，拿不准的地方在那句话里说明，不要编；搜索没成功界面上已经标出来了，回答里不用讲。"
+                else if (res.isEmpty()) "没有搜到结果。用你自己知道的回答，拿不准的地方在那句话里说明，不要编。"
                 else res.mapIndexed { i, r -> "[${start + i + 1}] ${r.title}\n${r.url}\n${r.snippet}" }.joinToString("\n\n")
             }
             "listen_video" -> listenVideo(convId, msgId, args.str("url").orEmpty())
@@ -5040,6 +5071,14 @@ class Engine(
         if (e is ApiException) {
             val body = e.body.take(300)
             val lower = body.lowercase()
+            // 本机 Ollama 上下文开得太小（2026-10-28 查：用户的微信对话 10-27 22:49 连着报「request (8099 tokens) exceeds the available context size
+            // (4096 tokens)」）。Ollama 显存不到 24 GB 默认只开 4k，走 OpenAI 兼容接口改不了，只能在 Ollama 里调（docs.ollama.com/context-length）
+            if ("exceeds the available context size" in lower) {
+                val need = Regex("""request \((\d+) tokens\)""").find(lower)?.groupValues?.get(1)
+                val have = Regex("""context size \((\d+) tokens\)""").find(lower)?.groupValues?.get(1)
+                return "本机模型的上下文开得太小${if (need != null && have != null) "：这次要 $need 个词元，它只开了 $have" else ""}。" +
+                    "到 Ollama 的设置里把上下文长度（Context length）拉到 32k 或 64k（或者设环境变量 OLLAMA_CONTEXT_LENGTH=32768 再重开 Ollama），再试一次。"
+            }
             val hint = when {
                 e.status == 401 || (e.status == 403 && "key" in lower) || "invalid api key" in lower || "login fail" in lower ||
                     "unauthorized" in lower || "authentication" in lower || "令牌" in body -> "API Key 不对或已失效"

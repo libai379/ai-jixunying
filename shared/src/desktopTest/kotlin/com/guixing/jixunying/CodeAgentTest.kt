@@ -442,21 +442,20 @@ class CodeAgentTest {
         assertTrue(e.state.conversation(conv)!!.code!!.extraPaths.isEmpty())
     }
 
-    /** 批准时选「允许，并把这个文件夹加进工作区」：之后同一个文件夹里的读不再问；手机发来的同样选项只当这一次。 */
+    /** 批准时选「允许，并把这个文件夹加进工作区」：之后同一个文件夹里的读不再问；2026-10-28 起手机发来的同样照办。 */
     @Test
     fun allowAndAddFolderWidensWorkspace() = runBlocking {
         val outsideDir = File(dir, "other").apply { mkdirs(); File(this, "x.txt").writeText("OTHER_CONTENT\n") }
         val e = engine()
         val conv = codeConv(e)
         val path = File(outsideDir, "x.txt").absolutePath
-        // 手机来的「加进工作区」被 PhoneGate 改成只这一次
         val gate = com.guixing.jixunying.engine.code.PhoneGate
         assertNotNull(gate.check(Command.CodeDecide(conv, "s1", true, "dir"), e.state).refusal, "开关没开：手机一律拒")
         val on = e.state.copy(settings = e.state.settings.copy(code = e.state.settings.code.copy(allowPhone = true)))
         val viaPhone = gate.check(Command.CodeDecide(conv, "s1", true, "dir"), on)
         assertNull(viaPhone.refusal)
-        assertEquals("", (viaPhone.command as Command.CodeDecide).remember, "开关开着：批准放行，但「加进工作区」只当这一次")
-        assertNotNull(gate.check(Command.CodeSetAccess(conv, listOf(path), emptyList()), on).refusal, "手机不能改工作区")
+        assertEquals("dir", (viaPhone.command as Command.CodeDecide).remember, "开关开着：「加进工作区」照原样交给引擎")
+        assertNull(gate.check(Command.CodeSetAccess(conv, listOf(path), emptyList()), on).refusal, "手机也能改工作区")
 
         // 读外面的不问（2026-10-17）
         e.call(Command.CodeSend(conv, "读外面的文件 $path"))
@@ -534,9 +533,9 @@ class CodeAgentTest {
         assertEquals(other.absolutePath, e.state.conversation(first)!!.code!!.folder)
         assertTrue(e.call(Command.CodeReview(first, ch.id, false)).ok)
         assertEquals("greeting world\n", File(project, "a.txt").readText(), "换了文件夹也能撤销旧文件夹里的改动")
-        // 手机换不了
+        // 2026-10-28 起手机上也能换（以前手机换不了，只能挂在电脑上建过的文件夹上）
         val on = e.state.copy(settings = e.state.settings.copy(code = e.state.settings.code.copy(allowPhone = true)))
-        assertNotNull(com.guixing.jixunying.engine.code.PhoneGate.check(Command.CodeSetProject(first, folder = "C:\\"), on).refusal)
+        assertNull(com.guixing.jixunying.engine.code.PhoneGate.check(Command.CodeSetProject(first, folder = "C:\\"), on).refusal)
         Unit
     }
 
@@ -559,9 +558,9 @@ class CodeAgentTest {
         val ask = awaitWaiting(e, conv, "run")
         assertTrue("自动检查拦下" in ask.note && "超出请求范围" in ask.note, ask.note)
         e.call(Command.CodeStop(conv))
-        // 手机打不开自动
+        // 2026-10-28 起手机上也能开自动（以前打不开，切走就回不来）
         val on = e.state.copy(settings = e.state.settings.copy(code = e.state.settings.code.copy(allowPhone = true)))
-        assertNotNull(com.guixing.jixunying.engine.code.PhoneGate.check(Command.CodeSetMode(conv, CodeMode.ACCEPT_EDITS, auto = true), on).refusal)
+        assertNull(com.guixing.jixunying.engine.code.PhoneGate.check(Command.CodeSetMode(conv, CodeMode.ACCEPT_EDITS, auto = true), on).refusal)
         // 检查员的回答解析
         assertEquals(true to "好", com.guixing.jixunying.engine.AutoJudge.parse("<think>x</think>{\"allow\": true, \"reason\": \"好\"}"))
         assertNull(com.guixing.jixunying.engine.AutoJudge.parse("我觉得可以"))
@@ -796,13 +795,13 @@ class CodeAgentTest {
         assertTrue(aiOf(e, conv)!!.tools.single { it.kind == "fetch" }.approval.isEmpty())
     }
 
-    /** 2026-10-17「全部放开」：写工作区外面、跑命令都不问；危险命令照样问；手机打不开。 */
+    /** 2026-10-17「全部放开」：写工作区外面、跑命令都不问；危险命令照样问；2026-10-28 起手机上也能开。 */
     @Test
     fun openAllSkipsApprovalsExceptDangerous() = runBlocking {
         val e = engine()
         val conv = codeConv(e)
         val on = e.state.copy(settings = e.state.settings.copy(code = e.state.settings.code.copy(allowPhone = true)))
-        assertNotNull(com.guixing.jixunying.engine.code.PhoneGate.check(Command.CodeSetMode(conv, CodeMode.ACCEPT_EDITS, openAll = true), on).refusal, "手机打不开全部放开")
+        assertNull(com.guixing.jixunying.engine.code.PhoneGate.check(Command.CodeSetMode(conv, CodeMode.ACCEPT_EDITS, openAll = true), on).refusal, "手机也能开全部放开")
         assertTrue(e.call(Command.CodeSetMode(conv, CodeMode.ACCEPT_EDITS, openAll = true)).ok)
         val out = File(dir, "elsewhere/y.txt").apply { parentFile.mkdirs() }
         e.call(Command.CodeSend(conv, "写外面的文件 ${out.absolutePath}"))
@@ -1031,6 +1030,33 @@ class CodeAgentTest {
         assertTrue(ai[0].createdAt <= ai[1].createdAt)
     }
 
+    /**
+     * 2026-10-28 用户：「他跑着跑着跑偏了，我再给他输入命令，他听不到了」——在做的时候插话：
+     * 等批准的那一步先放下，用户的话下一步就交给模型（不再排到整件做完）；回答在插话处分成前后两段，用户的话夹在中间。
+     */
+    @Test
+    fun interjectionReachesModelMidway() = runBlocking {
+        val e = engine()
+        val conv = codeConv(e)
+        sendTask(e, conv, "跑命令 Write-Output INTERJECT_RAN")
+        val ask = awaitWaiting(e, conv, "run")
+        assertTrue(e.call(Command.CodeSend(conv, "先停一下，汇报进度")).ok)
+        await { aiCount(e, conv) == 2 && aiOf(e, conv)?.status == MsgStatus.DONE }
+        val msgs = listOf(e, conv)
+        assertEquals(listOf(Role.USER, Role.AI, Role.USER, Role.AI), msgs.map { it.role })
+        val first = msgs[1]
+        assertEquals(MsgStatus.DONE, first.status)
+        val put = first.tools.single { it.id == ask.id }
+        assertEquals("denied", put.approval)
+        assertEquals("你插了话，这一步先放下了", put.note)
+        val sent = requests.last()["messages"].toString()
+        assertTrue("先停一下，汇报进度" in sent && "因为用户插话先放下了" in sent, sent.takeLast(400))
+        assertFalse("INTERJECT_RAN\\n" in sent, "那条命令没跑")
+        assertEquals("收到。", msgs[3].content.trim())
+        delay(300)
+        assertEquals(2, aiCount(e, conv), "插话已经交给这一轮了，做完不再另起一轮")
+    }
+
     @Test
     fun ledgerTaggedCodeAndNoRecorder() = runBlocking {
         val e = engine()
@@ -1105,14 +1131,13 @@ class CodeAgentTest {
             assertEquals("powershell", pc.state.settings.code.shell)
             assertFalse(remote.call(Command.CodeCreate(project.absolutePath, "p1", "code-model")).ok)
 
-            // 电脑上打开开关：电脑上建过会话的文件夹，手机就能建 Code 会话了（标成手机发起）
+            // 电脑上打开开关：手机就能在电脑上任意文件夹建 Code 会话（标成手机发起），新建就能选「全部放开」（2026-10-28）
             pc.call(Command.SaveSettings(pc.state.settings.copy(code = pc.state.settings.code.copy(allowPhone = true))))
-            assertFalse(remote.call(Command.CodeCreate(project.absolutePath, "p1", "code-model")).ok, "电脑上还没建过这个文件夹的会话")
-            assertTrue(pc.call(Command.CodeCreate(project.absolutePath, "p1", "code-model")).ok)
-            val ok = remote.call(Command.CodeCreate(project.absolutePath, "p1", "code-model"))
+            val ok = remote.call(Command.CodeCreate(project.absolutePath, "p1", "code-model", openAll = true))
             assertTrue(ok.ok, ok.message)
             assertEquals(project.absolutePath, pc.state.conversation(ok.data)?.code?.folder)
             assertEquals(true, pc.state.conversation(ok.data)?.code?.fromPhone)
+            assertEquals(true, pc.state.conversation(ok.data)?.code?.openAll)
         } finally {
             relay.stop()
             broker.stopServer()

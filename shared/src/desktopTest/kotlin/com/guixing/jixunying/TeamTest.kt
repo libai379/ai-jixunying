@@ -240,7 +240,10 @@ class TeamTest {
         assertTrue(e.call(Command.CodeSetTeam(c, "test")).ok)
         assertEquals(listOf(TeamSeat("dev", "p1", "dev-model")), e.state.conversation(c)!!.code!!.team)
         val v = com.guixing.jixunying.engine.code.PhoneGate.check(Command.CodeSetTeam(c, "review", "p1", "review-model"), e.state)
-        assertFalse(v.refusal?.ok ?: true, "手机改不了团队")
+        assertFalse(v.refusal?.ok ?: true, "电脑上没开「允许手机用 Code 栏」：手机改不了团队")
+        val on = e.state.copy(settings = e.state.settings.copy(code = e.state.settings.code.copy(allowPhone = true)))
+        assertEquals(null, com.guixing.jixunying.engine.code.PhoneGate.check(Command.CodeSetTeam(c, "review", "p1", "review-model"), on).refusal,
+            "开了就能改（2026-10-28 起手机和电脑一样）")
 
         val solo = conv(e)
         e.call(Command.CodeSend(solo, "你好"))

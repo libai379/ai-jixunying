@@ -226,14 +226,14 @@ class AgentCliTest {
         assertEquals(MsgStatus.ERROR, ai(e, c)!!.status)
         assertTrue("not supported" in ai(e, c)!!.error.orEmpty(), ai(e, c)!!.error)
 
+        // 2026-10-28 起手机发来的任务和电脑上一样交给它（以前不交：它自己读文件，管不住）
         val before = runs().size
         val v = com.guixing.jixunying.engine.code.PhoneGate.check(Command.CodeSend(c, "把 a.txt 改了"), e.state.copy(
             settings = e.state.settings.copy(code = e.state.settings.code.copy(allowPhone = true))))
         e.call(v.command)
         awaitEnd(e, c, 3)
-        assertEquals(MsgStatus.ERROR, ai(e, c)!!.status)
-        assertTrue("手机发来的任务不交给 Codex" in ai(e, c)!!.error.orEmpty(), ai(e, c)!!.error)
-        assertEquals(before, runs().size, "手机发来的没启动它")
+        assertFalse("手机发来的任务不交给" in ai(e, c)!!.error.orEmpty(), ai(e, c)!!.error)
+        assertEquals(before + 1, runs().size, "手机发来的也启动了它")
     }
 
     companion object {

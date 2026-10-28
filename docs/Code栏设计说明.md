@@ -70,6 +70,8 @@
 
 ## 6 手机触发（第二期，现在只为不挡路）
 
+**2026-10-28 被第 21 节推翻**：手机和电脑能做的一样，下面的「手机不能做的」和 10-13 细则只留作历史。
+
 用户要求手机也能触发。原则：
 
 - 走现有的加密中转，不新开通道。
@@ -300,3 +302,14 @@
 2. 原样交给 --effort（ClaudeCli.args）。官方原文（https://code.claude.com/docs/en/model-config ）：Opus 5.5 / Sonnet 5.5 / Haiku 5.5 都支持 low～max；「If you set a level the active model does not support, Claude Code falls back to the highest supported level at or below the one you set」；ultracode：「launch with `claude --effort ultracode`, which starts the session at `xhigh` effort with ultracode on」，要 2.1.203 以上。本机 claude 2.1.308 实测 -p --effort low、--effort ultracode 都正常回答。
 3. 团队里的 Claude Code 角色也用这个会话的档（它们走同一个 claudeRound）。Codex / Gemini 不管这一项。
 4. 测试：ClaudeCodeTest.acceptEditsWritesWithoutAskingAndResumes 加了：没选不带 --effort；选 ultracode 带 --effort ultracode；不认识的档不收。
+
+## 21 手机和电脑一样、做事中途能插话（2026-10-28，推翻第 6 节的手机限制和第 3 节「排队」那条）
+
+起因：10-27 晚上（北京时间 10-28 上午）用户在手机上遥控电脑，让 Code 会话处理服务器断线的事。会话只能挂在电脑上建过的文件夹上（记账本的独立副本），资料在 F 盘全算「工作区外面」；手机发起的任务读工作区外面也要问；手机上只能切手动、计划，自动档一切走就回不来。第一个会话 101 步里 51 步要用户点允许或拒绝，用户在里面说「别问我直接通过」「停，别再问我了」，它在排队听不到。用户：「我之前说过了，不要限制，要比 code 更开放……更开放难道我得一秒钟不待，我一直点上百次允许吗？」「我跟他说话他不听……我也不知道从哪暂停他」。
+
+1. 手机和电脑一样（engine/code/PhoneGate.kt）：电脑上打开「允许手机用 Code 栏」后，新建会话用电脑上任意存在的文件夹（手机上能直接输入路径，也能从建过的里挑）、五档权限都能选（新建时就能选全部放开 / 自动，Command.CodeCreate 多了 openAll）、换档、改工作区和「不再问」、批准时顺便记住、换项目文件夹和模型、团队、一条龙，都放行。手机发起的任务读工作区外面不再问，也能交给外部 Claude Code / Codex / Gemini、Claude Code 照样当总指挥（CodeAgent 里的 PhoneTask 整个拿掉）。理由：配对过的手机本来就能一步步点允许，这些限制挡不住拿着手机的人，只让主人多点几十次；真正的闸门是配对和电脑上那个开关，这两样不变。还是只在电脑上做的：撤销整条回答的全部改动、「回到这里」（一次动一大片，手机屏幕小容易点错）、终端、提交和上传、各种登录、账号备份码。
+2. 对话页对齐（Engine.phoneLocked）：手机发起的这一轮，电脑上开了那个开关就和电脑上一样（读、改、跑命令按这个对话的档来问或不问）；没开照旧不许。微信发来的照旧不许。
+3. 做事中途插话（CodeAgent.submit / takeInterjections / afterToolsMsg）：自己的模型在跑时，用户新发的话不再排到这一件做完——下一步就交给模型；正在等批准的那一步按「先放下」处理（步骤上写「你插了话，这一步先放下了」），模型同时看到「那一步先放下了」和用户的原话。回答在插话处分成前后两段，用户的话夹在中间，界面上顺序就是说话的顺序。外部 Claude Code / Codex / Gemini、一条龙：进程里插不进去，照旧排队，输入框下面写清「要马上改方向先点停」。
+4. 停止键：在做的时候，输入框发送键旁边一直有停止键（以前只在顶栏，手机上会被提示条挡住）。
+5. 新建会话的权限档：五档都列，默认照最近建的那个会话的档（用户上次选了全部放开，下次就默认全部放开）。
+6. 测试：PhoneGateTest 改成手机任意文件夹、五档、改工作区都放行，开关关着照样都拦；CodeAgentTest.interjectionReachesModelMidway（等批准时插话：那一步放下、模型收到原话、回答分两段、做完不再另起一轮）；ChatFilesTest 加了开关开着时手机发起的命令照跑；AgentCliTest 手机发来的也交给 Codex。

@@ -15,7 +15,7 @@
   - 配对：电脑「设置→手机联机」显示二维码（也能复制成文字配对码），手机扫码或粘贴。二维码一次性。
   - 手机侧栏顶上可以在「本机」和「电脑」之间切换；「连接电脑」页能一键把电脑上的服务商（含 Key）和成员同步到手机。按内容比对（engine/ConfigMerge.kt）：同一个账号、同一位成员不重复加，手机上已有的不覆盖只补空缺；启动时也会合并重复项。
 - 功能：单聊 / 群聊、互相 @（含 AI 之间接力，最多 N 轮）、身份认知（知道自己和别人是谁、背后什么模型）、联网搜索、看图、读 PDF/Word/Excel/PPT/文本、做 Word / Excel / PPT 文件、会审模式、画图、服务商预设（国内外三十多家，含九模型测评的准确模型名和测评名次）。
-- 联网搜索：「自动」模式下智谱 / 千问用平台官方内置搜索；Kimi 的内置 $web_search 2026-10-20 下线，改成调我们的 web_search，但搜索发到 Kimi 官方搜索接口（WebSearch.kimi，POST {base}/tools/search，同一个 Key，出错退回设置里的引擎）；其他模型调 web_search（默认免费必应，可换博查 / 智谱 / Tavily / Brave）；不会调工具的模型由引擎代搜。不需要单独的 AI。
+- 联网搜索：「自动」模式下智谱 / 千问用平台官方内置搜索；Kimi 的内置 $web_search 2026-10-20 下线，改成调我们的 web_search，但搜索发到 Kimi 官方搜索接口（WebSearch.kimi，POST {base}/tools/search，同一个 Key，出错退回设置里的引擎）；DeepSeek 成员同理走 DeepSeek 官方搜索（WebSearch.deepseek，POST https://api.deepseek.com/v1/tools/search，5 元 / 千次，2026-10-28 接）；其他模型调 web_search（默认免费必应，可换博查 / 智谱 / Tavily / Brave），设置里是免费必应时借用户已有的 DeepSeek / Kimi 官方搜索（Engine.officialSearchFor：免费必应搜中文只按第一个字搜，实测记录在 docs/参考资料.md「回答啰嗦」）；不会调工具的模型由引擎代搜。不需要单独的 AI。
 - 画图协议（engine/ImageGen.kt）：OpenAI 风格、硅基流动、阿里百炼 / 千问AI平台（千问图像、新万相先同步，老 text2image 异步）、MiniMax、可灵（API Key 或 AK:SK 签 JWT）、魔搭（异步任务）。
   没在 设置→画图 指定时自动挑（model/ImagePick.kt，2026-10-08 用户定「默认千问」：画质优先，千问图像第一、免费 cogview-3-flash 垫底；按预设推断同一个 Key 能调的画图模型；Engine.paintAuto 失败换下一个，Key 失效 / 欠费整家跳过）。
 - 点名（engine/Stances.kt 的 Addressing）：群里没 @ 时，开头直接喊名字的程序认，其他出现成员名字的问记录员模型，只让被叫到的回答；开头喊了对话外的成员会拉进来。
@@ -29,7 +29,7 @@
 - 花费（2026-10-08）：每次调用模型、每张图记进账本 usage\年-月.jsonl（engine/Ledger.kt，UsageTag 标算谁的账）；价格表 model/Prices.kt（官方价，DeepSeek 分高峰 / 空闲，用户能改单价）；engine/CostReporter.kt 汇总；engine/Balances.kt 查余额；侧栏「花费」页 ui/CostsScreen.kt。
 - 做 Word / Excel / PPT（engine/OfficeWriter.kt、engine/PptWriter.kt，1.5.0）：手写 OOXML（不用 Apache POI，手机也能跑；元素顺序照 ECMA-376 schema，Office 对顺序很严）。成员工具 create_word（Markdown 正文 + 可选 title / style 通用·正式·公文 / header / landscape / toc）、create_excel（Markdown 表格，每个 ## 一个工作表，数字等自动认类型，公式行号按「表头第 1 行」写）、create_ppt（# 封面、每个 ## 一页、「备注：」进讲稿，可选 title / subtitle / theme）；PPT 不用占位符，形状全自己画，只留一个空白版式，五套配色、按字数选字号、放不下平均拆页；Engine.makeOfficeFile(ext) 存成附件（Attachment.generated = true）并另存副本（savedPath：电脑默认 文档\AI集训营，手机 <数据>/made/）；Command.ExportMessage 是「存成 Word / 表格存成 Excel」；设置 Settings.office（设置 → Word / Excel / PPT）。
   - 改了生成器要验两样：① 用 G:\DevCache\tools\ooxml-validator\bin\OOXMLValidatorCLI.exe <文件夹> Office2016 校验（JXY_OFFICE_OUT=文件夹 跑 OfficeWriterTest 会把样例存下来），0 个错误才算过；② 用 LibreOffice 看排出来的样子：G:\DevCache\tools\lo\x\program\soffice.exe -env:UserInstallation=file:///G:/DevCache/tools/lo/profile --headless --convert-to pdf --outdir <文件夹> <文件>（安装包解压的，没装进系统；配置目录放 G 盘），再把 PDF 转图片看。LibreOffice 的编号列表不会自动往下数，所以 PPT 每条编号都写死。
-- 说话规矩写在 engine/Prompts.kt：正经回答为主、幽默点到为止、不知道就说不知道、时效信息先搜再答并标出处。
+- 说话规矩写在 engine/Prompts.kt：不知道就说不知道、时效信息先搜再答并标出处（「说真话」）；最后一段「怎么回答」（2026-10-28 照 Claude 官方设定的思路写）：先想用户拿回答去做什么、第一句进正题、篇幅跟着问题走、排版越少越好、搜索过程不念、没问的不教、幽默点到为止；微信里的对话另说一句微信显示不了 Markdown。工具回给模型的话只交代怎么答，不叫它「告诉用户没搜到」。改这些之前先跑 LiveAnswerStyleTest（同一位成员裸调和本应用对比，JXY_LIVE_STYLE=数据文件夹）。
 - 记忆（engine/Memory.kt，2026-10-08）：记录员（model/RecorderPick.kt，默认 mimo-v2.6-flash）把太长的聊天压成摘要，全群一份，存 convs\<id>.memo.json；长期记忆 AppState.memories 写进每位成员的设定，AI 有 remember 工具，攒够 4 句用户的话自动挑；search_history 工具和侧栏搜索能翻以前的聊天。
   - 记忆二期（2026-10-26 用户定「对，就这样做」）：MemoryItem.topic 空 = 关于用户本人（每个对话都带），有名字 = 话题记忆，只在 Conversation.memoryTopic 相同的对话里带（Recorder.forPrompt），别的话题只在设定里列名字、AI 用 recall_memory 查。对话的话题由记录员挑记忆时顺带认（extractPrompt 输出 conversationTopic），用户在对话设置里定了（SetConvTopic，memoryTopicByUser）就不再改；UpdateConversation 一律保留这两个字段。出处：convId / messageId / quote，记录员抄的原话要 Recorder.locateQuote 在用户消息里对得上才挂，对不上不挂（不让编的原话冒充出处）；设置 → 记忆 按话题分组，点「来自」跳回那条消息。
 - 本地文档（engine/DocLibrary.kt）：两端各自给文档建索引（存 docindex\），AI 用 search_documents / read_document，只能读收录了的文件；侧栏「我的文档」页。手机要「所有文件访问」权限；手机上微信「用其他应用打开」和系统分享都能把文件交给 AI（MainActivity 的 VIEW / SEND 意图）。
@@ -46,6 +46,8 @@
 
 - **对话页和 Code 栏能力同步（用户 2026-10-17：「对话和 code 同步明白吗？只是专业不一样，一个专门开发，一个专门聊天工作」）**：读文件 / 文件夹、拖文件和贴图、看图、自定义指令、联网，两边口径一致，改一边就对照另一边一起改。只有「专业」不同：Code 栏改代码、跑命令、看差异和撤销；对话页群聊、会审、立场档案、画图、做 Word / Excel / PPT。
 
+- **手机遥控电脑时和电脑上一样，不再加「手机不许」（用户 2026-10-28：「不要限制，要比 code 更开放……我一直点上百次允许吗？」）**：闸门只有配对和电脑上「允许手机用 Code 栏」。以后想给手机单独加限制，先问用户。细节见 docs/Code栏设计说明.md 第 21 节。
+- **免费的尽量不用（用户 2026-10-28：「但凡免费真的不好用，我这次算是吃了一个大亏……既然能用钱解决……我们就花钱」）**：默认方案先用用户已有的付费服务（各家 Key），免费接口、爬网页只当实测能用的退路；起因是免费必应搜中文只按第一个字搜。
 - 不做网页版。苹果端暂不做（原生 iOS 必须有 Mac，用户 2026-10-07 说先不做）。
 - 联机不许退回「只能局域网」：用户明确说过只能同一个 Wi-Fi 用的联机没有意义。
 - 前身 G:\ai-discussion-app 只读参考，不改它的代码。它的 localStorage key `discussion_state_v3` 和 appId `com.taiclear.taic` 永远不许改。

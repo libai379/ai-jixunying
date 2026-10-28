@@ -37,26 +37,25 @@ data class CodeSpec(
     /** 这个会话是从手机发起的（电脑端要明显标出来）。 */
     val fromPhone: Boolean = false,
     /**
-     * 电脑上最后给这个会话选的权限档（2026-10-13，第二期）。手机不能比电脑放得更宽：
-     * 「接受编辑」只有电脑上选过，手机才能切过去（engine/code/PhoneGate）。null = 旧版建的会话或手机建的、电脑还没选过。
+     * 新建时选的、之后电脑上最后选的权限档（2026-10-13，第二期）。以前用来不让手机比电脑放得更宽；2026-10-28 起手机和电脑一样，只留着记录。
      */
     val pcMode: CodeMode? = null,
     /**
      * 加进工作区的文件夹或文件（2026-10-17，相当于 Claude Code 的 /add-dir）：和项目文件夹一样，读不问、改按权限档。
-     * 批准一步时选「允许，并把这个文件夹加进来」，或者在会话上面「工作区」里加。手机上加不了（engine/code/PhoneGate）。
+     * 批准一步时选「允许，并把这个文件夹加进来」，或者在会话上面「工作区」里加（2026-10-28 起手机上也能加）。
      */
     val extraPaths: List<String> = emptyList(),
-    /** 这个会话里「同样开头不再问」的命令开头（2026-10-17，engine/code/CodeCommands 判断）。手机上加不了。 */
+    /** 这个会话里「同样开头不再问」的命令开头（2026-10-17，engine/code/CodeCommands 判断）。 */
     val allowedCommands: List<String> = emptyList(),
     /**
      * 全部放开（2026-10-17 用户：「比 Claude 更开放」）：改文件、跑命令都不问，只有危险命令照样问；改之前照样备份、能撤销。
      * 不做成 CodeMode 的新值：旧版手机解不开新的枚举值，整个状态会读坏（和会审开关同一个道理）。界面上是「接受编辑 + 这个开关」。
-     * 只能在电脑上打开（PhoneGate）。
+     * 2026-10-28 起新建时就能选，手机上也能开。
      */
     val openAll: Boolean = false,
     /**
      * 自动（2026-10-17，照 Claude Code 的 auto mode）：读、改工作区里的直接做，其余的先让检查员（裁判模型，engine/AutoJudge）看，
-     * 检查员拦下的再问用户。和 openAll 一样不做成 CodeMode 新值（旧手机读不坏）；界面上是「接受编辑 + 这个开关」。只能在电脑上打开。
+     * 检查员拦下的再问用户。和 openAll 一样不做成 CodeMode 新值（旧手机读不坏）；界面上是「接受编辑 + 这个开关」。2026-10-28 起手机上也能开。
      */
     val autoMode: Boolean = false,
     /** 这个会话开过的 PR 网址（2026-10-18）：不为空时会话顶上显示检查状态。 */
@@ -246,18 +245,11 @@ data class CodeSettings(
 data class McpServerConfig(val name: String, val command: String, val enabled: Boolean = true)
 
 /**
- * 手机遥控电脑时 Code 栏能做什么（docs/Code栏设计说明.md 第 6 节，2026-10-13）。
- * 真正把关的是电脑上的 engine/code/PhoneGate；这里是它和手机界面共用的那几条判断（界面据此决定显示哪些按钮）。
+ * 手机遥控电脑时 Code 栏（docs/Code栏设计说明.md 第 6 节）。2026-10-28 起手机和电脑能做的一样（权限档、文件夹、工作区都不再限制），
+ * 把关的只剩配对和电脑上「允许手机用 Code 栏」（engine/code/PhoneGate）。
  */
 object CodePhone {
-    /** 电脑上给这个会话选过「接受编辑」，手机才能切过去。旧会话没记 pcMode：电脑上建的按它现在的档算。 */
-    fun mayAcceptEdits(spec: CodeSpec): Boolean =
-        (spec.pcMode ?: if (!spec.fromPhone) spec.mode else null) == CodeMode.ACCEPT_EDITS
-
-    /** 手机上新建能选的档（不含「接受编辑」）。 */
-    val createModes: List<CodeMode> = listOf(CodeMode.MANUAL, CodeMode.PLAN)
-
-    /** 电脑上已有 Code 会话的项目文件夹（去重：不分大小写、不管结尾斜杠）。手机新建对话框只能从这里选。 */
+    /** 电脑上已有 Code 会话的项目文件夹（去重：不分大小写、不管结尾斜杠）。手机新建对话框列出来方便挑，也能直接输入别的路径。 */
     fun folders(s: AppState): List<String> =
         s.conversations.mapNotNull { it.code?.folder }.distinctBy { it.trimEnd('\\', '/').lowercase() }
 }

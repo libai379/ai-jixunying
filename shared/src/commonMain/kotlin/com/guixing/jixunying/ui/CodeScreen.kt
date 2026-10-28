@@ -62,6 +62,7 @@ import androidx.compose.material.icons.rounded.SmartToy
 import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material3.Button
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
@@ -334,8 +335,8 @@ private fun CodeTopBar(ctl: AppController, state: AppState, conv: Conversation, 
         Spacer(Modifier.width(8.dp))
         if (showGit) GitDialog(ctl, conv, spec) { showGit = false }
         if (showHelp) CodeHelpDialog { showHelp = false }
-        // 2026-10-17「自动」「全部放开」：电脑上才有（手机上打不开，PhoneGate 也会拒）。顺序照 Claude 的菜单：自动、手动、接受编辑、全部放开、计划
-        val canOpen = onPc
+        // 2026-10-17「自动」「全部放开」；2026-10-28 起手机遥控电脑时也有（以前只有电脑上有，手机上切走就回不来）。顺序照 Claude 的菜单：自动、手动、接受编辑、全部放开、计划
+        val canOpen = access.canAct
         val base = CodeUi.modesFor(access, spec).map { ModeOpt(it) }
         val options = buildList {
             if (canOpen || spec.autoMode) add(ModeOpt(CodeMode.ACCEPT_EDITS, auto = true))
@@ -585,14 +586,15 @@ private fun GitDialog(ctl: AppController, conv: Conversation, spec: CodeSpec, on
 /**
  * 工作区（2026-10-17，照 Claude Code 的 /add-dir 和「不再问」）：
  * 项目文件夹 + 加进来的文件夹（AI 读不用问，改按权限档），以及这个会话里「同样开头不再问」的命令。
- * 只能在电脑上改（手机上只看，PhoneGate 也会拒）。
+ * 能动手就能改（2026-10-28 起手机遥控电脑时也能改，以前手机上只看）。
  */
 @Composable
 private fun WorkspaceDialog(ctl: AppController, conv: Conversation, spec: CodeSpec, onClose: () -> Unit) {
     val clipboard = LocalClipboardManager.current
     val platform = LocalPlatform.current
     val scope = rememberCoroutineScope()
-    val canEdit = platform.isDesktop && !ctl.remoteMode
+    val st by ctl.backend.store.state.collectAsState()
+    val canEdit = CodeUi.access(platform.isDesktop, ctl.remoteMode, st.settings.code.allowPhone).canAct
     fun save(paths: List<String>, cmds: List<String>) = ctl.run(Command.CodeSetAccess(conv.id, paths, cmds), quiet = true) { r ->
         if (!r.ok) ctl.toast(r.message.ifBlank { "没改成" })
     }
@@ -674,12 +676,13 @@ private fun WorkspaceDialog(ctl: AppController, conv: Conversation, spec: CodeSp
 /**
  * 谁来干活（2026-10-23 用户：「code 界面是不是我选终端自己链接 Claudecode」——选模型藏在「更多 → 工作区」里找不到，
  * 「终端」又像是接 Claude Code 的）：顶栏标题下面那个按钮点开就是这里——本机的编程命令行、自己加的模型、思考强度、团队。
- * 只能在电脑上改（手机上只看，PhoneGate 也会拒）。
+ * 能动手就能改（2026-10-28 起手机遥控电脑时也能改，以前手机上只看）。
  */
 @Composable
 private fun BrainDialog(ctl: AppController, conv: Conversation, spec: CodeSpec, onClose: () -> Unit) {
     val platform = LocalPlatform.current
-    val canEdit = platform.isDesktop && !ctl.remoteMode
+    val st by ctl.backend.store.state.collectAsState()
+    val canEdit = CodeUi.access(platform.isDesktop, ctl.remoteMode, st.settings.code.allowPhone).canAct
     AppDialog("谁来干活", onClose, width = 560.dp, actions = { Button(onClose) { Text("好了") } }) {
         Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState())) {
             Text("选 Claude Code、Codex、Gemini CLI，就是把任务交给你电脑上装的那个程序，用你自己的订阅或账号；" +
@@ -1195,8 +1198,8 @@ private fun CodeToolStep(ctl: AppController, msg: Message, t: ToolStep, canAct: 
                     } else {
                         if ("自动检查" in t.note) Text(t.note.substringAfter("（").removeSuffix("）").ifBlank { t.note },
                             style = MaterialTheme.typography.bodySmall, color = Ext.c.warning)
-                        // 「顺便放宽」的两个选项只在电脑上给（手机上点了也会被当成只允许这一次，见 PhoneGate）
-                        val canWiden = LocalPlatform.current.isDesktop && !ctl.remoteMode
+                        // 「顺便放宽」的两个选项：能批准就能给（2026-10-28 起手机上也给，PhoneGate 不再当成只允许这一次）
+                        val canWiden = !readonly
                         if (t.kind == "write" || t.kind == "edit") if (t.scopeDir.isNotBlank()) Text("这个文件在工作区外面。", style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
                         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                             Button(
@@ -1754,7 +1757,7 @@ private fun SmallCodeAction(icon: ImageVector, desc: String, onClick: () -> Unit
 // ———————————————— 输入框 ————————————————
 
 /**
- * 下面的输入框：发一条任务。上一条还在做的时候照样能发，会排在后面。
+ * 下面的输入框：发一条任务。在做的时候照样能发：自己的模型下一步就看到，外部 agent 等这一轮做完（2026-10-28）；旁边有停止键。
  * 2026-10-17：和聊天一样能带附件——回形针、图片按钮、拖进来、Ctrl+V 粘贴截图或复制的文件。
  * 图片发给能看图的模型；文档抽出文字一起发；电脑上的文件还把原路径告诉模型（并加进工作区，读不用再问）。
  */
@@ -1879,10 +1882,21 @@ private fun CodeComposer(ctl: AppController, conv: Conversation, running: Boolea
                             ComposerIcon(Icons.Rounded.Image, "图片") { pick(true) }
                             Spacer(Modifier.width(6.dp))
                             if (running) {
-                                Text("上一条还在做，这条会排在后面", style = MaterialTheme.typography.labelSmall, color = Ext.c.warning, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                // 2026-10-28 用户：「我再给他输入命令，他听不到了……我也不知道从哪暂停他」——自己的模型下一步就看到插话；
+                                // 外部 Claude Code / Codex / Gemini 插不进去，说清楚要马上改方向就先停
+                                val spec = conv.code
+                                val hears = spec != null && !spec.flowOn && !spec.isClaudeCode && !spec.isCliAgent
+                                Text(if (hears) "它在做，你说的话下一步就交给它" else "它在做，这句话等这一轮做完再交给它；要马上改方向先点停",
+                                    style = MaterialTheme.typography.labelSmall, color = Ext.c.warning, maxLines = 2, overflow = TextOverflow.Ellipsis)
                             }
                         }
                         val canSend = (text.text.isNotBlank() || pending.any { it.att != null || it.local }) && uploading == 0
+                        // 在做的时候发送键旁边一直有停止键（以前只在顶栏，手机上被提示条挡住）
+                        if (running) {
+                            GlassRoundButton(Icons.Rounded.Stop, "停下", enabled = true, color = MaterialTheme.colorScheme.error,
+                                onColor = MaterialTheme.colorScheme.onError, onClick = { ctl.run(Command.CodeStop(conv.id), okText = "停下了") })
+                            Spacer(Modifier.width(8.dp))
+                        }
                         Box(
                             Modifier, contentAlignment = Alignment.Center,
                         ) {
@@ -1975,11 +1989,18 @@ fun NewCodeDialog(ctl: AppController) {
     val platform = LocalPlatform.current
     val scope = rememberCoroutineScope()
     val access = CodeUi.access(platform.isDesktop, ctl.remoteMode, state.settings.code.allowPhone)
-    // 手机上不能弹系统选择器（选出来的路径是手机上的，电脑上没有）：只能从电脑上已有会话的文件夹里挑
+    // 手机上不能弹系统选择器（选出来的路径是手机上的，电脑上没有）：从电脑上已有会话的文件夹里挑，或者直接输入电脑上的路径（2026-10-28）
     val pcFolders = remember(state.conversations) { CodePhone.folders(state) }
     var folder by remember { mutableStateOf("") }
     var picked by remember { mutableStateOf("") }
-    var mode by remember { mutableStateOf(CodeMode.MANUAL) }
+    // 权限档五样都能选（2026-10-28，以前新建只有手动 / 接受编辑 / 计划，手机上只有手动 / 计划）；默认照最近建的那个会话
+    val modeOpts = listOf(ModeOpt(CodeMode.ACCEPT_EDITS, auto = true), ModeOpt(CodeMode.MANUAL), ModeOpt(CodeMode.ACCEPT_EDITS),
+        ModeOpt(CodeMode.ACCEPT_EDITS, open = true), ModeOpt(CodeMode.PLAN))
+    var mode by remember {
+        val last = state.conversations.filter { it.code != null }.maxByOrNull { it.createdAt }?.code
+        mutableStateOf(if (last == null) ModeOpt(CodeMode.MANUAL) else ModeOpt(last.mode, open = last.openAll && last.mode != CodeMode.PLAN,
+            auto = last.autoMode && !last.openAll && last.mode != CodeMode.PLAN))
+    }
     var error by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
     val options = state.providers.filter { it.enabled }.flatMap { p -> p.models.filter { it.tools }.map { p to it } }
@@ -1995,7 +2016,7 @@ fun NewCodeDialog(ctl: AppController) {
                     busy = true
                     error = ""
                     if (!platform.isDesktop) platform.askNotifyPermission()
-                    ctl.run(Command.CodeCreate(folder, p.id, m.id, mode), quiet = true) { r ->
+                    ctl.run(Command.CodeCreate(folder.trim(), p.id, m.id, mode.mode, auto = mode.auto, openAll = mode.open), quiet = true) { r ->
                         busy = false
                         if (r.ok) { ctl.showNewCode = false; ctl.openConversation(r.data) }
                         else error = r.message.ifBlank { "建不了这个会话" }
@@ -2024,10 +2045,12 @@ fun NewCodeDialog(ctl: AppController) {
                         Text(if (folder.isBlank()) "选择文件夹" else "换一个")
                     }
                 }
-            } else if (pcFolders.isEmpty()) {
-                Text(NO_PC_FOLDER, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
             } else {
-                // 手机上不弹系统选择器（手机上选的路径电脑上没有）：只从电脑上已有 Code 会话的文件夹里挑一个
+                // 手机上不弹系统选择器（手机上选的路径电脑上没有）：直接输入电脑上的路径，或者从电脑上已有 Code 会话的文件夹里挑
+                OutlinedTextField(folder, { folder = it }, Modifier.fillMaxWidth(), singleLine = true,
+                    placeholder = { Text("电脑上的文件夹，比如 F:\\claude-work", style = MaterialTheme.typography.bodyMedium, color = Ext.c.subtle) },
+                    textStyle = MaterialTheme.typography.bodyMedium)
+                if (pcFolders.isNotEmpty()) Spacer(Modifier.height(6.dp))
                 Column(Modifier.fillMaxWidth().heightIn(max = 180.dp).verticalScroll(rememberScrollState())) {
                     pcFolders.forEach { f ->
                         val on = f == folder
@@ -2072,16 +2095,16 @@ fun NewCodeDialog(ctl: AppController) {
                 }
             }
             Spacer(Modifier.height(12.dp))
-            FieldLabel("权限档", "之后随时能在会话上面换")
-            CodeUi.createModesFor(access).forEach { m ->
+            FieldLabel("权限档", "之后随时能在会话上面换；默认照你上一次选的")
+            modeOpts.forEach { m ->
                 Row(
                     Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).clickable { mode = m }.padding(horizontal = 4.dp, vertical = 4.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     RadioButton(m == mode, { mode = m })
                     Column(Modifier.weight(1f)) {
-                        Text(m.label, style = MaterialTheme.typography.bodyMedium)
-                        Text(modeDesc(m), style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
+                        Text(m.label, style = MaterialTheme.typography.bodyMedium, color = if (m.open) Ext.c.warning else MaterialTheme.colorScheme.onSurface)
+                        Text(modeOptDesc(m), style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
                     }
                 }
             }
@@ -2097,8 +2120,6 @@ fun NewCodeDialog(ctl: AppController) {
     }
 }
 
-/** 手机新建会话时，电脑上一个 Code 会话都没有：没法选文件夹，先说清楚怎么办。 */
-private const val NO_PC_FOLDER = "电脑上还没有 Code 会话。先在电脑上建一个，手机上才能选它的文件夹。"
 
 private fun modeDesc(m: CodeMode) = when (m) {
     CodeMode.MANUAL -> "改文件、跑命令之前都先问你（默认）"

@@ -58,7 +58,8 @@ import java.util.concurrent.ConcurrentHashMap
  * - 等批准时消息状态保持 STREAMING、这一步 ToolStep.approval = "waiting"，界面显示要写的内容 / 差异 / 命令；
  *   拒绝 = 不执行，把「用户拒绝了」当工具结果回给模型；点停止时等批准的按拒绝处理（绝不超时自动放行）。
  *
- * 一个会话同一时间只跑一个循环：在跑的时候又发任务就排队，前一个跑完接着跑。
+ * 一个会话同一时间只跑一个循环。在跑的时候用户又说话（2026-10-28）：自己的模型下一步就看到（插话，见 submit）；
+ * 外部 Claude Code / Codex / Gemini 进程里插不进去，照旧排队，前一个跑完接着跑。
  */
 class CodeAgent(private val host: CodeHost) {
 
@@ -78,29 +79,38 @@ class CodeAgent(private val host: CodeHost) {
     /** Claude Code 当总指挥时它调的派活工具（第 18 节）；电脑端的本机 MCP 服务也拿这个处理请求。 */
     val commander = com.guixing.jixunying.engine.code.Commander()
 
-    /** 手机发起的任务（消息编号）：这些任务里读工作区外的文件照旧要问（2026-10-17，电脑上发起的读不问）。 */
-    private val phoneTasks = ConcurrentHashMap.newKeySet<String>()
-
     /** 每个会话正在做的那条任务的文字（「自动」档给检查员看用户这次要什么）。 */
     private val currentTask = ConcurrentHashMap<String, String>()
 
-    /** 这一轮是手机发起的（放在协程上下文里，往下的工具都看得到）。 */
-    private class PhoneTask : kotlin.coroutines.AbstractCoroutineContextElement(PhoneTask) {
-        companion object Key : kotlin.coroutines.CoroutineContext.Key<PhoneTask>
-    }
+    /** 因为用户插话、先放下没做的那一步所在的会话（插话交给模型时说一声）。 */
+    private val putDown = ConcurrentHashMap.newKeySet<String>()
 
-    /** 用户发了一条任务：没人跑就直接跑，有人在跑就排队（一个会话同时只跑一个循环）。 */
-    fun submit(convId: String, task: Message, fromPhone: Boolean = false) {
-        if (fromPhone) phoneTasks += task.id
+    /**
+     * 用户发了一条任务：没人跑就直接跑。有人在跑：先放进队列——
+     * 自己的模型在跑时，下一步就从队列里取走交给它（drainInterjections），正在等批准的那一步按「先不做」放下，好让它马上听到
+     * （2026-10-28 用户：「他跑着跑着跑偏了，我再给他输入命令，他听不到了」；照 Claude Code，做事中途说的话下一步就看到）。
+     * 外部 Claude Code / Codex / Gemini、一条龙：进程里插不进去，照旧等这一件做完再接着跑。
+     * fromPhone 只用来标「手机发起」：2026-10-28 起手机发起的任务和电脑上一样（以前读工作区外面的要问、不能交给外部 agent）。
+     */
+    fun submit(convId: String, task: Message, @Suppress("UNUSED_PARAMETER") fromPhone: Boolean = false) {
         val run = runs.getOrPut(convId) { Run(convId) }
         synchronized(run) {
             if (run.running) {
                 run.queued.add(task)
+                if (hearsMidway(convId)) waitings.values.filter { it.convId == convId }.forEach { w ->
+                    if (w.done.complete(false to INTERJECT)) putDown += convId
+                }
                 return
             }
             run.running = true
         }
         start(run, task)
+    }
+
+    /** 这个会话跑的是自己的模型（不是外部 agent、不是一条龙）：做事中途能插话。 */
+    private fun hearsMidway(convId: String): Boolean {
+        val spec = host.state.conversation(convId)?.code ?: return false
+        return !spec.flowOn && !spec.isClaudeCode && !spec.isCliAgent
     }
 
     /**
@@ -125,7 +135,7 @@ class CodeAgent(private val host: CodeHost) {
     private fun start(run: Run, task: Message) {
         run.job = host.launch(run.convId) {
             try {
-                withContext(if (phoneTasks.remove(task.id)) PhoneTask() else kotlin.coroutines.EmptyCoroutineContext) { loop(run.convId, task) }
+                loop(run.convId, task)
                 host.compactLater(run.convId)
             } finally {
                 val next = synchronized(run) { run.queued.removeFirstOrNull() }
@@ -150,7 +160,8 @@ class CodeAgent(private val host: CodeHost) {
         if (spec.isCliAgent) return loopAgent(convId, task, spec)
         val provider = host.state.provider(spec.providerId)
         // 回复也用一条普通消息：和聊天一样流式推给界面（工具步骤挂在 tools 上）
-        val msg = Message(
+        // var：用户做事中途插话时，这一段收尾、插话之后的步骤记在新的一段回答上（见下面 takeInterjections）
+        var msg = Message(
             host.newId(), convId, Role.AI, CODE_ID, status = MsgStatus.STREAMING, createdAt = host.now(),
             modelLabel = if (provider == null) spec.modelId else "${spec.modelId}（${provider.name}）",
         )
@@ -222,9 +233,16 @@ class CodeAgent(private val host: CodeHost) {
                     val guard = CodeGuard(File(cur.folder), cur.extraPaths)
                     working += toolMsg(tc.id, step(convId, msg.id, tc, mode, cur, guard, backup, if (vision) seen else null))
                 }
-                if (seen.isNotEmpty()) {
-                    working += contentMsg("user", "（这是刚才 read_file 读到的图片：" + seen.joinToString("、") { it.first } + "）", seen.map { it.second })
+                // 用户做事中途说的话（2026-10-28）：这一段回答收尾，用户的话排在它后面，模型下一步就看到；之后的步骤记在新的一段上
+                // 到了最多步数就不取：这一轮要停了，留在队列里，停下以后照旧另起一轮去答
+                val said = if (full) emptyList() else takeInterjections(convId)
+                if (said.isNotEmpty()) {
+                    host.updateMessage(convId, msg.id) { it.copy(content = it.content.trim(), status = MsgStatus.DONE, usage = usage) }
+                    usage = Usage()
+                    msg = Message(host.newId(), convId, Role.AI, CODE_ID, status = MsgStatus.STREAMING, createdAt = host.now(), modelLabel = msg.modelLabel)
+                    host.addMessage(msg)
                 }
+                if (seen.isNotEmpty() || said.isNotEmpty()) working += afterToolsMsg(convId, seen, said, vision)
                 if (full) { reachedMax = true; break }
                 trimWorking(working)
             }
@@ -682,18 +700,12 @@ class CodeAgent(private val host: CodeHost) {
     }
 
     /**
-     * 读的东西在工作区外面：先停下来问用户（2026-10-17，照 Claude Code：工作区外的读要批准）。
-     * 返回 null = 在工作区里、不用问；返回 ToolStep = 问过、允许了（这一步已经记在消息上，读完用 setStep 填结果）；
-     * 拒绝了抛 Refused，调用的地方把它的说明回给模型。
+     * 读的东西在工作区外面要不要先问：不问（2026-10-17 用户「比 Claude 更开放」，电脑上发起的不问；
+     * 2026-10-28 手机发起的也不问了——用户在手机上修服务器，资料在别的盘，每读一下都要点允许）。
+     * 返回 null = 不用问；返回 ToolStep = 问过、允许了；拒绝了抛 Refused。口子留着，以后要按会话设定改回「先问」只改这里。
      */
-    private suspend fun askOutside(convId: String, msgId: String, kind: String, file: File, guard: CodeGuard, note: String): ToolStep? {
-        if (guard.inScope(file)) return null
-        // 2026-10-17 用户：「比 Claude 更开放」——电脑上发起的，工作区外面的也直接读，不问；只有手机发起的任务才停下来问
-        if (kotlin.coroutines.coroutineContext[PhoneTask] == null) return null
-        val step = ToolStep(kind, guard.relative(file), id = host.newId(), ok = true, note = note, scopeDir = guard.folderToAdd(file))
-        if (!waitApproval(convId, msgId, step)) throw Refused(refused("${note}：${guard.relative(file)}"))
-        return step
-    }
+    @Suppress("UNUSED_PARAMETER", "RedundantSuspendModifier")
+    private suspend fun askOutside(convId: String, msgId: String, kind: String, file: File, guard: CodeGuard, note: String): ToolStep? = null
 
     private class Refused(val text: String) : Exception(text)
 
@@ -1090,9 +1102,9 @@ class CodeAgent(private val host: CodeHost) {
             return
         }
         val backup = host.backupOf(convId)
-        // 组了队、电脑上发起、本机 MCP 服务起来了：这一轮它是总指挥（第 18 节），派活工具经 --mcp-config 给它
+        // 组了队、本机 MCP 服务起来了：这一轮它是总指挥（第 18 节），派活工具经 --mcp-config 给它（2026-10-28 起手机发起的也一样）
         val port = host.commanderPort()
-        val commanding = spec.team.isNotEmpty() && port != null && kotlin.coroutines.coroutineContext[PhoneTask] == null
+        val commanding = spec.team.isNotEmpty() && port != null
         // 自定义指令、总指挥的说明写进临时文件给它（--append-system-prompt-file），不放在命令行里
         val custom = listOf(settings.personal.instructions.trim(), settings.personal.codeInstructions.trim()).filter { it.isNotEmpty() }
         val parts = buildList {
@@ -1346,11 +1358,7 @@ class CodeAgent(private val host: CodeHost) {
             modelLabel = CodeSpec.agentLabel(spec.providerId, spec.modelId),
         )
         host.addMessage(msg)
-        // 手机发起的任务不许读收录范围外的文件：它们读文件不经过我们，管不住，干脆不交
-        if (kotlin.coroutines.coroutineContext[PhoneTask] != null) {
-            host.updateMessage(convId, msg.id) { it.copy(status = MsgStatus.ERROR, error = phoneNoAgent(name)) }
-            return
-        }
+        // 以前手机发起的任务不交给它们（它们读文件不经过我们，管不住）；2026-10-28 起手机和电脑一样
         val backup = host.backupOf(convId)
         try {
             val readOnly = (host.state.conversation(convId)?.code ?: spec).mode == CodeMode.PLAN
@@ -1390,8 +1398,7 @@ class CodeAgent(private val host: CodeHost) {
         val who = CodeSpec.agentLabel(seat.providerId, seat.modelId)
         val stepId = host.newId()
         addStep(convId, msgId, ToolStep("agent", name, id = stepId, ok = true, note = "${who}开始干活", output = uiText(text)))
-        val result = if (kotlin.coroutines.coroutineContext[PhoneTask] != null) phoneNoAgent(CodeSpec.agentName(seat.providerId)) + "。这张单子你自己做。" else {
-            val r = agentRound(convId, msgId, seat.providerId, seat.modelId, agentPrompt(text, readOnly), readOnly, host.backupOf(convId), intoAnswer = false)
+        val result = agentRound(convId, msgId, seat.providerId, seat.modelId, agentPrompt(text, readOnly), readOnly, host.backupOf(convId), intoAnswer = false).let { r ->
             when {
                 r.denied -> "用户没同意把这张单子交给 $who，没做。"
                 r.error != null -> "出错了：${r.error}" + if (r.said.isNotEmpty()) "\n它出错前说的：\n${r.said}" else ""
@@ -1402,8 +1409,36 @@ class CodeAgent(private val host: CodeHost) {
         return "$who「$name」交回的结果：\n$result"
     }
 
-    private fun phoneNoAgent(name: String) = "手机发来的任务不交给 $name：它自己读文件，管不住只读收录范围里的。" +
-        "在电脑上发，或者在电脑上把这个会话换成别的模型"
+    /** 取走排队的、用户做事中途说的话（只在自己的模型在跑时取，见 submit）。 */
+    private fun takeInterjections(convId: String): List<Message> {
+        if (!hearsMidway(convId)) return emptyList()
+        val run = runs[convId] ?: return emptyList()
+        return synchronized(run) { run.queued.toList().also { run.queued.clear() } }
+    }
+
+    /**
+     * 工具结果之后补的一条 user 消息：这一轮 read_file 读到的图片，加上用户做事中途说的话。
+     * 合成一条：有的接口不认连着两条 user。
+     */
+    private fun afterToolsMsg(convId: String, seen: List<Pair<String, String>>, said: List<Message>, vision: Boolean): JsonObject {
+        val text = StringBuilder()
+        val images = mutableListOf<String>()
+        if (seen.isNotEmpty()) {
+            text.append("（这是刚才 read_file 读到的图片：").append(seen.joinToString("、") { it.first }).append("）")
+            images += seen.map { it.second }
+        }
+        if (said.isNotEmpty()) {
+            if (text.isNotEmpty()) text.append("\n\n")
+            if (putDown.remove(convId)) text.append("（你刚才等批准的那一步因为用户插话先放下了，没做。）\n")
+            text.append("（用户在你做事的时候说：）")
+            for (m in said) {
+                val (more, imgs) = if (m.attachments.isEmpty()) "" to emptyList() else host.attachmentParts(m, latest = true, vision = vision)
+                text.append("\n").append((m.content + more).trim())
+                images += imgs
+            }
+        }
+        return contentMsg("user", text.toString(), images)
+    }
 
     /** 给它的话：用户的自定义指令 + 任务；只读时说一声（它改不了文件，交回做法）。 */
     private fun agentPrompt(body: String, readOnly: Boolean): String = buildString {
@@ -1733,14 +1768,7 @@ class CodeAgent(private val host: CodeHost) {
                 return allow()
             }
             "Read", "Glob", "Grep", "LS", "NotebookRead" -> {
-                // 它只在读工作区外面时来问：电脑上发起的不问（2026-10-17「比 Claude 更开放」），手机发起的停下来问
-                if (kotlin.coroutines.coroutineContext[PhoneTask] == null) return allow()
-                val raw = input.str("file_path") ?: input.str("path") ?: input.str("pattern") ?: ""
-                val file = guard.resolve(raw)
-                val step = ToolStep(claudeKind(name), file?.let { guard.relative(it) } ?: raw, id = stepId, ok = true,
-                    note = "读工作区外面的东西", scopeDir = file?.let { guard.folderToAdd(it) }.orEmpty())
-                if (!waitApproval(convId, msgId, step)) { steps[ev.toolUseId] = ExtStep(stepId, closed = true); return deny(refused("读 $raw")) }
-                steps[ev.toolUseId] = ExtStep(stepId)
+                // 它只在读工作区外面时来问：不问（2026-10-17 电脑上发起的不问「比 Claude 更开放」；2026-10-28 手机发起的也不问）
                 return allow()
             }
             "WebFetch", "WebSearch" -> return allow()
@@ -1887,7 +1915,8 @@ class CodeAgent(private val host: CodeHost) {
             else -> ""
         }
         setStep(convId, msgId, step.id) {
-            it.copy(approval = if (allow) "allowed" else "denied", ok = allow, note = if (allow) it.note + widened else "用户拒绝了这一步")
+            it.copy(approval = if (allow) "allowed" else "denied", ok = allow,
+                note = if (allow) it.note + widened else if (remember == INTERJECT) "你插了话，这一步先放下了" else "用户拒绝了这一步")
         }
         return allow
     }
@@ -2055,6 +2084,8 @@ class CodeAgent(private val host: CodeHost) {
         private const val RESULT_LIMIT = 12_000
         /** 界面上一步显示的内容最长多少字。 */
         private const val UI_TEXT_LIMIT = 20_000
+        /** 等批准的那一步因为用户插话先放下（放在 Waiting 结果的 remember 里，见 submit）。 */
+        private const val INTERJECT = "interject"
         /** 一条龙（第 19 节）：给开发的前面对话最多多少字、交回开发的意见最多多少字；开发交回的话开头有这些就是没做成。 */
         private const val FLOW_CONTEXT_LIMIT = 6000
         private const val FLOW_FEEDBACK_LIMIT = 12_000

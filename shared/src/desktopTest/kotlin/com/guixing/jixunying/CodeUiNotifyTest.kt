@@ -61,23 +61,12 @@ class CodeUiNotifyTest {
     }
 
     @Test
-    fun phoneListsOnlyManualAndPlan() {
-        // 手机上只列「手动」「计划」——和电脑上 PhoneGate 允许手机新建的那两档一致
-        assertEquals(listOf(CodeMode.MANUAL, CodeMode.PLAN), CodeUi.createModesFor(CodeAccess.PHONE))
-        assertEquals(listOf(CodeMode.MANUAL, CodeMode.PLAN), CodeUi.modesFor(CodeAccess.PHONE, spec(CodeMode.MANUAL)))
-        // 只读（开关没开 / 手机本机）时列的也是这两档，只是点不动
-        assertEquals(listOf(CodeMode.MANUAL, CodeMode.PLAN), CodeUi.modesFor(CodeAccess.LOCKED, spec(CodeMode.MANUAL)))
-    }
-
-    @Test
-    fun acceptEditsShowsOnlyWhenPcAllowedIt() {
-        // 电脑上给这个会话选过「接受编辑」：手机上也能看见、能切回去
-        assertTrue(CodeMode.ACCEPT_EDITS in CodeUi.modesFor(CodeAccess.PHONE, spec(CodeMode.MANUAL, pcMode = CodeMode.ACCEPT_EDITS)))
-        // 会话现在是「接受编辑」、电脑上建的（旧会话没 pcMode）：按它现在的档算，能看见
-        assertTrue(CodeMode.ACCEPT_EDITS in CodeUi.modesFor(CodeAccess.PHONE, spec(CodeMode.ACCEPT_EDITS, fromPhone = false)))
-        // 手机建的、电脑上没选过：不列（切过去电脑也会拒）
-        assertFalse(CodeMode.ACCEPT_EDITS in CodeUi.modesFor(CodeAccess.PHONE, spec(CodeMode.MANUAL, fromPhone = true)))
-        assertFalse(CodeMode.ACCEPT_EDITS in CodeUi.modesFor(CodeAccess.PHONE, spec(CodeMode.ACCEPT_EDITS, fromPhone = true)))
+    fun phoneListsAllModesLikePc() {
+        // 2026-10-28 起手机遥控电脑时和电脑上一样（以前只列手动、计划，自动档切走就回不来）；手机建的会话也一样
+        assertEquals(CodeMode.entries.toList(), CodeUi.createModesFor(CodeAccess.PHONE))
+        assertEquals(CodeMode.entries.toList(), CodeUi.modesFor(CodeAccess.PHONE, spec(CodeMode.MANUAL, fromPhone = true)))
+        // 只读（开关没开 / 手机本机）时也列全，只是点不动
+        assertEquals(CodeMode.entries.toList(), CodeUi.modesFor(CodeAccess.LOCKED, spec(CodeMode.MANUAL)))
     }
 
     // ———————————————— CodeNotify.plan ————————————————

@@ -58,9 +58,25 @@ class WebSearch(private val proxy: () -> String?) {
     }
 
     /**
+     * DeepSeek 官方搜索接口（POST https://api.deepseek.com/v1/tools/search，用 DeepSeek 的 Key，5 元 / 千次、只收搜到结果的）。
+     * 2026-10-17 上线，出处见 docs/参考资料.md「DeepSeek 联网搜索」。summary 是给模型读的长摘要（600～800 字），比 snippet 有用。
+     */
+    suspend fun deepseek(q: String, baseUrl: String, key: String, px: String?, n: Int): List<SearchSource> {
+        val root = baseUrl.trim().trimEnd('/').removeSuffix("/v1")
+        val o = postJson("$root/v1/tools/search", key, px, buildJsonObject {
+            put("query", q.trim().take(128)); put("count", n.coerceIn(3, 10))
+        })
+        return (o["results"] as? JsonArray).orEmpty().map { it.jsonObject }.map {
+            SearchSource(it.str("title").orEmpty(), it.str("url").orEmpty(), it.str("summary").orEmpty().ifBlank { it.str("snippet").orEmpty() }.take(800))
+        }.filter { it.url.startsWith("http") }
+    }
+
+    /**
      * 免费搜索：必应和 DuckDuckGo 一起搜，按和搜索词对得上的程度挑。
      * 2026-10-21 实测：不带登录的必应对中文题常返回完全无关的结果（搜珠峰高度出来工商银行股票、二手车），
      * 不是空的，所以以前「必应没结果才换 DuckDuckGo」永远换不过去；cn.bing.com/search 还会被跳回首页、一条没有。
+     * 2026-10-28 又量：必应搜「达拉干沉香 历史」只按第一个字搜，回来全是「达」字的字典（换 setlang、带 cookie、加引号都一样）；
+     * 百度、搜狗不登录能搜到对题的，但连搜两三次就要人机验证，所以没加。用户有 DeepSeek / Kimi 时改走它们的官方搜索（Engine.officialSearchFor）。
      */
     private suspend fun free(q: String, n: Int, px: String?): List<SearchSource> = coroutineScope {
         // 国内不走代理时 DuckDuckGo 连不上（手机常这样），各给 12 秒，不让一边拖住

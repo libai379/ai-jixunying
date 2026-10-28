@@ -54,23 +54,25 @@ sealed interface Command {
         val mode: CodeMode = CodeMode.MANUAL,
         /** 手机发来的（电脑收到手机的指令时由 PhoneGate 填 true，手机自己填的不算）。 */
         val fromPhone: Boolean = false,
-        /** 2026-10-18：用这个仓库的独立副本（git worktree）开会话。手机上不许。 */
+        /** 2026-10-18：用这个仓库的独立副本（git worktree）开会话。 */
         val worktree: Boolean = false,
-        /** 2026-10-22：开「自动」档（独立副本照原会话的档开）。手机发来的不算。 */
+        /** 2026-10-22：开「自动」档（独立副本照原会话的档开）。2026-10-28 起手机发来的也算。 */
         val auto: Boolean = false,
+        /** 2026-10-28：开「全部放开」（新建时就能选，以前要建好再切；手机上也能选）。 */
+        val openAll: Boolean = false,
     ) : Command
     /**
      * Code 栏：换这个会话的项目文件夹 / 模型（2026-10-17，新建不再先选，开起来以后随时换）。空字符串 = 这一样不换。
-     * 换文件夹时，以前改动记录里的相对路径换成完整路径，照样能撤销。只能在电脑上换（PhoneGate）。
+     * 换文件夹时，以前改动记录里的相对路径换成完整路径，照样能撤销。2026-10-28 起手机上也能换。
      */
     @Serializable data class CodeSetProject(val convId: String, val folder: String = "", val providerId: String = "", val modelId: String = "") : Command
     /**
      * Code 栏：给团队的一个角色选脑子（2026-10-19，多角色派活）。providerId 空 = 这个角色不要了；
      * CodeSpec.CLAUDE_CODE = 交给 Claude Code（modelId 是 --model 别名）；CodeSpec.CODEX / GEMINI = 交给 Codex / Gemini CLI（2026-10-20）。
-     * 只能在电脑上改（PhoneGate）。
+     * 2026-10-28 起手机上也能改。
      */
     @Serializable data class CodeSetTeam(val convId: String, val role: String, val providerId: String = "", val modelId: String = "") : Command
-    /** 流程模板（2026-10-22，第 19 节）：flow 填 CodeSpec.FLOW_DEV 打开一条龙，空 = 关掉。只能在电脑上改（PhoneGate）。 */
+    /** 流程模板（2026-10-22，第 19 节）：flow 填 CodeSpec.FLOW_DEV 打开一条龙，空 = 关掉。2026-10-28 起手机上也能改。 */
     @Serializable data class CodeSetFlow(val convId: String, val flow: String = "") : Command
     /** Claude Code 的思考强度（2026-10-22）：effort 是 CodeSpec.EFFORTS 里的一个，空 = 它自己的默认。 */
     @Serializable data class CodeSetEffort(val convId: String, val effort: String = "") : Command
@@ -116,9 +118,9 @@ sealed interface Command {
     @Serializable data class AgentStatus(val agent: String) : Command
     /** Code 栏：换权限档（只影响之后的步骤，已经跑完的不变）。fromPhone 同上。 */
     @Serializable data class CodeSetMode(val convId: String, val mode: CodeMode, val fromPhone: Boolean = false,
-        /** 2026-10-17：「全部放开」（CodeSpec.openAll）。手机发来 true 的一律拒（PhoneGate）。 */
+        /** 2026-10-17：「全部放开」（CodeSpec.openAll）。2026-10-28 起手机上也能开。 */
         val openAll: Boolean = false,
-        /** 2026-10-17：「自动」（CodeSpec.autoMode）。手机发来 true 的一律拒。 */
+        /** 2026-10-17：「自动」（CodeSpec.autoMode）。2026-10-28 起手机上也能开。 */
         val auto: Boolean = false) : Command
     /** Code 栏：发一条任务，开始跑编码循环（同一个会话已经在跑就排队，前一个跑完接着跑）。 */
     @Serializable data class CodeSend(
@@ -131,7 +133,7 @@ sealed interface Command {
          * 手机发来的一律清空（手机上的路径电脑上没有，也不许手机放大工作区，PhoneGate）。
          */
         val paths: List<String> = emptyList(),
-        /** 手机发来的（PhoneGate 填 true）：这个任务里读工作区外的文件照旧要问。 */
+        /** 手机发来的（PhoneGate 填 true）：只用来标「手机发起」，2026-10-28 起和电脑上发的一样做。 */
         val fromPhone: Boolean = false,
     ) : Command
     /** Code 栏：停下这个会话正在跑的循环（模型请求和正在跑的命令都停），消息状态变 STOPPED。 */
@@ -139,12 +141,12 @@ sealed interface Command {
     /**
      * Code 栏：批准或拒绝一步（读写工作区外的文件 / 写文件 / 改文件 / 跑命令）。针对具体某一步，没有超时自动放行。
      * remember（2026-10-17）："" 只这一次；"dir" 允许并把这一步的文件夹（ToolStep.scopeDir）加进工作区；
-     * "command" 允许并且同样开头（ToolStep.prefix）的命令这个会话里不再问。手机发来的一律当 ""（PhoneGate）。
+     * "command" 允许并且同样开头（ToolStep.prefix）的命令这个会话里不再问。2026-10-28 起手机发来的也照办。
      */
     @Serializable data class CodeDecide(val convId: String, val stepId: String, val allow: Boolean, val remember: String = "") : Command
     /**
      * Code 栏：改这个会话的工作区（加进来的文件夹 / 文件）和「不再问」的命令开头（2026-10-17）。整份替换。
-     * 只能在电脑上改，手机发来的拒绝（PhoneGate）。
+     * 2026-10-28 起手机上也能改（电脑上打开「允许手机用 Code 栏」时）。
      */
     @Serializable data class CodeSetAccess(val convId: String, val extraPaths: List<String>, val allowedCommands: List<String>) : Command
     /** Code 栏：某一处改动的统一差异（unified diff）。结果 data 是差异文本。 */
@@ -170,7 +172,7 @@ sealed interface Command {
         val attachmentIds: List<String> = emptyList(),
         /** 2026-10-17：电脑上拖进来 / 选的文件和文件夹的路径：写进消息、这个对话的 AI 读它不用再问。手机发来的清空（PhoneGate）。 */
         val paths: List<String> = emptyList(),
-        /** 手机发来的（PhoneGate 填 true，手机自己填的不算）：这一轮 AI 不许读收录范围外的文件。 */
+        /** 手机发来的（PhoneGate 填 true，手机自己填的不算）：电脑上没打开「允许手机用 Code 栏」时，这一轮 AI 不许读收录范围外的文件、不许改文件和跑命令。 */
         val fromPhone: Boolean = false,
         /** true 时不走聊天模型，直接把文字当画图提示词。 */
         val drawImage: Boolean = false,
@@ -182,7 +184,7 @@ sealed interface Command {
     @Serializable data class Regenerate(val convId: String, val messageId: String, val fromPhone: Boolean = false) : Command
     /**
      * 对话页：AI 要读收录范围外的文件，用户批准或拒绝（2026-10-17）。remember = "dir"：允许并且这个文件夹在这个对话里以后不再问。
-     * 手机发来的 remember 一律当 ""（PhoneGate）。
+     * 2026-10-28 起手机发来的 remember 也照办（电脑上打开「允许手机用 Code 栏」时，PhoneGate）。
      */
     @Serializable data class ChatDecide(val convId: String, val stepId: String, val allow: Boolean, val remember: String = "") : Command
     /** 对话页：撤销 AI 改的一处文件（恢复成改之前的样子，原来没有的文件删掉）。2026-10-17。 */

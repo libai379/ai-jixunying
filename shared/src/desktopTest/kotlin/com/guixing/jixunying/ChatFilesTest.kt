@@ -188,12 +188,19 @@ class ChatFilesTest {
         await { e.store.messages.value[conv].orEmpty().size > before + 1 && ai(e, conv)?.status == MsgStatus.DONE }
         assertTrue(ai(e, conv)!!.tools.none { it.approval.isNotEmpty() }, "全部放开不问")
         assertTrue("RUN_OK_2" in lastTools())
-        // 手机发起的不能跑
+        // 手机发起的：电脑上没开「允许手机用 Code 栏」不能跑
         val viaPhone = com.guixing.jixunying.engine.code.PhoneGate.check(Command.SendMessage(conv, "跑命令 目标：Write-Output RUN_OK_3"), e.state).command
         val b2 = e.store.messages.value[conv].orEmpty().size
         e.call(viaPhone)
         await { e.store.messages.value[conv].orEmpty().size > b2 + 1 && ai(e, conv)?.status == MsgStatus.DONE }
         assertTrue("手机上发起" in lastTools() && "RUN_OK_3\\n" !in lastTools().substringAfterLast("tool_call_id"))
+        // 开了就和电脑上一样（2026-10-28，用户：「不要限制」）：这个对话全部放开，手机发起的也不问直接跑
+        e.call(Command.SaveSettings(e.state.settings.copy(code = e.state.settings.code.copy(allowPhone = true))))
+        val viaPhone2 = com.guixing.jixunying.engine.code.PhoneGate.check(Command.SendMessage(conv, "跑命令 目标：Write-Output RUN_OK_4"), e.state).command
+        val b3 = e.store.messages.value[conv].orEmpty().size
+        e.call(viaPhone2)
+        await { e.store.messages.value[conv].orEmpty().size > b3 + 1 && ai(e, conv)?.status == MsgStatus.DONE }
+        assertTrue("RUN_OK_4" in lastTools() && "手机上发起" !in lastTools().substringAfterLast("RUN_OK_3"), lastTools().takeLast(400))
     }
 
     /** 2026-10-17 对话栏能删文件夹：拖进来的文件夹里不问；删之前整个备份，一键放回去。 */
