@@ -138,6 +138,36 @@ class WolfGameTest {
         assertFalse(prompts.any { it.first != 4 && "你用解药救了" in it.third })
     }
 
+    /**
+     * 2026-10-29 用户：「狼人杀跑的这么慢……这一局那不得跑过几个小时啊？」——实测智谱一次私下判断 268 秒，整桌干等。
+     * 私下判断超时就跳过（记弃权），不等它；对局照常往下走。
+     */
+    @Test
+    fun slowJudgeIsSkippedNotWaitedFor() = runBlocking {
+        var r = record(WolfBoard.SIX, listOf(WolfRole.WOLF, WolfRole.WOLF, WolfRole.SEER, WolfRole.WITCH, WolfRole.VILLAGER, WolfRole.VILLAGER))
+        val brain = WolfBrain { seat, _, user ->
+            when (stepOf(user)) {
+                "knife" -> target(6)
+                "check" -> target(1)
+                "witch" -> "{\"save\": false, \"poison\": 0}"
+                "speak", "lastWords" -> "<发言>嗯</发言>"
+                // 3 号每次私下判断都要「想」5 秒，别人马上交
+                "judge" -> { if (seat.no == 3) kotlinx.coroutines.delay(5_000); "{\"most\": ${if (seat.no == 1) 2 else 1}, \"confidence\": 50}" }
+                "vote" -> target(0)
+                else -> "?"
+            }
+        }
+        val t0 = System.currentTimeMillis()
+        val out = WolfGame(r, { brain }, onUpdate = { r = it }, maxDays = 1, judgeTimeoutMs = 300).run()
+        val took = System.currentTimeMillis() - t0
+        assertTrue(took < 4_000, "两轮判断都不该等 3 号的 5 秒（用了 $took 毫秒）")
+        val skipped = out.notes.filter { it.seat == 3 && it.kind == "abstain" && it.stage == "判断" }
+        assertEquals(2, skipped.size, out.notes.filter { it.seat == 3 }.toString())
+        assertTrue(skipped.all { "跳过" in it.text })
+        assertTrue(out.notes.count { it.kind == "judge" } >= 8, "别人的判断照常记")
+        assertEquals("打满 1 天没分出胜负", out.endReason)
+    }
+
     /** 乱答：先重问一次，还不行记弃权（票是 0），绝不随机代投；大家都弃票就平安。 */
     @Test
     fun invalidOutputIsRetriedThenAbstains() = runBlocking {

@@ -46,6 +46,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
@@ -186,7 +187,9 @@ private fun WolfLobby(ctl: AppController, state: AppState, wide: Boolean) {
         for (i in picks.indices) picks[i].role?.let { r -> if (picks.count { it.role == r } > roles.count { it == r }) picks[i] = picks[i].copy(role = null) }
     }
     var step by remember { mutableStateOf(false) }
-    var judge by remember { mutableStateOf(true) }
+    // 私下判断默认关（2026-10-29 用户：「狼人杀跑的这么慢……这一局那不得跑过几个小时啊？」——实测第 1 天 15 分钟里它占了 7 分钟，
+    // 只给测评用，桌上谁也看不到）；做测评时再打开
+    var judge by remember { mutableStateOf(false) }
     var useExp by remember { mutableStateOf(true) }
     var guide by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf("") }
@@ -239,7 +242,7 @@ private fun WolfLobby(ctl: AppController, state: AppState, wide: Boolean) {
             Spacer(Modifier.height(12.dp))
             SectionCard {
                 if (host) SwitchRow("一步一步来", "每一步（天黑、狼人行动、投票……）等你点「下一步」再走；不开就自动打，随时能暂停", step) { step = it }
-                SwitchRow("记录 AI 的私下判断", "每天发言前、投票前让每个 AI 说它怀疑谁、几成把握（测评用，不给别人看）；调用大约多一倍", judge) { judge = it }
+                SwitchRow("记录 AI 的私下判断", "测评用，桌上谁也看不到：每天发言前、投票前让每个 AI 说它怀疑谁、几成把握。打开以后每天多两轮，一局慢将近一倍（谁超过 1 分钟没交就跳过）", judge) { judge = it }
                 SwitchRow("带上以前的经验", "每局打完 AI 各总结一句经验，下局开打前给它看（照第一代）", useExp) { useExp = it }
                 val ai = picks.count { it.memberId.isNotBlank() }
                 Text("这局 $ai 个 AI。6 个 AI 实测一局调 36 次模型、约 0.38 元；开着私下判断大约翻倍，打完复盘每个 AI 再多一次；本地模型不花钱。",
@@ -386,6 +389,16 @@ private fun WolfTable(ctl: AppController, state: AppState, live: WolfLive, wide:
     val thinking = if (god || !night) live.thinking else live.thinking.filter { n ->
         n == me?.no || (me != null && me.role.wolf && r.seats.firstOrNull { it.no == n }?.role?.wolf == true)
     }
+    // 谁想了多久（2026-10-29 用户：「狼人杀跑的这么慢，半天了，还卡在思考」——看得出是谁在拖）：从这台设备看到它开始想算起
+    val since = remember(r.id) { mutableStateMapOf<Int, Long>() }
+    var clock by remember { mutableStateOf(nowMillis()) }
+    LaunchedEffect(thinking) {
+        val t = nowMillis()
+        for (n in thinking) if (n !in since) since[n] = t
+        for (n in since.keys.toList()) if (n !in thinking) since.remove(n)
+    }
+    LaunchedEffect(Unit) { while (true) { clock = nowMillis(); kotlinx.coroutines.delay(1000) } }
+    val took: (Int) -> String = { n -> since[n]?.let { val sec = ((clock - it) / 1000).coerceAtLeast(0); "${sec / 60}:${(sec % 60).toString().padStart(2, '0')}" }.orEmpty() }
     val lines = remember(r, viewer, god, typing, thinking) {
         linesOf(r, { e -> god || e.visibleTo.isEmpty() || (me != null && me.no in e.visibleTo) }, emptyList()) +
             thinking.map { WolfLine.Typing(it, typing[it].orEmpty()) }
@@ -421,7 +434,7 @@ private fun WolfTable(ctl: AppController, state: AppState, live: WolfLive, wide:
         // 中间：像群聊一样
         LazyColumn(Modifier.weight(1f).fillMaxWidth(), state = list,
             contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = if (wide) 24.dp else 12.dp, vertical = 10.dp)) {
-            items(lines.size) { i -> Box(Modifier.widthIn(max = 820.dp)) { LineView(lines[i], r, state, god) } }
+            items(lines.size) { i -> Box(Modifier.widthIn(max = 820.dp)) { LineView(lines[i], r, state, god, took) } }
         }
         HorizontalDivider(color = Ext.c.border)
         // 底下：轮到谁做什么
@@ -442,7 +455,7 @@ private fun WolfTable(ctl: AppController, state: AppState, live: WolfLive, wide:
                             else humans.filter { it.alive && (it.no !in seen || waiting.any { a -> a.seat == it.no }) }
                         if (night && waiting.isNotEmpty()) Text("天黑了：活着的真人轮流看一眼（没事的人看完直接挡上），别让别人看到。",
                             style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
-                        if (callOut.isEmpty()) Text(waitText(live.copy(thinking = thinking), r), style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
+                        if (callOut.isEmpty()) Text(waitText(live.copy(thinking = thinking), r, took), style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
                         for (s in callOut.distinctBy { it.no }) {
                             val a = waiting.firstOrNull { it.seat == s.no }
                             Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -459,7 +472,7 @@ private fun WolfTable(ctl: AppController, state: AppState, live: WolfLive, wide:
                         val mine = live.asks.firstOrNull { it.seat == me.no }
                         if (mine != null) AskPanel(ctl, mine, r) { c -> send(c); if (humans.size > 1) viewer = 0 }
                         else {
-                            Text(if (!me.alive) "你已经出局了，可以接着看。" else if (night && humans.size > 1) "今晚你没有要做的事。" else waitText(live.copy(thinking = thinking), r), style = MaterialTheme.typography.bodySmall,
+                            Text(if (!me.alive) "你已经出局了，可以接着看。" else if (night && humans.size > 1) "今晚你没有要做的事。" else waitText(live.copy(thinking = thinking), r, took), style = MaterialTheme.typography.bodySmall,
                                 color = Ext.c.subtle, modifier = Modifier.padding(top = 6.dp))
                             if (humans.size > 1) TextButton(onClick = { viewer = 0 }) { Text("看完了，挡住屏幕") }
                         }
@@ -470,9 +483,11 @@ private fun WolfTable(ctl: AppController, state: AppState, live: WolfLive, wide:
     }
 }
 
-private fun waitText(live: WolfLive, r: WolfGameRecord): String = when {
+private fun waitText(live: WolfLive, r: WolfGameRecord, took: (Int) -> String = { "" }): String = when {
     live.paused -> "已暂停"
-    live.thinking.isNotEmpty() -> "等 " + live.thinking.joinToString("、") { n -> r.seats.firstOrNull { it.no == n }?.let { "${it.no}号 ${it.name}" } ?: "${n}号" } + "……"
+    live.thinking.isNotEmpty() -> "等 " + live.thinking.joinToString("、") { n ->
+        (r.seats.firstOrNull { it.no == n }?.let { "${it.no}号 ${it.name}" } ?: "${n}号") + took(n).let { if (it.isBlank()) "" else "（想了 $it）" }
+    } + "……"
     live.asks.isNotEmpty() -> "等 " + live.asks.joinToString("、") { a -> if (a.seat == 0) "主持人" else "${a.seat}号" } + "……"
     else -> "……"
 }
@@ -513,7 +528,7 @@ private fun SeatAvatar(s: WolfSeat?, state: AppState, size: Int) {
 
 /** 聊天流里的一行怎么画。 */
 @Composable
-private fun LineView(l: WolfLine, r: WolfGameRecord, state: AppState, god: Boolean) {
+private fun LineView(l: WolfLine, r: WolfGameRecord, state: AppState, god: Boolean, took: (Int) -> String = { "" }) {
     fun seat(n: Int) = r.seats.firstOrNull { it.no == n }
     when (l) {
         is WolfLine.Sys -> {
@@ -566,7 +581,7 @@ private fun LineView(l: WolfLine, r: WolfGameRecord, state: AppState, god: Boole
             val s = seat(e.actor)
             Bubble(s, state, (when (e.kind) { "pk" -> "PK"; "lastWords" -> "遗言"; "review" -> "复盘"; else -> "" }), e.text, god)
         }
-        is WolfLine.Typing -> Bubble(seat(l.seat), state, "", l.text.ifBlank { "正在想…" }, god, typing = true)
+        is WolfLine.Typing -> Bubble(seat(l.seat), state, took(l.seat).let { if (it.isBlank()) "" else "想了 $it" }, l.text.ifBlank { "正在想…" }, god, typing = true)
         is WolfLine.Thought -> {
             val n = l.n
             Text("💭 ${n.seat}号 " + (if (n.kind == "judge") "判断（最怀疑 ${n.most}号，把握 ${n.confidence}%）" else if (n.kind == "exp") "总结的经验" else n.stage) + "：" + n.text,

@@ -13,6 +13,7 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.random.Random
 
 /**
@@ -47,6 +48,11 @@ class WolfGame(
     private val gate: WolfGate = WolfGate {},
     /** AI 每天发言前、投票前交私下判断（测评用）。 */
     private val judge: Boolean = true,
+    /**
+     * 一个 AI 交私下判断最多等多久（毫秒），超时这次判断跳过、记弃权。私下判断只给测评用、不影响对局，
+     * 不能让整桌等最慢的那个（2026-10-29 实测：智谱 GLM-5.3-Flash 一次判断 268 秒，别人一分钟内都交了）。
+     */
+    private val judgeTimeoutMs: Long = 60_000,
     /** 给某个座位的规则后面再加的话（以前总结的经验）。 */
     private val systemExtra: (WolfSeat) -> String = { "" },
 ) {
@@ -494,6 +500,11 @@ class WolfGame(
     }
 
     private suspend fun judgeOne(s: WolfSeat, day: Int, stage: String) {
+        if (withTimeoutOrNull(judgeTimeoutMs) { judgeOneNow(s, day, stage) } == null)
+            note(WolfNote(day, s.no, "abstain", "判断", "想了 ${judgeTimeoutMs / 1000} 秒还没交，这次判断跳过（只是测评用的记录，不影响对局）"))
+    }
+
+    private suspend fun judgeOneNow(s: WolfSeat, day: Int, stage: String) {
         val others = aliveNos().filter { it != s.no }
         val ask = "（这一步只记录，不会给任何人看。）说说你现在的判断：每个别的活着的玩家是狼人的把握（0～100），" +
             "以及你最怀疑谁。输出 JSON：{\"probs\": {\"座位号\": 把握, …}, \"most\": 座位号, \"confidence\": 0～100, \"why\": \"一两句理由\"}。" +

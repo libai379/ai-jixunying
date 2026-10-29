@@ -2284,12 +2284,14 @@ class Engine(
         val m = state.member(seat.memberId) ?: throw IllegalStateException("${seat.no}号的 AI 成员不在了")
         val p = state.provider(m.providerId) ?: throw IllegalStateException("${m.name} 的模型服务不在了")
         val msgs = listOf(buildJsonObject { put("role", "system"); put("content", system) }, userMsg(user))
+        // 和对话栏一样带上这位成员的「思考」设置（2026-10-29 查狼人杀慢时发现以前没带，用的是服务商默认）
+        val thinking = if (llm.thinkingDropped(p, m.modelId)) null else Thinking.params(Thinking.rule(p, m.modelId), m.thinking)
         var last: Exception? = null
         repeat(2) { attempt ->
             try {
                 val got = StringBuilder()
                 val r = withContext(Dispatchers.IO + UsageTag("wolf", m.id)) {
-                    llm.chat(p, m.modelId, msgs, m.temperature, null) { d, _ -> if (d.isNotEmpty()) { got.append(d); onText(got.toString()) } }
+                    llm.chat(p, m.modelId, msgs, m.temperature, null, thinking = thinking) { d, _ -> if (d.isNotEmpty()) { got.append(d); onText(got.toString()) } }
                 }
                 return r.content
             } catch (e: CancellationException) {
