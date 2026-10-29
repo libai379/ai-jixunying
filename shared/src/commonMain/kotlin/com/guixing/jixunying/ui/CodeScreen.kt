@@ -1020,6 +1020,7 @@ private fun CodeStartHint(conv: Conversation) {
 private fun CodeUserMessage(ctl: AppController, m: Message) {
     val clipboard = LocalClipboardManager.current
     Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.End) {
+        Text(clockText(m.createdAt), style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, modifier = Modifier.padding(bottom = 3.dp))
         if (m.attachments.isNotEmpty()) {
             AttachmentStrip(ctl, m.attachments, alignEnd = true)
             Spacer(Modifier.height(6.dp))
@@ -1135,6 +1136,8 @@ private fun CodeAiHead(m: Message) {
         MemberAvatar(null, 34.dp, emoji = "🛠️", color = 0xFF4F5BEB)
         Spacer(Modifier.width(12.dp))
         Text("Code 助手", style = MaterialTheme.typography.titleSmall)
+        Spacer(Modifier.width(6.dp))
+        Text(clockText(m.createdAt), style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
         if (m.modelLabel.isNotBlank()) {
             Spacer(Modifier.width(8.dp))
             Pill(m.modelLabel, Ext.c.subtle)

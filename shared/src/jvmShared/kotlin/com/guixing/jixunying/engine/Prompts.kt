@@ -17,6 +17,13 @@ import java.util.Locale
  * 4. 怎么回答（放最后）：先想用户拿回答去做什么，篇幅跟着问题走，排版越少越好，过程不念、没问的不教。
  */
 object Prompts {
+    /**
+     * 一句话是北京时间几点说的（2026-10-29 用户：「给他挂一个时钟，让 AI 能够感知时间的流逝……我几点跟他说的话，接下来哪句话又是几点」）：
+     * 聊天记录、Code 栏的会话历史里每句话前面都标上，「10月29日 23:53」。
+     */
+    fun clock(ms: Long): String =
+        java.time.Instant.ofEpochMilli(ms).atZone(java.time.ZoneId.of("Asia/Shanghai")).format(java.time.format.DateTimeFormatter.ofPattern("M月d日 HH:mm", java.util.Locale.CHINA))
+
 
     fun modelLabel(state: AppState, m: Member): String {
         val p = state.provider(m.providerId)
@@ -100,7 +107,7 @@ object Prompts {
             }
             appendLine()
             appendLine("【你能做什么】")
-            appendLine("- 现在是北京时间 $time。")
+            appendLine("- 现在是北京时间 $time。聊天记录里每句话前面都标着是北京时间几点说的（你自己说过的标在〔〕里），看得出隔了多久、哪句先哪句后；你回答时不用自己写时间。")
             appendLine(if (canSeeImages) "- 你能看图：用户发来的图片会直接给你看。" else "- 你看不到图片：如果用户发了图，告诉他你这个模型不支持看图，可以换一个能看图的成员。")
             appendLine("- 用户发来的文档（PDF、Word、Excel、PPT、代码、文本等）已经转成文字放在消息里，标有「附件」字样。")
             if (canDraw) appendLine("- 你可以画图：用户要图片、要改图时调用 generate_image，提示词要具体（主体、风格、构图、光线、色彩）；用户说「改成……」就在上一张的基础上调整描述重新画。画完简单说明即可，不用把图再描述一遍。可以一边聊一边画。")

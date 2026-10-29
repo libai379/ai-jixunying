@@ -60,6 +60,9 @@ import kotlin.test.assertTrue
  * 循环、工具、审批本身在 engine/CodeAgent.kt。
  */
 class CodeAgentTest {
+    /** 每句话前面程序标的时间（「【我 · 10月30日 00:08】」「〔10月30日 00:08〕」，2026-10-29 加的）：假模型按原话认任务，先去掉。 */
+    private fun untimed(t: String) = t.replace(Regex("""(^|\n)[【〔][^】〕\n]*\d{1,2}:\d{2}[】〕]"""), "$1")
+
     private val requests = Collections.synchronizedList(mutableListOf<JsonObject>())
     private lateinit var fake: EmbeddedServer<*, *>
     private var port = 0
@@ -93,12 +96,12 @@ class CodeAgentTest {
                     val system = (msgs.first().jsonObject["content"] as? JsonPrimitive)?.contentOrNull.orEmpty()
                     // 任务文字：最后一条 user（后面几轮最后一条是工具结果；一个会话连发两次时前面还有旧任务）
                     val task = msgs.map { it.jsonObject }.lastOrNull { it["role"]?.jsonPrimitive?.content == "user" }
-                        ?.let { (it["content"] as? JsonPrimitive)?.contentOrNull }.orEmpty()
+                        ?.let { (it["content"] as? JsonPrimitive)?.contentOrNull }.orEmpty().let(::untimed)
                     val toolResults = msgs.map { it.jsonObject }.filter { it["role"]?.jsonPrimitive?.content == "tool" }
                         .map { (it["content"] as? JsonPrimitive)?.contentOrNull.orEmpty() }
                     // 所有 user 说过的话（无人值守接着做时最后一条是「这一轮走满了，接着做」，任务在前面）
                     val allUser = msgs.map { it.jsonObject }.filter { it["role"]?.jsonPrimitive?.content == "user" }
-                        .joinToString("\n") { (it["content"] as? JsonPrimitive)?.contentOrNull.orEmpty() }
+                        .joinToString("\n") { untimed((it["content"] as? JsonPrimitive)?.contentOrNull.orEmpty()) }
                     call.respondTextWriter(ContentType.Text.EventStream) {
                         fun chunk(delta: String) { write("data: {\"choices\":[{\"index\":0,\"delta\":$delta}]}\n\n"); flush() }
                         fun say(text: String) = chunk(Json.encodeToString(JsonObject.serializer(), JsonObject(mapOf("content" to JsonPrimitive(text)))))

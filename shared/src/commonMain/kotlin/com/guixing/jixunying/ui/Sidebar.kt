@@ -451,8 +451,12 @@ private fun CodeSessionRow(ctl: AppController, state: AppState, c: Conversation,
         MemberAvatar(null, 30.dp, emoji = "🛠️", color = 0xFF4F5BEB)
         Spacer(Modifier.width(10.dp))
         Column(Modifier.weight(1f)) {
-            Text(c.title, style = MaterialTheme.typography.bodyMedium, fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
-                maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(c.title, style = MaterialTheme.typography.bodyMedium, fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+                Spacer(Modifier.width(6.dp))
+                Text(clockText(c.updatedAt), style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, maxLines = 1)
+            }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 // 手机发起的会话：电脑上要一眼看得出来（设计说明第 6 节，第二期）
                 if (c.code?.fromPhone == true) {
@@ -589,8 +593,13 @@ private fun ConversationRow(ctl: AppController, state: AppState, c: Conversation
         }
         Spacer(Modifier.width(10.dp))
         Column(Modifier.weight(1f)) {
-            Text(c.title, style = MaterialTheme.typography.bodyMedium, fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
-                maxLines = 1, overflow = TextOverflow.Ellipsis)
+            // 标题右边是最后一次说话的时间（2026-10-29 用户：「左边那个对话栏那个下面要带上时间」）
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(c.title, style = MaterialTheme.typography.bodyMedium, fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+                Spacer(Modifier.width(6.dp))
+                Text(clockText(c.updatedAt), style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, maxLines = 1)
+            }
             Text((if (c.channel.startsWith("weixin:")) "微信 · " else "") +
                 (if (members.size > 1) "群聊 · " + members.joinToString("、") { it.name } else members.firstOrNull()?.name ?: "未选成员"),
                 style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, maxLines = 1, overflow = TextOverflow.Ellipsis)

@@ -60,6 +60,19 @@ class CodeUiNotifyTest {
         assertEquals(CodeMode.entries.toList(), CodeUi.modesFor(CodeAccess.FULL, spec(CodeMode.MANUAL)))
     }
 
+    /** 2026-10-29 每句话、每个对话带上北京时间：今天只写时分，昨天写「昨天」，今年更早写月日，往年带年份；AI 看到的是「10月29日 23:53」。 */
+    @Test
+    fun clockTextInBeijingTime() {
+        val h = 3_600_000L
+        val now = 1_793_289_600_000L // 北京 2026-10-30 00:00
+        assertEquals("23:53", com.guixing.jixunying.ui.clockText(now - 7 * 60_000L, now - 60_000L))
+        assertEquals("昨天 23:53", com.guixing.jixunying.ui.clockText(now - 7 * 60_000L, now + 1 * h))
+        assertEquals("10月27日 08:00", com.guixing.jixunying.ui.clockText(now - 3 * 24 * h + 8 * h, now))
+        assertTrue(com.guixing.jixunying.ui.clockText(now - 400L * 24 * h, now).startsWith("2025年"))
+        assertEquals("", com.guixing.jixunying.ui.clockText(0, now))
+        assertEquals("10月29日 23:53", com.guixing.jixunying.engine.Prompts.clock(now - 7 * 60_000L))
+    }
+
     /** 2026-10-28 新对话首页那句问候：按北京时间几点说早上好 / 晚上好 / 夜深了，第二句是暖心话；名字空就叫「你」。 */
     @Test
     fun homeGreetingFollowsBeijingTime() {

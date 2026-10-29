@@ -385,6 +385,8 @@ private fun ChatEmptyHint(state: AppState, conv: Conversation, onTip: (String) -
 @Composable
 private fun UserMessage(ctl: AppController, state: AppState, m: Message) {
     Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.End) {
+        // 几点说的（2026-10-29 用户要每句话都带时间）
+        Text(clockText(m.createdAt), style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, modifier = Modifier.padding(bottom = 3.dp))
         if (m.attachments.isNotEmpty()) {
             AttachmentStrip(ctl, m.attachments, alignEnd = true)
             Spacer(Modifier.height(6.dp))
@@ -424,6 +426,8 @@ private fun AiMessage(ctl: AppController, state: AppState, m: Message,
         Column(Modifier.weight(1f)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(if (painter) "画图助手" else if (videoMaker) "视频助手" else if (chair) "会审主席" else member?.name ?: "已移除的成员", style = MaterialTheme.typography.titleSmall)
+                Spacer(Modifier.width(6.dp))
+                Text(clockText(m.createdAt), style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
                 Spacer(Modifier.width(8.dp))
                 if (review) { Pill(if (folded) "互评 · 点开看" else "互评", MaterialTheme.colorScheme.secondary) { folded = !folded }; Spacer(Modifier.width(6.dp)) }
                 if (chair) { Pill("会审汇总", Ext.c.success); Spacer(Modifier.width(6.dp)) }

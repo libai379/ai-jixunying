@@ -541,16 +541,16 @@ class EngineTest {
         waitIdle(e, conv, 1)
         fun lastUser(req: JsonObject) = req["messages"]!!.jsonArray.last { it.jsonObject["role"]!!.jsonPrimitive.content == "user" }
             .jsonObject["content"]!!.jsonPrimitive.content
-        assertEquals("【我】第一句", lastUser(requests.last()), "没有指令时不贴")
+        assertEquals("【我】第一句", lastUser(requests.last()).replace(Regex(" · [^】]*】"), "】"), "没有指令时不贴")
         e.call(Command.SaveSettings(e.state.settings.copy(personal = e.state.settings.personal.copy(instructions = "回答用「报告老板：」开头"))))
         e.call(Command.SendMessage(conv, "第二句"))
         waitIdle(e, conv, 2)
-        assertEquals("【我】第二句\n\n（我在设置里写的自定义指令：回答用「报告老板：」开头）", lastUser(requests.last()))
+        assertEquals("【我】第二句\n\n（我在设置里写的自定义指令：回答用「报告老板：」开头）", lastUser(requests.last()).replace(Regex(" · [^】]*】"), "】"))
         val fresh = e.call(Command.CreateConversation(listOf(ms[0].id))).data
         e.call(Command.UpdateConversation(e.state.conversation(fresh)!!.copy(webSearch = false)))
         e.call(Command.SendMessage(fresh, "新对话第一句"))
         waitIdle(e, fresh, 1)
-        assertEquals("【我】新对话第一句", lastUser(requests.last()), "新对话还没有回答，指令在 system 里就够了")
+        assertEquals("【我】新对话第一句", lastUser(requests.last()).replace(Regex(" · [^】]*】"), "】"), "新对话还没有回答，指令在 system 里就够了")
         assertTrue("报告老板" in systemOf(requests.last()))
     }
 
@@ -584,7 +584,7 @@ class EngineTest {
         assertEquals(listOf("m0", "m1"), ai.map { it.senderId }, "只有甲回答，甲 @ 了乙，乙接着说；丙不说话")
         val lastReq = requests.last()
         assertTrue("「甲」在发言里 @ 了你" in systemOf(lastReq))
-        assertTrue("【甲】我是甲。@乙 你核实一下" in lastReq["messages"].toString())
+        assertTrue(Regex("""【甲 · [^】]*】我是甲。@乙 你核实一下""").containsMatchIn(lastReq["messages"].toString()))
     }
 
     @Test

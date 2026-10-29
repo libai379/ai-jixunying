@@ -3952,6 +3952,8 @@ class Engine(
         var t = text.trim()
         // 模型有时会学聊天记录的格式，在开头写「【自己名字】」
         listOf("【${me.name}】", "${me.name}：", "${me.name}:").forEach { if (t.startsWith(it)) t = t.removePrefix(it).trimStart() }
+        // 学着聊天记录在开头写了时间（「〔10月29日 23:53〕」「【阿德 · 10月29日 23:53】」）
+        t = t.replace(Regex("""^[〔【][^〕】\n]{0,24}\d{1,2}:\d{2}[〕】]\s*"""), "")
         return t
     }
 
@@ -5053,7 +5055,9 @@ class Engine(
                 else -> state.member(m.senderId)?.name ?: "已移除的成员"
             } + if (m.stage == "review") "·互评" else ""
             val sb = StringBuilder()
-            if (!mine) sb.append("【").append(speaker).append("】")
+            // 每句话标上几点说的（2026-10-29 用户要 AI 感知时间的流逝）；自己说过的标在〔〕里，回答前 cleanReply 会把它学着写的去掉
+            if (!mine) sb.append("【").append(speaker).append(" · ").append(Prompts.clock(m.createdAt)).append("】")
+            else sb.append("〔").append(Prompts.clock(m.createdAt)).append("〕")
             sb.append(stripThink(m.content))
             val imgs = mutableListOf<String>()
             for (a in m.attachments) {

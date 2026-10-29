@@ -470,6 +470,26 @@ fun formatTime(millis: Long): String {
     }
 }
 
+/**
+ * 一句话、一个对话是北京时间几点（2026-10-29 用户：「每个对话都要带上时间，包括左边那个对话栏」）：
+ * 今天的只写「23:53」，昨天的「昨天 23:53」，今年更早的「10月27日 23:53」，往年的带年份。
+ */
+fun clockText(millis: Long, now: Long = nowMillis()): String {
+    if (millis <= 0) return ""
+    val bj = 8 * 3_600_000L
+    val day = (millis + bj).floorDiv(86_400_000L)
+    val today = (now + bj).floorDiv(86_400_000L)
+    val minOfDay = (millis + bj).mod(86_400_000L) / 60_000
+    val hm = "${(minOfDay / 60).toString().padStart(2, '0')}:${(minOfDay % 60).toString().padStart(2, '0')}"
+    val date = dateText(millis)
+    return when {
+        day == today -> hm
+        day == today - 1 -> "昨天 $hm"
+        date.substringBefore("年") == dateText(now).substringBefore("年") -> date.substringAfter("年") + " " + hm
+        else -> "$date $hm"
+    }
+}
+
 /** 北京时间的日期，例如「2025年10月3日」（公共代码里没有时区库，按 UTC+8 自己算）。 */
 fun dateText(millis: Long): String {
     fun floorDiv(a: Long, b: Long) = if (a >= 0) a / b else -((-a + b - 1) / b)
