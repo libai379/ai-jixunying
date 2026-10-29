@@ -192,6 +192,13 @@ data class WolfGameRecord(
 }
 
 object WolfText {
+    /** 阵营和目标（给 AI 的规则、真人的身份条、开局页的身份介绍都用这一句）。 */
+    fun goal(role: WolfRole): String = when (role.faction) {
+        "wolf" -> "你属于狼人阵营：目标是屠边——让神职全部出局，或者平民全部出局；白天要藏好身份，别让好人认出你们。"
+        "good" -> "你属于好人阵营：目标是把狼人全部找出来、投票放逐出局。"
+        else -> "你还没有阵营：第一夜复制了谁，就和谁一个阵营。"
+    }
+
     /** 「2 普通狼、预言家、女巫、3 平民」。 */
     fun roles(list: List<WolfRole>): String =
         WolfRole.entries.mapNotNull { r -> list.count { it == r }.takeIf { it > 0 }?.let { n -> (if (n > 1) "$n " else "") + r.label } }.joinToString("、")

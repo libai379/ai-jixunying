@@ -13,7 +13,8 @@ import com.guixing.jixunying.model.WolfSeatMetric
  */
 object WolfPrompts {
 
-    fun system(r: WolfGameRecord, me: WolfSeat): String = buildString {
+    /** known = 法官那里这个座位手里的东西（药还在不在、技能用没用……，见 WolfGame.knownFor）。 */
+    fun system(r: WolfGameRecord, me: WolfSeat, known: List<String> = emptyList()): String = buildString {
         val roles = r.roleList.toSet()
         appendLine("你在玩一局狼人杀，你是 ${me.no}号。法官是程序。")
         appendLine()
@@ -29,11 +30,20 @@ object WolfPrompts {
         appendLine()
         appendLine("【你的身份】${me.role.label}" + (me.origRole?.let { "（你本来是${it.label}，第一夜复制成了${me.role.label}）" } ?: ""))
         appendLine(me.role.desc)
+        // 阵营和目标说清楚（2026-10-29 用户：「每个人知不知道自己是什么职业，应该做什么……」；第一代也写了）
+        appendLine(WolfText.goal(me.role))
         if (me.role.wolf) {
             val mates = r.seats.filter { it.role.wolf && it.no != me.no }
-            appendLine("你的狼队友：${mates.joinToString("、") { "${it.no}号" + if (!it.alive) "（已出局）" else "" }.ifEmpty { "没有" }}。你们的目标是屠边，白天要藏好身份。")
+            appendLine("你的狼队友：${mates.joinToString("、") { "${it.no}号" + if (!it.alive) "（已出局）" else "" }.ifEmpty { "没有" }}。")
         }
+        for (k in known) appendLine(k)
         if (!me.alive) appendLine("你已经出局了。")
+        appendLine()
+        appendLine("【你看得到的、看不到的】")
+        appendLine("- 看得到：大家的发言、遗言、投票（投完一起公布），天亮公布的死讯，白天亮出来的技能（开枪、翻牌、自爆、决斗）；" +
+            "记录里标着「只有你知道」「查验结果」「法官告诉你」" + (if (me.role.wolf) "「狼队」" else "") + "的几行，只有你" + (if (me.role.wolf) "（和狼队友）" else "") + "看得到。")
+        appendLine("- 看不到：别人的身份" + (if (me.role.wolf) "（狼队友除外；好人里谁是神职、谁是平民你不知道）" else "") +
+            "，别人自己说的身份可能是假的；夜里别人做了什么；天亮只公布谁死了，不公布怎么死的。")
         appendLine()
         append("别的玩家可能是 AI，也可能是真人，你只知道他们的座位号。按你的身份尽力让自己的阵营赢。")
     }

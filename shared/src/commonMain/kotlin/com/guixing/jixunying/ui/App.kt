@@ -86,7 +86,8 @@ enum class MainPage { DOCS, STANCES, COSTS }
  * 侧栏顶上的两栏（docs/Code栏设计说明.md 第 1、11 节，2026-10-12）：
  * 「对话」是现在的聊天，「Code」是对着一个项目文件夹写代码的会话。两边各列各的，互不掺和。
  */
-enum class SidebarTab(val label: String) { CHAT("对话"), CODE("Code"), WOLF("集训场") }
+// 第三栏 10-27 叫「集训场」（我起的名字，用户没定过）；10-29 用户：「狼人杀我怎么没找到？」——直接叫「狼人杀」
+enum class SidebarTab(val label: String) { CHAT("对话"), CODE("Code"), WOLF("狼人杀") }
 
 /** 要放进某个对话输入框的文件：别的 App 发来的（还没上传），或者文档库里转成的附件。 */
 class Incoming(val files: List<PickedFile> = emptyList(), val attachments: List<com.guixing.jixunying.model.Attachment> = emptyList()) {

@@ -1124,76 +1124,13 @@ private fun Composer(ctl: AppController, state: AppState, conv: Conversation, ru
         }
     }
 
-    // ———— 听写：点话筒录音，停下就发给听写模型，认出来的字填进输入框（不直接发，用户看一眼再发） ————
-
-    var recording by remember(conv.id) { mutableStateOf(false) }
-    var recSec by remember(conv.id) { mutableStateOf(0) }
-    var recognizing by remember(conv.id) { mutableStateOf(false) }
-
-    /** 认出来的字插到光标处（输入框里原来有字就接在旁边，不覆盖）。 */
-    fun insertSpoken(t: String) {
-        if (t.isBlank()) { ctl.toast("没听出内容，再说一次"); return }
-        val cur = text
-        val at = cur.selection.start.coerceIn(0, cur.text.length)
-        val before = cur.text.substring(0, at)
-        val add = if (before.isEmpty() || before.last().isWhitespace()) t else " $t"
-        text = TextFieldValue(before + add + cur.text.substring(at), TextRange(at + add.length))
-    }
-
-    /** 开始录音；没有麦克风 / 没给权限就把原因弹出来（权限被拒时提示条上多一个「去设置」）。 */
-    fun startRec() {
-        if (recording || recognizing) return
-        scope.launch {
-            val err = platform.startRecording()
-            if (err == null) {
-                recSec = 0
-                recording = true
-                return@launch
-            }
-            if (err == NO_RECORD_PERMISSION && platform.canOpenAppSettings) {
-                val res = ctl.snackbar.showSnackbar(err, actionLabel = "去设置", withDismissAction = true, duration = SnackbarDuration.Long)
-                if (res == SnackbarResult.ActionPerformed) platform.openAppSettings()
-            } else ctl.toast(err)
-        }
-    }
-
-    fun stopRec() {
-        if (!recording) return
-        recording = false
-        scope.launch {
-            val wav = platform.stopRecording()
-            if (wav == null) { ctl.toast("没有录到声音，再试一次"); return@launch }
-            recognizing = true
-            // 听写也用本机的服务商：手机遥控电脑时，录音不往中转上传（见 SpeechUi.kt 顶上那段）
-            val r = ctl.hub.local.call(Command.Transcribe(kotlin.io.encoding.Base64.encode(wav)))
-            recognizing = false
-            if (!r.ok) { ctl.toast(r.message.ifBlank { "没听清，再试一次" }); return@launch }
-            insertSpoken(r.data.trim())
-        }
-    }
-
-    // 一次最多录 5 分钟（MiniMax 一段最长 500 秒，留点余量），到点自动停下并听写
-    LaunchedEffect(recording) {
-        if (!recording) return@LaunchedEffect
-        while (true) {
-            kotlinx.coroutines.delay(1000)
-            recSec++
-            if (recSec >= 300) {
-                ctl.toast("一次最多录 5 分钟，先认这一段")
-                stopRec()
-                return@LaunchedEffect
-            }
-        }
-    }
-    // 离开这个对话 / 切到别的页面：这段录音不要了
-    DisposableEffect(conv.id) {
-        onDispose { if (recording) { recording = false; platform.cancelRecording() } }
-    }
+    // ———— 听写：点话筒录音，停下就发给听写模型，认出来的字填进输入框（不直接发，用户看一眼再发；和 Code 栏共用 Dictation.kt） ————
+    val dictation = rememberDictation(ctl, conv.id) { t -> text = text.withSpoken(t) }
     // 开发截图用：conv:编号#record = 打开对话就是「正在录音」的样子
     LaunchedEffect(conv.id, ctl.debugDialog) {
         if (ctl.debugDialog != "record") return@LaunchedEffect
         ctl.debugDialog = ""
-        startRec()
+        dictation.start()
     }
 
     // AI 还在回答或画图时也能接着发：新消息另起一轮，不用等
@@ -1338,26 +1275,7 @@ private fun Composer(ctl: AppController, state: AppState, conv: Conversation, ru
                                 Spacer(Modifier.width(6.dp))
                             }
                             // 听写：点一下开始录，再点一下停下，认出来的字填进输入框（不直接发）
-                            if (platform.canRecord) when {
-                                recognizing -> Row(Modifier.padding(horizontal = 5.dp), verticalAlignment = Alignment.CenterVertically) {
-                                    CircularProgressIndicator(Modifier.size(13.dp), strokeWidth = 2.dp)
-                                    Spacer(Modifier.width(5.dp))
-                                    Text("识别中…", style = MaterialTheme.typography.labelMedium, color = Ext.c.subtle)
-                                }
-                                recording -> Row(
-                                    Modifier.clip(RoundedCornerShape(50))
-                                        .background(MaterialTheme.colorScheme.error.copy(alpha = 0.12f))
-                                        .border(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.45f), RoundedCornerShape(50))
-                                        .clickable { stopRec() }.padding(horizontal = 9.dp, vertical = 5.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                ) {
-                                    Icon(Icons.Rounded.Mic, "停下并变成文字", Modifier.size(15.dp), tint = MaterialTheme.colorScheme.error)
-                                    Spacer(Modifier.width(4.dp))
-                                    Text("${recSec / 60}:${(recSec % 60).toString().padStart(2, '0')}",
-                                        style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.error)
-                                }
-                                else -> ComposerIcon(Icons.Rounded.Mic, "说一段话，变成文字填进输入框（最多 5 分钟，再点一下停下）") { startRec() }
-                            }
+                            if (platform.canRecord) DictationButton(dictation, "说一段话，变成文字填进输入框（最多 5 分钟，再点一下停下）")
                             // 2026-10-17 对话栏 = Chat + Cowork：AI 改文件要不要先问（电脑上才有；手机上改不了，PhoneGate 也会保留电脑上的）
                             if (platform.isDesktop && !ctl.remoteMode) {
                                 Spacer(Modifier.width(4.dp))

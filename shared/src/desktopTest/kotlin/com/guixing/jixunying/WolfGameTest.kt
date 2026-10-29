@@ -98,6 +98,46 @@ class WolfGameTest {
         assertTrue(out.calls > 20)
     }
 
+    /**
+     * 2026-10-29 用户：「每个人知不知道自己是什么职业，应该做什么，能够看到什么，看不到什么？」
+     * 每个座位的规则里有身份、阵营和目标、看得到 / 看不到什么；女巫看得到自己昨晚用了什么药（以前只写进法官记录，她自己看不到），手里还剩什么药；别人看不到她用药。
+     */
+    @Test
+    fun everyoneKnowsRoleGoalAndOwnActions() = runBlocking {
+        val prompts = java.util.Collections.synchronizedList(mutableListOf<Triple<Int, String, String>>())
+        var r = record(WolfBoard.SIX, listOf(WolfRole.WOLF, WolfRole.WOLF, WolfRole.SEER, WolfRole.WITCH, WolfRole.VILLAGER, WolfRole.VILLAGER))
+        val brain = WolfBrain { seat, system, user ->
+            val step = stepOf(user)
+            prompts += Triple(seat.no, step, system + "\n" + user)
+            when (step) {
+                "knife" -> target(3)
+                "check" -> target(1)
+                // 第 1 夜救 3 号；以后不用药
+                "witch" -> if ("解药还在" in system) "{\"save\": true, \"poison\": 0}" else "{\"save\": false, \"poison\": 0}"
+                "speak", "lastWords" -> "<发言>嗯</发言>"
+                "judge" -> "{\"most\": 1, \"confidence\": 50}"
+                "vote" -> target(0)
+                else -> error(step)
+            }
+        }
+        WolfGame(r, { brain }, onUpdate = { r = it }, maxDays = 2).run()
+        for ((no, _, text) in prompts) {
+            val wolf = no in listOf(1, 2)
+            assertTrue((if (wolf) "你属于狼人阵营" else "你属于好人阵营") in text, "$no 号的规则里没写阵营和目标")
+            assertTrue("【你看得到的、看不到的】" in text && "看不到：别人的身份" in text, "$no 号没说看得到、看不到什么")
+            assertEquals(wolf, "「狼队」" in text, "$no 号：只有狼的说明里提狼队那几行")
+        }
+        // 女巫：第 1 夜用药前两瓶都在；白天看得到「你用解药救了 3号」、知道解药用了
+        assertTrue(prompts.any { it.first == 4 && it.second == "witch" && "你的药：解药还在，毒药还在" in it.third })
+        val witchDay = prompts.filter { it.first == 4 && it.second == "speak" }
+        assertTrue(witchDay.isNotEmpty() && witchDay.all { "（只有你知道）你用解药救了 3号" in it.third && "你的药：解药已经用了，毒药还在" in it.third },
+            witchDay.firstOrNull()?.third.orEmpty().takeLast(1500))
+        // 第 2 夜还问她（毒药还在），这一夜没用药也告诉她自己
+        assertTrue(r.events.any { it.kind == "act" && it.visibleTo == listOf(4) && it.day == 2 && "你今晚没用药" in it.text })
+        // 别人看不到女巫用药
+        assertFalse(prompts.any { it.first != 4 && "你用解药救了" in it.third })
+    }
+
     /** 乱答：先重问一次，还不行记弃权（票是 0），绝不随机代投；大家都弃票就平安。 */
     @Test
     fun invalidOutputIsRetriedThenAbstains() = runBlocking {

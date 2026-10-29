@@ -1767,6 +1767,8 @@ private fun CodeComposer(ctl: AppController, conv: Conversation, running: Boolea
     val pending = remember(conv.id) { mutableStateListOf<PendingFile>() }
     var uploading by remember(conv.id) { mutableStateOf(0) }
     val slashAll = rememberSlashCommands(ctl, conv.id)
+    // 听写（2026-10-29 用户：「Code 为什么没有语音输入？」）：和对话栏同一份（Dictation.kt），认出来的字填进输入框，看一眼再发
+    val dictation = rememberDictation(ctl, conv.id) { t -> text = text.withSpoken(t) }
 
     fun add(files: List<PickedFile>) {
         // 2026-10-17 用户：「把所有限制全部删掉，随意加任何文件」。照 Claude Code：电脑上的文件、文件夹只把路径交给 AI，
@@ -1879,6 +1881,10 @@ private fun CodeComposer(ctl: AppController, conv: Conversation, running: Boolea
                             ComposerIcon(Icons.Rounded.AttachFile, if (platform.isDesktop) "附件（代码、图片、PDF、Word、Excel…；也可以把文件拖进来，或者 Ctrl+V 粘贴截图）" else "附件") { pick(false) }
                             if (!platform.isDesktop) Spacer(Modifier.width(6.dp))   // 手机上两个圆按钮有底色，别粘在一起
                             ComposerIcon(Icons.Rounded.Image, "图片") { pick(true) }
+                            if (platform.canRecord) {
+                                if (!platform.isDesktop) Spacer(Modifier.width(6.dp))
+                                DictationButton(dictation, "说一段话，变成文字填进输入框（最多 5 分钟，再点一下停下）")
+                            }
                             Spacer(Modifier.width(6.dp))
                             if (running) {
                                 // 2026-10-28 用户：「我再给他输入命令，他听不到了……我也不知道从哪暂停他」——自己的模型下一步就看到插话，

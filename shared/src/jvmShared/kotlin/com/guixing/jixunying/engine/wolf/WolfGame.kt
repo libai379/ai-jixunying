@@ -204,9 +204,10 @@ class WolfGame(
             step("第 $day 夜 · 女巫")
             emit(WolfEvent(day, true, "witchInfo", 0, knife, if (knife == 0) "今晚没人被刀。" else "今晚 ${name(knife)} 被刀了。", visibleTo = listOf(w.no)))
             val (save, p) = witch(w, day, knife)
-            if (save) { saved = true; antidote[w.no] = false; god(day, true, "${name(w.no)}（女巫）用解药救了 ${name(knife)}。", w.no, knife) }
-            if (p != 0) { poisoned += p; poison[w.no] = false; god(day, true, "${name(w.no)}（女巫）毒了 ${name(p)}。", w.no, p) }
-            if (!save && p == 0) god(day, true, "${name(w.no)}（女巫）今晚没用药。", w.no)
+            // 自己用了什么药也告诉她自己（2026-10-29 查出来：以前只写进法官记录，第二天女巫自己看不到昨晚救没救、毒了谁）
+            if (save) { saved = true; antidote[w.no] = false; god(day, true, "${name(w.no)}（女巫）用解药救了 ${name(knife)}。", w.no, knife); tell(w.no, day, true, "你用解药救了 ${name(knife)}。", knife) }
+            if (p != 0) { poisoned += p; poison[w.no] = false; god(day, true, "${name(w.no)}（女巫）毒了 ${name(p)}。", w.no, p); tell(w.no, day, true, "你用毒药毒了 ${name(p)}。", p) }
+            if (!save && p == 0) { god(day, true, "${name(w.no)}（女巫）今晚没用药。", w.no); tell(w.no, day, true, "你今晚没用药。") }
         }
         // 商人送的查验 / 毒药
         for ((no, gift) in gifts) {
@@ -216,7 +217,8 @@ class WolfGame(
             else {
                 val p = pickTarget(s, day, true, "下毒", "奇迹商人送了你一瓶毒药：今晚毒谁？也可以不用（target 写 0）。", "奇迹商人送了你一瓶毒药：今晚毒谁？",
                     aliveNos().filter { it != no }, allowZero = true)
-                if (p != 0) { poisoned += p; god(day, true, "${name(no)} 用商人的毒药毒了 ${name(p)}。", no, p) }
+                if (p != 0) { poisoned += p; god(day, true, "${name(no)} 用商人的毒药毒了 ${name(p)}。", no, p); tell(no, day, true, "你用商人的毒药毒了 ${name(p)}。", p) }
+                else tell(no, day, true, "商人送的毒药你今晚没用。")
             }
         }
         // 天亮一起结算：同守同救算死（奶穿）；梦游、护盾挡狼刀
@@ -609,7 +611,24 @@ class WolfGame(
 
     // ———————————————— 给 AI 看的 ————————————————
 
-    private fun systemFor(s: WolfSeat): String = WolfPrompts.system(record, seat(s.no)) + systemExtra(s).let { if (it.isBlank()) "" else "\n\n$it" }
+    private fun systemFor(s: WolfSeat): String = WolfPrompts.system(record, seat(s.no), knownFor(seat(s.no))) + systemExtra(s).let { if (it.isBlank()) "" else "\n\n$it" }
+
+    /**
+     * 这个座位手里的东西：药还在不在、技能用没用、上一晚守 / 梦游的是谁、魅惑了谁（2026-10-29 用户：「每个人知不知道自己是什么职业，应该做什么，
+     * 能够看到什么，看不到什么？」）。这些在法官这里，记录里不一定有，所以单独写进它的规则；验人结果这类记录里已经有的不重复。
+     */
+    private fun knownFor(s: WolfSeat): List<String> = buildList {
+        when (s.role) {
+            WolfRole.WITCH -> add("你的药：解药" + (if (antidote[s.no] == true) "还在" else "已经用了") + "，毒药" + (if (poison[s.no] == true) "还在" else "已经用了") + "。")
+            WolfRole.GUARD -> lastGuard[s.no]?.takeIf { it != 0 }?.let { add("你上一晚守的是 ${name(it)}，下一晚不能再守他。") }
+            WolfRole.DREAMER -> lastDream[s.no]?.takeIf { it != 0 }?.let { add("你上一晚让 ${name(it)} 梦游；再连着选他，他会死。") }
+            WolfRole.KNIGHT -> add(if (s.no in knightUsed) "你已经决斗过了（整局一次）。" else "你的决斗还没用（整局一次）。")
+            WolfRole.MERCHANT -> add(if (s.no in merchantUsed) "你的礼物已经送出去了（整局一次）。" else "你的礼物还没送（整局一次）。")
+            WolfRole.BEAUTY_WOLF -> charm[s.no]?.let { add("你魅惑的是 ${name(it)}（他自己不知道）：你出局时他跟着出局。") }
+            WolfRole.IDIOT -> if (s.revealed) add("你已经翻过牌了：还在场上、能发言，但不能再投票。")
+            else -> {}
+        }
+    }
 
     private fun userFor(s: WolfSeat, day: Int, night: Boolean, ask: String): String = WolfPrompts.user(record, seat(s.no), day, night, ask)
 }

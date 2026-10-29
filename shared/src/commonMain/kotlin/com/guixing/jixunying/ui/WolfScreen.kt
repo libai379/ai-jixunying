@@ -95,7 +95,7 @@ fun WolfScreen(ctl: AppController, wide: Boolean, openDrawer: () -> Unit) {
     Column(Modifier.fillMaxSize()) {
         if (!wide) Row(Modifier.fillMaxWidth().heightIn(min = 56.dp).padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = openDrawer) { Icon(Icons.Rounded.Menu, "菜单") }
-            Text("集训场 · 狼人杀", style = MaterialTheme.typography.titleMedium)
+            Text("狼人杀", style = MaterialTheme.typography.titleMedium)
         }
         val l = live
         when {
@@ -211,7 +211,11 @@ private fun WolfLobby(ctl: AppController, state: AppState, wide: Boolean) {
                 Text("一共 ${roles.size} 人：" + com.guixing.jixunying.model.WolfText.roles(roles).ifBlank { "还没选" }, style = MaterialTheme.typography.bodySmall,
                     color = Ext.c.subtle, modifier = Modifier.padding(top = 8.dp))
                 for (w in warns) Text("⚠️ $w", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
-                Spacer(Modifier.height(8.dp))
+                Spacer(Modifier.height(10.dp))
+                // 2026-10-29 用户：「职业介绍的地方在哪儿？你不会说跟我开局之后再看吧？」——就在开局页这里，开局之前就能看，单独标一个小标题
+                Text("身份介绍", style = MaterialTheme.typography.titleSmall)
+                Text("每个身份能干什么、属于哪边；右边加减这局的人数。", style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle,
+                    modifier = Modifier.padding(bottom = 4.dp))
                 // 每个身份一行：名字、阵营、能干什么直接写在下面，旁边加减人数（2026-10-28 用户：「每个角色的说明在哪儿？」——以前藏在「角色图鉴」按钮里）。
                 // 这局用到的排前面；没用到的收在「其余身份」里，点开也是一样带说明
                 val used = WolfRole.entries.filter { (counts.value[it] ?: 0) > 0 }
@@ -597,7 +601,10 @@ private fun MyRoleBar(me: WolfSeat, r: WolfGameRecord) {
             (if (me.role.wolf) " · 狼队友：" + r.seats.filter { it.role.wolf && it.no != me.no }.joinToString("、") { "${it.no}号${it.name}" }.ifEmpty { "没有" } else "") +
             (if (open) "" else "  （点开看技能说明）"),
             style = MaterialTheme.typography.labelLarge, color = if (me.role.wolf) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary)
-        if (open) Text(me.role.desc, style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle, modifier = Modifier.padding(top = 2.dp))
+        if (open) {
+            Text(me.role.desc, style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle, modifier = Modifier.padding(top = 2.dp))
+            Text(com.guixing.jixunying.model.WolfText.goal(me.role), style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
+        }
     }
 }
 

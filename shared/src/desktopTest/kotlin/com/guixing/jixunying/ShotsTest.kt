@@ -925,6 +925,9 @@ class ShotsTest {
         val desktop = DesktopPlatform(fileLog = false) { null }
         shoot("desktop-decide-chat", 1280, 900, 1f, local, desktop, "conv:c14")
         shoot("desktop-decide-code", 1280, 820, 1f, local, desktop, "code:c12")
+        // 2026-10-29 用户：「Code 为什么没有语音输入？狼人杀我怎么没找到？职业介绍的地方在哪儿？」——Code 栏输入框的话筒、侧栏第三栏叫「狼人杀」、开局页的身份介绍
+        shoot("phone-remote-drawer-tabs", 824, 1784, 2f, on, phone, "conv:c1#drawer")
+        shoot("phone-wolf-lobby-roles", 824, 3000, 2f, local, phone, "wolf")
     }
 
     /** 集训场：开局页、主持人看 AI 打（暂停在第一天发言中）、真人轮到发言、打完的复盘（AI 用 WolfFakeLlm，不联网）。 */
