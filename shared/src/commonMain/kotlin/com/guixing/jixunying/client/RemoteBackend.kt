@@ -166,6 +166,8 @@ class RemoteBackend(
     /**
      * 和 call 一样，电脑没答完时先回的一截（WireFrame.Part）交给 onPart。
      * 借电脑本机模型（HostChat）：大模型在电脑上慢慢想，从最后一次收到东西算起等 10 分钟。
+     * 借电脑听视频（HostListen）也等 10 分钟（解码再一段段听写）；借电脑读平台链接（HostPage）等 4 分钟
+     * （10-29 实测电脑上开一条抖音要 46 秒，前面还可能排着别的页面）。
      */
     suspend fun callStreaming(command: Command, onPart: ((String, String) -> Unit)?): CommandResult {
         if (revoked.value) return CommandResult(false, "已取消配对")
@@ -173,7 +175,11 @@ class RemoteBackend(
         var lastPart = clock.markNow()
         val sink: ((String, String) -> Unit)? = onPart?.let { f -> { c, r -> lastPart = clock.markNow(); f(c, r) } }
         val id = lock.withLock { val id = nextReq++; pending[id] = deferred; sink?.let { partSinks[id] = it }; id }
-        val limit = if (command is Command.HostChat) 600.seconds else 120.seconds
+        val limit = when (command) {
+            is Command.HostChat, is Command.HostListen -> 600.seconds
+            is Command.HostPage -> 240.seconds
+            else -> 120.seconds
+        }
         return try {
             link.send(WireFrame.Req(id, command))
             var r: CommandResult? = null

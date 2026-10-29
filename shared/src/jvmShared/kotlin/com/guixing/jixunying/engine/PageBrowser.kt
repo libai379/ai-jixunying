@@ -115,7 +115,8 @@ object SocialLinks {
         val text = page.str("text").orEmpty()
         return "验证码" in title || "出错啦" in title || "/login" in url || "passport" in url || "captcha" in url.lowercase() ||
             "安全风控" in text || "访问请求被拒绝" in text ||
-            (text.length < 400 && ("登录" in text || "扫码" in text))
+            // 抖音作品页顶上有「登录」按钮，文案短的作品整页不到 400 字（10-29 实测一条图文 340 字被当成登录页）：有「发布时间」就是读到了作品
+            (text.length < 400 && ("登录" in text || "扫码" in text) && "发布时间" !in text)
     }
 
     /** 整理成给 AI 读的文字。 */

@@ -236,6 +236,16 @@ sealed interface Command {
      */
     /** 手机借电脑本机的模型问一次（request = messages / temperature / tools / extra / thinking 的 JSON）；只认电脑上地址是本机的服务商。 */
     @Serializable data class HostChat(val providerId: String, val model: String, val request: String) : Command
+    /**
+     * 手机借电脑的浏览器读一个平台链接（2026-10-29 用户：「抖音链接还是看不了对吧」——手机上没有浏览器）：
+     * 电脑打开、读页面，data 回页面 JSON（SocialLinks.EXTRACT_JS 的结果）。只认抖音、小红书、快手、微博、B站。
+     */
+    @Serializable data class HostPage(val url: String) : Command
+    /**
+     * 手机借电脑听平台视频（同上）：电脑上解码声音、用电脑 设置 → 语音 选的那家听写。media = 手机读页面时已经拿到的视频地址（空 = 电脑自己找）。
+     * ok、message = 成没成和步骤上的短说明，data = 给 AI 的文字。
+     */
+    @Serializable data class HostListen(val url: String, val media: String = "") : Command
     @Serializable data class GitHubExchange(val code: String, val redirectUri: String, val verifier: String) : Command
     /** 花费：period = today / week / month / all。结果 data 是 CostReport 的 JSON。 */
     @Serializable data class GetCosts(val period: String = "month") : Command

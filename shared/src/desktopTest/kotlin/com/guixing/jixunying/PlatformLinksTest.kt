@@ -1,6 +1,9 @@
 package com.guixing.jixunying
 
+import com.guixing.jixunying.client.ConnState
+import com.guixing.jixunying.client.Hub
 import com.guixing.jixunying.engine.Engine
+import com.guixing.jixunying.engine.HostModels
 import com.guixing.jixunying.engine.PageBrowser
 import com.guixing.jixunying.engine.SocialLinks
 import com.guixing.jixunying.engine.Storage
@@ -8,8 +11,13 @@ import com.guixing.jixunying.model.Command
 import com.guixing.jixunying.model.Member
 import com.guixing.jixunying.model.ModelInfo
 import com.guixing.jixunying.model.MsgStatus
+import com.guixing.jixunying.model.PairingCode
 import com.guixing.jixunying.model.ProviderConfig
+import com.guixing.jixunying.model.RelaySettings
 import com.guixing.jixunying.model.Role
+import com.guixing.jixunying.relay.RelayHost
+import com.guixing.jixunying.relay.RelayLink
+import com.guixing.jixunying.relay.pairWithHost
 import io.ktor.http.ContentType
 import io.ktor.server.cio.CIO
 import io.ktor.server.engine.EmbeddedServer
@@ -140,6 +148,74 @@ class PlatformLinksTest {
         assertTrue(SocialLinks.blocked(page("""{"title":"出错啦! - bilibili.com","url":"https://www.bilibili.com/video/BV1","text":"错误号: 412 安全风控"}""")))
         assertTrue(SocialLinks.blocked(page("""{"title":"小红书","url":"https://www.xiaohongshu.com/login?redirectPath=x","text":"扫码登录"}""")))
         assertFalse(SocialLinks.blocked(page("""{"title":"","url":"https://www.douyin.com/video/1","text":"${"作品文案 ".repeat(100)}登录"}""")))
+        // 10-29 电脑上真读的一条抖音图文：整页 340 来字、顶上有「登录」按钮，作品文案和发布时间都读到了，以前被当成登录页
+        assertFalse(SocialLinks.blocked(page("""{"title":"","url":"https://www.douyin.com/note/7701206475788048740","text":"精选\n推荐\n搜索\n投稿\n登录\n3.4万\n我说，这是我给小肥鱼做的脑子。#deepseek #鲸鱼娘\n发布时间：2026-10-27 00:54:21"}""")))
+    }
+
+    /**
+     * 手机上读、听抖音链接（2026-10-29 用户：「抖音链接还是看不了对吧」）：手机没有浏览器，连着电脑时交给电脑上的浏览器读、交给电脑听；
+     * 没连上电脑时 AI 拿到的是「要电脑开着」，不给听视频的工具。
+     */
+    @Test
+    fun phoneReadsPlatformLinksThroughPc() = runBlocking<Unit> {
+        val mqttPort = ServerSocket(0).use { it.localPort }
+        val broker = io.moquette.broker.Server()
+        broker.startServer(io.moquette.broker.config.MemoryConfig(java.util.Properties().apply {
+            setProperty("port", mqttPort.toString()); setProperty("host", "127.0.0.1"); setProperty("websocket_port", "disabled")
+            setProperty("allow_anonymous", "true"); setProperty("persistence_enabled", "false")
+            setProperty("data_path", File(dir, "mqtt").absolutePath)
+        }))
+        val browser = FakeBrowser()
+        val pc = Engine(Storage(File(dir, "pc")), browserFactory = { browser })
+        pc.call(Command.SaveSettings(pc.state.settings.copy(relay = RelaySettings(true, listOf("tcp://127.0.0.1:$mqttPort"), "测试电脑"))))
+        // 听写只在电脑上有（手机上没加能听写的服务商，听视频照样能用：电脑听）
+        pc.call(Command.SaveProvider(ProviderConfig("pz", "zhipu", "智谱", "http://127.0.0.1:$port/v1", "sk-z")))
+        val relay = RelayHost(pc)
+        relay.restart()
+        try {
+            withTimeout(15_000) { while (!pc.state.relayStatus.startsWith("已连上")) delay(100) }
+            val phone = Engine(Storage(File(dir, "phone")), isPhone = true)
+            phone.call(Command.SaveProvider(ProviderConfig("p1", "custom", "假服务商", "http://127.0.0.1:$port/v1", "sk-test", listOf(ModelInfo("m")))))
+            phone.call(Command.SaveMember(Member("a1", "阿测", providerId = "p1", modelId = "m")))
+            val conv = phone.call(Command.CreateConversation(listOf("a1"))).data
+            phone.call(Command.UpdateConversation(phone.state.conversation(conv)!!.copy(webSearch = false)))
+            val hub = Hub(phone, linkFactory = { RelayLink(it) }, pairer = { c, n -> pairWithHost(c, n) }, deviceName = "测试手机")
+            HostModels(hub, phone).install()
+            fun ai() = phone.store.messages.value[conv].orEmpty().lastOrNull { it.role == Role.AI }
+            suspend fun ask(text: String): String {
+                val before = phone.store.messages.value[conv].orEmpty().size
+                phone.call(Command.SendMessage(conv, text))
+                withTimeout(30_000) { while (!(phone.store.messages.value[conv].orEmpty().size > before + 1 && ai()?.status == MsgStatus.DONE)) delay(30) }
+                return requests.last()["messages"]!!.jsonArray.last { it.jsonObject["role"]?.jsonPrimitive?.content == "tool" }.jsonObject["content"]!!.jsonPrimitive.content
+            }
+            val link = "https://www.douyin.com/video/7697224638232825098"
+
+            // 没连上电脑：说清楚要电脑开着，不去瞎读；也不给听视频
+            val off = ask("帮我看看 $link")
+            assertTrue(HostModels.PAGE_OFFLINE in off, off)
+            assertFalse(requests.last()["tools"].toString().contains("listen_video"))
+            assertFalse(ai()!!.tools.last { it.kind == "fetch" }.ok)
+            assertTrue(browser.opened.isEmpty())
+
+            assertTrue(hub.pair(PairingCode(pc.state.hostId, pc.state.pairingSecret, "测试电脑", pc.state.settings.relay.brokers)).isSuccess)
+            withTimeout(20_000) { while (hub.remote.value?.conn?.value !is ConnState.Connected) delay(100) }
+
+            val dy = ask("再看看 $link")
+            assertTrue("【抖音】" in dy && "医者医人" in dy && "这个是真想看" in dy, dy)
+            assertEquals(listOf(link), browser.opened.toList(), "是电脑上的浏览器开的")
+            assertTrue(ai()!!.tools.last { it.kind == "fetch" }.ok)
+
+            // 听视频：手机把读页面时拿到的视频地址交给电脑，电脑解码、用电脑上的智谱听写
+            val heard = ask("听一下 $link")
+            assertTrue(requests.last()["tools"].toString().contains("listen_video"))
+            assertTrue("第1段台词" in heard && "整段 200 秒" in heard, heard)
+            assertEquals(listOf(link), browser.opened.toList(), "读过的链接电脑不用再开页面")
+            assertEquals(listOf("https://v5-dy-ov.zjcdn.com/video/abc.mp4"), browser.audioAsked.toList())
+            val step = ai()!!.tools.last { it.kind == "listen" }
+            assertTrue(step.ok && "3 秒" in step.note, step.note)
+        } finally {
+            relay.stop(); broker.stopServer()
+        }
     }
 
     @Test

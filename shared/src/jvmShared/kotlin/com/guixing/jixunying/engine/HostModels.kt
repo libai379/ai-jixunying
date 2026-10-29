@@ -99,7 +99,18 @@ object HostChatCodec {
     }
 }
 
-/** 手机上跑：抄电脑本机的服务商、装上「经电脑问」。 */
+/**
+ * 手机上：抖音、小红书这些平台链接交给配对的电脑读、听（2026-10-29 用户：「抖音链接还是看不了对吧」）。
+ * 手机上没有浏览器（这些平台不登录、不用真浏览器只给登录页），电脑上的 Edge 能读（docs/平台链接设计说明.md 第 5 节）。
+ * online = 现在连着电脑；没连上时 page、listen 抛异常，说清楚要电脑开着。
+ */
+interface HostBrowser {
+    val online: Boolean
+    suspend fun page(url: String): JsonObject
+    suspend fun listen(url: String, media: String): com.guixing.jixunying.model.CommandResult
+}
+
+/** 手机上跑：抄电脑本机的服务商、装上「经电脑问」「经电脑读平台链接」。 */
 class HostModels(
     private val hub: Hub,
     private val engine: Engine,
@@ -124,6 +135,21 @@ class HostModels(
             if (!r.ok) throw IllegalStateException(r.message)
             HostChatCodec.parseResult(r.data)
         }
+        engine.hostBrowser = object : HostBrowser {
+            override val online get() = hub.remote.value?.conn?.value is ConnState.Connected
+            private fun remote() = hub.remote.value?.takeIf { it.conn.value is ConnState.Connected }
+                ?: throw IllegalStateException(PAGE_OFFLINE)
+            override suspend fun page(url: String): JsonObject {
+                val r = remote().call(Command.HostPage(url))
+                if (!r.ok) throw IllegalStateException(r.message.ifBlank { "电脑没读成" })
+                return AppJson.parseToJsonElement(r.data).jsonObject
+            }
+            override suspend fun listen(url: String, media: String) = remote().call(Command.HostListen(url, media))
+        }
+    }
+
+    companion object {
+        const val PAGE_OFFLINE = "手机上没有浏览器，这种平台链接要交给电脑读：要电脑开着、手机连上电脑"
     }
 
     /** 返回 true = 改了手机上的服务商或成员。 */

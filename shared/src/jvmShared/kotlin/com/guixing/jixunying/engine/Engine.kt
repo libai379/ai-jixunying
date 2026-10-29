@@ -179,6 +179,9 @@ class Engine(
         get() = llm.viaHost
         set(v) { llm.viaHost = v }
 
+    /** 手机上：抖音、小红书这些平台链接交给配对的电脑读、听（HostModels 装上，2026-10-29）。 */
+    @Volatile var hostBrowser: HostBrowser? = null
+
     /** 手机上：GitHub 登录换令牌交给配对的电脑（GitHubViaHost 装上）。返回 null = 电脑不在，自己换。 */
     @Volatile var githubViaHost: (suspend (code: String, redirect: String, verifier: String) -> Account.GithubUser?)? = null
     private fun accountInfo(extra: (AccountInfo) -> AccountInfo = { it }) = account.identity.let { i ->
@@ -193,31 +196,52 @@ class Engine(
      */
     private suspend fun listenVideo(convId: String, msgId: String, url: String): String {
         if (!url.startsWith("http")) return "参数错误：url 要以 http 开头"
-        val browser = pageBrowser ?: return "这台设备上不能听视频（要电脑上的 Edge）"
-        val target = speechTarget("", "", tts = false) ?: return Speech.NO_ASR + "。请告诉用户去 设置 → 语音 加一家能听写的服务商。"
-        fun step(ok: Boolean, note: String) = updateMessage(convId, msgId, persist = false) { it.copy(tools = it.tools + ToolStep("listen", url, ok = ok, note = note)) }
+        // 手机上没有浏览器：交给配对的电脑听（2026-10-29，docs/平台链接设计说明.md 第 5 节）
+        val host = hostBrowser
+        val h = if (pageBrowser == null && host != null) listenViaHost(host, url) else listenHere(url)
+        h.note?.let { n -> updateMessage(convId, msgId, persist = false) { it.copy(tools = it.tools + ToolStep("listen", url, ok = h.ok, note = n)) } }
+        return h.text
+    }
+
+    /** 听视频的结果：给 AI 的文字；成没成；步骤上的短说明（null = 不加步骤，比如这台设备根本不能听）。 */
+    private class Heard(val text: String, val ok: Boolean = false, val note: String? = null)
+
+    /** 在这台设备上听（电脑上：Edge 解码、设置 → 语音 选的那家听写）。media = 已经知道的视频地址（手机读页面时拿到的）。 */
+    private suspend fun listenHere(url: String, media: String = ""): Heard {
+        if (!url.startsWith("http")) return Heard("参数错误：url 要以 http 开头")
+        val browser = pageBrowser ?: return Heard("这台设备上不能听视频（要电脑上的 Edge）")
+        val target = speechTarget("", "", tts = false) ?: return Heard(Speech.NO_ASR + "。请告诉用户去 设置 → 语音 加一家能听写的服务商。")
         return try {
-            val media = pageVideos[url] ?: if (SocialLinks.platformOf(url) != null) {
+            val found = media.ifBlank { null } ?: pageVideos[url] ?: if (SocialLinks.platformOf(url) != null) {
                 val page = pageSlots.withPermit { browser.snapshot(url, SocialLinks.EXTRACT_JS) }
                 SocialLinks.videoOf(page)?.also { pageVideos[url] = it }
             } else url
-            if (media == null) { step(false, "页面上没找到视频"); return "这个页面上没找到视频地址（可能是图文，或者要登录）。" }
-            val (pcm, total) = pageSlots.withPermit { browser.audioPcm(media, LISTEN_MAX_SEC) }
+            if (found == null) return Heard("这个页面上没找到视频地址（可能是图文，或者要登录）。", note = "页面上没找到视频")
+            val (pcm, total) = pageSlots.withPermit { browser.audioPcm(found, LISTEN_MAX_SEC) }
             val wav = SpeechText.wavOf(16000, 1, 16, pcm)
             val w = SpeechText.parseWav(wav)
-            if (w == null || SpeechText.isSilent(w)) { step(false, "没有说话声"); return "视频里几乎没有声音（可能只有画面或很轻的音乐），听不出说了什么。" }
+            if (w == null || SpeechText.isSilent(w)) return Heard("视频里几乎没有声音（可能只有画面或很轻的音乐），听不出说了什么。", note = "没有说话声")
             val parts = SpeechText.splitWav(wav, 120.0)
-            val text = buildString { for (p in parts) append(speech.transcribe(target.provider, target.model, p.bytes)) }
+            // 某一段只有音乐、没听出字就当这段是空的，别让整段失败（拼完全空的下面写「没听出字」）
+            val text = buildString { for (p in parts) append(try { speech.transcribe(target.provider, target.model, p.bytes) } catch (_: Speech.NothingHeard) { "" }) }
             val heard = w.seconds.toInt()
-            step(true, "${heard} 秒" + if (total > heard + 1) "（整段 ${total.toInt()} 秒，只听了前 ${LISTEN_MAX_SEC / 60} 分钟）" else "")
-            "视频里说的话（语音转文字，${heard} 秒" + (if (total > heard + 1) "，整段 ${total.toInt()} 秒只听了前 ${LISTEN_MAX_SEC / 60} 分钟" else "") +
-                "；可能有同音错字，背景音乐里的歌词也会被听进来）：\n" + text.ifBlank { "（没听出字）" }
+            Heard("视频里说的话（语音转文字，${heard} 秒" + (if (total > heard + 1) "，整段 ${total.toInt()} 秒只听了前 ${LISTEN_MAX_SEC / 60} 分钟" else "") +
+                "；可能有同音错字，背景音乐里的歌词也会被听进来）：\n" + text.ifBlank { "（没听出字）" },
+                ok = true, note = "${heard} 秒" + if (total > heard + 1) "（整段 ${total.toInt()} 秒，只听了前 ${LISTEN_MAX_SEC / 60} 分钟）" else "")
         } catch (e: CancellationException) {
             throw e
         } catch (e: Throwable) {
-            step(false, friendlyError(e))
-            "视频没听成：${friendlyError(e)}。请如实告诉用户。"
+            Heard("视频没听成：${friendlyError(e)}。请如实告诉用户。", note = friendlyError(e))
         }
+    }
+
+    /** 手机上：交给配对的电脑听（Command.HostListen）。电脑那边成没成都带着给 AI 的文字；没带文字 = 根本没送到电脑。 */
+    private suspend fun listenViaHost(host: HostBrowser, url: String): Heard {
+        val r = try { host.listen(url, pageVideos[url].orEmpty()) } catch (e: CancellationException) { throw e } catch (e: Throwable) {
+            CommandResult(false, e.message ?: e.toString())
+        }
+        return if (r.data.isNotBlank()) Heard(r.data, r.ok, r.message.ifBlank { null })
+        else Heard("视频没听成：${r.message}。请如实告诉用户。", note = r.message)
     }
     private val search = WebSearch { state.settings.proxy.trim().ifEmpty { null } }
     private val images = ImageGen { proxyFor(it.useProxy) }
@@ -934,6 +958,18 @@ class Engine(
             }
             CommandResult(message = "在打开的 GitHub 页面上点同意", data = pending.url)
         }
+        // 手机借电脑的浏览器读、听平台链接（2026-10-29 用户：「抖音链接还是看不了对吧」，docs/平台链接设计说明.md 第 5 节）
+        is Command.HostPage -> {
+            val b = pageBrowser
+            when {
+                b == null -> CommandResult(false, "电脑上没有能用的浏览器（要 Edge 或 Chrome）")
+                SocialLinks.platformOf(c.url) == null -> CommandResult(false, "电脑只替手机读抖音、小红书、快手、微博、B站的链接")
+                else -> try {
+                    CommandResult(data = pageSlots.withPermit { b.snapshot(c.url, SocialLinks.EXTRACT_JS) }.toString())
+                } catch (e: CancellationException) { throw e } catch (e: Throwable) { CommandResult(false, friendlyError(e)) }
+            }
+        }
+        is Command.HostListen -> listenHere(c.url, c.media).let { CommandResult(it.ok, it.note.orEmpty(), it.text) }
         is Command.HostChat -> try {
             // 只认地址是电脑本机的服务商（Ollama 这类）：手机不能借这条路花电脑上云端服务商的钱
             val p = state.provider(c.providerId)
@@ -3822,7 +3858,7 @@ class Engine(
             // MCP 外部工具（2026-10-18）：电脑上对话栏也能用，和 Code 栏同一套
             val mcp = if (useTools && filesOn) runCatching { mcpTools() }.getOrDefault(emptyList()) else emptyList()
             val tools = if (useTools) JsonArray(toolDefs(fnSearch, fetch = wantSearch || linkInAsk,
-                listen = (wantSearch || linkInAsk) && pageBrowser != null && speechTarget("", "", tts = false) != null, draw = hasImageModel, native = native, memory = memOn, docs = docsOn, office = officeOn, files = filesOn, video = hasVideo) +
+                listen = (wantSearch || linkInAsk) && (pageBrowser != null && speechTarget("", "", tts = false) != null || hostBrowser?.online == true), draw = hasImageModel, native = native, memory = memOn, docs = docsOn, office = officeOn, files = filesOn, video = hasVideo) +
                 mcp.map { (n, _, t) -> buildJsonObject {
                     put("type", "function")
                     putJsonObject("function") { put("name", n); put("description", ("（外部工具 ${t.name}）" + t.description).take(1000)); put("parameters", t.inputSchema) }
@@ -4249,7 +4285,8 @@ class Engine(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Throwable) {
-            CommandResult(false, friendlyError(e, t.provider))
+            storage.log("JxySpeech", "读出来没成功（${t.provider.name} ${t.model}）：" + friendlyError(e, t.provider))
+            CommandResult(false, speechFailText(e, t.provider, "读出来"))
         }
     }
 
@@ -4280,7 +4317,8 @@ class Engine(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Throwable) {
-            CommandResult(false, friendlyError(e, t.provider))
+            storage.log("JxySpeech", "听写没成功（${t.provider.name} ${t.model}）：" + friendlyError(e, t.provider))
+            CommandResult(false, speechFailText(e, t.provider, "听写"))
         }
     }
 
@@ -4747,12 +4785,19 @@ class Engine(
             "fetch_url" -> {
                 val url = args.str("url").orEmpty()
                 if (!url.startsWith("http")) return "参数错误：url 要以 http 开头"
-                // 抖音、小红书、快手、微博、B站：用本机浏览器读（2026-10-23，普通请求只拿到登录页、验证码页）
+                // 抖音、小红书、快手、微博、B站：用本机浏览器读（2026-10-23，普通请求只拿到登录页、验证码页）；
+                // 手机上没有浏览器，交给配对的电脑读（2026-10-29；没连上电脑时 host.page 抛异常说清楚要电脑开着）
                 val platform = SocialLinks.platformOf(url)
                 val browser = pageBrowser
-                if (platform != null && browser != null) {
+                val host = hostBrowser
+                val read: (suspend () -> JsonObject)? = when {
+                    browser != null -> { -> pageSlots.withPermit { browser.snapshot(url, SocialLinks.EXTRACT_JS) } }
+                    host != null -> { -> host.page(url) }
+                    else -> null
+                }
+                if (platform != null && read != null) {
                     val (text, step) = try {
-                        val page = pageSlots.withPermit { browser.snapshot(url, SocialLinks.EXTRACT_JS) }
+                        val page = read()
                         if (SocialLinks.blocked(page)) {
                             ("${platform.name}没让看（页面是登录页、验证码或者风控拦截：${page.str("title").orEmpty().ifBlank { page.str("url").orEmpty() }}）。" +
                                 "请如实告诉用户没读到，并说可以在电脑上 设置 → 联网搜索 → 读平台链接 里点「去登录${platform.name}」扫码登录后再试；" +
@@ -5089,25 +5134,67 @@ class Engine(
                 return "本机模型的上下文开得太小${if (need != null && have != null) "：这次要 $need 个词元，它只开了 $have" else ""}。" +
                     "到 Ollama 的设置里把上下文长度（Context length）拉到 32k 或 64k（或者设环境变量 OLLAMA_CONTEXT_LENGTH=32768 再重开 Ollama），再试一次。"
             }
-            val hint = when {
-                e.status == 401 || (e.status == 403 && "key" in lower) || "invalid api key" in lower || "login fail" in lower ||
-                    "unauthorized" in lower || "authentication" in lower || "令牌" in body -> "API Key 不对或已失效"
-                e.status == 402 || "insufficient" in lower || "余额" in body || "欠费" in body || "balance" in lower || "quota" in lower ||
-                    "arrearage" in lower || "good standing" in lower -> "余额或额度不足"
-                e.status == 404 -> "模型名或接口地址不对"
-                e.status == 429 -> "请求太频繁或额度用完了，稍后再试"
-                e.status >= 500 -> "服务商那边出错了，稍后再试"
-                else -> "请求被拒绝"
+            val hint = when (apiTrouble(e)) {
+                ApiTrouble.KEY -> "API Key 不对或已失效"
+                ApiTrouble.BALANCE -> "余额或额度不足"
+                ApiTrouble.NOT_FOUND -> "模型名或接口地址不对"
+                ApiTrouble.BUSY -> "请求太频繁或额度用完了，稍后再试"
+                ApiTrouble.SERVER -> "服务商那边出错了，稍后再试"
+                ApiTrouble.OTHER -> "请求被拒绝"
             }
             return "$hint（HTTP ${e.status}）：$body"
         }
         val msg = e.message ?: e::class.simpleName ?: "未知错误"
-        val net = e is java.net.ConnectException || e is java.net.UnknownHostException ||
+        return if (isNetError(e)) "网络连不上：$msg${proxyHint(p)}" else msg
+    }
+
+    /** 服务商的报错是哪一类：看状态码和返回原文（friendlyError 和语音的短提示共用）。 */
+    private enum class ApiTrouble { KEY, BALANCE, NOT_FOUND, BUSY, SERVER, OTHER }
+
+    private fun apiTrouble(e: ApiException): ApiTrouble {
+        val body = e.body.take(300)
+        val lower = body.lowercase()
+        return when {
+            e.status == 401 || (e.status == 403 && "key" in lower) || "invalid api key" in lower || "login fail" in lower ||
+                "unauthorized" in lower || "authentication" in lower || "令牌" in body -> ApiTrouble.KEY
+            e.status == 402 || "insufficient" in lower || "余额" in body || "欠费" in body || "balance" in lower || "quota" in lower ||
+                "arrearage" in lower || "good standing" in lower -> ApiTrouble.BALANCE
+            e.status == 404 -> ApiTrouble.NOT_FOUND
+            // MiniMax 限流是 HTTP 200 + base_resp 1002「rate limit exceeded」（checkBaseResp 转成 400）
+            e.status == 429 || "rate limit" in lower -> ApiTrouble.BUSY
+            e.status >= 500 -> ApiTrouble.SERVER
+            else -> ApiTrouble.OTHER
+        }
+    }
+
+    private fun isNetError(e: Throwable): Boolean {
+        val msg = e.message.orEmpty()
+        return e is java.net.ConnectException || e is java.net.UnknownHostException ||
             e::class.simpleName.orEmpty().contains("Timeout") || msg.contains("timed out", true)
-        return if (net) {
-            val proxyHint = if (p != null && !p.useProxy && Presets.byId(p.presetId).useProxy) "；这是海外服务商，记得在 设置→模型服务 里打开「走代理」" else
-                if (p?.useProxy == true) "；检查代理 ${state.settings.proxy} 是否开着" else ""
-            "网络连不上：$msg$proxyHint"
-        } else msg
+    }
+
+    /** 连不上网时补一句代理怎么查（海外服务商没开「走代理」、开了代理但代理没开着）。 */
+    private fun proxyHint(p: ProviderConfig?): String =
+        if (p != null && !p.useProxy && Presets.byId(p.presetId).useProxy) "；这是海外服务商，记得在 设置→模型服务 里打开「走代理」" else
+            if (p?.useProxy == true) "；检查代理 ${state.settings.proxy} 是否开着" else ""
+
+    /**
+     * 读出来 / 听写出错时给用户看的一句话（2026-10-29 用户看到听写的原始报错「请求被拒绝（HTTP 200）：小米听写没返回文字……{"id":…」：
+     * 「这种错误是后面日志显示的，不是前端用户显示」）。原始报错由调用处写进日志 jxy.log，这里只说用户该做什么。
+     */
+    private fun speechFailText(e: Throwable, p: ProviderConfig, what: String): String = when (e) {
+        is Speech.NothingHeard -> "没听清，再说一次"
+        is SpeechDownloadFailed -> "声音合成好了，但没下载下来（这次已经扣费），再试一次"
+        is ApiException -> when (apiTrouble(e)) {
+            ApiTrouble.KEY -> "${what}没成功：${p.name} 的 API Key 不对或已失效（设置 → 模型服务）"
+            ApiTrouble.BALANCE -> "${what}没成功：${p.name} 余额或额度不足"
+            ApiTrouble.NOT_FOUND -> "${what}没成功：模型名或接口地址不对（设置 → 语音）"
+            ApiTrouble.BUSY -> "${what}太频繁了，等几秒再试"
+            ApiTrouble.SERVER -> "${p.name} 那边出错了，等一下再试"
+            ApiTrouble.OTHER -> "${what}没成功，再试一次"
+        }
+        // Speech 里自己写的说明（录音太长、这家没接听写……），本来就是给人看的
+        is IllegalStateException -> e.message ?: "${what}没成功，再试一次"
+        else -> if (isNetError(e)) "网络连不上，${what}没成功${proxyHint(p)}" else "${what}没成功，再试一次"
     }
 }

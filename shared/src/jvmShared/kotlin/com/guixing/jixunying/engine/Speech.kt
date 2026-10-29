@@ -303,7 +303,7 @@ class Speech(private val proxyOf: (ProviderConfig) -> String?) {
         bill(p, model, SpeechText.secondsOf(wav) ?: 0.0) // 收下了就记一条（后面解析失败也已经扣钱）
         val text = ((o["choices"] as? JsonArray)?.firstOrNull() as? JsonObject)
             ?.let { it["message"] as? JsonObject }?.str("content")
-        if (text.isNullOrBlank()) throw ApiException(200, "小米听写没返回文字（choices[0].message.content 是空的）：" + o.toString().take(300))
+        if (text.isNullOrBlank()) throw NothingHeard("小米听写没返回文字（choices[0].message.content 是空的）：" + o.toString().take(300))
         return text
     }
 
@@ -321,7 +321,7 @@ class Speech(private val proxyOf: (ProviderConfig) -> String?) {
         bill(p, model, seconds) // 收下了就记一条
         // 官方文档没写返回里文字叫什么（docs/参考资料.md 里记了「没写」），先按 OpenAI 的 text 取；取不到把整段返回报出来
         val got = o.str("text") ?: (o["data"] as? JsonObject)?.str("text")
-        if (got.isNullOrBlank()) throw ApiException(200, "MiniMax 听写返回里没找到文字（现在按 text 取，整个返回是：" + text.take(300) + "）")
+        if (got.isNullOrBlank()) throw NothingHeard("MiniMax 听写返回里没找到文字（现在按 text 取，整个返回是：" + text.take(300) + "）")
         return got
     }
 
@@ -341,7 +341,7 @@ class Speech(private val proxyOf: (ProviderConfig) -> String?) {
         }
         bill(p, model, seconds) // 收下了就记一条（按这一段的秒数）
         return o.str("text")?.takeIf { it.isNotBlank() }
-            ?: throw ApiException(200, "智谱听写没返回文字：" + text.take(300))
+            ?: throw NothingHeard("智谱听写没返回文字：" + text.take(300))
     }
 
     /**
@@ -356,6 +356,12 @@ class Speech(private val proxyOf: (ProviderConfig) -> String?) {
             append(HttpHeaders.ContentDisposition, "filename=\"$name\"")
         })
     })
+
+    /**
+     * 听写那家收下了、也回了，但回来的里面没有字：多半是没听出说了什么，也可能是返回的格式变了。
+     * [raw] 是原始返回的开头，只写进日志 jxy.log，不给用户看（2026-10-29 用户看到这段原文：「这种错误是后面日志显示的，不是前端用户显示」）。
+     */
+    class NothingHeard(val raw: String) : Exception(raw)
 
     companion object {
         /** 智谱一段最长 30 秒，切成 25 秒一段（官方限制，见 docs/参考资料.md）。 */

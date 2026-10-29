@@ -1884,6 +1884,7 @@ private fun CodeComposer(ctl: AppController, conv: Conversation, running: Boolea
                         // 左边一组只占剩下的宽度，发送键先排、永远是完整大小（2026-10-22，和对话栏一样；以前「上一条还在做」那行字在窄屏、大字体下会把发送键挤没）
                         Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
                             ComposerIcon(Icons.Rounded.AttachFile, if (platform.isDesktop) "附件（代码、图片、PDF、Word、Excel…；也可以把文件拖进来，或者 Ctrl+V 粘贴截图）" else "附件") { pick(false) }
+                            if (!platform.isDesktop) Spacer(Modifier.width(6.dp))   // 手机上两个圆按钮有底色，别粘在一起
                             ComposerIcon(Icons.Rounded.Image, "图片") { pick(true) }
                             Spacer(Modifier.width(6.dp))
                             if (running) {

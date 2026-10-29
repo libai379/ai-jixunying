@@ -116,6 +116,7 @@ class SpeechTest {
     @Volatile private var mimoWithoutAudio = false
     @Volatile private var miniMaxFails = false
     @Volatile private var miniMaxAsrUnknownField = false
+    @Volatile private var mimoAsrEmpty = false
 
     private lateinit var fake: EmbeddedServer<*, *>
     private var port = 0
@@ -164,6 +165,11 @@ class SpeechTest {
                     val first = req["messages"]!!.jsonArray.first().jsonObject
                     if (first["content"] is JsonArray) {
                         // 听写：user 消息里是 input_audio
+                        if (mimoAsrEmpty) {
+                            // 10-29 用户手机上就是这样：HTTP 200，content 是空的
+                            call.respondText("""{"id":"asr-1","choices":[{"message":{"role":"assistant","content":""}}]}""", ContentType.Application.Json)
+                            return@post
+                        }
                         call.respondText("""{"choices":[{"message":{"content":"小米听写：你好世界"}}]}""", ContentType.Application.Json)
                         return@post
                     }
@@ -240,6 +246,8 @@ class SpeechTest {
     private suspend fun speak(e: Engine, text: String, providerId: String = "", modelId: String = "", voice: String = "") =
         e.call(Command.Speak(text, providerId, modelId, voice))
 
+    private fun logText() = File(dir, "logs/jxy.log").takeIf { it.isFile }?.readText().orEmpty()
+
     private suspend fun transcribe(e: Engine, wav: ByteArray, providerId: String = "", modelId: String = "") =
         e.call(Command.Transcribe(Base64.getEncoder().encodeToString(wav), "audio/wav", providerId, modelId))
 
@@ -282,8 +290,10 @@ class SpeechTest {
         val e = engine("mimo")
         val r = speak(e, "念一下")
         assertFalse(r.ok)
-        assertTrue("没返回音频" in r.message, r.message)
-        assertTrue("choices[0].message.audio.data" in r.message, r.message)
+        // 原文只进日志，界面上一句人话（2026-10-29 用户：「这种错误是后面日志显示的，不是前端用户显示」）
+        assertEquals("读出来没成功，再试一次", r.message)
+        val log = logText()
+        assertTrue("没返回音频" in log && "choices[0].message.audio.data" in log, log)
     }
 
     @Test
@@ -307,8 +317,9 @@ class SpeechTest {
         val e = engine("minimax")
         val r = speak(e, "念一下")
         assertFalse(r.ok)
-        assertTrue("rate limit exceeded" in r.message, r.message)
-        assertTrue("1002" in r.message, r.message)
+        assertEquals("读出来太频繁了，等几秒再试", r.message)
+        val log = logText()
+        assertTrue("rate limit exceeded" in log && "1002" in log, log)
     }
 
     @Test
@@ -380,8 +391,22 @@ class SpeechTest {
         val e = engine("minimax")
         val r = transcribe(e, shortWav)
         assertFalse(r.ok)
-        assertTrue("没找到文字" in r.message, r.message)
-        assertTrue("某些没见过的字段" in r.message, r.message)
+        assertEquals("没听清，再说一次", r.message)
+        val log = logText()
+        assertTrue("没找到文字" in log && "某些没见过的字段" in log, log)
+    }
+
+    @Test
+    fun mimoEmptyTextIsShortAndLogged() = runBlocking {
+        // 10-29 用户手机截图：黑框里是「请求被拒绝（HTTP 200）：小米听写没返回文字（choices[0].message.content 是空的）：{"id":…」
+        mimoAsrEmpty = true
+        val e = engine("mimo")
+        val r = transcribe(e, shortWav)
+        assertFalse(r.ok)
+        assertEquals("没听清，再说一次", r.message)
+        val log = logText()
+        assertTrue("[JxySpeech]" in log && "choices[0].message.content 是空的" in log && "asr-1" in log, log)
+        assertFalse("sk-mimo" in log, "日志里不写 Key")
     }
 
     @Test
@@ -742,7 +767,9 @@ class SpeechTest {
             e.call(Command.SaveProvider(ProviderConfig(id = "p-zhipu", presetId = "zhipu", name = "智谱", baseUrl = "http://127.0.0.1:$p2/v1", apiKey = "sk")))
             val r = transcribe(e, shortWav)
             assertFalse(r.ok)
-            assertTrue("Failed to parse multipart" in r.message, r.message)
+            // 原文进日志，界面上一句人话（2026-10-29）
+            assertEquals("听写没成功，再试一次", r.message)
+            assertTrue("Failed to parse multipart" in logText(), logText())
             assertEquals(0, Ledger(File(dir, "usage")).since(0).count { it.kind == UsageKinds.ASR }, "没识别就不记账")
         } finally {
             broken.stop(100, 200)

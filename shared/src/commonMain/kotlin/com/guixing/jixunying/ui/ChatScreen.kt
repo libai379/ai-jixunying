@@ -1334,8 +1334,13 @@ private fun Composer(ctl: AppController, state: AppState, conv: Conversation, ru
                                     ctl.run(Command.UpdateConversation(conv.copy(webSearch = !conv.webSearch)))
                                 }
                                 Spacer(Modifier.width(4.dp))
-                            } else ToggleIcon(Icons.Rounded.Language, if (conv.webSearch) "联网：开着（点一下关）" else "联网：关着（点一下开）", conv.webSearch) {
-                                ctl.run(Command.UpdateConversation(conv.copy(webSearch = !conv.webSearch)), okText = if (conv.webSearch) "联网关了" else "联网开了")
+                            } else {
+                                // 手机上三个圆按钮都有底色了，挨着不留缝会粘成一条
+                                Spacer(Modifier.width(6.dp))
+                                ToggleIcon(Icons.Rounded.Language, if (conv.webSearch) "联网：开着（点一下关）" else "联网：关着（点一下开）", conv.webSearch) {
+                                    ctl.run(Command.UpdateConversation(conv.copy(webSearch = !conv.webSearch)), okText = if (conv.webSearch) "联网关了" else "联网开了")
+                                }
+                                Spacer(Modifier.width(6.dp))
                             }
                             // 听写：点一下开始录，再点一下停下，认出来的字填进输入框（不直接发）
                             if (platform.canRecord) when {
@@ -1434,12 +1439,29 @@ private fun Composer(ctl: AppController, state: AppState, conv: Conversation, ru
     }
 }
 
+/**
+ * 输入框那一排的圆按钮（对话栏的「+」、话筒，Code 栏的附件、图片）。
+ * 手机上大一圈、带一层圆底（2026-10-29 用户发手机截图：「这三个按钮再大 25%，语音和加号都要跟联网这个按钮一样，做一个背景图层」）：
+ * 32 → 40dp、图标 19 → 24dp，底色不分开关；联网开着时另用主色（ToggleIcon）。电脑上照旧光图标（那一排是带字的胶囊，鼠标点得准）。
+ */
 @Composable
 internal fun ComposerIcon(icon: androidx.compose.ui.graphics.vector.ImageVector, desc: String, onClick: () -> Unit) {
-    Box(Modifier.size(32.dp).clip(CircleShape).clickable(onClick = onClick), contentAlignment = Alignment.Center) {
-        Icon(icon, desc, Modifier.size(19.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+    val phone = !LocalPlatform.current.isDesktop
+    Box(
+        Modifier.size(if (phone) PhoneButton else 32.dp).clip(CircleShape)
+            .then(if (phone) Modifier.background(composerFill()) else Modifier).clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(icon, desc, Modifier.size(if (phone) PhoneGlyph else 19.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
+
+private val PhoneButton = 40.dp
+private val PhoneGlyph = 24.dp
+
+/** 手机上输入框圆按钮底下那层淡底（深色、浅色、开不开玻璃都看得出是个按钮，又不抢发送键）。 */
+@Composable
+private fun composerFill(): Color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.07f)
 
 /** 横着能滑、右边还有东西没露出来时，右边缘淡出一截，看得出后面还有（2026-10-22，输入框那一排放不下时）。 */
 private fun Modifier.fadeEnd(scroll: androidx.compose.foundation.ScrollState): Modifier = this
@@ -1470,15 +1492,15 @@ private fun PlusItem(icon: androidx.compose.ui.graphics.vector.ImageVector, name
     )
 }
 
-/** 只有图标的开关（手机上的联网）：开着时底色和图标用主色。 */
+/** 只有图标的开关（手机上的联网）：和 ComposerIcon 一样大、一样有底；开着时底色和图标用主色。 */
 @Composable
 internal fun ToggleIcon(icon: androidx.compose.ui.graphics.vector.ImageVector, desc: String, checked: Boolean, onClick: () -> Unit) {
     val primary = MaterialTheme.colorScheme.primary
     Box(
-        Modifier.size(32.dp).clip(CircleShape).background(if (checked) primary.copy(alpha = 0.14f) else Color.Transparent).clickable(onClick = onClick),
+        Modifier.size(PhoneButton).clip(CircleShape).background(if (checked) primary.copy(alpha = 0.14f) else composerFill()).clickable(onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
-        Icon(icon, desc, Modifier.size(19.dp), tint = if (checked) primary else MaterialTheme.colorScheme.onSurfaceVariant)
+        Icon(icon, desc, Modifier.size(PhoneGlyph), tint = if (checked) primary else MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 

@@ -827,6 +827,43 @@ class ShotsTest {
         // 2026-10-28 用户：「顶栏下面有白边……这个不应该有描边的」——浮着的玻璃顶栏里不画分隔线、头像那组不画灰边
         shoot("phone-chat-topbar", 824, 1784, 2f, hub, phone, "conv:c5")
         shoot("desktop-code-topbar", 1280, 820, 1f, hub, desktop, "code:c8")
+        // 和用户一样把顶栏的高光关掉再看一次（用户：「没有开高光和染色」）
+        kotlinx.coroutines.runBlocking {
+            val s = e.state.settings
+            val bar = s.glassTuning.paramsFor(com.guixing.jixunying.model.GlassTarget.BAR)
+            e.call(com.guixing.jixunying.model.Command.SaveSettings(s.copy(glassTuning = s.glassTuning.with(com.guixing.jixunying.model.GlassTarget.BAR,
+                bar.copy(highlight = bar.highlight.copy(enabled = false), tint = bar.tint.copy(enabled = false))))))
+        }
+        shoot("phone-chat-topbar-nohighlight", 824, 1784, 2f, hub, phone, "conv:c5")
+    }
+
+    /**
+     * 2026-10-29 用户发手机截图：「这三个按钮再大 25%，语音和加号都要跟联网这个按钮一样，做一个背景图层」。
+     * 手机输入框那一排（能录音的手机才有话筒）：联网关着、开着各一张，最窄的 320dp 一张，关了玻璃一张，深色一张。
+     */
+    @Test
+    fun composerButtonShots() {
+        val dir = out ?: return
+        dir.mkdirs()
+        val tmp = tempDir("jxy-composershots")
+        val e = seed(File(tmp, "data"), File(tmp, "文档").apply { mkdirs() })
+        val hub = Hub(e)
+        val phone = FakeAvPlatform(PhonePlatform())
+        fun web(on: Boolean) = kotlinx.coroutines.runBlocking {
+            e.call(com.guixing.jixunying.model.Command.UpdateConversation(e.state.conversation("c1")!!.copy(webSearch = on)))
+        }
+        fun look(f: (com.guixing.jixunying.model.Settings) -> com.guixing.jixunying.model.Settings) = kotlinx.coroutines.runBlocking {
+            e.call(com.guixing.jixunying.model.Command.SaveSettings(f(e.state.settings)))
+        }
+        web(false)
+        shoot("phone-composer-web-off", 824, 1784, 2f, hub, phone, "conv:c1")
+        web(true)
+        shoot("phone-composer-web-on", 824, 1784, 2f, hub, phone, "conv:c1")
+        shoot("phone-composer-320", 640, 1422, 2f, hub, phone, "conv:c1")
+        look { it.copy(glass = false) }
+        shoot("phone-composer-noglass", 824, 1784, 2f, hub, phone, "conv:c1")
+        look { it.copy(glass = true, darkMode = 2) }
+        shoot("phone-composer-dark", 824, 1784, 2f, hub, phone, "conv:c1")
     }
 
     /** 集训场：开局页、主持人看 AI 打（暂停在第一天发言中）、真人轮到发言、打完的复盘（AI 用 WolfFakeLlm，不联网）。 */
