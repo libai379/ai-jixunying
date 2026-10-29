@@ -930,6 +930,9 @@ class ShotsTest {
         shoot("phone-wolf-lobby-roles", 824, 3000, 2f, local, phone, "wolf")
         shoot("phone-home-mic", 824, 1784, 2f, local, phone, "home")
         shoot("desktop-home-mic", 1280, 820, 1f, local, desktop, "home")
+        // 2026-10-29 用户：「过程汇报……和做完之后要汇报的……要分开」——过程小字淡色，汇报单独一张卡片
+        shoot("desktop-code-report", 1280, 1300, 1f, local, desktop, "code:c15")
+        shoot("phone-code-report", 824, 2400, 2f, local, phone, "code:c15")
     }
 
     /** 集训场：开局页、主持人看 AI 打（暂停在第一天发言中）、真人轮到发言、打完的复盘（AI 用 WolfFakeLlm，不联网）。 */

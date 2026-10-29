@@ -92,6 +92,7 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -1076,13 +1077,22 @@ private fun codeRows(ctl: AppController, state: AppState, messages: List<Message
         add("${m.id}:head", indent = false) { CodeAiHead(m) }
         // 待办清单放最上面（2026-10-18）
         m.tools.lastOrNull { it.kind == "todo" }?.let { t -> add("${m.id}:todo") { TodoCard(t.output) } }
-        // 一步工具一行，点开看输入和输出；边做边说的话按时间插在步骤之间
+        // 一步工具一行，点开看输入和输出；边做边说的话按时间插在步骤之间。
+        // 2026-10-29 用户：「过程汇报这些和他做完之后要汇报的这个部分是要分开的……前面那个过程可以留着，但是一定要字体淡化……后面汇报的那个，单独拿出来」：
+        // 做完以后，最后一步之后的那段话是汇报（醒目的卡片）；之前边做边说的都是过程（小字、淡色、左边一道竖线）。还在做的时候全按过程显示。
+        val report = if (streaming) null else entries.lastOrNull()?.takeIf { it is CodeEntry.Said && entries.size > 1 } as? CodeEntry.Said
         entries.forEach { e ->
             when (e) {
                 is CodeEntry.Step -> add("${m.id}:s:${e.step.id}") { CodeToolStep(ctl, m, e.step, canAct) }
                 is CodeEntry.Said -> {
                     val text = splitThink(e.text).first
-                    if (text.isNotBlank()) add("${m.id}:t:${e.key}") { SelectionContainer { MarkdownText(text, Modifier.padding(bottom = 6.dp)) } }
+                    if (text.isNotBlank()) add("${m.id}:t:${e.key}") {
+                        when {
+                            e === report -> CodeReport(text)
+                            entries.size == 1 && !streaming -> SelectionContainer { MarkdownText(text, Modifier.padding(bottom = 6.dp)) }
+                            else -> CodeProcessText(text)
+                        }
+                    }
                 }
             }
         }
@@ -1093,6 +1103,30 @@ private fun codeRows(ctl: AppController, state: AppState, messages: List<Message
         add("${m.id}:foot") { CodeAiFoot(ctl, m, body, onDiff) }
     }
     return rows
+}
+
+/** 边做边说的过程：小一号、淡色、左边一道竖线，看得出不是结论。 */
+@Composable
+private fun CodeProcessText(text: String) {
+    val t = MaterialTheme.typography
+    // 左边那道竖线画在背后（Markdown 里有懒加载的块，不能量固有高度）
+    val line = Ext.c.border
+    Box(Modifier.padding(bottom = 6.dp).drawBehind { drawRect(line, size = androidx.compose.ui.geometry.Size(2.dp.toPx(), size.height)) }.padding(start = 12.dp)) {
+        MaterialTheme(typography = t.copy(bodyLarge = t.bodySmall, bodyMedium = t.bodySmall)) {
+            SelectionContainer { MarkdownText(text, color = Ext.c.subtle) }
+        }
+    }
+}
+
+/** 做完以后的汇报：单独一张卡片、正常字号，一眼看得到。 */
+@Composable
+private fun CodeReport(text: String) {
+    val primary = MaterialTheme.colorScheme.primary
+    Column(Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 8.dp).clip(RoundedCornerShape(14.dp))
+        .background(primary.copy(alpha = 0.06f)).border(1.dp, primary.copy(alpha = 0.35f), RoundedCornerShape(14.dp)).padding(14.dp)) {
+        Text("做完了 · 汇报", style = MaterialTheme.typography.labelLarge, color = primary, modifier = Modifier.padding(bottom = 6.dp))
+        SelectionContainer { MarkdownText(text) }
+    }
 }
 
 @Composable
