@@ -184,12 +184,12 @@ fun CodeScreen(ctl: AppController, convId: String, wide: Boolean, openDrawer: ()
             val h = maxHeight
             val short = h < 420.dp
             Column(Modifier.fillMaxSize()) {
-                val topBars: @Composable () -> Unit = {
-                    if (h >= 240.dp) CodeTopBar(ctl, state, conv, spec, wide, openDrawer, running, access)
-                    if (spec.prUrl.isNotBlank() && platform.isDesktop && !ctl.remoteMode) CiBar(ctl, conv, spec)
-                }
                 val glassOnHere = com.guixing.jixunying.ui.glass.LocalGlass.current.let { it.on && it.backdrop != null } &&
                     !(ctl.codeTerminalOpen && access.canAct && platform.isDesktop && !ctl.remoteMode)
+                val topBars: @Composable () -> Unit = {
+                    if (h >= 240.dp) CodeTopBar(ctl, state, conv, spec, wide, openDrawer, running, access, divider = !glassOnHere)
+                    if (spec.prUrl.isNotBlank() && platform.isDesktop && !ctl.remoteMode) CiBar(ctl, conv, spec)
+                }
                 if (!glassOnHere) topBars()
                 // 和对话页一样（10-24）：开着液态玻璃、没开终端时，输入框浮在步骤列表上，列表一直排到底，输入框的玻璃透出下面的字
                 val env = com.guixing.jixunying.ui.glass.LocalGlass.current
@@ -260,7 +260,7 @@ private fun CodeBottomNote(access: CodeAccess) {
 
 @Composable
 private fun CodeTopBar(ctl: AppController, state: AppState, conv: Conversation, spec: CodeSpec,
-                       wide: Boolean, openDrawer: () -> Unit, running: Boolean, access: CodeAccess) {
+                       wide: Boolean, openDrawer: () -> Unit, running: Boolean, access: CodeAccess, divider: Boolean = true) {
     val provider = state.provider(spec.providerId)
     // 窄屏那一行只放得下文件夹的最后一节，点一下弹完整的路径（下面弹窗）
     var showPath by remember(conv.id) { mutableStateOf(false) }
@@ -302,7 +302,7 @@ private fun CodeTopBar(ctl: AppController, state: AppState, conv: Conversation, 
                 }
                 Spacer(Modifier.width(6.dp))
                 Row(
-                    Modifier.weight(1f, fill = false).clip(RoundedCornerShape(50)).border(1.dp, Ext.c.border, RoundedCornerShape(50))
+                    Modifier.weight(1f, fill = false).clip(RoundedCornerShape(50)).chipOutline(RoundedCornerShape(50))
                         .clickable { showBrain = true }.padding(start = 6.dp, end = 2.dp, top = 1.dp, bottom = 1.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
@@ -316,7 +316,7 @@ private fun CodeTopBar(ctl: AppController, state: AppState, conv: Conversation, 
         }
         if (running && access.canAct) {
             Row(
-                Modifier.clip(RoundedCornerShape(50)).border(1.dp, Ext.c.border, RoundedCornerShape(50))
+                Modifier.clip(RoundedCornerShape(50)).chipOutline(RoundedCornerShape(50))
                     .clickable { ctl.run(Command.CodeStop(conv.id)) }.padding(horizontal = 10.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
@@ -353,7 +353,8 @@ private fun CodeTopBar(ctl: AppController, state: AppState, conv: Conversation, 
             ctl.run(Command.CodeSetMode(conv.id, o.mode, openAll = o.open, auto = o.auto, unattended = o.unattended), okText = "权限档换成「${o.label}」")
         }
     }
-    HorizontalDivider(color = Ext.c.border)
+    // 浮着的玻璃顶栏里不画分隔线（2026-10-28 用户：「顶栏下面有白边」）
+    if (divider) HorizontalDivider(color = Ext.c.border)
     if (showPath) WorkspaceDialog(ctl, conv, spec) { showPath = false }
     if (showBrain) BrainDialog(ctl, conv, spec) { showBrain = false }
 }
@@ -862,7 +863,7 @@ private fun CodeModePicker(mode: ModeOpt, modes: List<ModeOpt>, enabled: Boolean
     val color = if (mode.open) Ext.c.warning else MaterialTheme.colorScheme.primary
     Box {
         Row(
-            Modifier.clip(RoundedCornerShape(50)).border(1.dp, Ext.c.border, RoundedCornerShape(50))
+            Modifier.clip(RoundedCornerShape(50)).chipOutline(RoundedCornerShape(50))
                 .background(color.copy(alpha = 0.10f))
                 .clickable(enabled = enabled) { open = true }.padding(start = 10.dp, end = 6.dp, top = 6.dp, bottom = 6.dp),
             verticalAlignment = Alignment.CenterVertically,

@@ -195,7 +195,7 @@ fun ChatScreen(ctl: AppController, convId: String, wide: Boolean, openDrawer: ()
             LaunchedEffect(currentFind) { if (currentFind != null) ctl.focusMessageId = currentFind }
             val topBar: @Composable () -> Unit = {
                 if (h >= 240.dp) ChatTopBar(state, conv, wide, openDrawer, onStances = if (conv.stanceTopics > 0) ({ stanceDialog = "" }) else null,
-                    onFind = { ctl.findOpen = true }) { showConvSettings = true }
+                    onFind = { ctl.findOpen = true }, divider = !floating) { showConvSettings = true }
                 if (ctl.findOpen) FindBar(findQuery, { findQuery = it; findIndex = (findHits.size - 1).coerceAtLeast(0) }, findHits.size, findIndex,
                     onPrev = { if (findHits.isNotEmpty()) findIndex = (findIndex - 1 + findHits.size) % findHits.size },
                     onNext = { if (findHits.isNotEmpty()) findIndex = (findIndex + 1) % findHits.size },
@@ -243,7 +243,8 @@ fun ChatScreen(ctl: AppController, convId: String, wide: Boolean, openDrawer: ()
 }
 
 @Composable
-private fun ChatTopBar(state: AppState, conv: Conversation, wide: Boolean, openDrawer: () -> Unit, onStances: (() -> Unit)?, onFind: () -> Unit = {}, onSettings: () -> Unit) {
+private fun ChatTopBar(state: AppState, conv: Conversation, wide: Boolean, openDrawer: () -> Unit, onStances: (() -> Unit)?, onFind: () -> Unit = {},
+                       divider: Boolean = true, onSettings: () -> Unit) {
     val members = conv.memberIds.mapNotNull { state.member(it) }
     // 至少 60 高，系统字体调大时跟着长高（2026-10-22：以前写死 60，200% 字体时副标题掉出顶栏、压到消息上）
     Row(
@@ -269,7 +270,7 @@ private fun ChatTopBar(state: AppState, conv: Conversation, wide: Boolean, openD
         IconButton(onClick = onFind, modifier = Modifier.size(36.dp)) { Icon(Icons.Rounded.Search, "在对话里找", Modifier.size(19.dp), tint = Ext.c.subtle) }
         Spacer(Modifier.width(4.dp))
         Row(
-            Modifier.clip(RoundedCornerShape(50)).border(1.dp, Ext.c.border, RoundedCornerShape(50)).clickable(onClick = onSettings)
+            Modifier.clip(RoundedCornerShape(50)).chipOutline(RoundedCornerShape(50)).clickable(onClick = onSettings)
                 .padding(start = 6.dp, end = 10.dp, top = 4.dp, bottom = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -279,7 +280,8 @@ private fun ChatTopBar(state: AppState, conv: Conversation, wide: Boolean, openD
             Icon(Icons.Rounded.Tune, "对话设置", Modifier.size(16.dp), tint = Ext.c.subtle)
         }
     }
-    androidx.compose.material3.HorizontalDivider(color = Ext.c.border)
+    // 浮着的玻璃顶栏里不画分隔线（2026-10-28 用户：「顶栏下面有白边」——画在玻璃里就是底边上一条白线）
+    if (divider) androidx.compose.material3.HorizontalDivider(color = Ext.c.border)
 }
 
 @Composable

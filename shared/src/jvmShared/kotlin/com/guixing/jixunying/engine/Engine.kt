@@ -3730,6 +3730,9 @@ class Engine(
         return Result.success(VideoInput(use, f.name, mime, bytes, seconds = VideoMedia.durationOf(f.name, mime, bytes)))
     }
 
+    /** 画图的提醒（智谱水印）这次开程序说过了没有。 */
+    @Volatile private var imageNoteShown = false
+
     private suspend fun paint(target: Pair<ProviderConfig, String>, prompt: String, size: String? = null): Pair<Attachment, String?> {
         // 画成一张记一张（成员在聊天里画的记在成员账上；测试画的算测试）。画好了只是下载失败的也已经扣钱，照样记
         val tag = currentCoroutineContext()[UsageTag]
@@ -3740,6 +3743,8 @@ class Engine(
             bill(); throw e
         }
         bill()
+        // 智谱没签去水印的免责声明：这张还带水印，告诉用户去哪儿签（一次开程序只说一回）
+        if (r.note.isNotBlank() && !imageNoteShown) { imageNoteShown = true; emit(Event.Notice(r.note)) }
         val ext = r.mime.substringAfter('/').replace("jpeg", "jpg")
         val att = Attachment(newId(), "图片_${System.currentTimeMillis() % 1_000_000}.$ext", r.mime, r.bytes.size.toLong(), AttachmentKind.GENERATED_IMAGE, note = prompt.take(200))
         storage.putFile(att, r.bytes, null)

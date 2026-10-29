@@ -37,7 +37,8 @@ import javax.crypto.spec.SecretKeySpec
  */
 class ImageGen(private val proxyOf: (ProviderConfig) -> String?) {
 
-    class Result(val bytes: ByteArray, val mime: String, val revisedPrompt: String?)
+    /** note：要告诉用户的一句（比如智谱没签免责声明、这张还带水印）；空 = 没有。 */
+    class Result(val bytes: ByteArray, val mime: String, val revisedPrompt: String?, val note: String = "")
 
     enum class Protocol { OPENAI, SILICONFLOW, DASHSCOPE, MINIMAX, KLING, MODELSCOPE }
 
@@ -59,6 +60,9 @@ class ImageGen(private val proxyOf: (ProviderConfig) -> String?) {
                 else -> Protocol.OPENAI
             }
         }
+
+        /** 智谱画的图还带水印时告诉用户的话（没在智谱后台签去水印的免责声明，带 watermark_enabled = false 会被拒）。 */
+        const val ZHIPU_WATERMARK_NOTE = "智谱画的图还带着「AI生成」水印：要去掉，先到智谱开放平台 个人中心 → 安全管理 → 去水印管理 签一下免责声明，签完以后画的就不带了。"
 
         /** "1024x1024" → 宽高比 "1:1"（MiniMax、可灵要比例不要像素）。 */
         fun aspectOf(size: String): String {
@@ -122,26 +126,40 @@ class ImageGen(private val proxyOf: (ProviderConfig) -> String?) {
     // —— OpenAI 风格 ——
     private suspend fun openAi(client: HttpClient, p: ProviderConfig, model: String, prompt: String, size: String): Result {
         val silicon = protocolOf(p) == Protocol.SILICONFLOW
-        val body = buildJsonObject {
+        val zhipu = p.presetId == "zhipu" || p.baseUrl.contains("bigmodel.cn")
+        fun body(noMark: Boolean) = buildJsonObject {
             put("model", model)
             put("prompt", prompt)
             if (silicon) put("image_size", size) else put("size", size)
             if (!silicon) put("n", 1)
             if (p.baseUrl.contains("volces.com")) { put("response_format", "url"); put("watermark", false) }
+            // 智谱（2026-10-28 用户：「生图都带 AI 生成，改」）：watermark_enabled = false 关掉显式和隐式水印。官方文档
+            // （docs.bigmodel.cn 图像生成）：「仅允许已签署免责声明的客户使用，签署路径：个人中心-安全管理-去水印管理」
+            if (zhipu && noMark) put("watermark_enabled", false)
         }
-        val o = client.post(base(p) + "/images/generations") {
+        suspend fun send(noMark: Boolean) = client.post(base(p) + "/images/generations") {
             header("Authorization", "Bearer ${p.apiKey.trim()}")
             contentType(ContentType.Application.Json)
-            setBody(body.toString())
-        }.jsonOrThrow()
+            setBody(body(noMark).toString())
+        }
+        var note = ""
+        var resp = send(noMark = true)
+        // 没签免责声明被拒：照常带水印画，告诉用户去哪儿签
+        if (zhipu && resp.status.value !in 200..299) {
+            val text = resp.bodyAsText()
+            if (!Regex("(?i)watermark|水印|免责").containsMatchIn(text)) throw ApiException(resp.status.value, text)
+            resp = send(noMark = false)
+            note = ZHIPU_WATERMARK_NOTE
+        }
+        val o = resp.jsonOrThrow()
         (o["error"] as? JsonObject)?.let { throw ApiException(400, it.toString()) }
         val first = ((o["data"] ?: o["images"]) as? JsonArray)?.firstOrNull() as? JsonObject
             ?: throw ApiException(200, "返回里没有图片：" + o.toString().take(300))
         val revised = first.str("revised_prompt")
-        first.str("b64_json")?.let { return Result(Base64.getDecoder().decode(it), sniffMime(it), revised) }
+        first.str("b64_json")?.let { return Result(Base64.getDecoder().decode(it), sniffMime(it), revised, note) }
         val url = first.str("url") ?: throw ApiException(200, "返回里没有图片地址：" + o.toString().take(300))
         val (bytes, mime) = download(client, url)
-        return Result(bytes, mime, revised)
+        return Result(bytes, mime, revised, note)
     }
 
     // —— 阿里百炼 / 千问AI平台：千问图像、通义万相 ——
@@ -215,6 +233,8 @@ class ImageGen(private val proxyOf: (ProviderConfig) -> String?) {
             setBody(buildJsonObject {
                 put("model", model); put("prompt", prompt); put("aspect_ratio", aspectOf(size))
                 put("response_format", "base64"); put("n", 1); put("prompt_optimizer", true)
+                // 官方文档写默认就是 false（platform.minimax.cn image-generation-t2i），写明白免得哪天改了默认
+                put("aigc_watermark", false)
             }.toString())
         }.jsonOrThrow()
         val br = o["base_resp"] as? JsonObject

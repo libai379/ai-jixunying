@@ -315,6 +315,9 @@ class EngineTest {
                     imageRequests += "openai:" + body
                     // 「慢」字的图故意画 2 秒，用来测画图时还能接着聊
                     if ("慢" in body) delay(2_000)
+                    // 智谱没签去水印的免责声明（2026-10-28）：带 watermark_enabled 就拒
+                    if ("没签" in body && "watermark_enabled" in body) return@post call.respondText(
+                        "{\"error\":{\"code\":\"1301\",\"message\":\"去水印功能需要先签署免责声明\"}}", ContentType.Application.Json, HttpStatusCode.BadRequest)
                     call.respondText("""{"data":[{"b64_json":"$pngB64"}]}""", ContentType.Application.Json)
                 }
                 get("/img/1.png") { call.respondBytes(png, ContentType.Image.PNG) }
@@ -980,6 +983,25 @@ class EngineTest {
         assertFalse(step.ok)
         assertTrue("DeepSeek 官方搜索出错" in step.note && "博查" in step.note, step.note)
         assertTrue("回答里不用讲" in poor.content && "告诉用户" !in poor.content, poor.content)
+    }
+
+    /** 2026-10-28 用户：「生图都带 AI 生成，改」——智谱画图带 watermark_enabled=false；没签免责声明被拒，就照常带水印画出来、提醒去哪儿签。 */
+    @Test
+    fun zhipuImageAsksNoWatermark() = runBlocking {
+        val (e, ms) = engineWithMembers("小智")
+        e.call(Command.SaveProvider(ProviderConfig("img-zp", "zhipu", "智谱", "${base()}/v1", "k", listOf(ModelInfo("cogview-4-250304", imageGen = true, tools = false)))))
+        e.call(Command.SaveSettings(e.state.settings.copy(imageGen = ImageGenSettings("img-zp", "cogview-4-250304", "1024x1024"))))
+        val conv = e.call(Command.CreateConversation(listOf(ms[0].id))).data
+        imageRequests.clear()
+        e.call(Command.SendMessage(conv, "一只猫", drawImage = true))
+        waitIdle(e, conv, 1)
+        assertTrue("\"watermark_enabled\":false" in imageRequests.single(), imageRequests.toString())
+        imageRequests.clear()
+        e.call(Command.SendMessage(conv, "没签的猫", drawImage = true))
+        waitIdle(e, conv, 2)
+        assertEquals(2, imageRequests.size, "被拒以后不带这个参数再画一次：" + imageRequests)
+        assertFalse("watermark_enabled" in imageRequests.last())
+        assertTrue(e.store.messages.value[conv]!!.last().attachments.isNotEmpty(), "照常画出来了")
     }
 
     @Test

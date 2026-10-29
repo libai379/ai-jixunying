@@ -824,6 +824,9 @@ class ShotsTest {
         shoot("phone-home-360", 720, 1560, 2f, hub, phone, "home")
         shoot("desktop-code-modes", 1280, 820, 1f, hub, desktop, "code:c8#modes")
         shoot("phone-settings-appearance", 824, 1784, 2f, hub, phone, "settings:APPEARANCE")
+        // 2026-10-28 用户：「顶栏下面有白边……这个不应该有描边的」——浮着的玻璃顶栏里不画分隔线、头像那组不画灰边
+        shoot("phone-chat-topbar", 824, 1784, 2f, hub, phone, "conv:c5")
+        shoot("desktop-code-topbar", 1280, 820, 1f, hub, desktop, "code:c8")
     }
 
     /** 集训场：开局页、主持人看 AI 打（暂停在第一天发言中）、真人轮到发言、打完的复盘（AI 用 WolfFakeLlm，不联网）。 */

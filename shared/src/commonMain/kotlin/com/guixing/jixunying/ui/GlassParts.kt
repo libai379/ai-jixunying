@@ -62,6 +62,17 @@ fun GlassSurface(
 }
 
 /**
+ * 顶栏上胶囊按钮的外框（2026-10-28 用户：「顶栏下面有白边，没有开高光和染色……这个不应该有描边的」）：
+ * 关着玻璃照旧 1dp 灰边；开着玻璃不画边（灰边在玻璃上看着是一圈白线），换一层很淡的底色，照样看得出能点。
+ */
+@Composable
+fun Modifier.chipOutline(shape: Shape): Modifier {
+    val env = LocalGlass.current
+    return if (env.on && env.backdrop != null) this.background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.06f), shape)
+    else this.border(1.dp, Ext.c.border, shape)
+}
+
+/**
  * 发送键这类圆形主按钮：开着玻璃时是液态按钮（按下跟手形变 + 高光，弹回），关着时是原来的实心圆。
  * enabled = false 时是灰的、点不了。
  */
