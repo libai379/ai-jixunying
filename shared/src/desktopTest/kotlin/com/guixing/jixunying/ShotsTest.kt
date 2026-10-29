@@ -928,6 +928,8 @@ class ShotsTest {
         // 2026-10-29 用户：「Code 为什么没有语音输入？狼人杀我怎么没找到？职业介绍的地方在哪儿？」——Code 栏输入框的话筒、侧栏第三栏叫「狼人杀」、开局页的身份介绍
         shoot("phone-remote-drawer-tabs", 824, 1784, 2f, on, phone, "conv:c1#drawer")
         shoot("phone-wolf-lobby-roles", 824, 3000, 2f, local, phone, "wolf")
+        shoot("phone-home-mic", 824, 1784, 2f, local, phone, "home")
+        shoot("desktop-home-mic", 1280, 820, 1f, local, desktop, "home")
     }
 
     /** 集训场：开局页、主持人看 AI 打（暂停在第一天发言中）、真人轮到发言、打完的复盘（AI 用 WolfFakeLlm，不联网）。 */
@@ -943,7 +945,8 @@ class ShotsTest {
             val e = Engine(Storage(File(tmp, "data")))
             val hub = Hub(e)
             val desktop = DesktopPlatform(fileLog = false) { null }
-            val phone = PhonePlatform()
+            // 真手机能录音：主持人插话、上桌发言旁边都有话筒（2026-10-29 用户：「狼人杀依旧没有语音输入」）
+            val phone = FakeAvPlatform(PhonePlatform())
             shoot("desktop-wolf-lobby", 1280, 1400, 1f, hub, desktop, "wolf")
             shoot("phone-wolf-lobby", 824, 1784, 2f, hub, phone, "wolf")
             fun live() = kotlinx.coroutines.runBlocking { e.call(com.guixing.jixunying.model.Command.WolfCurrent).data }

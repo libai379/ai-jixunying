@@ -204,6 +204,8 @@ fun EmptyChatScreen(ctl: AppController, wide: Boolean, openDrawer: () -> Unit) {
         }
         // 输入框：打字回车（电脑）或点发送就开一个新对话；电脑上宽窗口里居中、限宽
         val platform = LocalPlatform.current
+        // 话筒（2026-10-29 用户：「狼人杀依旧没有语音输入」——顺着把所有跟 AI 说话的输入框过了一遍，首页这个也没有）
+        val dictation = rememberDictation(ctl, "home") { heard -> text = if (text.isBlank()) heard else "$text $heard" }
         Box(Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 14.dp), contentAlignment = Alignment.Center) { Row(
             Modifier.widthIn(max = 760.dp).fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
@@ -219,6 +221,10 @@ fun EmptyChatScreen(ctl: AppController, wide: Boolean, openDrawer: () -> Unit) {
                 },
                 shape = RoundedCornerShape(22.dp), maxLines = 6,
             )
+            if (platform.canRecord) {
+                Spacer(Modifier.width(6.dp))
+                DictationButton(dictation, "说一段话，变成文字填进输入框（再点一下停下）")
+            }
             Spacer(Modifier.width(8.dp))
             GlassRoundButton(Icons.Rounded.ArrowUpward, "发送", enabled = text.isNotBlank() && picked.isNotEmpty() && !busy,
                 color = MaterialTheme.colorScheme.primary, onColor = MaterialTheme.colorScheme.onPrimary, onClick = { send() })

@@ -433,7 +433,7 @@ private fun WolfTable(ctl: AppController, state: AppState, live: WolfLive, wide:
                 when {
                     live.over -> Text(if (live.reviewing) "AI 们在说复盘感想……" else r.endReason.ifBlank { r.error.ifBlank { "这局结束了" } },
                         style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
-                    hostMode -> HostSay(live) { send(Command.WolfSay(it)) }
+                    hostMode -> HostSay(ctl) { send(Command.WolfSay(it)) }
                     humans.size > 1 && viewer == 0 -> {
                         // 几个真人轮流：白天轮到谁叫谁；夜里不说谁有事（不然等于亮身份），活着的真人每人都看一眼
                         val waiting = live.asks.filter { it.seat != 0 }
@@ -627,12 +627,22 @@ private fun HostAskCard(a: WolfAsk, send: (Command) -> Unit) {
     }
 }
 
-/** 主持人插话（全 AI 的局）：大家都看得到，AI 之后每一步都会看到。 */
+/**
+ * 主持人插话（全 AI 的局）：大家都看得到，AI 之后每一步都会看到。
+ * 能打字也能点话筒说（2026-10-29 用户：「狼人杀依旧没有语音输入」——以前话筒只在上桌发言那里，主持人这一栏没有）。
+ */
 @Composable
-private fun HostSay(live: WolfLive, say: (String) -> Unit) {
+private fun HostSay(ctl: AppController, say: (String) -> Unit) {
+    val platform = LocalPlatform.current
     var text by remember { mutableStateOf("") }
+    val dictation = rememberDictation(ctl, "wolf-host") { heard -> text = if (text.isBlank()) heard else "$text $heard" }
     Row(verticalAlignment = Alignment.CenterVertically) {
-        AppTextField(text, { text = it }, Modifier.weight(1f), placeholder = "以主持人身份说一句（比如「3号你为什么改票？」），AI 都看得到")
+        // 主持人是法官：只宣布规则和结果，不问玩家问题（2026-10-29 用户：「主持人不应该说三号你为什么改票，主持人是一个规则执行者」）
+        AppTextField(text, { text = it }, Modifier.weight(1f), placeholder = "以主持人身份宣布一句（比如「本局女巫不能自救」「现在进入投票」），AI 都看得到")
+        if (platform.canRecord) {
+            Spacer(Modifier.width(6.dp))
+            DictationButton(dictation, "说一句话，变成文字填进输入框（再点一下停下）")
+        }
         Spacer(Modifier.width(8.dp))
         Button(enabled = text.isNotBlank(), onClick = { say(text.trim()); text = "" }) { Text("说") }
     }
@@ -653,11 +663,14 @@ private fun AskPanel(ctl: AppController, a: WolfAsk, r: WolfGameRecord, send: (C
                 var text by remember(a.id) { mutableStateOf("") }
                 var skill by remember(a.id) { mutableStateOf("") }
                 var target by remember(a.id) { mutableStateOf(0) }
+                val dictation = rememberDictation(ctl, a.id) { heard -> text = if (text.isBlank()) heard else "$text $heard" }
                 Row(verticalAlignment = Alignment.Bottom) {
                     AppTextField(text, { text = it }, Modifier.weight(1f), singleLine = false, minLines = 2,
                         placeholder = if (a.kind == "lastWords") "遗言" else "说你的判断和理由")
-                    Spacer(Modifier.width(6.dp))
-                    VoiceButton(ctl) { heard -> text = if (text.isBlank()) heard else "$text $heard" }
+                    if (LocalPlatform.current.canRecord) {
+                        Spacer(Modifier.width(6.dp))
+                        DictationButton(dictation, "说一段话，变成文字填进输入框（再点一下停下）")
+                    }
                 }
                 if (a.options.isNotEmpty()) {
                     FlowRow(Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -703,34 +716,6 @@ private fun AskPanel(ctl: AppController, a: WolfAsk, r: WolfGameRecord, send: (C
             }
         }
     }
-}
-
-/** 说话代替打字：点一下开始录，再点一下停，认出来的字接在输入框后面（用本机的听写模型，和聊天输入框一样）。 */
-@Composable
-private fun VoiceButton(ctl: AppController, onText: (String) -> Unit) {
-    val platform = LocalPlatform.current
-    val scope = rememberCoroutineScope()
-    var recording by remember { mutableStateOf(false) }
-    var busy by remember { mutableStateOf(false) }
-    IconButton(enabled = !busy, onClick = {
-        scope.launch {
-            if (!recording) {
-                val err = platform.startRecording()
-                if (err == null) recording = true else ctl.toast(err)
-            } else {
-                recording = false
-                val wav = platform.stopRecording() ?: run { ctl.toast("没有录到声音，再试一次"); return@launch }
-                busy = true
-                val r = ctl.hub.local.call(Command.Transcribe(kotlin.io.encoding.Base64.encode(wav)))
-                busy = false
-                if (!r.ok || r.data.isBlank()) ctl.toast(r.message.ifBlank { "没听清，再试一次" }) else onText(r.data.trim())
-            }
-        }
-    }) {
-        Icon(if (recording) Icons.Rounded.Stop else Icons.Rounded.Mic, if (recording) "停下并认字" else "说话",
-            tint = if (recording) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)
-    }
-    androidx.compose.runtime.DisposableEffect(Unit) { onDispose { if (recording) platform.cancelRecording() } }
 }
 
 // ———————————————— 复盘 ————————————————
