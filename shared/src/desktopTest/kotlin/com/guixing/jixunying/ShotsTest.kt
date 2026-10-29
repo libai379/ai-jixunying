@@ -866,6 +866,67 @@ class ShotsTest {
         shoot("phone-composer-dark", 824, 1784, 2f, hub, phone, "conv:c1")
     }
 
+    /**
+     * 2026-10-29 用户发手机截图（遥控电脑时顶上那一整条「正在操作电脑「DESKTOP-U8LFGC9」 切回本机」）：
+     * 「这个窗口能不能做的小一点优雅一点，在一边」。手机遥控电脑时的对话页、Code 栏、新对话首页、设置页，连着和没连上各看一次。
+     */
+    @Test
+    fun remoteBadgeShots() {
+        val dir = out ?: return
+        dir.mkdirs()
+        val tmp = tempDir("jxy-remoteshots")
+        val e = seed(File(tmp, "data"), File(tmp, "文档").apply { mkdirs() })
+        val seeded = Storage(File(tmp, "data"))
+        val msgs = listOf("c1", "c8", "c11", "c12", "c14").associateWith { seeded.loadMessages(it) }
+        // 电脑上开着「允许手机用 Code 栏」：等批准的步骤手机上有允许 / 拒绝
+        val host = e.state.copy(settings = e.state.settings.copy(code = e.state.settings.code.copy(allowPhone = true)))
+        // 假的电脑线路：一连上就把电脑的状态和这两个会话的记录发过来；online = false 就是电脑没连上
+        class Link(online: Boolean) : com.guixing.jixunying.client.FrameLink {
+            override val online = kotlinx.coroutines.flow.MutableStateFlow(online)
+            override val incoming = kotlinx.coroutines.flow.MutableSharedFlow<com.guixing.jixunying.model.WireFrame>(extraBufferCapacity = 64)
+            override suspend fun send(frame: com.guixing.jixunying.model.WireFrame) {
+                when (frame) {
+                    is com.guixing.jixunying.model.WireFrame.Hello -> {
+                        incoming.emit(com.guixing.jixunying.model.WireFrame.Evt(com.guixing.jixunying.model.Event.State(host)))
+                        msgs.forEach { (cid, list) -> incoming.emit(com.guixing.jixunying.model.WireFrame.Evt(com.guixing.jixunying.model.Event.Messages(cid, list))) }
+                    }
+                    is com.guixing.jixunying.model.WireFrame.Req -> {
+                        (frame.command as? com.guixing.jixunying.model.Command.LoadMessages)?.let { c ->
+                            incoming.emit(com.guixing.jixunying.model.WireFrame.Evt(com.guixing.jixunying.model.Event.Messages(c.convId, msgs[c.convId].orEmpty())))
+                        }
+                        incoming.emit(com.guixing.jixunying.model.WireFrame.Res(frame.reqId, com.guixing.jixunying.model.CommandResult()))
+                    }
+                    else -> {}
+                }
+            }
+            override fun close() {}
+        }
+        fun remoteHub(name: String, online: Boolean): Hub {
+            val h = Hub(Engine(Storage(File(tmp, name)), isPhone = true), linkFactory = { Link(online) }, deviceName = "SM-S938U")
+            h.attach(com.guixing.jixunying.model.PairedHost("h1", "DESKTOP-U8LFGC9", "d1", "k", emptyList()))
+            h.useRemote.value = true
+            return h
+        }
+        val phone = FakeAvPlatform(PhonePlatform())
+        val on = remoteHub("phone-on", true)
+        shoot("phone-remote-chat", 824, 1784, 2f, on, phone, "conv:c1")
+        shoot("phone-remote-code", 824, 1784, 2f, on, phone, "code:c8")
+        // 2026-10-29 用户：「允许和拒绝按钮，这么潦草吗」——等批准那一排：只有允许 / 拒绝、带「加进工作区」、带「这个开头不再问」
+        shoot("phone-remote-code-outside", 824, 1784, 2f, on, phone, "code:c11")
+        shoot("phone-remote-code-cmd", 824, 1784, 2f, on, phone, "code:c12")
+        shoot("phone-remote-home", 824, 1784, 2f, on, phone, "home")
+        shoot("phone-remote-settings", 824, 1784, 2f, on, phone, "settings:APPEARANCE")
+        shoot("phone-remote-chat-320", 640, 1422, 2f, on, phone, "conv:c1")
+        val off = remoteHub("phone-off", false)
+        shoot("phone-remote-offline", 824, 1784, 2f, off, phone, "conv:c1")
+        // 对话里改文件的卡片（手机本机、电脑上各一张）和电脑上的 Code 栏
+        val local = Hub(e)
+        shoot("phone-decide-chat", 824, 1784, 2f, local, phone, "conv:c14")
+        val desktop = DesktopPlatform(fileLog = false) { null }
+        shoot("desktop-decide-chat", 1280, 900, 1f, local, desktop, "conv:c14")
+        shoot("desktop-decide-code", 1280, 820, 1f, local, desktop, "code:c12")
+    }
+
     /** 集训场：开局页、主持人看 AI 打（暂停在第一天发言中）、真人轮到发言、打完的复盘（AI 用 WolfFakeLlm，不联网）。 */
     @Test
     fun wolfShots() {

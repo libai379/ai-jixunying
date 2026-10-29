@@ -1,5 +1,6 @@
 package com.guixing.jixunying.ui
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -22,6 +23,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.ChevronRight
+import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.SwapHoriz
 import androidx.compose.material.icons.rounded.Computer
 import androidx.compose.material.icons.rounded.Link
@@ -71,24 +73,56 @@ private fun connText(c: ConnState) = when (c) {
     ConnState.Local -> "本机"
 }
 
-/** 手机在遥控电脑时，顶上一条提示，一键切回本机。 */
+/**
+ * 手机在遥控电脑时，右上角一个小胶囊：电脑的名字，角上一个点（绿 = 连着，红 = 没连上）；点开是连接状态、「切回本机」、联机设置。
+ * 2026-10-29 用户发手机截图（以前是顶上一整条「正在操作电脑「…」  切回本机」，连按钮 52dp 高）：「这个窗口能不能做的小一点优雅一点，在一边」。
+ */
 @Composable
 fun RemoteBanner(ctl: AppController) {
     val conn by ctl.backend.conn.collectAsState()
     val ok = conn is ConnState.Connected
-    Row(
-        Modifier.fillMaxWidth().background(if (ok) MaterialTheme.colorScheme.primary.copy(alpha = 0.10f) else MaterialTheme.colorScheme.errorContainer)
-            .padding(horizontal = 14.dp, vertical = 6.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Icon(Icons.Rounded.Computer, null, Modifier.size(16.dp), tint = if (ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error)
-        Spacer(Modifier.width(8.dp))
-        val name = ctl.hub.remote.value?.host?.hostName ?: "电脑"
-        Text(if (ok) "正在操作电脑「$name」" else "电脑「$name」：${connText(conn)}", style = MaterialTheme.typography.labelMedium,
-            color = if (ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onErrorContainer,
-            modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
-        TextButton(onClick = { ctl.hub.useRemote.value = false }, contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp)) {
-            Text("切回本机", style = MaterialTheme.typography.labelMedium)
+    val name = ctl.hub.remote.value?.host?.hostName?.ifBlank { null } ?: "电脑"
+    val tint = if (ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
+    var open by remember { mutableStateOf(false) }
+    Row(Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 4.dp), horizontalArrangement = Arrangement.End) {
+        Box {
+            GlassSurface(CircleShape, Modifier.clip(CircleShape).clickable { open = true }, border = BorderStroke(1.dp, Ext.c.border)) {
+                Row(Modifier.padding(start = 10.dp, end = 6.dp, top = 5.dp, bottom = 5.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Box {
+                        Icon(Icons.Rounded.Computer, null, Modifier.size(15.dp), tint = tint)
+                        Box(Modifier.align(Alignment.TopEnd).offset(x = 3.dp, y = (-2).dp).size(7.dp).clip(CircleShape)
+                            .background(if (ok) Ext.c.success else MaterialTheme.colorScheme.error))
+                    }
+                    Spacer(Modifier.width(7.dp))
+                    Text(if (ok) name else "$name · " + if (conn == ConnState.Connecting) "连接中" else "没连上",
+                        style = MaterialTheme.typography.labelMedium, color = tint, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.widthIn(max = 170.dp))
+                    Icon(Icons.Rounded.ExpandMore, "电脑的连接状态、切回本机", Modifier.size(16.dp), tint = Ext.c.subtle)
+                }
+            }
+            androidx.compose.material3.DropdownMenu(open, { open = false }) {
+                androidx.compose.material3.DropdownMenuItem(
+                    {
+                        Column {
+                            Text("正在操作电脑「$name」")
+                            Text(connText(conn), style = MaterialTheme.typography.labelSmall, color = if (ok) Ext.c.success else MaterialTheme.colorScheme.error)
+                        }
+                    },
+                    leadingIcon = { Icon(Icons.Rounded.Computer, null, Modifier.size(18.dp)) },
+                    onClick = { open = false },
+                )
+                androidx.compose.material3.HorizontalDivider(color = Ext.c.border)
+                androidx.compose.material3.DropdownMenuItem(
+                    { Text("切回本机") },
+                    leadingIcon = { Icon(Icons.Rounded.PhoneAndroid, null, Modifier.size(18.dp)) },
+                    onClick = { open = false; ctl.hub.useRemote.value = false },
+                )
+                androidx.compose.material3.DropdownMenuItem(
+                    { Text("联机设置…") },
+                    leadingIcon = { Icon(Icons.Rounded.Link, null, Modifier.size(18.dp)) },
+                    onClick = { open = false; ctl.openSettings(SettingsTab.DEVICES) },
+                )
+            }
         }
     }
 }

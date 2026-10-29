@@ -93,6 +93,28 @@ fun Pill(text: String, color: Color = MaterialTheme.colorScheme.primary, modifie
     }
 }
 
+/** 等批准那一排按钮是哪一种：允许（实心主色）、顺便放宽（细边）、拒绝（浅红底红字）。 */
+enum class DecideKind { ALLOW, WIDEN, DENY }
+
+/**
+ * 等批准那一排的按钮（Code 栏的步骤、对话里的改文件卡片共用）。
+ * 2026-10-29 用户发手机截图：「允许和拒绝按钮，这么潦草吗」——以前「允许」是 Material 按钮（最矮 40dp），
+ * 「拒绝」是自己画的细红框（32dp 左右），一高一矮、顶端对齐。现在都是 40dp 高的胶囊、字一样大，允许和拒绝一样宽；那一排竖着居中。
+ */
+@Composable
+fun DecideButton(text: String, kind: DecideKind, onClick: () -> Unit) {
+    val error = MaterialTheme.colorScheme.error
+    val pad = PaddingValues(horizontal = 18.dp, vertical = 8.dp)
+    val m = Modifier.heightIn(min = 40.dp).widthIn(min = if (kind == DecideKind.WIDEN) 0.dp else 92.dp)
+    val label: @Composable RowScope.() -> Unit = { Text(text, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+    when (kind) {
+        DecideKind.ALLOW -> androidx.compose.material3.Button(onClick, m, contentPadding = pad, content = label)
+        DecideKind.WIDEN -> androidx.compose.material3.OutlinedButton(onClick, m, contentPadding = pad, border = BorderStroke(1.dp, Ext.c.border), content = label)
+        DecideKind.DENY -> androidx.compose.material3.Button(onClick, m, contentPadding = pad, content = label,
+            colors = androidx.compose.material3.ButtonDefaults.buttonColors(containerColor = error.copy(alpha = 0.13f), contentColor = error))
+    }
+}
+
 @Composable
 fun ToggleChip(label: String, icon: ImageVector, checked: Boolean, onToggle: () -> Unit) {
     val primary = MaterialTheme.colorScheme.primary

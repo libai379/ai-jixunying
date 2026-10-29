@@ -481,20 +481,15 @@ private fun ReadApprovalCard(ctl: AppController, m: Message, t: ToolStep, who: S
         Text("$who 要${t.note.ifBlank { "改这个文件" }}：", style = MaterialTheme.typography.labelMedium, color = Ext.c.warning)
         SelectionContainer { Text(t.input, style = if (t.kind == "run") MaterialTheme.typography.bodyMedium.copy(fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace) else MaterialTheme.typography.bodyMedium) }
         if (t.output.isNotBlank()) ScrollPane { DiffLines(t.output) }
-        androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Button(onClick = { ctl.run(Command.ChatDecide(m.convId, t.id, true)) },
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 16.dp, vertical = 6.dp)) {
-                Text(if (canWiden) "只允许这一次" else "允许")
-            }
-            if (canWiden && t.scopeDir.isNotBlank()) androidx.compose.material3.OutlinedButton(
-                onClick = { ctl.run(Command.ChatDecide(m.convId, t.id, true, "dir")) },
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 14.dp, vertical = 6.dp),
-            ) { Text("允许，${t.scopeDir.substringAfterLast('\\').substringAfterLast('/')} 这个对话里以后不再问", maxLines = 1, overflow = TextOverflow.Ellipsis) }
-            Box(
-                Modifier.clip(RoundedCornerShape(50)).border(1.dp, MaterialTheme.colorScheme.error, RoundedCornerShape(50))
-                    .clickable { ctl.run(Command.ChatDecide(m.convId, t.id, false)) }.padding(horizontal = 16.dp, vertical = 6.dp),
-            ) { Text("拒绝", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.error) }
+        // 允许、拒绝两个在第一行挨着；「以后不再问」另起一行（和 Code 栏一样）
+        androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp),
+            itemVerticalAlignment = Alignment.CenterVertically) {
+            DecideButton(if (canWiden) "只允许这一次" else "允许", DecideKind.ALLOW) { ctl.run(Command.ChatDecide(m.convId, t.id, true)) }
+            DecideButton("拒绝", DecideKind.DENY) { ctl.run(Command.ChatDecide(m.convId, t.id, false)) }
         }
+        if (canWiden && t.scopeDir.isNotBlank()) DecideButton(
+            "允许，${t.scopeDir.substringAfterLast('\\').substringAfterLast('/')} 这个对话里以后不再问", DecideKind.WIDEN,
+        ) { ctl.run(Command.ChatDecide(m.convId, t.id, true, "dir")) }
     }
 }
 

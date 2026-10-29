@@ -1206,28 +1206,21 @@ private fun CodeToolStep(ctl: AppController, msg: Message, t: ToolStep, canAct: 
                         // 「顺便放宽」的两个选项：能批准就能给（2026-10-28 起手机上也给，PhoneGate 不再当成只允许这一次）
                         val canWiden = !readonly
                         if (t.kind == "write" || t.kind == "edit") if (t.scopeDir.isNotBlank()) Text("这个文件在工作区外面。", style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
-                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                            Button(
-                                onClick = { ctl.run(Command.CodeDecide(msg.convId, t.id, true)) },
-                                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 16.dp, vertical = 6.dp),
-                            ) { Text(if (canWiden && (t.scopeDir.isNotBlank() || t.prefix.isNotBlank())) "只允许这一次" else "允许") }
-                            if (canWiden && t.scopeDir.isNotBlank()) OutlinedButton(
-                                onClick = { ctl.run(Command.CodeDecide(msg.convId, t.id, true, "dir")) },
-                                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 14.dp, vertical = 6.dp),
-                            ) { Text("允许，并把 ${folderName(t.scopeDir)} 加进工作区", maxLines = 1, overflow = TextOverflow.Ellipsis) }
-                            if (canWiden && t.prefix.isNotBlank()) OutlinedButton(
-                                onClick = { ctl.run(Command.CodeDecide(msg.convId, t.id, true, "command")) },
-                                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 14.dp, vertical = 6.dp),
-                            ) {
-                                Text(if (t.prefix.startsWith("web:")) "允许，${t.prefix.removePrefix("web:")} 这个会话里不再问"
-                                    else "允许，「${t.prefix.take(30)}」开头的这个会话里不再问", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        // 允许、拒绝两个在第一行挨着；「顺便放宽」的长按钮另起一行（以前排在中间，窄屏上把「拒绝」挤到单独一行）
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp),
+                            itemVerticalAlignment = Alignment.CenterVertically) {
+                            DecideButton(if (canWiden && (t.scopeDir.isNotBlank() || t.prefix.isNotBlank())) "只允许这一次" else "允许", DecideKind.ALLOW) {
+                                ctl.run(Command.CodeDecide(msg.convId, t.id, true))
                             }
-                            Box(
-                                Modifier.clip(RoundedCornerShape(50)).border(1.dp, MaterialTheme.colorScheme.error, RoundedCornerShape(50))
-                                    .clickable { ctl.run(Command.CodeDecide(msg.convId, t.id, false)) }
-                                    .padding(horizontal = 16.dp, vertical = 6.dp),
-                            ) { Text("拒绝", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.error) }
+                            DecideButton("拒绝", DecideKind.DENY) { ctl.run(Command.CodeDecide(msg.convId, t.id, false)) }
                         }
+                        if (canWiden && t.scopeDir.isNotBlank()) DecideButton("允许，并把 ${folderName(t.scopeDir)} 加进工作区", DecideKind.WIDEN) {
+                            ctl.run(Command.CodeDecide(msg.convId, t.id, true, "dir"))
+                        }
+                        if (canWiden && t.prefix.isNotBlank()) DecideButton(
+                            if (t.prefix.startsWith("web:")) "允许，${t.prefix.removePrefix("web:")} 这个会话里不再问"
+                            else "允许，「${t.prefix.take(30)}」开头的这个会话里不再问", DecideKind.WIDEN,
+                        ) { ctl.run(Command.CodeDecide(msg.convId, t.id, true, "command")) }
                     }
                     t.approval == "denied" -> Text(deniedText(t), style = MaterialTheme.typography.bodySmall, color = Ext.c.warning)
                     t.note.isNotEmpty() -> Text(t.note, style = MaterialTheme.typography.bodySmall,
