@@ -260,6 +260,8 @@ class EngineTest {
                             }
                             toolTexts.any { "视频做好了" in it } -> say("做好了。")
                             toolTexts.any { "做视频失败" in it } -> say("没做成。")
+                            // 2026-10-30 真回答里出过：学着聊天记录在开头写「〔11月x日?〕」、正文里夹「[附件：…]」
+                            latest.contains("学时间") -> say("〔11月x日?〕好的 [附件：视频_1.mp4]")
                             // 聊天里要图：先调 generate_image，拿到结果再说话
                             hasDraw && latest.contains("画") && !sawTool -> {
                                 chunk("""{"tool_calls":[{"index":0,"id":"img_1","type":"function","function":{"name":"generate_image","arguments":"{\"prompt\":\"一只慢吞吞的猫\"}"}}]}""")
@@ -1343,10 +1345,13 @@ class EngineTest {
         fun msg(id: Long, items: String, from: String = "me@im.wechat") = """{"message_id":$id,"from_user_id":"$from","to_user_id":"bot1@im.bot","message_type":1,"context_token":"ctx$id","item_list":[$items]}"""
         val keyB64 = Base64.getEncoder().encodeToString(wxKey)
         wxInbox += msg(98765432109876543, """{"type":1,"text_item":{"text":"你好"}}""")
+        withTimeout(20_000) { while (wxSent.none { "我是小智" in it }) delay(50) }
+        // 2026-10-30：连发的几条（图 + 话、再一句要画图）一起进对话、按最后一句答一次，不再一条一条翻旧话题
         wxInbox += msg(2, """{"type":2,"image_item":{"media":{"encrypt_query_param":"img1","aes_key":"$keyB64","encrypt_type":1}}},{"type":1,"text_item":{"text":"看看这张"}}""")
         wxInbox += msg(3, """{"type":1,"text_item":{"text":"帮我画一只猫"}}""")
         // 陌生人发来的不理（只回答扫码绑定的本人）
         wxInbox += msg(5, """{"type":1,"text_item":{"text":"我是陌生人"}}""", from = "stranger@im.wechat")
+        withTimeout(20_000) { while (wxSent.none { "画好了" in it }) delay(50) }
         wxInbox += msg(4, """{"type":1,"text_item":{"text":"/新对话"}}""")
         withTimeout(20_000) { while (wxSent.none { "换个新话题" in it }) delay(50) }
 
@@ -1359,6 +1364,9 @@ class EngineTest {
         assertEquals("你好", msgs.first().content)
         val img = msgs.first { it.content == "看看这张" }.attachments.single()
         assertContentEquals(png, e.fileBytes(img.id), "图片下载后解密")
+        val look = msgs.indexOfFirst { it.content == "看看这张" }
+        assertEquals("帮我画一只猫", msgs[look + 1].content, "连发的两条挨着进了对话，中间没有插一条回答")
+        assertEquals(1, msgs.drop(look).count { it.role == Role.AI }, "两条只答一次")
 
         val texts = wxSent.filter { it.startsWith("{") }.map { Json.parseToJsonElement(it).jsonObject["msg"]!!.jsonObject }
         val firstReply = texts.first()
@@ -1381,9 +1389,42 @@ class EngineTest {
         assertEquals("周报.docx", fileMsg["file_item"]!!.jsonObject["file_name"]!!.jsonPrimitive.content)
         assertEquals("dl1", fileMsg["file_item"]!!.jsonObject["media"]!!.jsonObject["encrypt_query_param"]!!.jsonPrimitive.content)
 
+        // 2026-10-30 用户：「微信聊天里边用 MiniMax 生成的两个视频文件都读不到」——视频照官方插件按视频消息发（上传 media_type 2、消息 type 5），微信里直接能播
+        System.setProperty("jxy.videoPollMs", "30")
+        e.call(Command.SaveProvider(ProviderConfig("pq", "qianwen", "千问AI平台（阿里）", "${base()}/compatible-mode/v1", "k", listOf(ModelInfo("qwen3.8-max")))))
+        wxSent.clear()
+        wxInbox += msg(8, """{"type":1,"text_item":{"text":"做一段海边日落的视频"}}""")
+        withTimeout(30_000) { while (wxSent.none { "video_item" in it }) delay(50) }
+        assertTrue(wxSent.any { it.startsWith("upload:") && "\"media_type\":2" in it }, "视频按 media_type 2 上传")
+        val vid = wxSent.first { "video_item" in it }.let { Json.parseToJsonElement(it).jsonObject["msg"]!!.jsonObject["item_list"]!!.jsonArray[0].jsonObject }
+        assertEquals("5", vid["type"]!!.jsonPrimitive.content)
+        assertEquals("dl1", vid["video_item"]!!.jsonObject["media"]!!.jsonObject["encrypt_query_param"]!!.jsonPrimitive.content)
+        assertTrue(vid["video_item"]!!.jsonObject["video_size"]!!.jsonPrimitive.content.toInt() % 16 == 0, "video_size 是密文长度（16 的倍数）")
+        assertTrue(wxSent.none { "file_item" in it && ".mp4" in it }, "视频不再当普通文件发")
+
         e.call(Command.WeixinLogout)
         assertFalse(e.state.weixin.bound)
         bridge.stop()
+    }
+
+    /** 2026-10-30 真回答里出过「〔11月x日〕」开头、正文里夹「[附件：视频_119551.mp4]」：学聊天记录的格式写的，回答里去掉。 */
+    @Test
+    fun replyDropsCopiedTimeAndAttachmentTags() = runBlocking {
+        val (e, ms) = engineWithMembers("小智")
+        val conv = e.call(Command.CreateConversation(listOf(ms[0].id))).data
+        e.call(Command.UpdateConversation(e.state.conversation(conv)!!.copy(webSearch = false)))
+        e.call(Command.SendMessage(conv, "学时间"))
+        waitIdle(e, conv, 1)
+        assertEquals("好的", e.store.messages.value[conv]!!.last { it.role == Role.AI }.content)
+    }
+
+    /** 2026-10-30 用户：「每次回答后面都加入来源最下面这一段，传到微信的时候自动过滤」：正文里的编号、末尾的来源列表不发到微信。 */
+    @Test
+    fun weixinDropsCitations() {
+        val f = com.guixing.jixunying.engine.WeixinBridge.Companion::withoutCitations
+        val answer = "真腊沉香是上品[1][2]，有宋代原文支撑[3]。\n\n所以核心是这个。\n\n来源：\n1. 清 观音菩萨_凤凰拍卖 2013年春季艺术品拍卖会 http://auction.zhuokearts.com/art/27683345.shtml\n2. 园地拍卖 http://pai.chcoin.com/showlist-0-2661.html?f=6-0-13"
+        assertEquals("真腊沉香是上品，有宋代原文支撑。\n\n所以核心是这个。", f(answer))
+        assertEquals("来源：朋友推荐的，没有网址。", f("来源：朋友推荐的，没有网址。"), "正文里的「来源：」后面不是网址列表，不删")
     }
 
     @Test
@@ -1889,6 +1930,8 @@ class EngineTest {
             wxSent.clear()
             wxInbox += msg(14, "手机答过的这条", tC)
             wxInbox += msg(15, "积压的新消息", tC + 1)
+            withTimeout(20_000) { while (replies().count { "小智" in it } < 1) delay(50) }
+            // 隔开发（连着发会攒在一起答一次，2026-10-30）
             wxInbox += msg(16, "电脑回来了吗", System.currentTimeMillis() + 5_000)
             withTimeout(20_000) { while (replies().count { "小智" in it } < 2) delay(50) }
             delay(500)

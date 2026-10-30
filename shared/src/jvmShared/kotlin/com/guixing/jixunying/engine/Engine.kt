@@ -3429,17 +3429,35 @@ class Engine(
      * 外部渠道来的一句话：放进对话、等这一轮答完，返回 AI 的回答（最终内容）。
      * 和界面上发消息走同一套（@ 拉人、工具、记忆都一样）；界面上能看到，也能点「停止」。
      */
-    suspend fun channelTurn(convId: String, text: String, attachmentIds: List<String>): List<Message> {
+    suspend fun channelTurn(convId: String, text: String, attachmentIds: List<String>): List<Message> =
+        channelTurn(convId, listOf(ChannelInput(text, attachmentIds)))
+
+    /** 渠道（微信）发来的一条：文字、附件、对方发出的时间（0 = 现在）。 */
+    data class ChannelInput(val text: String, val attachmentIds: List<String>, val at: Long = 0)
+
+    /**
+     * 几条一起进对话、按最后一条答一次（2026-10-30 用户：微信助理「后来新的那个话题，它似乎没有看到……每次回答都没有强制他去看上下文」）：
+     * 以前连发几条是一条一条排队答，答第一条时后面几条还没进对话，AI 看不到，就一条条翻旧话题。
+     * 每条带对方真正发出的时间（AI 的时钟按它算，不按轮到它的时间）。
+     */
+    suspend fun channelTurn(convId: String, inputs: List<ChannelInput>): List<Message> {
         var conv = state.conversation(convId) ?: return emptyList()
-        val invited = outsidersCalled(text, conv)
+        val invited = outsidersCalled(inputs.joinToString("\n") { it.text }, conv)
         if (invited.isNotEmpty()) {
             updateState { s -> s.copy(conversations = s.conversations.map { if (it.id == conv.id) it.copy(memberIds = it.memberIds + invited.map { m -> m.id }) else it }) }
             conv = state.conversation(convId) ?: return emptyList()
         }
         if (conv.memberIds.isEmpty()) return emptyList()
-        val atts = attachmentIds.mapNotNull { storage.fileMeta(it) }
-        val userMsg = Message(newId(), convId, Role.USER, USER_ID, text.trim(), attachments = atts, createdAt = now())
-        addMessage(userMsg)
+        var last: Message? = null
+        for (i in inputs) {
+            val atts = i.attachmentIds.mapNotNull { storage.fileMeta(it) }
+            if (i.text.isBlank() && atts.isEmpty()) continue
+            val at = if (i.at > 0) minOf(i.at, now()) else now()
+            val m = Message(newId(), convId, Role.USER, USER_ID, i.text.trim(), attachments = atts, createdAt = at)
+            addMessage(m)
+            last = m
+        }
+        val userMsg = last ?: return emptyList()
         touchConversation(convId, null)
         val job = scope.async { runTurn(convId, userMsg) }
         running.getOrPut(convId) { ConcurrentHashMap.newKeySet() }.add(job)
@@ -3952,8 +3970,11 @@ class Engine(
         var t = text.trim()
         // 模型有时会学聊天记录的格式，在开头写「【自己名字】」
         listOf("【${me.name}】", "${me.name}：", "${me.name}:").forEach { if (t.startsWith(it)) t = t.removePrefix(it).trimStart() }
-        // 学着聊天记录在开头写了时间（「〔10月29日 23:53〕」「【阿德 · 10月29日 23:53】」）
-        t = t.replace(Regex("""^[〔【][^〕】\n]{0,24}\d{1,2}:\d{2}[〕】]\s*"""), "")
+        // 学着聊天记录在开头写了时间（「〔10月29日 23:53〕」「【阿德 · 10月29日 23:53】」）；10-30 真回答里还写过「〔11月x日〕」「〔11月x日?〕」这种没有钟点的，〔〕开头的一律去掉
+        t = t.replace(Regex("""^〔[^〕\n]{0,30}〕\s*"""), "")
+        t = t.replace(Regex("""^【[^】\n]{0,24}\d{1,2}:\d{2}】\s*"""), "")
+        // 学着聊天记录写「[附件：视频_119551.mp4]」（附件本来就单独显示在回答下面）
+        t = t.replace(Regex("""\s*\[附件：[^\]\n]{1,80}\]"""), "")
         return t
     }
 

@@ -932,6 +932,8 @@ class ShotsTest {
         shoot("desktop-home-mic", 1280, 820, 1f, local, desktop, "home")
         // 2026-10-29 用户：「过程汇报……和做完之后要汇报的……要分开」——过程小字淡色，汇报单独一张卡片
         shoot("desktop-code-report", 1280, 1300, 1f, local, desktop, "code:c15")
+        // 2026-10-30 用户：货币换算「只留两个窗口就够了，上下两个窗口选货币并排，右边两个窗口填金额」
+        shoot("phone-costs-converter", 824, 7000, 2f, local, phone, "costs")
         shoot("phone-code-report", 824, 2400, 2f, local, phone, "code:c15")
     }
 

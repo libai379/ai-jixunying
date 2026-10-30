@@ -506,7 +506,8 @@ class CodeAgent(private val host: CodeHost) {
             }
             if (text.isBlank() && images.isEmpty()) continue
             // 每句话标上几点说的（2026-10-29 用户要 AI 感知时间的流逝，和对话栏一样）
-            text = (if (role == "user") "【我 · ${Prompts.clock(m.createdAt)}】" else "〔${Prompts.clock(m.createdAt)}〕") + text
+            // 只给用户的话标时间：Code 栏的回答不过 cleanReply，自己的话也标的话它会学着在回答开头写（10-30 对话栏里出过「〔11月x日〕」）
+            if (role == "user") text = "【我 · ${Prompts.clock(m.createdAt)}】" + text
             // 有的接口不允许连着两条同一个角色，合并一下
             val last = parts.lastOrNull()
             if (last != null && last.role == role) parts[parts.size - 1] = Part(role, last.text + "\n\n" + text, last.images + images)

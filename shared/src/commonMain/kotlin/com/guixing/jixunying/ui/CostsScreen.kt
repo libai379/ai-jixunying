@@ -23,12 +23,15 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.Menu
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -544,41 +547,37 @@ private val currencyNames = linkedMapOf(
 )
 
 /**
- * 每一行都是输入框（2026-10-27 用户：「上面只能填美元……这些币里边可以随意换算」）：在哪一行填，就以那一行为准换出别的行。
- * 以前是一个金额框 + 一排小标签选货币，看着像只能填美元。
+ * 两行（2026-10-30 用户：「只留两个窗口就够了，上下两个窗口选货币并排，右边两个窗口填金额，上下可以互相换算」）：
+ * 每行左边选货币、右边填金额；在哪一行填，就以那一行为准换出另一行。中间一行写汇率。
+ * 以前（10-27）是 14 种货币各一行，太长。
  */
 @Composable
 private fun ConverterCard(ctl: AppController, costs: com.guixing.jixunying.model.CostSettings) {
     // 美元对人民币用页面上那个（可能是手填的）；别的用联网取的
     val perUsd = costs.fx + ("USD" to 1.0) + ("CNY" to costs.usdRate)
-    var from by remember { mutableStateOf("CNY") }
+    var top by remember { mutableStateOf("CNY") }
+    var bottom by remember { mutableStateOf("USD") }
+    // 用户最后在哪一行填的：0 上面、1 下面；另一行跟着算
+    var typedIn by remember { mutableStateOf(0) }
     var amountText by remember { mutableStateOf("100") }
     var busy by remember { mutableStateOf(false) }
-    val amount = amountText.toDoubleOrNull()
-    val fromRate = perUsd[from]
+    fun convert(text: String, from: String, to: String): String {
+        val v = text.toDoubleOrNull() ?: return ""
+        val a = perUsd[from] ?: return ""
+        val b = perUsd[to] ?: return ""
+        return plainMoney(v / a * b)
+    }
+    val topText = if (typedIn == 0) amountText else convert(amountText, bottom, top)
+    val bottomText = if (typedIn == 1) amountText else convert(amountText, top, bottom)
     SectionCard {
-        FieldLabel("货币换算", "在任意一种货币那一行填数，别的几种跟着换算")
-        currencyNames.forEach { (code, name) ->
-            val to = perUsd[code]
-            val shown = when {
-                code == from -> amountText
-                amount != null && fromRate != null && to != null -> plainMoney(amount / fromRate * to)
-                else -> ""
-            }
-            Row(Modifier.fillMaxWidth().padding(vertical = 3.dp), verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.width(96.dp)) {
-                    Text(name, style = MaterialTheme.typography.bodyMedium, fontWeight = if (code == from) FontWeight.SemiBold else FontWeight.Normal, maxLines = 2)
-                    Text(code, style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
-                }
-                Spacer(Modifier.width(8.dp))
-                if (to == null) Text("还没取到汇率", style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle, modifier = Modifier.weight(1f))
-                else AppTextField(shown, { t -> from = code; amountText = t.filter { c -> c.isDigit() || c == '.' }.take(14) },
-                    modifier = Modifier.weight(1f), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
-            }
-            if (code != from && fromRate != null && to != null) Text("1 ${currencyNames[from]} = ${fmtRate(to / fromRate)} $name",
-                style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, modifier = Modifier.padding(start = 104.dp))
-        }
-        Row(verticalAlignment = Alignment.CenterVertically) {
+        FieldLabel("货币换算", "左边选货币，右边填金额；上下哪一行填都行")
+        ConverterRow(top, topText, perUsd, { top = it }) { t -> typedIn = 0; amountText = t }
+        val a = perUsd[top]
+        val b = perUsd[bottom]
+        Text(if (a != null && b != null) "1 ${currencyNames[top]} = ${fmtRate(b / a)} ${currencyNames[bottom]}" else "这两种之间的汇率还没取到",
+            style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, modifier = Modifier.padding(vertical = 4.dp))
+        ConverterRow(bottom, bottomText, perUsd, { bottom = it }) { t -> typedIn = 1; amountText = t }
+        Row(Modifier.padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
             Text(if (costs.fx.isEmpty()) "别的货币的汇率还没取到，点「现在更新」联网取。" else if (costs.usdRateAt > 0) "汇率 ${formatTime(costs.usdRateAt)} 从 ${costs.usdRateFrom} 取的，每 12 小时自动更新。" else "",
                 style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, modifier = Modifier.weight(1f))
             TextButton(enabled = !busy, onClick = {
@@ -586,6 +585,36 @@ private fun ConverterCard(ctl: AppController, costs: com.guixing.jixunying.model
                 ctl.run(Command.RefreshUsdRate, quiet = true) { r -> busy = false; ctl.toast(if (r.ok) "汇率更新了" else r.message) }
             }) { Text(if (busy) "正在取…" else "现在更新", style = MaterialTheme.typography.labelMedium) }
         }
+    }
+}
+
+/** 换算的一行：左边点开选货币，右边填金额。 */
+@Composable
+private fun ConverterRow(code: String, text: String, perUsd: Map<String, Double>, onPick: (String) -> Unit, onType: (String) -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    Row(Modifier.fillMaxWidth().padding(vertical = 3.dp), verticalAlignment = Alignment.CenterVertically) {
+        Box {
+            OutlinedButton(onClick = { open = true }, modifier = Modifier.width(132.dp), contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp)) {
+                Column(Modifier.weight(1f)) {
+                    Text(currencyNames[code] ?: code, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                    Text(code, style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
+                }
+                Icon(Icons.Rounded.ExpandMore, "选货币", Modifier.size(18.dp), tint = Ext.c.subtle)
+            }
+            DropdownMenu(open, { open = false }) {
+                currencyNames.forEach { (c, name) ->
+                    val has = perUsd[c] != null
+                    DropdownMenuItem(
+                        text = { Text("$name  $c" + if (has) "" else "（还没取到汇率）", color = if (has) MaterialTheme.colorScheme.onSurface else Ext.c.subtle) },
+                        onClick = { open = false; onPick(c) },
+                        enabled = has,
+                    )
+                }
+            }
+        }
+        Spacer(Modifier.width(10.dp))
+        AppTextField(text, { t -> onType(t.filter { c -> c.isDigit() || c == '.' }.take(14)) },
+            modifier = Modifier.weight(1f), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
     }
 }
 
