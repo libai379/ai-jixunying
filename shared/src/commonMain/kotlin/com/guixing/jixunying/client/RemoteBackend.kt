@@ -10,6 +10,8 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -39,6 +41,9 @@ interface FrameLink {
 }
 
 /** 手机遥控电脑：指令经加密线路发给电脑，电脑推回事件。电脑关着时这里显示离线，手机本机照常能用。 */
+/** 从电脑取文件时一段多大：经公共中转加密后约 6 片（每片 96KB）。 */
+private const val FILE_PART = 512 * 1024
+
 class RemoteBackend(
     val host: PairedHost,
     private val link: FrameLink,
@@ -205,13 +210,72 @@ class RemoteBackend(
         return runCatching { AppJson.decodeFromString(Attachment.serializer(), r.data) }.getOrNull()
     }
 
+    private val _downloads = MutableStateFlow<Map<String, Float>>(emptyMap())
+    override val downloads: StateFlow<Map<String, Float>> = _downloads
+
+    /**
+     * 从电脑取文件：一段 512KB 地取，三段一起，哪段没到就单独重取（2026-10-30 用户：手机上 MiniMax 做的视频「打不开，也下载不了」——
+     * 以前整个文件一次传，17MB 经公共中转切成两百多片一起发，丢一片就拼不起来、等 120 秒算失败；千问的 3MB 四十来片过得去）。
+     * 电脑是旧版、不认分段：第一段 20 秒没回音就按旧办法整个取。
+     */
     override suspend fun fileBytes(id: String): ByteArray? {
         fileCache[id]?.let { return it }
-        val r = call(Command.GetFile(id))
-        if (!r.ok) return null
-        return runCatching { Base64.decode(r.data) }.getOrNull()?.also {
-            fileCache[id] = it
-            while (fileCache.size > 30) fileCache.remove(fileCache.keys.first())
+        val got = try { fileInParts(id) } finally { _downloads.value = _downloads.value - id }
+        val bytes = when (got) {
+            is PartsResult.Done -> got.bytes
+            // 电脑不认分段（旧版）：按旧办法整个取
+            PartsResult.NotSupported -> call(Command.GetFile(id)).takeIf { it.ok }?.let { r -> runCatching { Base64.decode(r.data) }.getOrNull() }
+            PartsResult.Failed -> null
         }
+        // 只把小文件（图片这类）留在内存里；十几 MB 的视频留几个手机内存就紧了
+        return bytes?.also {
+            if (it.size <= 4 * 1024 * 1024) {
+                fileCache[id] = it
+                while (fileCache.size > 30) fileCache.remove(fileCache.keys.first())
+            }
+        }
+    }
+
+    private sealed interface PartsResult {
+        class Done(val bytes: ByteArray) : PartsResult
+        data object NotSupported : PartsResult
+        data object Failed : PartsResult
+    }
+
+    private suspend fun fileInParts(id: String): PartsResult {
+        // 第一段 20 秒没回音：多半是旧版电脑不认这条（它会直接丢掉认不出的请求，不回话）
+        val first = withTimeoutOrNull(20.seconds) { part(id, 0, tries = 1) } ?: return PartsResult.NotSupported
+        val total = first.first
+        if (total > Int.MAX_VALUE || total < 0) return PartsResult.Failed
+        val out = ByteArray(total.toInt())
+        first.second.copyInto(out, 0)
+        var done = first.second.size.toLong()
+        val offsets = (first.second.size.toLong() until total step FILE_PART.toLong()).toList()
+        _downloads.value = _downloads.value + (id to (done.toFloat() / total.coerceAtLeast(1)))
+        for (window in offsets.chunked(3)) {
+            val got = coroutineScope {
+                window.map { off -> async { off to part(id, off) } }.map { it.await() }
+            }
+            for ((off, p) in got) {
+                val bytes = p?.second ?: return PartsResult.Failed
+                bytes.copyInto(out, off.toInt())
+                done += bytes.size
+            }
+            _downloads.value = _downloads.value + (id to (done.toFloat() / total))
+        }
+        return if (done == total) PartsResult.Done(out) else PartsResult.Failed
+    }
+
+    /** 取一段：(整个文件多少字节, 这一段)；最多试 tries 次，文件不在就不再试。 */
+    private suspend fun part(id: String, offset: Long, tries: Int = 3): Pair<Long, ByteArray>? {
+        repeat(tries) {
+            val r = call(Command.GetFilePart(id, offset, FILE_PART))
+            if (r.ok) {
+                val total = r.message.toLongOrNull()
+                val bytes = runCatching { Base64.decode(r.data) }.getOrNull()
+                if (total != null && bytes != null) return total to bytes
+            } else if (r.message == "文件不存在") return null
+        }
+        return null
     }
 }

@@ -34,7 +34,11 @@ interface Backend {
     suspend fun fileBytes(id: String): ByteArray?
     /** 本机是不是引擎所在的电脑（决定显示「手机连接」还是「连接电脑」）。 */
     val isHost: Boolean
+    /** 正在从电脑取的文件：编号 → 取了几成（0～1）。本机的不用取，一直是空的。 */
+    val downloads: StateFlow<Map<String, Float>> get() = NoDownloads
 }
+
+private val NoDownloads: StateFlow<Map<String, Float>> = MutableStateFlow(emptyMap())
 
 /** 把事件流落成界面可观察的状态。本地和远程共用。 */
 class ClientStore {

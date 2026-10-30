@@ -148,6 +148,20 @@ class Storage(val root: File) {
 
     fun fileBytes(id: String): ByteArray? = File(fileDir, safe(id)).takeIf { it.isFile }?.readBytes()
 
+    /** 文件的一段：(整个文件多少字节, 从 offset 起最多 length 字节)；文件不在返回 null。 */
+    fun fileSlice(id: String, offset: Long, length: Int): Pair<Long, ByteArray>? {
+        val f = File(fileDir, safe(id)).takeIf { it.isFile } ?: return null
+        java.io.RandomAccessFile(f, "r").use { raf ->
+            val total = raf.length()
+            val from = offset.coerceIn(0, total)
+            val n = minOf(length.toLong(), total - from).toInt().coerceAtLeast(0)
+            val buf = ByteArray(n)
+            raf.seek(from)
+            raf.readFully(buf)
+            return total to buf
+        }
+    }
+
     fun fileText(id: String): String? = File(fileDir, safe(id) + ".txt").takeIf { it.isFile }?.readText(Charsets.UTF_8)
 
     fun deleteFile(id: String) {

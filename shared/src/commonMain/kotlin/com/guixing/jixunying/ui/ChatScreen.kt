@@ -880,6 +880,9 @@ private fun MadeFileChip(ctl: AppController, a: Attachment) {
     val platform = LocalPlatform.current
     val scope = rememberCoroutineScope()
     var busy by remember { mutableStateOf(false) }
+    // 遥控电脑时大文件一段一段取，显示取到几成（2026-10-30，视频十几 MB 要取一会儿）
+    val downloads by ctl.backend.downloads.collectAsState()
+    val pct = downloads[a.id]
     fun open() {
         if (busy) return
         busy = true
@@ -889,7 +892,7 @@ private fun MadeFileChip(ctl: AppController, a: Attachment) {
             val ok = here || (ctl.backend.fileBytes(a.id)?.let { platform.openBytes(a.name, it) } == true)
             if (!ok) {
                 val bytes = ctl.backend.fileBytes(a.id)
-                if (bytes == null) ctl.toast("文件取不到") else if (platform.saveFile(a.name, bytes)) ctl.toast("已保存《${a.name}》")
+                if (bytes == null) ctl.toast("文件没取过来：网络不好或电脑没开，再点一次") else if (platform.saveFile(a.name, bytes)) ctl.toast("已保存《${a.name}》")
             }
             busy = false
         }
@@ -901,20 +904,21 @@ private fun MadeFileChip(ctl: AppController, a: Attachment) {
     ) {
         val ext = a.name.substringAfterLast('.', "").uppercase().take(4)
         Box(Modifier.size(36.dp).clip(RoundedCornerShape(8.dp)).background(docColor(ext)), contentAlignment = Alignment.Center) {
-            if (busy) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp, color = Color.White)
+            if (busy && pct != null) Text("${(pct * 100).toInt()}%", color = Color.White, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+            else if (busy) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp, color = Color.White)
             else Text(when (ext) { "XLSX" -> "表"; "DOCX" -> "文"; "PPTX" -> "演"; "MP4" -> "视"; else -> ext }, color = Color.White, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
         }
         Spacer(Modifier.width(10.dp))
         // weight(fill = false)：窄屏上文字让位，「另存为」不被挤没（10-24 phoneSettingsFit）
         Column(Modifier.weight(1f, fill = false).widthIn(max = 280.dp)) {
             Text(a.name, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text(listOf(formatSize(a.size), a.note).filter { it.isNotBlank() }.joinToString(" · ") + " · 点一下打开",
+            Text(if (pct != null) "正在从电脑取 ${(pct * 100).toInt()}%（${formatSize(a.size)}）" else listOf(formatSize(a.size), a.note).filter { it.isNotBlank() }.joinToString(" · ") + " · 点一下打开",
                 style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
         IconButton(onClick = {
             scope.launch {
                 val bytes = ctl.backend.fileBytes(a.id)
-                if (bytes == null) ctl.toast("文件取不到") else if (platform.saveFile(a.name, bytes)) ctl.toast("已保存《${a.name}》")
+                if (bytes == null) ctl.toast("文件没取过来：网络不好或电脑没开，再点一次") else if (platform.saveFile(a.name, bytes)) ctl.toast("已保存《${a.name}》")
             }
         }, Modifier.size(34.dp)) { Icon(Icons.Rounded.Download, "另存为", Modifier.size(18.dp), tint = Ext.c.subtle) }
     }

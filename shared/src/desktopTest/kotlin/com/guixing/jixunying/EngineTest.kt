@@ -55,6 +55,7 @@ import java.io.ByteArrayOutputStream
 import java.io.File
 import java.net.ServerSocket
 import java.util.Base64
+import kotlinx.coroutines.launch
 import java.util.Collections
 import java.util.Properties
 import java.util.zip.ZipEntry
@@ -2034,6 +2035,17 @@ class EngineTest {
             val bigAtt = remote.upload("大文件.bin", "application/octet-stream", big)
             assertNotNull(bigAtt)
             assertContentEquals(big, remote.fileBytes(bigAtt.id))
+
+            // 2026-10-30 用户：手机上 MiniMax 做的视频「打不开，也下载不了」——电脑上的大文件手机一段 512KB 地取（三段一起），看得到取了几成
+            val video = ByteArray(5_300_000) { (it * 7 % 253).toByte() }
+            val vAtt = AppJson.decodeFromString(com.guixing.jixunying.model.Attachment.serializer(),
+                pc.call(Command.UploadFile("视频.mp4", "video/mp4", Base64.getEncoder().encodeToString(video))).data)
+            val progress = java.util.Collections.synchronizedList(mutableListOf<Float>())
+            val watch = launch { remote.downloads.collect { m -> m[vAtt.id]?.let { progress += it } } }
+            assertContentEquals(video, remote.fileBytes(vAtt.id))
+            watch.cancel()
+            assertTrue(progress.isNotEmpty() && progress.all { it in 0f..1f }, "取的时候有进度：$progress")
+            assertTrue(remote.downloads.value.isEmpty(), "取完了不再显示进度")
 
             // 手机切到后台省电：断开中转；回前台换一套新连接接上，照常能用
             remote.pause()

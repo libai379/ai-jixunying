@@ -200,6 +200,11 @@ sealed interface Command {
     @Serializable data class UploadFile(val name: String, val mime: String, val base64: String) : Command
     /** 远程取文件：结果 data 是 Base64。 */
     @Serializable data class GetFile(val id: String) : Command
+    /**
+     * 远程取文件的一段（2026-10-30 用户：手机上 MiniMax 做的视频「打不开，也下载不了」——整个文件一次经公共中转传，
+     * 17MB 切成两百多片一起发，丢一片就拼不起来）：data 是这一段的 Base64，message 是整个文件多少字节。
+     */
+    @Serializable data class GetFilePart(val id: String, val offset: Long, val length: Int) : Command
     /** 手机从电脑导入服务商（含 Key）、成员、个人资料、搜索和画图设置。结果 data 是 ConfigBundle 的 JSON。 */
     @Serializable data object ExportConfig : Command
     /** 手机把电脑导出的配置并入本机。 */

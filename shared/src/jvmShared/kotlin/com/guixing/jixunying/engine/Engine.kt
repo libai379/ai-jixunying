@@ -1728,6 +1728,10 @@ class Engine(
             val bytes = storage.fileBytes(c.id) ?: return CommandResult(false, "文件不存在")
             CommandResult(data = Base64.getEncoder().encodeToString(bytes))
         }
+        is Command.GetFilePart -> {
+            val (total, part) = storage.fileSlice(c.id, c.offset, c.length.coerceIn(1, 2_000_000)) ?: return CommandResult(false, "文件不存在")
+            CommandResult(message = total.toString(), data = Base64.getEncoder().encodeToString(part))
+        }
         is Command.ExportConfig -> {
             val s = state
             val bundle = ConfigBundle(s.providers, s.members, s.profile, s.settings.search, s.settings.imageGen, s.settings.proxy, s.memories)
