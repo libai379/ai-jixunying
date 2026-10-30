@@ -22,7 +22,7 @@ compose.desktop {
         nativeDistributions {
             targetFormats(TargetFormat.Msi, TargetFormat.Exe)
             packageName = "ai-jixunying"
-            packageVersion = "1.12.0"
+            packageVersion = "1.12.1"
             description = "AI集训营"
             // 发布者（Windows「程序和功能」里显示）；和 model/Presets.kt 的 APP_DEVELOPER 一致（用户 2026-10-14 定）
             vendor = "癸星科技"
