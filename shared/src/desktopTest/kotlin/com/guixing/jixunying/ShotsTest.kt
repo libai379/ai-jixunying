@@ -1244,6 +1244,15 @@ class ShotsTest {
         val (hubB, _) = phoneHub(File(tmp, "phone-b"))
         Thread.sleep(3_000)
         shoot("phone-weixin-shared", 824, 1784, 2f, hubB, phone, "settings:WEIXIN")
+        // 2026-10-30 多微信：电脑挂两个——电脑自己扫的（能读文件）、手机遥控时扫的（只聊天）
+        val phoneId = e.state.devices.firstOrNull()?.id ?: "d1"
+        e.setWeixinInfo(com.guixing.jixunying.model.WeixinInfo(bound = true, status = "2 个微信，2 个在收消息", answering = true, botId = "bot1@im.bot", bots = listOf(
+            com.guixing.jixunying.model.WeixinBot("bot1@im.bot", "o9cq803Nabc@im.wechat", "已连接：在微信里给助理发消息就行", true, 1, System.currentTimeMillis() - 600_000),
+            com.guixing.jixunying.model.WeixinBot("bot2@im.bot", "oXyZ12kq@im.wechat", "已连接：在微信里给助理发消息就行", true, 2, 0, boundBy = phoneId, readFiles = false))))
+        shoot("desktop-weixin-multi", 1280, 1100, 1f, hub, desktop, "settings:WEIXIN")
+        shoot("phone-weixin-multi", 824, 1784, 2f, hub, phone, "settings:WEIXIN")
+        shoot("phone-weixin-multi-220", 440, 1300, 2f, hub, phone, "settings:WEIXIN")
+        e.setWeixinInfo(com.guixing.jixunying.model.WeixinInfo())
 
         // ———— 手机下令（第二期 2026-10-13）：手机遥控电脑上的 Code 栏 ————
         // 假的电脑线路：一连上就把电脑的状态发过来，要记录的时候（LoadMessages）回一份。

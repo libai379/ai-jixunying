@@ -32,6 +32,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.guixing.jixunying.model.AppState
 import com.guixing.jixunying.model.Command
+import com.guixing.jixunying.model.WeixinBot
 import com.guixing.jixunying.model.WeixinSettings
 import kotlinx.coroutines.launch
 
@@ -39,6 +40,8 @@ import kotlinx.coroutines.launch
  * 设置 → 微信。扫码绑定微信助理、选谁来回答、开关。
  * 手机上看本机时（1.5.0 起手机也能接）：配对过电脑就用电脑的同一个绑定（一个微信只能绑一台设备），电脑在接时手机待命；
  * 没配对电脑的手机自己绑。
+ * 一台设备能挂几个微信（2026-10-30 多微信方案甲）：列表里每个微信写着谁绑的、连没连上，能单独解绑、再绑一个；
+ * 电脑上每个微信一个「能读电脑上的文件」开关（手机遥控电脑时绑的默认只聊天）。
  */
 @Composable
 fun WeixinPage(ctl: AppController, state: AppState) {
@@ -48,7 +51,8 @@ fun WeixinPage(ctl: AppController, state: AppState) {
     val ws = state.settings.weixin
     var busy by remember { mutableStateOf(false) }
     var code by remember { mutableStateOf("") }
-    var confirmUnbind by remember { mutableStateOf(false) }
+    /** 要解绑的那个微信（botId；空字符串 = 老界面那样全部）。 */
+    var confirmUnbind by remember { mutableStateOf<String?>(null) }
     fun save(f: (WeixinSettings) -> WeixinSettings) = ctl.updateSettings { it.copy(weixin = f(it.weixin)) }
     // 手机上看的是本机（不是遥控电脑），并且配对过电脑
     val phoneLocal = !platform.isDesktop && ctl.backend === ctl.hub.local
@@ -71,26 +75,26 @@ fun WeixinPage(ctl: AppController, state: AppState) {
         return
     }
 
-    if (paired != null && (wx.shared || !wx.bound)) {
+    if (paired != null && wx.bots.all { it.shared }) {
         // 配对过电脑的手机：用电脑的绑定，不在手机上另外扫码（会把电脑的顶掉）
         SectionCard {
             Text(if (wx.bound) "用的是电脑上的微信绑定" else "还没接微信", style = MaterialTheme.typography.titleSmall)
-            if (wx.bound && wx.status.isNotBlank()) Text(wx.status, style = MaterialTheme.typography.bodySmall,
-                color = if (wx.status.startsWith("已连接")) Ext.c.success else Ext.c.subtle)
-            if (wx.bound && wx.lastMessageAt > 0) Text("这台手机收到的最近一条：${formatTime(wx.lastMessageAt)}", style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
+            wx.bots.forEach { b -> BotRow(b, state, isDesktop = false, onReadFiles = null, onUnbind = null) }
             Text(
                 when {
-                    wx.bound -> "回答用的是这台手机上的 AI 成员。手机上的 AI集训营 要开着（在后台也行）才能接；电脑在接时手机只待命，不收消息。"
+                    wx.bound -> "回答用的是这台手机上的 AI 成员。手机上的 AI集训营 要开着（在后台也行）才能接；电脑在接时手机只待命，不收消息。" +
+                        "这台手机拿的是：它遥控电脑时绑的微信（电脑关了由它接），加上电脑自己绑的（电脑关了由接班的手机接）。"
                     host?.weixin?.bound == true -> "电脑上已经绑定了微信。开着下面「这台手机接微信」的开关，手机会自动用同一个绑定，不用再扫码。"
-                    else -> "先在电脑上 设置 → 微信 扫码绑定，这台手机会自动用同一个绑定。一个微信只能绑一台设备，在手机上另外扫码会把电脑的顶掉。"
+                    else -> "先在电脑上 设置 → 微信 扫码绑定（也可以在侧栏顶上切到电脑，在这台手机上扫），这台手机会自动用同一个绑定。一个微信只能绑一台设备，在手机上另外扫码会把电脑的顶掉。"
                 },
                 style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle, modifier = Modifier.padding(top = 6.dp))
-            if (!wx.bound && host?.weixin?.bound == true) {
+            if (host?.weixin?.bound == true) {
                 Spacer(Modifier.height(8.dp))
                 Button(enabled = hostOnline && !busy, onClick = {
                     busy = true
                     ctl.scope.launch {
-                        val r = paired.call(Command.WeixinShare)
+                        // 新版电脑给全部该拿的；老版本电脑不认，退回一份的
+                        val r = paired.call(Command.WeixinShareAll).takeIf { it.ok } ?: paired.call(Command.WeixinShare)
                         if (r.ok) ctl.run(Command.WeixinImport(r.data)) { busy = false } else { busy = false; ctl.toast(r.message) }
                     }
                 }) { Text(if (busy) "正在同步…" else "现在同步") }
@@ -99,15 +103,19 @@ fun WeixinPage(ctl: AppController, state: AppState) {
             }
         }
     } else SectionCard {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Text(if (wx.bound) "已绑定微信" else "还没绑定微信", style = MaterialTheme.typography.titleSmall)
-                // 状态和标题说的是一回事时就不重复了
-                if (wx.status.isNotBlank() && wx.status != "未绑定") Text(wx.status, style = MaterialTheme.typography.bodySmall,
-                    color = if (wx.status.startsWith("已连接")) Ext.c.success else Ext.c.subtle)
-                if (wx.bound && wx.lastMessageAt > 0) Text("最近一条微信消息：${formatTime(wx.lastMessageAt)}", style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
-            }
-            if (wx.bound) TextButton(onClick = { confirmUnbind = true }) { Text("解除绑定", color = MaterialTheme.colorScheme.error) }
+        Text(if (wx.bots.isEmpty()) "还没绑定微信" else if (wx.bots.size == 1) "已绑定微信" else "已绑定 ${wx.bots.size} 个微信", style = MaterialTheme.typography.titleSmall)
+        // 扫码过程里的说明、出错（二维码过期之类）；没在扫码时总的状态各行自己写了
+        val loginNote = wx.status.takeIf { wx.loginLink.isNotBlank() || wx.needVerifyCode || (wx.bots.isEmpty() && it != "未绑定") || (wx.bots.size > 1 && wx.bots.none { b -> b.status == it } && !it.contains("个微信")) }
+        if (!loginNote.isNullOrBlank()) Text(loginNote, style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
+        val canToggle = platform.isDesktop
+        wx.bots.forEach { b ->
+            BotRow(b, state, isDesktop = platform.isDesktop,
+                onReadFiles = if (canToggle) { on -> ctl.run(Command.WeixinSetReadFiles(b.botId, on)) } else null,
+                onUnbind = { confirmUnbind = b.botId })
+            // 手机自己扫码绑了、电脑也绑了同一个微信：后绑的会把先绑的顶掉
+            if (!b.shared && b.userId.isNotEmpty() && host?.weixin?.bots?.any { it.userId == b.userId } == true)
+                Text("这个微信电脑上也绑了。一个微信只能绑一台设备，后绑的会把先绑的顶掉。建议在手机上解除它，手机会自动改用电脑的绑定。",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(top = 4.dp))
         }
         Spacer(Modifier.height(10.dp))
         if (wx.loginLink.isNotBlank()) {
@@ -142,18 +150,19 @@ fun WeixinPage(ctl: AppController, state: AppState) {
                     }
                 }
             }
-        } else if (!wx.bound) {
-            Button(enabled = !busy, onClick = {
+        } else {
+            val bind = {
                 busy = true
                 ctl.run(Command.WeixinLogin, quiet = true) { r -> busy = false; if (!r.ok) ctl.toast(r.message) }
-            }) { Text(if (busy) "正在生成二维码…" else "绑定微信") }
-            Text("需要这台设备能上网（连的是腾讯的服务器，国内直连，不走代理）。一个微信只能绑一台设备：手机配对过电脑的话，在电脑上绑，手机会自动用同一个绑定。",
+            }
+            if (wx.bots.isEmpty()) Button(enabled = !busy, onClick = bind) { Text(if (busy) "正在生成二维码…" else "绑定微信") }
+            else OutlinedButton(enabled = !busy, onClick = bind) { Text(if (busy) "正在生成二维码…" else "再绑一个微信") }
+            Text(
+                if (platform.isDesktop || !phoneLocal)
+                    "需要这台设备能上网（连的是腾讯的服务器，国内直连，不走代理）。能挂几个微信，同一个微信再扫一次只换掉它自己那份。" +
+                        "在手机上遥控电脑时扫的，记成那台手机绑的：电脑关了由那台手机接，默认只聊天、不读电脑上的文件。"
+                else "需要这台设备能上网（连的是腾讯的服务器，国内直连，不走代理）。一个微信只能绑一台设备：手机配对过电脑的话，在电脑上绑（或者切到电脑后在这里扫），手机会自动用同一个绑定。",
                 style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, modifier = Modifier.padding(top = 6.dp))
-        }
-        // 手机自己扫码绑了、电脑也绑了：后绑的会把先绑的顶掉
-        if (wx.bound && !wx.shared && host?.weixin?.bound == true) {
-            Text("这台手机和电脑各绑了一次微信。一个微信只能绑一台设备，后绑的会把先绑的顶掉。建议在手机上「解除绑定」，手机会自动改用电脑的绑定。",
-                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(top = 8.dp))
         }
     }
     Spacer(Modifier.height(12.dp))
@@ -162,7 +171,7 @@ fun WeixinPage(ctl: AppController, state: AppState) {
             SwitchRow("开启微信助理", "关掉后这台电脑不回微信消息（绑定还在）；配对的手机开着微信助理的话，由手机接着答", ws.enabled) { v -> save { it.copy(enabled = v) } }
             // 一台电脑连多台手机（2026-10-24）：电脑不接时只让一台手机接，不然几台一起回
             if (platform.isDesktop && wx.bound && state.devices.isNotEmpty()) {
-                FieldLabel("电脑关机时由哪台手机接", "只让一台接，不然几台手机会一起回；默认是最后一台来拿绑定的")
+                FieldLabel("电脑关机时由哪台手机接", "管的是电脑自己绑的微信（手机绑的由那台手机自己接）。只让一台接，不然几台手机会一起回；默认是第一台来拿绑定的")
                 FlowRowCompat {
                     val cur = state.weixinBackup
                     (state.devices.map { it.id to it.name } + ("none" to "都不接")).forEach { (id, name) ->
@@ -212,12 +221,45 @@ fun WeixinPage(ctl: AppController, state: AppState) {
     Spacer(Modifier.height(12.dp))
     WeixinFilesTips(isPhone = false)
 
-    if (confirmUnbind) {
-        AppDialog("解除绑定微信", { confirmUnbind = false }, width = 440.dp, actions = {
-            TextButton({ confirmUnbind = false }) { Text("取消") }
-            Button({ confirmUnbind = false; ctl.run(Command.WeixinLogout) },
+    confirmUnbind?.let { botId ->
+        val b = wx.bots.firstOrNull { it.botId == botId }
+        AppDialog("解除绑定微信", { confirmUnbind = null }, width = 440.dp, actions = {
+            TextButton({ confirmUnbind = null }) { Text("取消") }
+            Button({ confirmUnbind = null; ctl.run(Command.WeixinUnbind(botId)) },
                 colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)) { Text("解除绑定") }
-        }) { Text("解除后微信里的助理不再回复，电脑上的「微信对话」聊天记录保留。以后可以重新扫码绑定。", style = MaterialTheme.typography.bodyMedium) }
+        }) {
+            Text((b?.let { "解除「${botName(it, state, platform.isDesktop)}」。" } ?: "") +
+                "解除后这个微信里的助理不再回复，「微信对话」聊天记录保留，别的微信照常。以后可以重新扫码绑定。", style = MaterialTheme.typography.bodyMedium)
+        }
+    }
+}
+
+/** 一个微信叫什么：微信没给昵称，用本人编号开头几位 + 谁绑的。 */
+private fun botName(b: WeixinBot, state: AppState, isDesktop: Boolean): String {
+    val who = when {
+        b.boundBy.isEmpty() -> if (b.shared) "电脑上绑的" else if (isDesktop) "这台电脑上绑的" else "这台设备上绑的"
+        else -> (state.devices.firstOrNull { it.id == b.boundBy }?.name?.let { "「$it」绑的" } ?: "一台手机绑的")
+    }
+    val id = b.userId.substringBefore('@').let { if (it.length > 6) it.take(6) + "…" else it }.ifBlank { b.botId.substringBefore('@').take(6) }
+    return "微信 $id · $who"
+}
+
+/** 列表里的一个微信：叫什么、状态、最近一条；电脑上能开关「读电脑上的文件」；能单独解绑。 */
+@Composable
+private fun BotRow(b: WeixinBot, state: AppState, isDesktop: Boolean, onReadFiles: ((Boolean) -> Unit)?, onUnbind: (() -> Unit)?) {
+    Column(Modifier.padding(top = 10.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(botName(b, state, isDesktop), style = MaterialTheme.typography.bodyMedium)
+                if (b.status.isNotBlank()) Text(b.status, style = MaterialTheme.typography.bodySmall,
+                    color = if (b.status.startsWith("已连接")) Ext.c.success else Ext.c.subtle)
+                if (b.lastMessageAt > 0) Text("最近一条：${formatTime(b.lastMessageAt)}", style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
+            }
+            if (onUnbind != null) TextButton(onClick = onUnbind) { Text("解除", color = MaterialTheme.colorScheme.error) }
+        }
+        if (onReadFiles != null) SwitchRow("能读电脑上的文件", if (b.readFiles) "这个微信里 AI 能搜「我的文档」、读收录范围里的文件" else "只聊天：这个微信里 AI 不碰电脑上的文件", b.readFiles, onReadFiles)
+        else if (!b.shared && b.boundBy.isNotEmpty()) Text(if (b.readFiles) "能读电脑上的文件" else "只聊天，不读电脑上的文件（在电脑上能改）",
+            style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
     }
 }
 

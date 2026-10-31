@@ -337,6 +337,8 @@ class WeixinBridge(
 
     /** 手机上：存下电脑交过来的一份绑定（老版本电脑只给一份）。 */
     fun importShared(json: String): CommandResult {
+        // 「现在同步」按钮拿的是 WeixinShareAll 的列表时也走这里
+        if (json.trimStart().startsWith("[")) return importSharedAll(json)
         val b = runCatching { AppJson.decodeFromString(WeixinShareBundle.serializer(), json) }.getOrNull()
             ?: return CommandResult(false, "电脑发来的微信绑定看不懂（两边版本不一样？）")
         importBundles(listOf(b), full = false)
