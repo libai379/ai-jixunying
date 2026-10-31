@@ -17,6 +17,7 @@ import io.ktor.server.cio.CIO
 import io.ktor.server.engine.EmbeddedServer
 import io.ktor.server.engine.embeddedServer
 import io.ktor.server.response.respondBytes
+import io.ktor.server.response.respondOutputStream
 import io.ktor.server.response.respondRedirect
 import io.ktor.server.response.respondText
 import io.ktor.server.routing.get
@@ -57,6 +58,8 @@ class UpdaterTest {
     @Volatile private var version = "9.9.9"
     /** 下载地址不给下（模拟手机直连 GitHub 下不动）。 */
     @Volatile private var blockDownloads = false
+    /** 下载很慢（一小段一小段地给，模拟手机绕过代理直连 GitHub，10-31）。 */
+    @Volatile private var slowAssets = false
 
     private fun freePort() = ServerSocket(0).use { it.localPort }
     private fun sha(b: ByteArray) = MessageDigest.getInstance("SHA-256").digest(b).joinToString("") { "%02x".format(it) }
@@ -88,6 +91,12 @@ class UpdaterTest {
                 get("/assets/{name}") {
                     downloads.incrementAndGet()
                     val n = call.parameters["name"].orEmpty()
+                    if (slowAssets && n.endsWith(".apk")) {
+                        call.respondOutputStream(ContentType.parse("application/vnd.android.package-archive")) {
+                            apk.toList().chunked(30_000).forEach { c -> write(c.toByteArray()); flush(); Thread.sleep(80) }
+                        }
+                        return@get
+                    }
                     when {
                         n.endsWith(".apk") -> call.respondBytes(apk, ContentType.parse("application/vnd.android.package-archive"))
                         n.endsWith(".zip") -> call.respondBytes(zip, ContentType.Application.Zip)
@@ -124,6 +133,21 @@ class UpdaterTest {
         assertEquals(info.assetSize, f.length())
     }
 
+    /** 真连 GitHub（JXY_LIVE_UPDATE=1 才跑）：电脑替手机下（HostFetchUpdate）走的是哪条线、多久（10-31 真机上用了六分半）。 */
+    @Test
+    fun liveHostFetch() = runBlocking {
+        if (System.getenv("JXY_LIVE_UPDATE") != "1") return@runBlocking
+        System.clearProperty("jxy.update.api"); System.clearProperty("jxy.update.prefix")
+        val pc = Engine(Storage(File(dir, "pc-live")))
+        pc.call(Command.SaveSettings(pc.state.settings.copy(proxy = System.getenv("JXY_PROXY") ?: "127.0.0.1:10809")))
+        val info = Updater(File(dir, "x"), proxy = { "127.0.0.1:10809" }, isPhone = true).check()
+        val t0 = System.currentTimeMillis()
+        val r = withTimeout(600_000) { pc.call(Command.HostFetchUpdate(info.assetUrl, info.sha256, info.assetSize)) }
+        println("live-host: ok=${r.ok} ${r.message} in ${System.currentTimeMillis() - t0} ms")
+        File(dir, "pc-live/logs/jxy.log").takeIf { it.isFile }?.readLines()?.filter { "JxyUpdate" in it }?.forEach { println("live-host log: $it") }
+        assertTrue(r.ok, r.message)
+    }
+
     @Test
     fun versionsCompare() {
         assertTrue(Updater.newer("1.12.10", "1.12.9"))
@@ -153,6 +177,47 @@ class UpdaterTest {
         val up = Updater(File(dir, "u2"), proxy = { "127.0.0.1:1" }, isPhone = true, current = "1.0.0")
         assertEquals(listOf("127.0.0.1:1", null), up.routes("http://127.0.0.2:$port/x"))
         assertEquals("9.9.9", up.check().version)
+    }
+
+    /** 太慢就换路：后面还有路或者调用方还有别的办法（abortIfSlow）才放弃；没别的办法就慢慢下完（10-31 手机绕过代理直连 GitHub）。 */
+    @Test
+    fun slowDownloadGivesUpOnlyWhenThereIsAnotherWay() = runBlocking {
+        slowAssets = true
+        val up = Updater(File(dir, "slow"), proxy = { null }, isPhone = true, current = "1.0.0", slowAfterMs = 200, minBytesPerSec = 50L * 1024 * 1024)
+        val info = up.check()
+        val e = assertFailsWith<Updater.SlowDownload> { up.download(info, abortIfSlow = true) {} }
+        assertTrue("太慢" in e.message!!, e.message)
+        assertTrue(File(dir, "slow").listFiles().isNullOrEmpty(), "没下完的删掉了")
+        assertContentEquals(apk, up.download(info) {}.readBytes(), "没别的办法：慢慢下完")
+    }
+
+    /** 引擎：手机直连太慢马上请电脑代下；电脑也帮不上，回来接着直连慢慢下完。 */
+    @Test
+    fun phoneSlowDirectAsksComputerThenFallsBack() = runBlocking {
+        System.setProperty("jxy.version", "1.0.0")
+        System.setProperty("jxy.update.slowAfterMs", "200")
+        System.setProperty("jxy.update.minSpeed", (50L * 1024 * 1024).toString())
+        try {
+            slowAssets = true
+            val e = Engine(Storage(File(dir, "p-slow")), isPhone = true)
+            var asked = 0
+            e.updateFallback = { _, _ -> asked++; apk }
+            e.call(Command.UpdateCheck)
+            e.call(Command.UpdateDownload)
+            withTimeout(15_000) { while (e.state.update.downloaded.isEmpty() && !e.state.update.error) delay(30) }
+            assertEquals(1, asked, "直连太慢，请了电脑")
+            assertContentEquals(apk, File(e.state.update.downloaded).readBytes())
+
+            val e2 = Engine(Storage(File(dir, "p-slow2")), isPhone = true)
+            e2.updateFallback = { _, _ -> throw IllegalStateException("电脑现在没连上") }
+            e2.call(Command.UpdateCheck)
+            e2.call(Command.UpdateDownload)
+            withTimeout(15_000) { while (e2.state.update.downloaded.isEmpty() && !e2.state.update.error) delay(30) }
+            assertFalse(e2.state.update.error, e2.state.update.status)
+            assertContentEquals(apk, File(e2.state.update.downloaded).readBytes(), "电脑帮不上：回来直连慢慢下完")
+        } finally {
+            System.clearProperty("jxy.update.slowAfterMs"); System.clearProperty("jxy.update.minSpeed")
+        }
     }
 
     /** 挑文件：手机 apk；电脑能原地换要整包，不能换（或没有整包）要安装程序；校验值、大小、地址照 GitHub 给的。 */

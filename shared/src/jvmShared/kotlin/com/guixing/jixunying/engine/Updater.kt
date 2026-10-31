@@ -39,7 +39,16 @@ class Updater(
     val current: String = System.getProperty("jxy.version") ?: APP_VERSION,
     /** 每条线路成没成、用了多久记一笔（10-31 电脑替手机代下用了六分半，像是没走代理，事后查不出走了哪条）。 */
     private val log: (String) -> Unit = {},
+    /**
+     * 下得太慢就换路（2026-10-31）：开始 slowAfterMs 以后平均还不到 minBytesPerSec，后面还有别的路就放弃这条。
+     * 这台电脑实测直连 GitHub 每秒七十来 KB、走代理每秒一 MB 多；手机直连常年这么慢，与其慢慢等不如早点请电脑代下。
+     */
+    private val slowAfterMs: Long = System.getProperty("jxy.update.slowAfterMs")?.toLongOrNull() ?: 15_000,
+    private val minBytesPerSec: Long = System.getProperty("jxy.update.minSpeed")?.toLongOrNull() ?: 150L * 1024,
 ) {
+    /** 这条路下得太慢，主动放弃（后面还有路可走）。 */
+    class SlowDownload(msg: String) : Exception(msg)
+
     companion object {
         const val LATEST_API = "https://api.github.com/repos/libai379/ai-jixunying/releases/latest"
         /** 只认本项目发行版的下载地址（电脑替手机代下时用，免得手机让电脑去下别的东西）。测试里换成假服务器（-Djxy.update.prefix）。 */
@@ -110,6 +119,7 @@ class Updater(
             is java.net.ConnectException -> "连不上：${e.message.orEmpty().take(60)}"
             is java.net.SocketTimeoutException, is io.ktor.client.plugins.HttpRequestTimeoutException -> "等太久没回应"
             is javax.net.ssl.SSLException -> "加密连接没建成：${e.message.orEmpty().take(60)}"
+            is SlowDownload -> e.message.orEmpty()
             else -> (e.message?.takeIf { it.isNotBlank() } ?: e.javaClass.simpleName).take(80)
         }
 
@@ -163,8 +173,10 @@ class Updater(
     /**
      * 下载这台设备要的那个文件，核对 SHA-256；对不上删掉、抛异常。onProgress 给 0..1。
      * 发行版没给 SHA-256 的不下（核对不了就不装）。
+     * 走代理没成（不是慢）先换个新连接再试一次代理，再退回直连（10-31 电脑替手机下用了六分半，像是代理那一下没连上就改走了慢的直连）。
+     * 太慢的路：后面还有路就换下一条；最后一条只在 abortIfSlow（调用方还有别的办法，比如手机请电脑代下）时才放弃，抛 SlowDownload。
      */
-    suspend fun download(info: UpdateInfo, onProgress: (Float) -> Unit): File = withContext(Dispatchers.IO) {
+    suspend fun download(info: UpdateInfo, abortIfSlow: Boolean = false, onProgress: (Float) -> Unit): File = withContext(Dispatchers.IO) {
         require(info.assetUrl.isNotEmpty()) { "这一版没有这台设备能用的文件" }
         if (info.sha256.isEmpty()) throw IllegalStateException("发行版没给这个文件的校验值，不敢装；去发行版网页手动下载吧")
         if (info.assetSize > MAX_SIZE) throw IllegalStateException("文件太大（${info.assetSize / 1024 / 1024} MB），不像是安装包")
@@ -173,10 +185,14 @@ class Updater(
         val target = File(dir, info.assetName)
         val part = File(dir, info.assetName + ".part")
         var last: Throwable? = null
-        for (route in routes(info.assetUrl)) {
+        val rs = routes(info.assetUrl)
+        // 代理那条试两次（第二次只在第一次不是因为慢才试）
+        val attempts = if (rs.size > 1) listOf(rs[0], rs[0]) + rs.drop(1) else rs
+        for ((i, route) in attempts.withIndex()) {
+            if (i == 1 && last is SlowDownload) continue
             try {
                 val t0 = System.currentTimeMillis()
-                fetch(route, info.assetUrl, part, info.assetSize, onProgress)
+                fetch(route, info.assetUrl, part, info.assetSize, canAbort = i < attempts.lastIndex || abortIfSlow, onProgress)
                 log("下 ${info.assetName}：${route ?: "直连"} 用了 ${(System.currentTimeMillis() - t0) / 1000} 秒，${part.length()} 字节")
                 val got = sha256(part)
                 if (got != info.sha256) {
@@ -199,14 +215,15 @@ class Updater(
                 last = e
             }
         }
+        if (last is SlowDownload) throw last
         throw IllegalStateException("下载没成功（${why(last)}）")
     }
 
     /** 边下边写进文件，带进度。GitHub 的下载地址会跳到 release-assets.githubusercontent.com，客户端自己跟着跳。 */
-    private suspend fun fetch(route: String?, url: String, out: File, expected: Long, onProgress: (Float) -> Unit) {
+    private suspend fun fetch(route: String?, url: String, out: File, expected: Long, canAbort: Boolean, onProgress: (Float) -> Unit) {
         Http.client(route).prepareGet(url) {
-            // 一百多 MB 慢网也得下得完；卡住不动由 socket 超时管
-            timeout { requestTimeoutMillis = 2 * 60 * 60_000L }
+            // 一百多 MB 慢网也得下得完；卡住不动由 socket 超时管（能换路时 20 秒没动静就换）
+            timeout { requestTimeoutMillis = 2 * 60 * 60_000L; if (canAbort) socketTimeoutMillis = 20_000 }
             header("User-Agent", "AIJixunying/$current")
         }.execute { resp ->
             if (resp.status.value !in 200..299) throw ApiException(resp.status.value, "下载失败")
@@ -215,12 +232,16 @@ class Updater(
             val buf = ByteArray(1 shl 16)
             var done = 0L
             var shown = -1
+            val t0 = System.currentTimeMillis()
             resp.bodyAsChannel().toInputStream().use { input -> out.outputStream().use { os ->
                 while (true) {
                     val n = input.read(buf)
                     if (n < 0) break
                     os.write(buf, 0, n)
                     done += n
+                    val ms = System.currentTimeMillis() - t0
+                    if (canAbort && ms > slowAfterMs && done < total && done * 1000 / ms < minBytesPerSec)
+                        throw SlowDownload("太慢（每秒 ${done * 1000 / ms / 1024} KB）")
                     if (done > MAX_SIZE) throw IllegalStateException("文件太大，不像是安装包")
                     if (total > 0) {
                         val pct = (done * 100 / total).toInt()

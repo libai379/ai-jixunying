@@ -3261,18 +3261,28 @@ class Engine(
         setUpdate { it.copy(progress = 0f, downloaded = "", status = "正在下载 ${info.assetName}…", error = false) }
         updateJob = scope.launch {
             try {
+                val fb = updateFallback
                 val f = try {
-                    updater.download(info) { p -> setUpdate { it.copy(progress = p) } }
+                    // 手机还能请电脑代下：直连太慢就别死等（10-31 真机：直连 GitHub 每秒七十来 KB）
+                    updater.download(info, abortIfSlow = fb != null) { p -> setUpdate { it.copy(progress = p) } }
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
-                    val fb = updateFallback ?: throw e
+                    fb ?: throw e
                     storage.log("JxyUpdate", "直连没下下来，请电脑代下：$e")
-                    setUpdate { it.copy(progress = 0f, status = "直连 GitHub 没下下来，改请电脑代下：电脑先下好（进度到一半），再传到手机", error = false) }
-                    val bytes = try { fb(info) { p -> setUpdate { it.copy(progress = p) } } }
-                        catch (e2: CancellationException) { throw e2 }
-                        catch (e2: Exception) { throw IllegalStateException("${e.message}；${e2.message}") }
-                    updater.adoptBytes(bytes, info)
+                    val slow = e is Updater.SlowDownload
+                    setUpdate { it.copy(progress = 0f, status = (if (slow) "直连 GitHub 太慢" else "直连 GitHub 没下下来") + "，改请电脑代下：电脑先下好（进度到一半），再传到手机", error = false) }
+                    try {
+                        updater.adoptBytes(fb(info) { p -> setUpdate { it.copy(progress = p) } }, info)
+                    } catch (e2: CancellationException) {
+                        throw e2
+                    } catch (e2: Exception) {
+                        // 电脑帮不上（没连着、太老、也没下成）：只是慢的话回来接着直连慢慢下
+                        if (!slow) throw IllegalStateException("${e.message}；${e2.message}")
+                        storage.log("JxyUpdate", "电脑没帮上（$e2），回来直连慢慢下")
+                        setUpdate { it.copy(progress = 0f, status = "电脑没帮上（${e2.message}），接着直连慢慢下…", error = false) }
+                        updater.download(info) { p -> setUpdate { it.copy(progress = p) } }
+                    }
                 }
                 setUpdate { it.copy(progress = -1f, downloaded = f.path, status = "新版 ${info.version} 下好了，核对过没问题", error = false) }
             } catch (e: CancellationException) {
