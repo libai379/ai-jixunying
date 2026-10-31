@@ -44,6 +44,12 @@ interface Platform {
     fun setPref(key: String, value: String?) {}
     /** 用系统默认程序打开本机文件。 */
     fun openFile(path: String): Boolean = false
+
+    /**
+     * 装下好的新版（2026-10-30 检查更新）。kind 见 UpdateInfo.kind：电脑 zip = 解开、退出、换掉程序文件夹再打开，exe = 打开安装程序再退出；
+     * 手机 apk = 交给系统的安装界面。返回 null = 已经交出去了（电脑上程序马上会退出）；返回文字 = 没装成的说法。
+     */
+    suspend fun installUpdate(path: String, kind: String, version: String): String? = "这台设备不能自己更新"
     /** 这个路径上有没有一个文件（设置 → Code 栏 填的外壳程序对不对；手机上是只读的，用不到）。 */
     fun fileExists(path: String): Boolean = false
     /** 把收到的文件（比如手机遥控电脑时电脑做的 Word）存成临时文件，再用默认程序打开。 */

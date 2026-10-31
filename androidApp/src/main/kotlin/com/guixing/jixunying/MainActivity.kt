@@ -143,6 +143,8 @@ class JxyApp : Application() {
         // GitHub：连着电脑就用电脑上登录的；手机自己登录时换令牌也交给电脑（2026-10-24）
         com.guixing.jixunying.engine.GitHubViaHost(hub, engine).start()
         com.guixing.jixunying.engine.HostModels(hub, engine).start()
+        // 检查更新：手机直连 GitHub 下不动时请电脑代下（2026-10-30）
+        engine.updateFallback = com.guixing.jixunying.engine.UpdateViaHost(hub)::fetch
         weixin.start()
         watchLifecycle()
     }
@@ -327,6 +329,26 @@ class MainActivity : ComponentActivity() {
             startActivity(Intent(Intent.ACTION_VIEW).setDataAndType(uri, mime).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION))
             true
         }.getOrDefault(false)
+
+        /**
+         * 检查更新（2026-10-30）：下好的 apk（在 files 目录里，FileProvider 管得到）交给系统的安装界面——「要更新此应用吗」→ 更新 → 装完有「打开」。
+         * 不用 PackageInstaller 静默装：静默装完系统直接把正在用的程序关掉，也没有「打开」可点。
+         * 第一次要用户允许本应用「安装未知应用」（REQUEST_INSTALL_PACKAGES 是 appop），没允许就先打开那个设置页。
+         */
+        override suspend fun installUpdate(path: String, kind: String, version: String): String? = withContext(Dispatchers.Main) {
+            val f = File(path)
+            if (kind != "apk" || !f.isFile) return@withContext "安装包不见了，重新下载一次"
+            if (!packageManager.canRequestPackageInstalls()) {
+                runCatching { startActivity(Intent(android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName"))) }
+                return@withContext "先在打开的页面里允许 AI集训营「安装未知应用」，回来再点一次「安装」"
+            }
+            runCatching {
+                val uri = androidx.core.content.FileProvider.getUriForFile(this@MainActivity, "$packageName.files", f)
+                startActivity(Intent(Intent.ACTION_VIEW).setDataAndType(uri, "application/vnd.android.package-archive")
+                    .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK))
+            }.exceptionOrNull()?.let { return@withContext "打不开系统的安装界面：${it.message}" }
+            null
+        }
 
         override suspend fun openBytes(name: String, bytes: ByteArray): Boolean = withContext(Dispatchers.IO) {
             runCatching {

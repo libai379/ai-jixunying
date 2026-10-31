@@ -13,6 +13,8 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- 听写：输入框旁边的话筒按钮。第一次点的时候问用户（不能录音就不显示这个按钮） -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- 检查更新（2026-10-30）：下好的新版交给系统的安装界面；第一次要用户在系统里允许「安装未知应用」 -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <application
         android:name=".JxyApp"

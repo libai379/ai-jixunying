@@ -294,6 +294,15 @@ sealed interface Command {
      * 结果 data 是绑定列表的 JSON。老版本电脑不认这条，手机退回 WeixinShare。
      */
     @Serializable data object WeixinShareAll : Command
+    /** 检查更新（2026-10-30）：查 GitHub 发行版最新的一版。结果 data 是 UpdateInfo 的 JSON；情况也写进 AppState.update。 */
+    @Serializable data object UpdateCheck : Command
+    /** 检查更新：在后台下载这台设备该下的那个文件并核对 SHA-256，进度和结果写进 AppState.update。 */
+    @Serializable data object UpdateDownload : Command
+    /**
+     * 手机直连 GitHub 下不动时，请电脑代下（电脑走它的代理）：只认本项目发行版的地址。
+     * 电脑下好、核对过放进自己的文件区，结果 data 是文件编号，手机再用 GetFilePart 分段取。
+     */
+    @Serializable data class HostFetchUpdate(val url: String, val sha256: String, val size: Long) : Command
     /** 微信助理：解除其中一个微信的绑定。 */
     @Serializable data class WeixinUnbind(val botId: String) : Command
     /** 微信助理：这个微信里 AI 能不能读电脑上的文件。只能在电脑上改。 */

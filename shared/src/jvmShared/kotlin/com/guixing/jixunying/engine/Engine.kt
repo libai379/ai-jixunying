@@ -128,6 +128,8 @@ class Engine(
     private val autoScanDocs: Boolean = System.getProperty("jxy.docs.autoscan") != "false",
     /** 启动后自动联网更新美元汇率。自动测试里关掉（-Djxy.fx.auto=false），免得每个测试都去联网。 */
     private val autoUsdRate: Boolean = System.getProperty("jxy.fx.auto") != "false",
+    /** 每天自动查一次有没有新版（只标红点，不自动下）。自动测试里关掉（-Djxy.update.auto=false），免得去连 GitHub。 */
+    private val autoUpdateCheck: Boolean = System.getProperty("jxy.update.auto") != "false",
     /** 读平台链接用的浏览器（测试里换成假的）。 */
     private val browserFactory: (java.io.File) -> PageBrowser? = { createPageBrowser(it) },
 ) : Backend {
@@ -412,6 +414,7 @@ class Engine(
         // ChatGPT 登录状态以本机凭据为准（上次停在「正在登录」的也清掉）
         s = s.copy(chatgpt = chatgptInfo())
         s = s.copy(account = account.identity.let { i -> AccountInfo(Account.idOf(i.publicKey), i.createdAt, i.githubLogin, i.githubName, i.githubAvatar) })
+        s = s.copy(appVersion = com.guixing.jixunying.model.APP_VERSION)
         // 以前重复导入留下的同一个服务商 / 同一位成员，启动时合并掉
         val (deduped, memberMap, removed) = ConfigMerge.dedupe(s)
         if (removed > 0) s = deduped
@@ -440,6 +443,19 @@ class Engine(
             while (true) {
                 refreshUsdRate(force = false)
                 kotlinx.coroutines.delay(60 * 60_000L)
+            }
+        }
+        // 检查更新（2026-10-30）：启动一分钟后、之后每 6 小时看一眼，上次查过超过 20 小时就再查（只在「关于」上标红点，不自动下）
+        if (autoUpdateCheck) scope.launch {
+            kotlinx.coroutines.delay(60_000)
+            val mark = java.io.File(storage.root, "update-checked.txt")
+            while (true) {
+                val last = runCatching { mark.readText().trim().toLong() }.getOrDefault(0L)
+                if (now() - last > 20 * 60 * 60_000L && !state.update.checking && updateJob?.isActive != true) {
+                    runCatching { mark.writeText(now().toString()) }
+                    checkUpdate()
+                }
+                kotlinx.coroutines.delay(6 * 60 * 60_000L)
             }
         }
     }
@@ -1652,6 +1668,9 @@ class Engine(
         is Command.WeixinVerify -> weixin?.verify(c.code) ?: CommandResult(false, "这台设备没有接微信助理")
         is Command.WeixinLogout -> weixin?.logout() ?: CommandResult(false, "这台设备没有接微信助理")
         is Command.WeixinUnbind -> weixin?.logout(c.botId) ?: CommandResult(false, "这台设备没有接微信助理")
+        is Command.UpdateCheck -> checkUpdate()
+        is Command.UpdateDownload -> startUpdateDownload()
+        is Command.HostFetchUpdate -> hostFetchUpdate(c)
         is Command.WeixinSetReadFiles -> weixin?.setReadFiles(c.botId, c.on) ?: CommandResult(false, "这台设备没有接微信助理")
         // 手机经加密线路来要绑定（RelayHost 只放已配对的手机进来）
         is Command.WeixinShare -> weixin?.shareAccount()?.let { CommandResult(data = it) } ?: CommandResult(false, "电脑上还没绑定微信")
@@ -3173,6 +3192,123 @@ class Engine(
             any
         }
         if (changed) saveStances(setOf(convId))
+    }
+
+    // ———————————————— 检查更新（2026-10-30，engine/Updater.kt） ————————————————
+
+    /** 电脑上：装好的程序所在的文件夹（Main 从 jpackage.app-path 取）。能写就能原地换新版；开发时跑的是 null。 */
+    @Volatile var appDir: java.io.File? = null
+
+    val updater: Updater by lazy {
+        Updater(java.io.File(storage.root, "updates"), proxy = { proxyFor(true) }, isPhone = isPhone, canSwap = { appDir?.let(::canSwapIn) == true })
+    }
+    @Volatile private var updateJob: Job? = null
+
+    /**
+     * 手机上：直连 GitHub 下不动时请配对的电脑代下、分段取回来（JxyApp 里填 UpdateViaHost，见那里）。
+     * 给 (要下的版本, 进度 0..1)，返回整个文件；电脑不在线、太老、也没下成就抛异常（说法给人看）。
+     */
+    @Volatile var updateFallback: (suspend (com.guixing.jixunying.model.UpdateInfo, (Float) -> Unit) -> ByteArray)? = null
+
+    /** 程序文件夹和它的上一层都能写（换新版要在旁边建临时文件夹、改名）。 */
+    private fun canSwapIn(dir: java.io.File): Boolean = runCatching {
+        val parent = dir.absoluteFile.parentFile ?: return false
+        val probe = java.io.File(parent, ".jxy-write-test-" + now())
+        val ok = probe.createNewFile()
+        probe.delete()
+        ok && java.nio.file.Files.isWritable(dir.toPath())
+    }.getOrDefault(false)
+
+    private fun setUpdate(f: (com.guixing.jixunying.model.UpdateState) -> com.guixing.jixunying.model.UpdateState) {
+        synchronized(stateLock) { state = state.copy(update = f(state.update)) }
+        emit(Event.State(state))
+    }
+
+    private suspend fun checkUpdate(): CommandResult {
+        setUpdate { it.copy(checking = true, status = "正在查 GitHub 上的最新版…", error = false) }
+        return try {
+            val info = updater.check()
+            val newer = Updater.newer(info.version, updater.current)
+            val ready = if (newer) runCatching { updater.ready(info) }.getOrNull() else null
+            val note = when {
+                !newer -> "已经是最新版（${updater.current}）"
+                info.kind.isEmpty() -> "有新版 ${info.version}，但这一版没有这台设备能自动装的文件，去发行版网页下载"
+                ready != null -> "新版 ${info.version} 已经下好了"
+                else -> "有新版 ${info.version}"
+            }
+            setUpdate { it.copy(checking = false, checkedAt = now(), latest = info, newer = newer, downloaded = ready?.path.orEmpty(), status = note, error = false) }
+            CommandResult(message = note, data = AppJson.encodeToString(com.guixing.jixunying.model.UpdateInfo.serializer(), info))
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            val why = e.message ?: e.toString()
+            storage.log("JxyUpdate", "检查更新没成功：$e")
+            setUpdate { it.copy(checking = false, checkedAt = now(), status = "没查成：$why", error = true) }
+            CommandResult(false, why)
+        }
+    }
+
+    /** 后台下载（界面看 state.update.progress）；已经在下就不再开一个。 */
+    private suspend fun startUpdateDownload(): CommandResult {
+        if (updateJob?.isActive == true) return CommandResult(message = "正在下载")
+        val info = state.update.latest?.takeIf { state.update.newer } ?: run {
+            val r = checkUpdate()
+            if (!r.ok) return r
+            state.update.latest?.takeIf { state.update.newer } ?: return CommandResult(false, "已经是最新版")
+        }
+        if (info.kind.isEmpty()) return CommandResult(false, "这一版没有这台设备能自动装的文件，去发行版网页下载")
+        setUpdate { it.copy(progress = 0f, downloaded = "", status = "正在下载 ${info.assetName}…", error = false) }
+        updateJob = scope.launch {
+            try {
+                val f = try {
+                    updater.download(info) { p -> setUpdate { it.copy(progress = p) } }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    val fb = updateFallback ?: throw e
+                    storage.log("JxyUpdate", "直连没下下来，请电脑代下：$e")
+                    setUpdate { it.copy(progress = 0f, status = "直连 GitHub 没下下来，改请电脑代下…", error = false) }
+                    val bytes = try { fb(info) { p -> setUpdate { it.copy(progress = p) } } }
+                        catch (e2: CancellationException) { throw e2 }
+                        catch (e2: Exception) { throw IllegalStateException("${e.message}；${e2.message}") }
+                    updater.adoptBytes(bytes, info)
+                }
+                setUpdate { it.copy(progress = -1f, downloaded = f.path, status = "新版 ${info.version} 下好了，核对过没问题", error = false) }
+            } catch (e: CancellationException) {
+                setUpdate { it.copy(progress = -1f, status = "下载停了", error = false) }
+                throw e
+            } catch (e: Throwable) {
+                storage.log("JxyUpdate", "下载 ${info.assetName} 没成功：$e")
+                setUpdate { it.copy(progress = -1f, status = e.message ?: e.toString(), error = true) }
+            }
+        }
+        return CommandResult(message = "开始下载")
+    }
+
+    /**
+     * 手机直连 GitHub 下不动，请电脑代下（电脑走自己的代理）。只认本项目发行版的地址、必须带校验值；
+     * 下好核对过放进文件区（编号 update-<校验值前 16 位>），手机用 GetFilePart 分段取。以前代下的删掉，只留这一个。
+     */
+    private suspend fun hostFetchUpdate(c: Command.HostFetchUpdate): CommandResult {
+        if (!c.url.startsWith(Updater.DOWNLOAD_PREFIX)) return CommandResult(false, "只替手机下本项目发行版里的文件")
+        val sha = c.sha256.lowercase()
+        if (!Regex("[0-9a-f]{64}").matches(sha)) return CommandResult(false, "没有校验值，不下")
+        if (c.size > Updater.MAX_SIZE) return CommandResult(false, "文件太大，不像是安装包")
+        val id = "update-" + sha.take(16)
+        val dest = storage.fileOf(id)
+        if (dest.isFile && Updater.sha256(dest) == sha) return CommandResult(message = dest.length().toString(), data = id)
+        val name = c.url.substringAfterLast('/')
+        val tmp = Updater(java.io.File(storage.root, "hostupdates"), proxy = { proxyFor(true) }, isPhone = true)
+        val f = try {
+            tmp.download(com.guixing.jixunying.model.UpdateInfo(assetName = name, assetUrl = c.url, assetSize = c.size, sha256 = sha, kind = "apk")) {}
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            return CommandResult(false, "电脑也没下下来：${e.message ?: e}")
+        }
+        storage.fileDir.listFiles()?.filter { it.name.startsWith("update-") }?.forEach { it.delete() }
+        if (!f.renameTo(dest)) { f.copyTo(dest, overwrite = true); f.delete() }
+        return CommandResult(message = dest.length().toString(), data = id)
     }
 
     // ———————————————— 外部渠道（微信助理） ————————————————

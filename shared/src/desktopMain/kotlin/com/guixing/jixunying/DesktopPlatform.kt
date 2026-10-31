@@ -278,8 +278,82 @@ class DesktopPlatform(private val fileLog: Boolean = true, private val window: (
         }
     }
 
+    // ---- 检查更新：原地换新版（2026-10-30）。用户这台电脑跑的是复制过去的程序文件夹（G:\DevCache\ai-jixunying-app），不是安装程序装的；
+    //      再跑安装程序会另装一份，桌面图标和开机自启还指着旧的。所以下整包、在原来的文件夹里换掉：
+    //      解开到旁边的 <程序文件夹>.update，写一个换文件夹的小脚本交给 PowerShell，自己退出；脚本等两个进程（启动器 + 程序本体）都退了，
+    //      把旧文件夹改名成 <程序文件夹>.old、新的改成原名，再打开。换不成就改回来、打开旧的。
+    //      jpackage 的启动器把程序本体放在一个关掉就杀进程的作业里，但带了 JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK
+    //      （OpenJDK jdk-25+36 src/jdk.jpackage/windows/native/applauncher/WinLauncher.cpp），程序再开的进程不在作业里，程序退了脚本照跑。
+
+    override suspend fun installUpdate(path: String, kind: String, version: String): String? = withContext(Dispatchers.IO) {
+        val f = File(path)
+        if (!f.isFile) return@withContext "安装包不见了，重新下载一次"
+        when (kind) {
+            "exe" -> {
+                runCatching { ProcessBuilder(f.absolutePath).start() }.exceptionOrNull()?.let { return@withContext "打不开安装程序：${it.message}" }
+                setPref("update.to", version)
+                quitSoon()
+                null
+            }
+            "zip" -> swapFromZip(f, version)
+            else -> "这台电脑用不了这个文件（$kind）"
+        }
+    }
+
+    /** 程序马上退出（停中转、微信、后台命令，和托盘里「退出」一样）。 */
+    private fun quitSoon() = java.awt.EventQueue.invokeLater { onQuit?.invoke() }
+
+    private fun swapFromZip(zip: File, version: String): String? {
+        val exe = exePath?.let(::File) ?: return "开发时直接跑的程序不能自己更新（装好的程序才行）"
+        val appDir = exe.parentFile.absoluteFile
+        val newDir = try {
+            UpdateSwap.prepare(zip, appDir, exe.name)
+        } catch (e: Exception) {
+            return e.message ?: e.toString()
+        }
+        val me = ProcessHandle.current()
+        // 启动器（父进程，同名 exe）也要等它退
+        val launcher = me.parent().orElse(null)?.takeIf { p -> p.info().command().orElse("").endsWith(exe.name, ignoreCase = true) }
+        val pids = listOfNotNull(me.pid(), launcher?.pid())
+        try {
+            UpdateSwap.launch(appDir, newDir, exe.name, pids)
+        } catch (e: Exception) {
+            UpdateSwap.stageOf(appDir).deleteRecursively()
+            return "换文件的小脚本没起来：${e.message}"
+        }
+        log("JxyUpdate", "整包解开了，交给脚本换文件夹：$appDir ← $newDir（等进程 $pids 退出）")
+        setPref("update.to", version)
+        quitSoon()
+        return null
+    }
+
+    /**
+     * 换好以后新版第一次开：两分钟后删掉旁边的 <程序文件夹>.old 和 .update（旧版留两分钟，新版一开就崩还能手动改回去）。
+     * 自动启动的注册表项指着别的地方（比如以前装在别处）也改成现在这个程序。
+     */
+    fun afterStart() {
+        val exe = exePath?.let(::File) ?: return
+        val appDir = exe.parentFile.absoluteFile
+        val parent = appDir.parentFile ?: return
+        Thread({
+            runCatching { Thread.sleep(120_000) }
+            listOf(File(parent, appDir.name + ".old"), File(parent, appDir.name + ".update")).filter { it.exists() }.forEach { d ->
+                // jpackage 打出来的 ai-jixunying.exe 是只读的，Java 删只读文件会失败（10-30 演练时 .old 里就剩它一个）：先去掉只读再删
+                val ok = runCatching { d.walkBottomUp().forEach { f -> f.setWritable(true) }; d.deleteRecursively() }.getOrDefault(false)
+                log("JxyUpdate", "删掉换新版留下的 ${d.name}：${if (ok) "删了" else "没删干净"}")
+            }
+        }, "jxy-update-cleanup").apply { isDaemon = true }.start()
+        if (getPref("autostart.chosen") != null) {
+            val (code, out) = reg("query", RUN_KEY, "/v", RUN_NAME)
+            if (code == 0 && !out.contains(exe.path, ignoreCase = true)) reg("add", RUN_KEY, "/v", RUN_NAME, "/t", "REG_SZ", "/d", "\"${exe.path}\"", "/f")
+        }
+    }
+
     // ---- 点叉留在后台（2026-10-30 用户：「它需要在后台运行。如果我想退，我只能在右下角……右键退出才能退」）：
     //      点叉只藏窗口，微信助理、手机遥控、后台命令照跑；右下角托盘图标点一下打开，右键「退出」才真退。
+
+    /** 窗口和托盘上的名字：用测试数据跑的（开发时 -Djxy.data）标出来，免得和用户正在用的那个看着一样、以为开了两个。 */
+    val appTitle: String get() = if (System.getProperty("jxy.data") != null) "AI集训营（测试数据）" else "AI集训营"
 
     /** 真退出（停中转、微信、后台命令再关程序）：Main 里填。 */
     var onQuit: (() -> Unit)? = null
@@ -317,7 +391,7 @@ class DesktopPlatform(private val fileLog: Boolean = true, private val window: (
             addSeparator()
             add(java.awt.MenuItem("退出").apply { addActionListener { onQuit?.invoke() } })
         }
-        val t = java.awt.TrayIcon(img, "AI集训营", menu)
+        val t = java.awt.TrayIcon(img, appTitle, menu)
         t.isImageAutoSize = true
         // 双击 / 点通知气泡：把窗口叫到前面，并切到通知说的那个会话（界面在 App 里收）
         t.addActionListener {
@@ -525,3 +599,83 @@ fun imageToPng(img: java.awt.Image): ByteArray {
 /** Ctrl+V 时剪贴板里的东西当不当附件：复制的文件当；截图（只有图没有字）当；有字的（从 Word、网页复制的字常常还带一张图）当文字粘贴。 */
 fun pasteAsFiles(files: Boolean, image: Boolean, text: Boolean): Boolean = files || (image && !text)
 
+/**
+ * 原地换新版的几步（检查更新，2026-10-30），从 DesktopPlatform.swapFromZip 拆出来好测：
+ * prepare 把整包解开到程序文件夹旁边的 <程序文件夹>.update，找出里面的新程序文件夹；launch 把 SWAP_SCRIPT 写进去交给 PowerShell。
+ */
+internal object UpdateSwap {
+    fun stageOf(appDir: File) = File(appDir.absoluteFile.parentFile, appDir.name + ".update")
+    fun oldOf(appDir: File) = File(appDir.absoluteFile.parentFile, appDir.name + ".old")
+
+    /** 解开整包，返回新的程序文件夹（里面有 exeName 和 app\）。不成抛异常，说法给人看；解开一半的删掉。 */
+    fun prepare(zip: File, appDir: File, exeName: String): File {
+        if (appDir.absoluteFile.parentFile == null) throw IllegalStateException("程序文件夹在盘的最上层，换不了")
+        val stage = stageOf(appDir)
+        runCatching { stage.deleteRecursively() }
+        stage.mkdirs()
+        try {
+            unzipTo(zip, stage)
+        } catch (e: Exception) {
+            stage.deleteRecursively()
+            throw IllegalStateException("解开整包没成功：${e.message}")
+        }
+        // 整包里是一个程序文件夹（ai-jixunying\ai-jixunying.exe + app\ + runtime\）
+        return stage.walkTopDown().maxDepth(2).firstOrNull { it.isDirectory && File(it, exeName).isFile && File(it, "app").isDirectory }
+            ?: run { stage.deleteRecursively(); throw IllegalStateException("整包里没有找到程序，没换") }
+    }
+
+    /** 写脚本、交给 PowerShell（不等它）；脚本日志在 <程序文件夹>.update\swap.log。 */
+    fun launch(appDir: File, newDir: File, exeName: String, pids: List<Long>): Process {
+        val stage = stageOf(appDir)
+        val script = File(stage, "swap.ps1").apply { writeText(SWAP_SCRIPT, Charsets.US_ASCII) }
+        return ProcessBuilder("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script.absolutePath,
+            "-AppDir", appDir.absolutePath, "-NewDir", newDir.absolutePath, "-OldDir", oldOf(appDir).absolutePath, "-ExeName", exeName,
+            "-Pids", pids.joinToString(","), "-Log", File(stage, "swap.log").absolutePath)
+            .directory(appDir.absoluteFile.parentFile).redirectErrorStream(true).redirectOutput(ProcessBuilder.Redirect.DISCARD).start()
+    }
+
+    /** 解开 zip；条目不许跑到目标文件夹外面去。 */
+    fun unzipTo(zip: File, dest: File) {
+        val root = dest.canonicalFile
+        java.util.zip.ZipInputStream(zip.inputStream().buffered()).use { zin ->
+            while (true) {
+                val e = zin.nextEntry ?: break
+                val out = File(root, e.name.replace('\\', '/')).canonicalFile
+                if (out != root && !out.path.startsWith(root.path + File.separator)) throw IllegalStateException("整包里有不对劲的路径：${e.name}")
+                if (e.isDirectory) out.mkdirs() else { out.parentFile?.mkdirs(); out.outputStream().use { zin.copyTo(it) } }
+            }
+        }
+    }
+}
+
+/**
+ * 换程序文件夹的 PowerShell 脚本（检查更新用，见 DesktopPlatform.swapFromZip）。只用 ASCII：Windows PowerShell 5.1 按系统代码页读不带 BOM 的脚本，
+ * 中文路径都从参数传。先等程序的进程都退出，旧文件夹改名成 OldDir、新的改成 AppDir，打开新的；哪一步不成就改回来打开旧的。
+ */
+internal val SWAP_SCRIPT = """
+param([string]${'$'}AppDir, [string]${'$'}NewDir, [string]${'$'}OldDir, [string]${'$'}ExeName, [string]${'$'}Pids, [string]${'$'}Log)
+function Say([string]${'$'}m) { try { Add-Content -LiteralPath ${'$'}Log -Value ((Get-Date -Format s) + ' ' + ${'$'}m) -Encoding UTF8 } catch {} }
+Say ('waiting for ' + ${'$'}Pids)
+foreach (${'$'}p in (${'$'}Pids -split ',')) { if (${'$'}p) { try { Wait-Process -Id ([int]${'$'}p) -Timeout 120 -ErrorAction Stop } catch {} } }
+Start-Sleep -Milliseconds 800
+${'$'}moved = ${'$'}false
+for (${'$'}i = 0; ${'$'}i -lt 40 -and -not ${'$'}moved; ${'$'}i++) {
+  try {
+    if (Test-Path -LiteralPath ${'$'}OldDir) { Remove-Item -LiteralPath ${'$'}OldDir -Recurse -Force -ErrorAction Stop }
+    Move-Item -LiteralPath ${'$'}AppDir -Destination ${'$'}OldDir -ErrorAction Stop
+    ${'$'}moved = ${'$'}true
+  } catch { Say ('old folder busy: ' + ${'$'}_); Start-Sleep -Milliseconds 750 }
+}
+if (-not ${'$'}moved) { Say 'gave up, starting the old one'; Start-Process -FilePath (Join-Path ${'$'}AppDir ${'$'}ExeName); exit 1 }
+try {
+  Move-Item -LiteralPath ${'$'}NewDir -Destination ${'$'}AppDir -ErrorAction Stop
+  Say 'swapped'
+} catch {
+  Say ('new folder failed: ' + ${'$'}_ + ' ; rolling back')
+  try { Move-Item -LiteralPath ${'$'}OldDir -Destination ${'$'}AppDir -ErrorAction Stop } catch { Say ('rollback failed: ' + ${'$'}_) }
+  Start-Process -FilePath (Join-Path ${'$'}AppDir ${'$'}ExeName)
+  exit 1
+}
+Start-Process -FilePath (Join-Path ${'$'}AppDir ${'$'}ExeName)
+Say 'started the new one'
+""".trimIndent()

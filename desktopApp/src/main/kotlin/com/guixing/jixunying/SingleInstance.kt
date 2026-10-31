@@ -18,7 +18,8 @@ object SingleInstance {
     fun claim(root: File, onQuit: () -> Unit = {}, onShow: () -> Unit): FileLock? {
         root.mkdirs()
         val raf = RandomAccessFile(File(root, "app.lock"), "rw")
-        val lock = runCatching { raf.channel.tryLock() }.getOrNull()
+        // 拿锁出错（不是「被别的占着」）要记下来：以前一律当成已经开着一个、悄悄退出，看不出真正的原因（2026-10-30 复查时补）
+        val lock = try { raf.channel.tryLock() } catch (e: Exception) { lockError = e.toString(); null }
         val portFile = File(root, "app.port")
         if (lock == null) {
             raf.close()
@@ -51,4 +52,8 @@ object SingleInstance {
     }
 
     @Volatile private var held: FileLock? = null
+
+    /** 上一次 claim 拿锁时出的错（null = 没出错，拿不到就是真有一个开着）。 */
+    @Volatile var lockError: String? = null
+        private set
 }

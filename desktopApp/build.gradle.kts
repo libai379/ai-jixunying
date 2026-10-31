@@ -43,3 +43,13 @@ compose.desktop {
         }
     }
 }
+
+// 检查更新用的电脑整包（2026-10-30）：createDistributable 出来的整个程序文件夹打成 zip，发版时和安装程序一起传上 GitHub
+// （改名成 AI-Jixunying-<版本>-<日期>-windows-update.zip）。电脑上点「更新」下这个，在原来的文件夹里换掉再打开，
+// 不用安装程序，桌面图标、开机自启都还指着同一个地方（DesktopPlatform.swapFromZip）。
+tasks.register<Zip>("packageUpdateZip") {
+    dependsOn("createDistributable")
+    from(layout.buildDirectory.dir("compose/binaries/main/app"))
+    archiveFileName.set("ai-jixunying-windows-update.zip")
+    destinationDirectory.set(layout.buildDirectory.dir("compose/binaries/main/update"))
+}

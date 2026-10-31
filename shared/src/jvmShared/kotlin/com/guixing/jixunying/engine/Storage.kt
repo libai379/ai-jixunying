@@ -148,6 +148,9 @@ class Storage(val root: File) {
 
     fun fileBytes(id: String): ByteArray? = File(fileDir, safe(id)).takeIf { it.isFile }?.readBytes()
 
+    /** 文件区里这个编号对应的文件（不管在不在）。 */
+    fun fileOf(id: String): File = File(fileDir, safe(id))
+
     /** 文件的一段：(整个文件多少字节, 从 offset 起最多 length 字节)；文件不在返回 null。 */
     fun fileSlice(id: String, offset: Long, length: Int): Pair<Long, ByteArray>? {
         val f = File(fileDir, safe(id)).takeIf { it.isFile } ?: return null

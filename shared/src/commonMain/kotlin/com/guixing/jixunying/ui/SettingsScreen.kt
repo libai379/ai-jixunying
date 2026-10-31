@@ -132,6 +132,8 @@ private fun tabTitle(t: SettingsTab, desktop: Boolean) = if (t == SettingsTab.DE
 @Composable
 fun SettingsScreen(ctl: AppController, tab: SettingsTab, wide: Boolean, openDrawer: () -> Unit) {
     val state by ctl.backend.store.state.collectAsState()
+    // 本机的状态（检查更新只看这台设备自己的）
+    val localState by ctl.hub.local.store.state.collectAsState()
     if (wide) {
         Row(Modifier.fillMaxSize()) {
             Column(Modifier.width(210.dp).fillMaxHeight().padding(12.dp)) {
@@ -152,7 +154,7 @@ fun SettingsScreen(ctl: AppController, tab: SettingsTab, wide: Boolean, openDraw
                         Spacer(Modifier.width(10.dp))
                         Text(tabTitle(t, LocalPlatform.current.isDesktop), style = MaterialTheme.typography.bodyMedium, fontWeight = if (sel) FontWeight.SemiBold else FontWeight.Normal,
                             color = if (sel) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface, modifier = Modifier.weight(1f))
-                        if (tabAlert(t, state)) Box(Modifier.size(7.dp).clip(CircleShape).background(MaterialTheme.colorScheme.error))
+                        if (tabAlert(t, state, localState)) Box(Modifier.size(7.dp).clip(CircleShape).background(MaterialTheme.colorScheme.error))
                     }
                 }
             }
@@ -184,8 +186,8 @@ fun SettingsScreen(ctl: AppController, tab: SettingsTab, wide: Boolean, openDraw
                         Icon(tabIcon(t), null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.primary)
                         Spacer(Modifier.width(12.dp))
                         Text(tabTitle(t, desktop), style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
-                        val alert = tabAlert(t, state)
-                        Text(if (alert) "后台出错" else tabSummary(t, state, ctl), style = MaterialTheme.typography.labelMedium,
+                        val alert = tabAlert(t, state, localState)
+                        Text(if (alert) (if (t == SettingsTab.ABOUT) "有新版 ${localState.update.latest?.version.orEmpty()}" else "后台出错") else tabSummary(t, state, ctl), style = MaterialTheme.typography.labelMedium,
                             color = if (alert) MaterialTheme.colorScheme.error else Ext.c.subtle, maxLines = 1,
                             overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 170.dp))
                         Text("  ›", color = Ext.c.subtle)
@@ -205,7 +207,10 @@ fun SettingsScreen(ctl: AppController, tab: SettingsTab, wide: Boolean, openDraw
 }
 
 /** 这一项要不要标红：记录员后台出错的提示都显示在「记忆」页（BgProblemsCard），所以标在「记忆」上。 */
-private fun tabAlert(t: SettingsTab, s: AppState): Boolean = t == SettingsTab.MEMORY && s.bgProblems.isNotEmpty()
+private fun tabAlert(t: SettingsTab, s: AppState, local: AppState = s): Boolean =
+    (t == SettingsTab.MEMORY && s.bgProblems.isNotEmpty()) ||
+        // 有新版（这台设备自己的，手机遥控电脑时也看本机）
+        (t == SettingsTab.ABOUT && local.update.newer)
 
 /** 设置首页每一项右边的小字：一眼看出现在是什么状态。 */
 private fun tabSummary(t: SettingsTab, s: AppState, ctl: AppController): String = when (t) {
@@ -1195,6 +1200,8 @@ private fun AppearancePage(ctl: AppController, state: AppState) {
 private fun AboutPage(ctl: AppController) {
     val platform = LocalPlatform.current
     PageHeader("关于", "AI集训营 ${com.guixing.jixunying.model.APP_VERSION}")
+    UpdateCard(ctl)
+    Spacer(Modifier.height(12.dp))
     SectionCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
             BrandMark(44)

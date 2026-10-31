@@ -181,7 +181,8 @@ class RemoteBackend(
         val sink: ((String, String) -> Unit)? = onPart?.let { f -> { c, r -> lastPart = clock.markNow(); f(c, r) } }
         val id = lock.withLock { val id = nextReq++; pending[id] = deferred; sink?.let { partSinks[id] = it }; id }
         val limit = when (command) {
-            is Command.HostChat, is Command.HostListen -> 600.seconds
+            // 电脑替手机代下安装包（几十 MB）也慢
+            is Command.HostChat, is Command.HostListen, is Command.HostFetchUpdate -> 600.seconds
             is Command.HostPage -> 240.seconds
             else -> 120.seconds
         }

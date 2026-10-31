@@ -28,7 +28,10 @@ fun main() {
         if (f.extendedState and Frame.ICONIFIED != 0) f.extendedState = f.extendedState and Frame.ICONIFIED.inv()
         f.isVisible = true; f.toFront(); f.requestFocus()
     } } }
-    if (single == null) { storage.log("JxySingle", "已经开着一个，叫它到前面，这个退出"); return }
+    if (single == null) {
+        storage.log("JxySingle", SingleInstance.lockError?.let { "占不住 app.lock（$it），当成已经开着一个，这个退出" } ?: "已经开着一个，叫它到前面，这个退出")
+        return
+    }
     val engine = Engine(storage)
     // Code 栏跑命令的执行器（安全核心在 engine/code/CodeShell.kt）：只在电脑上有，手机上是空的（手机不在本机跑命令）
     engine.codeRunner = com.guixing.jixunying.engine.code.CodeShell()
@@ -47,7 +50,9 @@ fun main() {
     weixin.start()
 
     val platform = DesktopPlatform { frame }
-    Thread { platform.autoStartOnce() }.start()
+    // 检查更新（2026-10-30）：装好的程序知道自己在哪个文件夹，能写就能原地换新版
+    engine.appDir = System.getProperty("jpackage.app-path")?.let { java.io.File(it).parentFile }
+    Thread { platform.autoStartOnce(); platform.afterStart() }.start()
     val hub = Hub(engine)
 
     application {
@@ -60,7 +65,7 @@ fun main() {
         androidx.compose.runtime.LaunchedEffect(Unit) { java.awt.EventQueue.invokeLater { platform.showTray() } }
         Window(
             onCloseRequest = { if (!platform.hideToTray()) quit() },
-            title = "AI集训营",
+            title = platform.appTitle,
             // 窗口和任务栏图标：用户 2026-10-12 给的那张（和安装包、安卓、App 里左上角同一张）
             icon = platform.brandIcon?.let { androidx.compose.ui.graphics.painter.BitmapPainter(it) },
             state = state,

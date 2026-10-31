@@ -1254,6 +1254,38 @@ class ShotsTest {
         shoot("phone-weixin-multi-220", 440, 1300, 2f, hub, phone, "settings:WEIXIN")
         e.setWeixinInfo(com.guixing.jixunying.model.WeixinInfo())
 
+        // 2026-10-30 检查更新：假的 GitHub（JDK 自带的小服务器）给一个新版，看「关于」里有新版、下载中的样子
+        val gh = com.sun.net.httpserver.HttpServer.create(java.net.InetSocketAddress("127.0.0.1", 0), 0)
+        gh.createContext("/latest") { x ->
+            val body = ("""{"tag_name":"v1.13.0","name":"AI集训营 1.13.0","published_at":"2026-11-02T01:00:00Z","html_url":"https://github.com/libai379/ai-jixunying/releases/tag/v1.13.0",""" +
+                """"body":"**AI集训营 1.13.0**，2026-11-02 发布。
+
+## What's New
+
+- **关于里能检查更新**：查 GitHub 发行版，下好核对过再装。
+- **微信助理能挂几个微信**。
+
+## Improvements
+
+- 电脑点叉留在后台。",""" +
+                """"assets":[{"name":"AI-Jixunying-1.13.0-20261102-windows-update.zip","size":127234306,"digest":"sha256:${"a".repeat(64)}","browser_download_url":"http://127.0.0.1:1/x.zip"},""" +
+                """{"name":"AI-Jixunying-1.13.0-20261102-android.apk","size":26124918,"digest":"sha256:${"b".repeat(64)}","browser_download_url":"http://127.0.0.1:1/x.apk"}]}""").toByteArray()
+            x.sendResponseHeaders(200, body.size.toLong()); x.responseBody.use { it.write(body) }
+        }
+        gh.start()
+        System.setProperty("jxy.update.api", "http://127.0.0.1:${gh.address.port}/latest")
+        try {
+            // 装好的程序文件夹能写：给整包（原地换新版）
+            e.appDir = File(tmp, "app-image/ai-jixunying").apply { mkdirs() }
+            kotlinx.coroutines.runBlocking { e.call(com.guixing.jixunying.model.Command.UpdateCheck) }
+            shoot("desktop-about-update", 1280, 900, 1f, hub, desktop, "settings:ABOUT")
+            shoot("phone-about-update", 824, 1784, 2f, hub, phone, "settings:ABOUT")
+            shoot("phone-settings-home-update", 824, 1784, 2f, hub, phone, "settingshome")
+        } finally {
+            System.clearProperty("jxy.update.api")
+            gh.stop(0)
+        }
+
         // ———— 手机下令（第二期 2026-10-13）：手机遥控电脑上的 Code 栏 ————
         // 假的电脑线路：一连上就把电脑的状态发过来，要记录的时候（LoadMessages）回一份。
         // 真的走中转要开 MQTT、要配对，截图不该联网（全流程在 CodeAgentTest.phoneThroughRelay 里测）。

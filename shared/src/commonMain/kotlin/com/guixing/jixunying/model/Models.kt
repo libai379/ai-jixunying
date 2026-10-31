@@ -622,11 +622,56 @@ data class AppState(
     val chatgpt: ChatGptInfo = ChatGptInfo(),
     /** 这台设备的账号（2026-10-24）：本机密钥算出来的编号 + 绑的 GitHub。私钥不在这里（只在 account/identity.json）。 */
     val account: AccountInfo = AccountInfo(),
+    /** 这台设备装的 AI集训营 版本（2026-10-30）：手机看电脑的这一项，知道电脑会不会新命令（老版本电脑没有这一项，是空的）。 */
+    val appVersion: String = "",
+    /** 检查更新的情况（2026-10-30）：只给这台设备自己的界面看，不存盘、不发给手机。 */
+    @kotlinx.serialization.Transient
+    val update: UpdateState = UpdateState(),
 ) {
     fun member(id: String) = members.firstOrNull { it.id == id }
     fun provider(id: String) = providers.firstOrNull { it.id == id }
     fun conversation(id: String) = conversations.firstOrNull { it.id == id }
 }
+
+/**
+ * GitHub 发行版上最新的一版（2026-10-30 检查更新，engine/Updater.kt）和这台设备该下的那个文件。
+ * kind：apk = 手机安装包；zip = 电脑整包（原地换掉程序文件夹再打开）；exe = 电脑安装程序；空 = 这一版没有这台设备能用的文件。
+ */
+@Serializable
+data class UpdateInfo(
+    val version: String = "",
+    val tag: String = "",
+    val name: String = "",
+    /** 发行说明原文（Markdown）。 */
+    val notes: String = "",
+    val publishedAt: String = "",
+    /** 发行版网页（没有能用的文件时让用户去这里下）。 */
+    val pageUrl: String = "",
+    val assetName: String = "",
+    val assetUrl: String = "",
+    val assetSize: Long = 0,
+    /** GitHub 给的 SHA-256（小写十六进制），下完拿它核对。 */
+    val sha256: String = "",
+    val kind: String = "",
+)
+
+/** 检查更新的情况（界面显示用）。 */
+@Serializable
+data class UpdateState(
+    val checking: Boolean = false,
+    val checkedAt: Long = 0,
+    /** 最近一次查到的最新版；null = 还没查过或没查成。 */
+    val latest: UpdateInfo? = null,
+    /** 最新版比这台设备装的新。 */
+    val newer: Boolean = false,
+    /** 正在下：0..1；-1 = 没在下。 */
+    val progress: Float = -1f,
+    /** 下好、核对过的文件（本机路径）。 */
+    val downloaded: String = "",
+    /** 给人看的一句（查不到、下载失败的原因也在这里）。 */
+    val status: String = "",
+    val error: Boolean = false,
+)
 
 /**
  * 「用 ChatGPT 登录」的状态（2026-10-23，docs/ChatGPT订阅设计说明.md）。
