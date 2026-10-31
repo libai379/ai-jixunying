@@ -414,7 +414,7 @@ class Engine(
         // ChatGPT 登录状态以本机凭据为准（上次停在「正在登录」的也清掉）
         s = s.copy(chatgpt = chatgptInfo())
         s = s.copy(account = account.identity.let { i -> AccountInfo(Account.idOf(i.publicKey), i.createdAt, i.githubLogin, i.githubName, i.githubAvatar) })
-        s = s.copy(appVersion = com.guixing.jixunying.model.APP_VERSION)
+        s = s.copy(appVersion = com.guixing.jixunying.model.APP_VERSION, hostFetchProgress = -1f)
         // 以前重复导入留下的同一个服务商 / 同一位成员，启动时合并掉
         val (deduped, memberMap, removed) = ConfigMerge.dedupe(s)
         if (removed > 0) s = deduped
@@ -3200,7 +3200,8 @@ class Engine(
     @Volatile var appDir: java.io.File? = null
 
     val updater: Updater by lazy {
-        Updater(java.io.File(storage.root, "updates"), proxy = { proxyFor(true) }, isPhone = isPhone, canSwap = { appDir?.let(::canSwapIn) == true })
+        Updater(java.io.File(storage.root, "updates"), proxy = { proxyFor(true) }, isPhone = isPhone, canSwap = { appDir?.let(::canSwapIn) == true },
+            log = { storage.log("JxyUpdate", it) })
     }
     @Volatile private var updateJob: Job? = null
 
@@ -3267,7 +3268,7 @@ class Engine(
                 } catch (e: Exception) {
                     val fb = updateFallback ?: throw e
                     storage.log("JxyUpdate", "直连没下下来，请电脑代下：$e")
-                    setUpdate { it.copy(progress = 0f, status = "直连 GitHub 没下下来，改请电脑代下…", error = false) }
+                    setUpdate { it.copy(progress = 0f, status = "直连 GitHub 没下下来，改请电脑代下：电脑先下好（进度到一半），再传到手机", error = false) }
                     val bytes = try { fb(info) { p -> setUpdate { it.copy(progress = p) } } }
                         catch (e2: CancellationException) { throw e2 }
                         catch (e2: Exception) { throw IllegalStateException("${e.message}；${e2.message}") }
@@ -3298,13 +3299,18 @@ class Engine(
         val dest = storage.fileOf(id)
         if (dest.isFile && Updater.sha256(dest) == sha) return CommandResult(message = dest.length().toString(), data = id)
         val name = c.url.substringAfterLast('/')
-        val tmp = Updater(java.io.File(storage.root, "hostupdates"), proxy = { proxyFor(true) }, isPhone = true)
+        val tmp = Updater(java.io.File(storage.root, "hostupdates"), proxy = { proxyFor(true) }, isPhone = true, log = { storage.log("JxyUpdate", "替手机下：$it") })
         val f = try {
-            tmp.download(com.guixing.jixunying.model.UpdateInfo(assetName = name, assetUrl = c.url, assetSize = c.size, sha256 = sha, kind = "apk")) {}
+            updateState { it.copy(hostFetchProgress = 0f) }
+            tmp.download(com.guixing.jixunying.model.UpdateInfo(assetName = name, assetUrl = c.url, assetSize = c.size, sha256 = sha, kind = "apk")) { p ->
+                updateState { it.copy(hostFetchProgress = p) }
+            }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Throwable) {
             return CommandResult(false, "电脑也没下下来：${e.message ?: e}")
+        } finally {
+            updateState { it.copy(hostFetchProgress = -1f) }
         }
         storage.fileDir.listFiles()?.filter { it.name.startsWith("update-") }?.forEach { it.delete() }
         if (!f.renameTo(dest)) { f.copyTo(dest, overwrite = true); f.delete() }

@@ -37,6 +37,8 @@ class Updater(
     private val api: String = System.getProperty("jxy.update.api") ?: LATEST_API,
     /** 本机版本（测试、真机演练时用 -Djxy.version 假装是旧版）。 */
     val current: String = System.getProperty("jxy.version") ?: APP_VERSION,
+    /** 每条线路成没成、用了多久记一笔（10-31 电脑替手机代下用了六分半，像是没走代理，事后查不出走了哪条）。 */
+    private val log: (String) -> Unit = {},
 ) {
     companion object {
         const val LATEST_API = "https://api.github.com/repos/libai379/ai-jixunying/releases/latest"
@@ -147,6 +149,7 @@ class Updater(
             } catch (e: IllegalStateException) {
                 throw e
             } catch (e: Throwable) {
+                log("查最新版：${route ?: "直连"} 没成：${why(e)}")
                 last = e
             }
         }
@@ -172,7 +175,9 @@ class Updater(
         var last: Throwable? = null
         for (route in routes(info.assetUrl)) {
             try {
+                val t0 = System.currentTimeMillis()
                 fetch(route, info.assetUrl, part, info.assetSize, onProgress)
+                log("下 ${info.assetName}：${route ?: "直连"} 用了 ${(System.currentTimeMillis() - t0) / 1000} 秒，${part.length()} 字节")
                 val got = sha256(part)
                 if (got != info.sha256) {
                     part.delete()
@@ -190,6 +195,7 @@ class Updater(
                 throw e
             } catch (e: Throwable) {
                 part.delete()
+                log("下 ${info.assetName}：${route ?: "直连"} 没成：${why(e)}")
                 last = e
             }
         }

@@ -20,17 +20,25 @@ class UpdateViaHost(private val hub: Hub) {
         if (r.store.state.value.appVersion.isEmpty()) throw IllegalStateException("电脑上的 AI集训营 太老，不会代下；先把电脑更新了")
         var id: String? = null
         var why = ""
-        // 电脑下几十 MB 可能比一次请求等得还久：超时了再问，电脑那边下好的不会重下
-        for (i in 1..3) {
-            val res = r.call(Command.HostFetchUpdate(info.assetUrl, info.sha256, info.assetSize))
-            if (res.ok) { id = res.data; break }
-            why = res.message
-            if ("只替" in why || "校验值" in why || "太大" in why) break
+        // 进度：电脑下（看电脑状态里的 hostFetchProgress）算前一半，传回手机算后一半。10-31 真机上电脑下了六分半，手机一直停在 0%，看着像卡死
+        coroutineScope {
+            val watch = launch { r.store.state.collect { s -> if (s.hostFetchProgress >= 0f) onProgress(s.hostFetchProgress * 0.5f) } }
+            try {
+                // 电脑下几十 MB 可能比一次请求等得还久：超时了再问，电脑那边下好的不会重下
+                for (i in 1..3) {
+                    val res = r.call(Command.HostFetchUpdate(info.assetUrl, info.sha256, info.assetSize))
+                    if (res.ok) { id = res.data; break }
+                    why = res.message
+                    if ("只替" in why || "校验值" in why || "太大" in why) break
+                }
+            } finally {
+                watch.cancel()
+            }
         }
         val fileId = id ?: throw IllegalStateException("电脑也没下成（$why）")
-        onProgress(0f)
+        onProgress(0.5f)
         return coroutineScope {
-            val watch = launch { r.downloads.collect { m -> m[fileId]?.let(onProgress) } }
+            val watch = launch { r.downloads.collect { m -> m[fileId]?.let { onProgress(0.5f + it * 0.5f) } } }
             try {
                 r.fileBytes(fileId) ?: throw IllegalStateException("电脑下好了，但取回手机没成功（网不好？再试一次）")
             } finally {

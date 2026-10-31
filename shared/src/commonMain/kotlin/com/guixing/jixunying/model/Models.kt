@@ -622,6 +622,8 @@ data class AppState(
     val chatgpt: ChatGptInfo = ChatGptInfo(),
     /** 这台设备的账号（2026-10-24）：本机密钥算出来的编号 + 绑的 GitHub。私钥不在这里（只在 account/identity.json）。 */
     val account: AccountInfo = AccountInfo(),
+    /** 电脑正在替手机下安装包的进度 0..1（-1 = 没在下）：手机等电脑下的时候看它，不然一直停在 0%（2026-10-31）。 */
+    val hostFetchProgress: Float = -1f,
     /** 这台设备装的 AI集训营 版本（2026-10-30）：手机看电脑的这一项，知道电脑会不会新命令（老版本电脑没有这一项，是空的）。 */
     val appVersion: String = "",
     /** 检查更新的情况（2026-10-30）：只给这台设备自己的界面看，不存盘、不发给手机。 */

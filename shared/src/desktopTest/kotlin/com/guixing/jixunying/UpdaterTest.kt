@@ -109,6 +109,21 @@ class UpdaterTest {
         dir.deleteRecursively()
     }
 
+    /** 真连 GitHub（JXY_LIVE_UPDATE=1 才跑）：查最新版、经本机代理把安卓包整个下下来并核对（10-31 手机请电脑代下时卡在 0 字节）。 */
+    @Test
+    fun liveDownloadThroughProxy() = runBlocking {
+        if (System.getenv("JXY_LIVE_UPDATE") != "1") return@runBlocking
+        System.clearProperty("jxy.update.api")
+        val up = Updater(File(dir, "live"), proxy = { System.getenv("JXY_PROXY") ?: "127.0.0.1:10809" }, isPhone = true, current = "1.0.0")
+        val info = up.check()
+        println("live: ${info.version} ${info.assetName} ${info.assetSize}")
+        val t0 = System.currentTimeMillis()
+        var last = 0f
+        val f = withTimeout(180_000) { up.download(info) { last = it } }
+        println("live: downloaded ${f.length()} in ${System.currentTimeMillis() - t0} ms, last progress $last")
+        assertEquals(info.assetSize, f.length())
+    }
+
     @Test
     fun versionsCompare() {
         assertTrue(Updater.newer("1.12.10", "1.12.9"))
