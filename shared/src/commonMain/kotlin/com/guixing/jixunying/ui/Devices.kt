@@ -74,64 +74,12 @@ private fun connText(c: ConnState) = when (c) {
 }
 
 /**
- * 手机在遥控电脑时，右上角一个小胶囊：电脑的名字，角上一个点（绿 = 连着，红 = 没连上）；点开是连接状态、「切回本机」、联机设置。
- * 2026-10-29 用户发手机截图（以前是顶上一整条「正在操作电脑「…」  切回本机」，连按钮 52dp 高）：「这个窗口能不能做的小一点优雅一点，在一边」。
- */
-@Composable
-fun RemoteBanner(ctl: AppController) {
-    val conn by ctl.backend.conn.collectAsState()
-    val ok = conn is ConnState.Connected
-    val name = ctl.hub.remote.value?.host?.hostName?.ifBlank { null } ?: "电脑"
-    val tint = if (ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
-    var open by remember { mutableStateOf(false) }
-    Row(Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 4.dp), horizontalArrangement = Arrangement.End) {
-        Box {
-            GlassSurface(CircleShape, Modifier.clip(CircleShape).clickable { open = true }, border = BorderStroke(1.dp, Ext.c.border)) {
-                Row(Modifier.padding(start = 10.dp, end = 6.dp, top = 5.dp, bottom = 5.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Box {
-                        Icon(Icons.Rounded.Computer, null, Modifier.size(15.dp), tint = tint)
-                        Box(Modifier.align(Alignment.TopEnd).offset(x = 3.dp, y = (-2).dp).size(7.dp).clip(CircleShape)
-                            .background(if (ok) Ext.c.success else MaterialTheme.colorScheme.error))
-                    }
-                    Spacer(Modifier.width(7.dp))
-                    Text(if (ok) name else "$name · " + if (conn == ConnState.Connecting) "连接中" else "没连上",
-                        style = MaterialTheme.typography.labelMedium, color = tint, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.widthIn(max = 170.dp))
-                    Icon(Icons.Rounded.ExpandMore, "电脑的连接状态、切回本机", Modifier.size(16.dp), tint = Ext.c.subtle)
-                }
-            }
-            androidx.compose.material3.DropdownMenu(open, { open = false }) {
-                androidx.compose.material3.DropdownMenuItem(
-                    {
-                        Column {
-                            Text("正在操作电脑「$name」")
-                            Text(connText(conn), style = MaterialTheme.typography.labelSmall, color = if (ok) Ext.c.success else MaterialTheme.colorScheme.error)
-                        }
-                    },
-                    leadingIcon = { Icon(Icons.Rounded.Computer, null, Modifier.size(18.dp)) },
-                    onClick = { open = false },
-                )
-                androidx.compose.material3.HorizontalDivider(color = Ext.c.border)
-                androidx.compose.material3.DropdownMenuItem(
-                    { Text("切回本机") },
-                    leadingIcon = { Icon(Icons.Rounded.PhoneAndroid, null, Modifier.size(18.dp)) },
-                    onClick = { open = false; ctl.hub.useRemote.value = false },
-                )
-                androidx.compose.material3.DropdownMenuItem(
-                    { Text("联机设置…") },
-                    leadingIcon = { Icon(Icons.Rounded.Link, null, Modifier.size(18.dp)) },
-                    onClick = { open = false; ctl.openSettings(SettingsTab.DEVICES) },
-                )
-            }
-        }
-    }
-}
-
-/**
- * 侧栏右上角的设备按钮（2026-10-14 用户给的侧栏改版图；10-23 改成点一下就切，下面说的下拉改成长按出来）：显示现在操作的是哪台，角上一个小点表示联机状态。
- * 手机：下拉里是「本机」、配对过的电脑（带连接状态）、「连接电脑…」（原来侧栏底下那一项收进来了）；
- *   点是绿的 = 连着电脑，红的 = 配对过但没连上，没配对就不显示点。
- * 电脑：下拉里是「本机」和「手机联机…」；点是绿的 = 已经连上中转（手机能找到这台电脑）。
+ * 侧栏右上角的设备按钮（2026-10-14 用户给的侧栏改版图；10-23 改成点一下就切，下拉改成长按出来）。
+ * 2026-10-31 用户：「手机和桌面端来回切换那个键，它要来回跳……没有一个固定点儿」「上面那个切回电脑那个键不要了，就找左边侧栏的一个点儿做一个按钮」：
+ * 以前按钮里写着「本机」/ 电脑名字，宽度跟着变，名字一长标签那一行放不下就被挤到下一行；遥控电脑时右上角还有一个「切回本机」。
+ * 现在只剩这一个、固定大小的圆按钮（不写字），永远在标签那一行的最右边；现在用的是哪台，主区域右下角一行半透明小字（DeviceCornerLabel）。
+ * 手机配对过电脑：点一下在本机和电脑之间切；没配对的手机、电脑上点一下打开联机页。长按是下拉（看连接状态、进联机设置）。
+ * 角上一个小点：手机上绿 = 连着电脑，红 = 配对过但没连上；电脑上绿 = 已经连上中转（手机能找到这台电脑）。
  */
 @Composable
 fun DeviceMenu(ctl: AppController, state: com.guixing.jixunying.model.AppState, onNavigate: () -> Unit) {
@@ -147,28 +95,26 @@ fun DeviceMenu(ctl: AppController, state: com.guixing.jixunying.model.AppState, 
         conn is ConnState.Connected -> Ext.c.success
         else -> MaterialTheme.colorScheme.error
     }
-    val label = if (onRemote) remote!!.host.hostName.ifBlank { "电脑" } else "本机"
     // 点一下就切（2026-10-23 用户：「切换设备按钮一键就行」）：手机配对过电脑时在本机和电脑之间来回切；
     // 没配对的手机、电脑上点一下打开联机页。长按还是原来的下拉（看连接状态、进联机设置）
     val canToggle = !platform.isDesktop && remote != null
+    val what = when {
+        canToggle -> if (onRemote) "正在用电脑，点一下切回本机（长按看连接状态）" else "正在用本机，点一下切到电脑（长按看连接状态）"
+        platform.isDesktop -> "手机联机"
+        else -> "连接电脑"
+    }
     Box {
-        Row(
-            Modifier.clip(RoundedCornerShape(50)).background(MaterialTheme.colorScheme.surface)
-                .border(1.dp, Ext.c.border, RoundedCornerShape(50))
+        Box(
+            Modifier.size(34.dp).clip(CircleShape).background(MaterialTheme.colorScheme.surface)
+                .border(1.dp, Ext.c.border, CircleShape)
                 .combinedClickable(onLongClick = { open = true }) {
                     if (canToggle) ctl.hub.useRemote.value = !onRemote
                     else { ctl.openSettings(SettingsTab.DEVICES); onNavigate() }
-                }.padding(start = 10.dp, end = 6.dp, top = 6.dp, bottom = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
+                },
+            contentAlignment = Alignment.Center,
         ) {
-            Icon(if (onRemote || platform.isDesktop) Icons.Rounded.Computer else Icons.Rounded.PhoneAndroid, null,
-                Modifier.size(15.dp), tint = if (onRemote) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
-            Spacer(Modifier.width(5.dp))
-            Text(label, style = MaterialTheme.typography.labelMedium, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.widthIn(max = 96.dp),
-                color = if (onRemote) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface)
-            Icon(if (canToggle) Icons.Rounded.SwapHoriz else Icons.Rounded.ChevronRight,
-                if (canToggle) "切换设备" else if (platform.isDesktop) "手机联机" else "连接电脑", Modifier.size(16.dp), tint = Ext.c.subtle)
+            Icon(if (canToggle) Icons.Rounded.SwapHoriz else if (platform.isDesktop) Icons.Rounded.PhoneAndroid else Icons.Rounded.Computer, what,
+                Modifier.size(18.dp), tint = if (onRemote) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
         }
         if (dot != null) {
             Box(Modifier.align(Alignment.TopEnd).offset(x = 2.dp, y = (-2).dp).size(9.dp).clip(CircleShape)
@@ -203,6 +149,24 @@ fun DeviceMenu(ctl: AppController, state: com.guixing.jixunying.model.AppState, 
             )
         }
     }
+}
+
+/**
+ * 现在用的是哪台（2026-10-31 用户：「你是还想提示他这是手机还是电脑？那就找一个角落隐蔽的地方，然后半透明字体就行」）：
+ * 手机上主区域右下角一行很淡的小字，「本机」或「电脑 · 名字」，点不了、不挡东西。电脑只有本机，不显示。
+ */
+@Composable
+fun DeviceCornerLabel(ctl: AppController, modifier: Modifier = Modifier) {
+    if (LocalPlatform.current.isDesktop) return
+    val remote by ctl.hub.remote.collectAsState()
+    val useRemote by ctl.hub.useRemote.collectAsState()
+    val r = remote
+    val text = if (useRemote && r != null) {
+        val conn by r.conn.collectAsState()
+        "电脑 · " + r.host.hostName.ifBlank { "电脑" } + if (conn is ConnState.Connected) "" else "（没连上）"
+    } else "本机"
+    Text(text, modifier, style = MaterialTheme.typography.labelSmall, maxLines = 1,
+        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.32f))
 }
 
 @Composable

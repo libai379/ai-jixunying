@@ -501,7 +501,6 @@ private fun MainContent(ctl: AppController, wide: Boolean, openDrawer: () -> Uni
     val noLocalCode = !LocalPlatform.current.isDesktop && !ctl.remoteMode
     LaunchedEffect(noLocalCode) { if (noLocalCode && ctl.sidebarTab == SidebarTab.CODE) ctl.sidebarTab = SidebarTab.CHAT }
     androidx.compose.foundation.layout.Column(Modifier.fillMaxSize()) {
-        if (ctl.remoteMode) RemoteBanner(ctl)
         Box(Modifier.weight(1f)) {
             when {
                 tab != null -> SettingsScreen(ctl, tab, wide, openDrawer)
@@ -517,6 +516,8 @@ private fun MainContent(ctl: AppController, wide: Boolean, openDrawer: () -> Uni
                 ctl.sidebarTab == SidebarTab.CODE -> CodeEmptyScreen(ctl, wide, openDrawer)
                 else -> EmptyChatScreen(ctl, wide, openDrawer)
             }
+            // 现在用的是本机还是电脑：右下角一行很淡的小字（2026-10-31，替掉以前右上角的「切回本机」胶囊）
+            DeviceCornerLabel(ctl, Modifier.align(Alignment.BottomEnd).padding(end = 10.dp, bottom = 1.dp))
         }
     }
     if (ctl.showNewChat) NewChatDialog(ctl)
