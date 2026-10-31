@@ -4,6 +4,7 @@ import com.guixing.jixunying.client.ConnState
 import com.guixing.jixunying.client.Hub
 import com.guixing.jixunying.client.RemoteBackend
 import com.guixing.jixunying.model.Command
+import com.guixing.jixunying.model.WeixinBot
 import com.guixing.jixunying.model.WeixinInfo
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -23,6 +24,9 @@ import kotlinx.coroutines.launch
  * 没配对电脑的手机不受影响，自己绑、自己答。
  * - 一台电脑连多台手机（2026-10-24）：电脑不接的时候只让一台手机接——电脑状态里的 weixinBackup（默认是最后一台来拿绑定的，
  *   电脑 设置 → 微信 能换）。手机把它记在本机 [backupFile]，电脑关着、手机重启了也知道该不该接。用自己扫码绑的不受这条管。
+ * - 电脑挂几个微信（2026-10-30 多微信方案甲）：每个微信分开算。手机只拿它自己遥控电脑时绑的、加上电脑自己绑的；
+ *   电脑在接哪个微信，手机那一份就待命；电脑关了，它自己绑的它接，电脑自己绑的归接班手机。
+ *   手机自己扫码绑的：电脑没在接同一个微信就照常答（以前电脑在接任何一个都待命，A 手机自己绑的就用不了）。
  */
 class WeixinHandover(
     private val hub: Hub,
@@ -44,12 +48,14 @@ class WeixinHandover(
     @Volatile private var backup: String = backupFile?.let { f -> runCatching { f.readText().trim() }.getOrNull() }.orEmpty()
 
     private var lastSync = 0L
-    private var reportedUntil = 0L
+    private val reportedUntil = java.util.concurrent.ConcurrentHashMap<String, Long>()
     private var wasConnected = false
+    /** 电脑是老版本、不认 WeixinShareAll：退回一份的 WeixinShare。 */
+    private var hostOld = false
 
     fun start() {
         bridge.standby = ::standbyReason
-        bridge.onAnswered = { scope.launch { report() } }
+        bridge.onAnswered = { _, _ -> scope.launch { report() } }
         scope.launch {
             while (isActive) {
                 runCatching { tick() }
@@ -58,8 +64,12 @@ class WeixinHandover(
         }
     }
 
-    /** 电脑在接就待命；还没弄清电脑在不在接时也先等着。返回 null = 手机可以接。 */
-    fun standbyReason(): String? {
+    /** 电脑上挂着的几个微信。老版本电脑没有 bots，只有汇总的一个（算电脑自己绑的）。 */
+    private fun hostBots(wx: WeixinInfo): List<WeixinBot> =
+        wx.bots.ifEmpty { if (wx.bound && wx.botId.isNotEmpty()) listOf(WeixinBot(wx.botId, answering = hostAnswering(wx))) else emptyList() }
+
+    /** 电脑在接这个微信就待命；还没弄清电脑在不在接时也先等着。返回 null = 手机可以接。 */
+    fun standbyReason(bot: WeixinBridge.BotRef): String? {
         val r = hub.remote.value ?: return null
         return when (r.conn.value) {
             is ConnState.Connecting -> CHECKING
@@ -68,17 +78,27 @@ class WeixinHandover(
                 when {
                     // 连上了但电脑的状态还没到（weixinCapable 是电脑状态里才有的）
                     !st.weixinCapable -> CHECKING
-                    hostAnswering(st.weixin) -> STANDBY
-                    else -> notMyTurn(r.host.deviceId)
+                    hostAnswers(st.weixin, bot) -> STANDBY
+                    else -> notMyTurn(r.host.deviceId, bot)
                 }
             }
-            else -> notMyTurn(r.host.deviceId)
+            else -> notMyTurn(r.host.deviceId, bot)
         }
     }
 
-    /** 电脑不接时：用的是电脑那份绑定、电脑又定了别的手机接班（或者都不接），这台就待命。 */
-    private fun notMyTurn(me: String): String? {
-        if (!bridge.isShared) return null
+    /** 电脑在接这个微信。老版本电脑说不清是哪个：在接就算在接（和以前一样）。 */
+    private fun hostAnswers(wx: WeixinInfo, bot: WeixinBridge.BotRef): Boolean {
+        if (wx.bots.isEmpty()) return hostAnswering(wx)
+        return wx.bots.any { it.answering && (it.botId == bot.botId || (bot.userId.isNotEmpty() && it.userId == bot.userId)) }
+    }
+
+    /**
+     * 电脑不接时：手机自己扫码绑的照常接；同步来的、是这台手机绑的照常接；同步来的、电脑自己绑的看接班的是不是这台
+     * （电脑定了别的手机接班、或者都不接，这台就待命）。
+     */
+    private fun notMyTurn(me: String, bot: WeixinBridge.BotRef): String? {
+        if (!bot.shared) return null
+        if (bot.boundBy.isNotEmpty()) return if (bot.boundBy == me) null else OTHER_PHONE
         val b = backup
         return if (b == "none" || (b.isNotEmpty() && b != me)) OTHER_PHONE else null
     }
@@ -92,34 +112,44 @@ class WeixinHandover(
             backup = st.weixinBackup
             backupFile?.let { f -> runCatching { f.parentFile?.mkdirs(); f.writeText(backup) } }
         }
-        // 电脑在接：它最后一次说话以前发来的消息都归它
-        if (hostAnswering(st.weixin)) bridge.raiseFence(remote.lastHeardAt)
-        if (!wasConnected) { wasConnected = true; reportedUntil = 0; report() }
-        val host = st.weixin
+        val host = hostBots(st.weixin)
+        // 电脑在接的那几个：它最后一次说话以前发来的消息都归它
+        for (b in host) if (b.answering) bridge.raiseFence(b.botId, remote.lastHeardAt)
+        if (!wasConnected) { wasConnected = true; reportedUntil.clear(); report() }
+        val me = remote.host.deviceId
         val on = engine.state.settings.weixin.enabled
-        when {
-            // 电脑解除了绑定：同步来的那份也删掉
-            !host.bound && bridge.isShared -> bridge.forgetShared()
-            // 电脑绑了（或者换了）微信：拿过来。手机自己扫码绑的不动
-            on && host.bound && host.botId.isNotEmpty() && (!bridge.isBound || (bridge.isShared && bridge.botId != host.botId)) &&
-                System.currentTimeMillis() - lastSync > 60_000 -> {
-                lastSync = System.currentTimeMillis()
-                sync(remote)
-            }
+        // 这台手机该拿的：它自己绑的 + 电脑自己绑的
+        val wanted = host.filter { it.boundBy.isEmpty() || it.boundBy == me }
+        val mine = bridge.refs()
+        // 电脑那边没有了（解除了、或者换了一个）：同步来的那份删掉
+        mine.filter { it.shared && host.none { h -> h.botId == it.botId } }.forEach { bridge.forgetShared(it.botId) }
+        // 电脑上有、这台还没有的：拿过来。手机自己扫码绑的同一个微信不动
+        val missing = wanted.filter { h -> mine.none { it.botId == h.botId || (!it.shared && h.userId.isNotEmpty() && it.userId == h.userId) } }
+        if (on && missing.isNotEmpty() && System.currentTimeMillis() - lastSync > 60_000) {
+            lastSync = System.currentTimeMillis()
+            sync(remote)
         }
     }
 
     private suspend fun sync(remote: RemoteBackend) {
+        if (!hostOld) {
+            val r = remote.call(Command.WeixinShareAll)
+            if (r.ok) { bridge.importSharedAll(r.data); return }
+            // 老版本电脑看不懂这条命令
+            hostOld = true
+        }
         val r = remote.call(Command.WeixinShare)
         if (r.ok) bridge.importShared(r.data)
     }
 
-    /** 告诉电脑手机答到了哪儿（连上的时候、每答完一条）。 */
+    /** 告诉电脑手机答到了哪儿（连上的时候、每答完一条），每个微信分开报。 */
     private suspend fun report() {
         val remote = hub.remote.value ?: return
         if (remote.conn.value !is ConnState.Connected) return
-        val t = bridge.answeredUntil
-        if (t <= reportedUntil) return
-        if (remote.call(Command.WeixinReport(t)).ok) reportedUntil = t
+        for (b in bridge.refs().filter { it.shared }) {
+            val t = bridge.answeredUntil(b.botId)
+            if (t <= (reportedUntil[b.botId] ?: 0)) continue
+            if (remote.call(Command.WeixinReport(t, b.botId)).ok) reportedUntil[b.botId] = t
+        }
     }
 }

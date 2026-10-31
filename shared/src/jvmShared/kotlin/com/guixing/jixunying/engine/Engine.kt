@@ -1647,13 +1647,18 @@ class Engine(
         }
         is Command.SearchHistory -> CommandResult(data = AppJson.encodeToString(
             kotlinx.serialization.builtins.ListSerializer(HistoryHit.serializer()), searchHistory(c.query, c.limit).hits))
-        is Command.WeixinLogin -> weixin?.login() ?: CommandResult(false, "这台设备没有接微信助理")
+        // 手机遥控电脑时扫的码：这个微信记成那台手机绑的（2026-10-30 多微信）
+        is Command.WeixinLogin -> weixin?.login(kotlin.coroutines.coroutineContext[RemoteDevice]?.id.orEmpty()) ?: CommandResult(false, "这台设备没有接微信助理")
         is Command.WeixinVerify -> weixin?.verify(c.code) ?: CommandResult(false, "这台设备没有接微信助理")
         is Command.WeixinLogout -> weixin?.logout() ?: CommandResult(false, "这台设备没有接微信助理")
+        is Command.WeixinUnbind -> weixin?.logout(c.botId) ?: CommandResult(false, "这台设备没有接微信助理")
+        is Command.WeixinSetReadFiles -> weixin?.setReadFiles(c.botId, c.on) ?: CommandResult(false, "这台设备没有接微信助理")
         // 手机经加密线路来要绑定（RelayHost 只放已配对的手机进来）
         is Command.WeixinShare -> weixin?.shareAccount()?.let { CommandResult(data = it) } ?: CommandResult(false, "电脑上还没绑定微信")
+        is Command.WeixinShareAll -> weixin?.shareFor(kotlin.coroutines.coroutineContext[RemoteDevice]?.id.orEmpty())?.let { CommandResult(data = it) }
+            ?: CommandResult(false, "这台设备没有接微信助理")
         is Command.WeixinImport -> weixin?.importShared(c.shareJson) ?: CommandResult(false, "这台设备没有接微信助理")
-        is Command.WeixinReport -> { weixin?.raiseFence(c.answeredUntil); CommandResult() }
+        is Command.WeixinReport -> { weixin?.raiseFence(c.botId, c.answeredUntil); CommandResult() }
         is Command.ExportMessage -> exportMessage(c)
         is Command.Speak -> speak(c)
         is Command.SpeakPlan -> speakPlan(c)
@@ -3848,10 +3853,12 @@ class Engine(
         val officialSearch = if (wantSearch) officialSearchFor(provider) else null
         val fnSearch = wantSearch && native == NativeSearch.NONE
         val memOn = state.settings.memory.enabled
-        val docsOn = docsUsable()
+        // 微信对话：别的手机绑的微信默认只聊天，不碰电脑上的文件（2026-10-30 多微信；设置 → 微信 每个微信一个开关）
+        val wxChatOnly = conv.channel.startsWith("weixin:") && weixin?.readFilesFor(conv.channel.removePrefix("weixin:")) == false
+        val docsOn = docsUsable() && !wxChatOnly
         val officeOn = state.settings.office.enabled
         // 电脑上：任意文件 / 文件夹都能读（收录范围外的先问用户；微信、手机发起的不许）
-        val filesOn = !isPhone
+        val filesOn = !isPhone && !wxChatOnly
         val useTools = toolsOk && (wantSearch || hasImageModel || hasVideo || memOn || docsOn || officeOn || filesOn)
 
         try {

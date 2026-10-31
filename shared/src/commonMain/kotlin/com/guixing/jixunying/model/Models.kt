@@ -252,6 +252,29 @@ data class WeixinInfo(
     val botId: String = "",
     /** 这台手机用的是从电脑同步来的绑定。 */
     val shared: Boolean = false,
+    /**
+     * 挂着的每一个微信（2026-10-30 多微信方案甲：一台设备能挂几个微信，一个微信一份，同一个微信重绑只换它自己那份）。
+     * 上面那几项是汇总（bound = 有一个就算，answering = 有一个在收，botId = 打头那个），给老版本手机看。
+     */
+    val bots: List<WeixinBot> = emptyList(),
+)
+
+/** 一个绑定的微信（界面显示用，不含凭证）。 */
+@Serializable
+data class WeixinBot(
+    val botId: String,
+    /** 扫码绑定的那个微信（ilink_user_id，不是凭证）：只回答他。 */
+    val userId: String = "",
+    val status: String = "",
+    val answering: Boolean = false,
+    val boundAt: Long = 0,
+    val lastMessageAt: Long = 0,
+    /** 谁绑的：空 = 这台设备自己；配对设备编号 = 那台手机遥控电脑时绑的。 */
+    val boundBy: String = "",
+    /** 这个微信里 AI 能不能读电脑上的文件。电脑自己绑的默认能，手机绑的默认只聊天。 */
+    val readFiles: Boolean = true,
+    /** 手机上：从电脑同步来的。 */
+    val shared: Boolean = false,
 )
 
 @Serializable

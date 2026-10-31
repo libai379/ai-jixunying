@@ -109,13 +109,13 @@ class RelayHost(private val engine: Engine) {
                     // 手机遥控电脑：先过 PhoneGate（Code 栏的写操作默认拦下；打开了也有限制；保存设置不许动 Code 栏那几项）
                     val v = PhoneGate.check(f.command, engine.state)
                     // 哪台手机来拿微信绑定，记下来：电脑关机时就它接（没指定过、或者指定的那台已经取消配对时）
-                    if (v.refusal == null && v.command is com.guixing.jixunying.model.Command.WeixinShare) engine.noteWeixinPhone(deviceId)
+                    if (v.refusal == null && (v.command is com.guixing.jixunying.model.Command.WeixinShare || v.command is com.guixing.jixunying.model.Command.WeixinShareAll)) engine.noteWeixinPhone(deviceId)
                     (v.command as? com.guixing.jixunying.model.Command.SyncDone)?.let { engine.noteSync(deviceId, it.summary) }
                     // 借电脑本机模型：边问边把增量发回这台手机（发送队列会把 80 毫秒里的几截并成一截）
                     val parts = if (v.command is com.guixing.jixunying.model.Command.HostChat)
                         com.guixing.jixunying.engine.HostChatParts { c, rs -> enqueue(deviceId, WireFrame.Part(f.reqId, c, rs)) }
                     else kotlin.coroutines.EmptyCoroutineContext
-                    val r = v.refusal ?: withContext(parts) { engine.call(v.command) }
+                    val r = v.refusal ?: withContext(parts + com.guixing.jixunying.engine.RemoteDevice(deviceId)) { engine.call(v.command) }
                     enqueue(deviceId, WireFrame.Res(f.reqId, r))
                 }
                 else -> Unit

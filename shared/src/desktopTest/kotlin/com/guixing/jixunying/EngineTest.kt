@@ -93,6 +93,9 @@ class EngineTest {
     private val wxTyping = Collections.synchronizedList(mutableListOf<String>())
     private val wxHeaders = Collections.synchronizedList(mutableListOf<String>())
     private val qrPolls = java.util.concurrent.atomic.AtomicInteger()
+    /** 下一次扫码绑上的是哪个微信（凭证、助理编号、本人）：测一台设备挂几个微信时换成第二个。第二个微信的消息放 wxInbox2。 */
+    @Volatile private var wxNextBind = Triple("tok", "bot1@im.bot", "me@im.wechat")
+    private val wxInbox2 = java.util.concurrent.ConcurrentLinkedQueue<String>()
     private val wxKey = ByteArray(16) { (it * 7 + 3).toByte() }
     private lateinit var fake: EmbeddedServer<*, *>
     private var port = 0
@@ -330,7 +333,7 @@ class EngineTest {
                     wxHeaders += call.request.headers["iLink-App-Id"].orEmpty()
                     val n = qrPolls.incrementAndGet()
                     call.respondText(if (n == 1) """{"status":"scaned"}"""
-                        else """{"status":"confirmed","bot_token":"tok","ilink_bot_id":"bot1@im.bot","ilink_user_id":"me@im.wechat","baseurl":"http://127.0.0.1:$port"}""",
+                        else wxNextBind.let { (t, b, u) -> """{"status":"confirmed","bot_token":"$t","ilink_bot_id":"$b","ilink_user_id":"$u","baseurl":"http://127.0.0.1:$port"}""" },
                         ContentType.Application.Json)
                 }
                 post("/ilink/bot/msg/notifystart") { call.respondText("{}", ContentType.Application.Json) }
@@ -338,7 +341,7 @@ class EngineTest {
                 post("/ilink/bot/getupdates") {
                     wxHeaders += "auth=" + call.request.headers["Authorization"] + ";type=" + call.request.headers["AuthorizationType"] + ";uin=" + call.request.headers["X-WECHAT-UIN"]
                     call.receiveText()
-                    val batch = wxInbox.poll()
+                    val batch = (if (call.request.headers["Authorization"] == "Bearer tok2") wxInbox2 else wxInbox).poll()
                     if (batch == null) { delay(300); call.respondText("""{"ret":0,"msgs":[],"get_updates_buf":"b0"}""", ContentType.Application.Json) }
                     else call.respondText("""{"ret":0,"msgs":[$batch],"get_updates_buf":"b${wxInbox.size}"}""", ContentType.Application.Json)
                 }
@@ -1406,6 +1409,129 @@ class EngineTest {
         e.call(Command.WeixinLogout)
         assertFalse(e.state.weixin.bound)
         bridge.stop()
+    }
+
+    /** 以前只有一份 weixin/account.json：启动时搬进 weixin/bots/<botId>/，算电脑自己绑的（能读文件），不用重扫。 */
+    @Test
+    fun weixinOldAccountMigrates() = runBlocking {
+        val (e, _) = engineWithMembers("小智")
+        val wxDir = File(dir, "wxold").apply { mkdirs() }
+        File(wxDir, "account.json").writeText("""{"botToken":"tok","botId":"bot1@im.bot","userId":"me@im.wechat","baseUrl":"${base()}","boundAt":5}""")
+        File(wxDir, "cursor.json").writeText("""{"buf":"b9","answeredUntil":77}""")
+        val bridge = com.guixing.jixunying.engine.WeixinBridge(e, wxDir, loginBase = base(), cdnBase = "${base()}/c2c")
+        assertTrue(bridge.isBound)
+        assertFalse(File(wxDir, "account.json").exists(), "旧文件搬走了")
+        assertTrue(File(wxDir, "bots/bot1_im.bot/account.json").isFile)
+        assertEquals(77, bridge.answeredUntil("bot1@im.bot"), "进度跟着搬")
+        assertTrue(bridge.readFilesFor("me@im.wechat"))
+        assertEquals("", bridge.refs().single().boundBy)
+    }
+
+    /**
+     * 多微信方案甲（2026-10-30 用户：「虽然兼容多个移动端，但是不能兼容多个移动端里面的微信 Chatbot 助手」）：
+     * 电脑挂两个微信——电脑自己扫的、手机 A 遥控电脑时扫的（记成 A 绑的、默认只聊天）；电脑开着两个都由电脑答；
+     * A 拿到两份（自己的 + 电脑的，它是接班），B 只拿电脑那份；电脑关掉微信助理后 A 答自己的；电脑解绑 A 的，A 跟着删。
+     */
+    @Test
+    fun weixinSeveralAccounts() = runBlocking {
+        val mqttPort = freePort()
+        val broker = io.moquette.broker.Server()
+        broker.startServer(io.moquette.broker.config.MemoryConfig(Properties().apply {
+            setProperty("port", mqttPort.toString()); setProperty("host", "127.0.0.1"); setProperty("websocket_port", "disabled")
+            setProperty("allow_anonymous", "true"); setProperty("persistence_enabled", "false"); setProperty("data_path", File(dir, "mqtt4").absolutePath)
+        }))
+        val (pc, _) = engineWithMembers("小智", root = File(dir, "pc4").also { it.mkdirs() })
+        pc.call(Command.SaveSettings(pc.state.settings.copy(relay = RelaySettings(true, listOf("tcp://127.0.0.1:$mqttPort"), "测试电脑"))))
+        val relay = RelayHost(pc)
+        relay.restart()
+        val pcWx = com.guixing.jixunying.engine.WeixinBridge(pc, File(dir, "pc4/weixin"), loginBase = base(), cdnBase = "${base()}/c2c", backlogHoldMs = 500)
+        pc.weixin = pcWx
+        pcWx.start()
+        val (phone, _) = engineWithMembers("小米", root = File(dir, "phone4").also { it.mkdirs() })
+        val phoneWx = com.guixing.jixunying.engine.WeixinBridge(phone, File(dir, "phone4/weixin"), loginBase = base(), cdnBase = "${base()}/c2c")
+        phone.weixin = phoneWx
+        val (phoneB, _) = engineWithMembers("小丽", root = File(dir, "phone5").also { it.mkdirs() })
+        val phoneBWx = com.guixing.jixunying.engine.WeixinBridge(phoneB, File(dir, "phone5/weixin"), loginBase = base(), cdnBase = "${base()}/c2c")
+        phoneB.weixin = phoneBWx
+        fun sent() = wxSent.filter { it.startsWith("{") }.map { Json.parseToJsonElement(it).jsonObject["msg"]!!.jsonObject }
+        fun replyTo(user: String) = sent().filter { it["to_user_id"]!!.jsonPrimitive.content == user }
+            .mapNotNull { it["item_list"]!!.jsonArray[0].jsonObject["text_item"]?.jsonObject?.get("text")?.jsonPrimitive?.content }
+        fun msg(id: Long, from: String, bot: String, text: String, at: Long) =
+            """{"message_id":$id,"from_user_id":"$from","to_user_id":"$bot","message_type":1,"create_time_ms":$at,"context_token":"c$id","item_list":[{"type":1,"text_item":{"text":"$text"}}]}"""
+        try {
+            withTimeout(15_000) { while (!pc.state.relayStatus.startsWith("已连上")) delay(100) }
+            // 电脑自己扫的第一个
+            assertTrue(pc.call(Command.WeixinLogin).ok)
+            withTimeout(10_000) { while (!pc.state.weixin.answering) delay(50) }
+
+            // 手机 A 配对后遥控电脑扫第二个微信：记成 A 绑的，默认只聊天
+            val hub = Hub(phone, linkFactory = { RelayLink(it) }, pairer = { c, n -> pairWithHost(c, n) }, deviceName = "手机A")
+            assertTrue(hub.pair(PairingCode(pc.state.hostId, pc.state.pairingSecret, "测试电脑", pc.state.settings.relay.brokers)).isSuccess)
+            val remoteA = hub.remote.value!!
+            withTimeout(15_000) { while (remoteA.conn.value !is com.guixing.jixunying.client.ConnState.Connected) delay(50) }
+            val idA = pc.state.devices.single().id
+            wxNextBind = Triple("tok2", "bot2@im.bot", "you@im.wechat")
+            assertTrue(remoteA.call(Command.WeixinLogin).ok)
+            withTimeout(15_000) { while (pc.state.weixin.bots.size < 2 || pc.state.weixin.bots.any { !it.answering }) delay(50) }
+            val (b1, b2) = pc.state.weixin.bots.let { l -> l.first { it.botId == "bot1@im.bot" } to l.first { it.botId == "bot2@im.bot" } }
+            assertEquals("", b1.boundBy); assertTrue(b1.readFiles, "电脑自己扫的能读文件")
+            assertEquals(idA, b2.boundBy, "遥控时扫的记成那台手机绑的"); assertFalse(b2.readFiles, "手机绑的默认只聊天")
+            assertTrue(File(dir, "pc4/weixin/bots/bot1_im.bot/account.json").isFile && File(dir, "pc4/weixin/bots/bot2_im.bot/account.json").isFile)
+
+            // 电脑开着：两个微信都电脑答；只聊天的那个不给读文件的工具
+            wxSent.clear(); requests.clear()
+            wxInbox += msg(41, "me@im.wechat", "bot1@im.bot", "电脑上的文件你能看吗", System.currentTimeMillis())
+            wxInbox2 += msg(42, "you@im.wechat", "bot2@im.bot", "我这边只聊天吗", System.currentTimeMillis())
+            withTimeout(20_000) { while (replyTo("me@im.wechat").none { "小智" in it } || replyTo("you@im.wechat").none { "小智" in it }) delay(50) }
+            fun toolsFor(text: String) = requests.first { r -> r["messages"].toString().contains(text) }["tools"]?.jsonArray
+                ?.map { it.jsonObject["function"]!!.jsonObject["name"]!!.jsonPrimitive.content }.orEmpty()
+            assertTrue("list_folder" in toolsFor("电脑上的文件你能看吗"), "电脑自己的微信照样能读电脑上的文件")
+            assertTrue(toolsFor("我这边只聊天吗").none { it in setOf("list_folder", "read_document", "search_documents", "run_command") }, "只聊天的不给文件工具")
+            // 开关只能在电脑上改
+            assertFalse(com.guixing.jixunying.engine.code.PhoneGate.check(Command.WeixinSetReadFiles("bot2@im.bot", true), pc.state).refusal == null)
+            assertTrue(pc.call(Command.WeixinSetReadFiles("bot2@im.bot", true)).ok)
+            assertTrue(pcWx.readFilesFor("you@im.wechat"))
+            assertTrue(pc.call(Command.WeixinSetReadFiles("bot2@im.bot", false)).ok)
+
+            // 手机 A 拿两份（自己的 + 电脑的），都待命；手机 B 只拿电脑那份
+            com.guixing.jixunying.engine.WeixinHandover(hub, phone, phoneWx).start()
+            phoneWx.start()
+            withTimeout(30_000) { while (phoneWx.refs().size < 2) delay(100) }
+            assertEquals(setOf("bot1@im.bot", "bot2@im.bot"), phoneWx.refs().map { it.botId }.toSet())
+            withTimeout(10_000) { while (phone.state.weixin.bots.any { it.status != com.guixing.jixunying.engine.WeixinHandover.STANDBY }) delay(50) }
+            val hubB = Hub(phoneB, linkFactory = { RelayLink(it) }, pairer = { c, n -> pairWithHost(c, n) }, deviceName = "手机B")
+            assertTrue(hubB.pair(PairingCode(pc.state.hostId, pc.state.pairingSecret, "测试电脑", pc.state.settings.relay.brokers)).isSuccess)
+            com.guixing.jixunying.engine.WeixinHandover(hubB, phoneB, phoneBWx, backupFile = File(dir, "phone5/backup.txt")).start()
+            phoneBWx.start()
+            withTimeout(30_000) { while (phoneBWx.refs().isEmpty()) delay(100) }
+            delay(1_000)
+            assertEquals(listOf("bot1@im.bot"), phoneBWx.refs().map { it.botId }, "别的手机绑的微信不给 B")
+            assertEquals(idA, pc.state.weixinBackup)
+
+            // 电脑关掉微信助理：A 接自己的和电脑的（它是接班），B 待命
+            val ws = pc.state.settings.weixin
+            pc.call(Command.SaveSettings(pc.state.settings.copy(weixin = ws.copy(enabled = false))))
+            withTimeout(20_000) { while (phone.state.weixin.bots.count { it.answering } < 2) delay(50) }
+            withTimeout(20_000) { while (phoneB.state.weixin.status != com.guixing.jixunying.engine.WeixinHandover.OTHER_PHONE) delay(50) }
+            wxSent.clear()
+            wxInbox2 += msg(43, "you@im.wechat", "bot2@im.bot", "电脑关了谁答", System.currentTimeMillis() + 5_000)
+            withTimeout(20_000) { while (replyTo("you@im.wechat").isEmpty()) delay(50) }
+            delay(1_000)
+            assertEquals(1, replyTo("you@im.wechat").size)
+            assertTrue("小米" in replyTo("you@im.wechat").single(), "A 答它自己绑的")
+
+            // 电脑解绑 A 绑的那个：A 跟着删，电脑那个还在
+            pc.call(Command.SaveSettings(pc.state.settings.copy(weixin = ws.copy(enabled = true))))
+            assertTrue(pc.call(Command.WeixinUnbind("bot2@im.bot")).ok)
+            assertEquals(listOf("bot1@im.bot"), pc.state.weixin.bots.map { it.botId })
+            assertFalse(File(dir, "pc4/weixin/bots/bot2_im.bot").exists())
+            withTimeout(20_000) { while (phoneWx.refs().any { it.botId == "bot2@im.bot" }) delay(100) }
+            assertEquals(listOf("bot1@im.bot"), phoneWx.refs().map { it.botId })
+            phoneBWx.stop()
+        } finally {
+            wxNextBind = Triple("tok", "bot1@im.bot", "me@im.wechat")
+            phoneWx.stop(); pcWx.stop(); relay.stop(); broker.stopServer()
+        }
     }
 
     /** 2026-10-30 真回答里出过「〔11月x日〕」开头、正文里夹「[附件：视频_119551.mp4]」：学聊天记录的格式写的，回答里去掉。 */

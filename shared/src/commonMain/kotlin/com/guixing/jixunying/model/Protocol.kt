@@ -287,8 +287,17 @@ sealed interface Command {
     @Serializable data object WeixinShare : Command
     /** 微信助理：手机把 WeixinShare 拿到的绑定存到本机。 */
     @Serializable data class WeixinImport(val shareJson: String) : Command
-    /** 微信助理：手机告诉电脑，微信消息它答到了这个时间（消息的 create_time_ms），电脑别再答一遍。 */
-    @Serializable data class WeixinReport(val answeredUntil: Long) : Command
+    /** 微信助理：手机告诉电脑，微信消息它答到了这个时间（消息的 create_time_ms），电脑别再答一遍。botId 空 = 老版本手机，算电脑自己绑的那几个。 */
+    @Serializable data class WeixinReport(val answeredUntil: Long, val botId: String = "") : Command
+    /**
+     * 微信助理（2026-10-30 多微信）：手机向电脑要它该拿的几份绑定——它自己遥控电脑时绑的，加上电脑自己绑的（电脑关了由接班手机答）。
+     * 结果 data 是绑定列表的 JSON。老版本电脑不认这条，手机退回 WeixinShare。
+     */
+    @Serializable data object WeixinShareAll : Command
+    /** 微信助理：解除其中一个微信的绑定。 */
+    @Serializable data class WeixinUnbind(val botId: String) : Command
+    /** 微信助理：这个微信里 AI 能不能读电脑上的文件。只能在电脑上改。 */
+    @Serializable data class WeixinSetReadFiles(val botId: String, val on: Boolean) : Command
     /** 电脑关机时由哪台手机接微信（设备编号；"none" = 都不接；空 = 不指定）。只能在电脑上改。 */
     @Serializable data class WeixinSetBackup(val deviceId: String) : Command
 
