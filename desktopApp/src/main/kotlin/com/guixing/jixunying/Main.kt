@@ -23,7 +23,8 @@ fun main() {
     // 只许开一个（2026-10-27 用户：「电脑能开多个」）：两个窗口共用一份数据，会各连一次微信和中转、重复回答、互相覆盖存档。
     // 已经开着就叫它到前面来，这个直接退出
     var frame: Frame? = null
-    val single = SingleInstance.claim(storage.root) { java.awt.EventQueue.invokeLater { frame?.let { f ->
+    var quitApp: (() -> Unit)? = null
+    val single = SingleInstance.claim(storage.root, onQuit = { java.awt.EventQueue.invokeLater { quitApp?.invoke() } }) { java.awt.EventQueue.invokeLater { frame?.let { f ->
         if (f.extendedState and Frame.ICONIFIED != 0) f.extendedState = f.extendedState and Frame.ICONIFIED.inv()
         f.isVisible = true; f.toFront(); f.requestFocus()
     } } }
@@ -51,9 +52,14 @@ fun main() {
 
     application {
         val state = rememberWindowState(size = DpSize(1280.dp, 820.dp))
+        // 真退出时把 AI 开的后台命令（开发服务器之类）全停掉，别留在电脑上
+        val quit = { relay.stop(); weixin.stop(); engine.codeRunner?.stopAllBackground(); engine.closeMcp(); exitApplication() }
+        platform.onQuit = quit
+        quitApp = quit
+        // 点叉只藏到右下角托盘（用户 2026-10-30），托盘右键「退出」才真退；电脑不支持托盘就照旧直接退
+        androidx.compose.runtime.LaunchedEffect(Unit) { java.awt.EventQueue.invokeLater { platform.showTray() } }
         Window(
-            // 退出时把 AI 开的后台命令（开发服务器之类）全停掉，别留在电脑上
-            onCloseRequest = { relay.stop(); weixin.stop(); engine.codeRunner?.stopAllBackground(); engine.closeMcp(); exitApplication() },
+            onCloseRequest = { if (!platform.hideToTray()) quit() },
             title = "AI集训营",
             // 窗口和任务栏图标：用户 2026-10-12 给的那张（和安装包、安卓、App 里左上角同一张）
             icon = platform.brandIcon?.let { androidx.compose.ui.graphics.painter.BitmapPainter(it) },

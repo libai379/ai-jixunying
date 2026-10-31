@@ -278,20 +278,59 @@ class DesktopPlatform(private val fileLog: Boolean = true, private val window: (
         }
     }
 
-    /** 建托盘图标（第一次弹通知时建，之后一直用这一个）。建不出来返回 null。 */
+    // ---- 点叉留在后台（2026-10-30 用户：「它需要在后台运行。如果我想退，我只能在右下角……右键退出才能退」）：
+    //      点叉只藏窗口，微信助理、手机遥控、后台命令照跑；右下角托盘图标点一下打开，右键「退出」才真退。
+
+    /** 真退出（停中转、微信、后台命令再关程序）：Main 里填。 */
+    var onQuit: (() -> Unit)? = null
+    private var hintedHide = false
+
+    /** 启动时就把托盘图标放出来，不等第一条通知。放不出来（不支持托盘）返回 false，这时点叉照旧直接退出。 */
+    fun showTray(): Boolean = (tray ?: makeTray()) != null
+
+    /** 点叉：有托盘就藏窗口返回 true（第一次藏时冒个气泡说怎么退）；没托盘返回 false，由调用方真退。 */
+    fun hideToTray(): Boolean {
+        val t = tray ?: makeTray() ?: return false
+        window()?.isVisible = false
+        if (!hintedHide) {
+            hintedHide = true
+            runCatching { t.displayMessage("AI集训营还在后台运行", "微信助理、手机遥控照常。要退出：右下角图标右键「退出」。", java.awt.TrayIcon.MessageType.NONE) }
+        }
+        return true
+    }
+
+    private fun bringToFront() = runCatching {
+        window()?.apply {
+            isVisible = true
+            if (extendedState and Frame.ICONIFIED != 0) extendedState = extendedState and Frame.ICONIFIED.inv()
+            toFront(); requestFocus()
+        }
+    }
+
+    /** 建托盘图标（启动时或第一次弹通知时建，之后一直用这一个）。建不出来返回 null。 */
     private fun makeTray(): java.awt.TrayIcon? = runCatching {
         if (!java.awt.SystemTray.isSupported()) return null
         val img = DesktopPlatform::class.java.getResourceAsStream("/jxy-app-icon.png")?.use { javax.imageio.ImageIO.read(it) }
             ?: java.awt.image.BufferedImage(16, 16, java.awt.image.BufferedImage.TYPE_INT_ARGB)
-        val t = java.awt.TrayIcon(img, "AI集训营")
+        val menu = java.awt.PopupMenu().apply {
+            add(java.awt.MenuItem("打开").apply { addActionListener { bringToFront() } })
+            addSeparator()
+            add(java.awt.MenuItem("退出").apply { addActionListener { onQuit?.invoke() } })
+        }
+        val t = java.awt.TrayIcon(img, "AI集训营", menu)
         t.isImageAutoSize = true
-        // 点一下：把窗口叫到前面，并切到通知说的那个会话（界面在 App 里收）
+        // 双击 / 点通知气泡：把窗口叫到前面，并切到通知说的那个会话（界面在 App 里收）
         t.addActionListener {
             noticeConv?.let { convRequest.value = it }
-            runCatching {
-                window()?.apply { isVisible = true; state = Frame.NORMAL; toFront() }
-            }
+            noticeConv = null
+            bringToFront()
         }
+        // 左键单击也打开（Windows 上 ActionListener 只认双击）
+        t.addMouseListener(object : java.awt.event.MouseAdapter() {
+            override fun mouseClicked(e: java.awt.event.MouseEvent) {
+                if (e.button == java.awt.event.MouseEvent.BUTTON1 && e.clickCount == 1) bringToFront()
+            }
+        })
         java.awt.SystemTray.getSystemTray().add(t)
         tray = t
         t
