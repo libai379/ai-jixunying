@@ -81,3 +81,97 @@ actual fun networkLoad(): NetLoad {
 actual fun platformLog(tag: String, text: String) {
     runCatching { android.util.Log.i(if (tag.startsWith("Jxy")) tag else "Jxy$tag", text.take(3000)) }
 }
+
+/**
+ * 手机上用系统的 MediaMetadataRetriever 取画面，按时间均匀取。附件文件没有扩展名，它按内容认格式。
+ * 用 OPTION_CLOSEST（准确的那一帧）：模拟器上量过，OPTION_CLOSEST_SYNC 只取关键帧，5 秒的视频六张里只有三张不一样，HEVC 那段六张全一样。
+ */
+actual fun localVideoFrames(file: java.io.File, count: Int, maxSide: Int): Pair<List<ByteArray>, Double>? {
+    val r = android.media.MediaMetadataRetriever()
+    try {
+        r.setDataSource(file.path)
+        val ms = r.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
+        val out = mutableListOf<ByteArray>()
+        for (i in 0 until count) {
+            val us = ms * 1000 * (2 * i + 1) / (2 * count)
+            val frame = r.getFrameAtTime(us, android.media.MediaMetadataRetriever.OPTION_CLOSEST) ?: continue
+            val scale = minOf(1.0, maxSide.toDouble() / maxOf(frame.width, frame.height))
+            val bmp = if (scale < 1.0) Bitmap.createScaledBitmap(frame, (frame.width * scale).toInt().coerceAtLeast(1), (frame.height * scale).toInt().coerceAtLeast(1), true) else frame
+            out += ByteArrayOutputStream().also { bmp.compress(Bitmap.CompressFormat.JPEG, 80, it) }.toByteArray()
+            if (bmp !== frame) bmp.recycle()
+            frame.recycle()
+        }
+        return out to ms / 1000.0
+    } finally {
+        runCatching { r.release() }
+    }
+}
+
+/** 手机上用 MediaExtractor + MediaCodec 把声轨解成 PCM，混成单声道、重采样到 16k（线性插值，给听写用够了）。 */
+actual fun localVideoAudio(file: java.io.File, maxSeconds: Int): Pair<ByteArray, Double>? {
+    val ex = android.media.MediaExtractor()
+    var codec: android.media.MediaCodec? = null
+    try {
+        ex.setDataSource(file.path)
+        val track = (0 until ex.trackCount).firstOrNull { ex.getTrackFormat(it).getString(android.media.MediaFormat.KEY_MIME)?.startsWith("audio/") == true }
+            ?: return ByteArray(0) to 0.0
+        ex.selectTrack(track)
+        val fmt = ex.getTrackFormat(track)
+        val seconds = if (fmt.containsKey(android.media.MediaFormat.KEY_DURATION)) fmt.getLong(android.media.MediaFormat.KEY_DURATION) / 1_000_000.0 else 0.0
+        var rate = fmt.getInteger(android.media.MediaFormat.KEY_SAMPLE_RATE)
+        var channels = fmt.getInteger(android.media.MediaFormat.KEY_CHANNEL_COUNT)
+        val c = android.media.MediaCodec.createDecoderByType(fmt.getString(android.media.MediaFormat.KEY_MIME)!!)
+        codec = c
+        c.configure(fmt, null, null, 0)
+        c.start()
+        val info = android.media.MediaCodec.BufferInfo()
+        val pcm = java.io.ByteArrayOutputStream()
+        // 重采样：上一个样本和小数位置留着，跨缓冲区接得上
+        var pos = 0.0
+        var prev = 0f
+        var inputDone = false
+        var heard = 0L
+        val want = maxSeconds * 16000L
+        while (heard < want) {
+            if (!inputDone) {
+                val i = c.dequeueInputBuffer(10_000)
+                if (i >= 0) {
+                    val n = ex.readSampleData(c.getInputBuffer(i)!!, 0)
+                    if (n < 0) { c.queueInputBuffer(i, 0, 0, 0, android.media.MediaCodec.BUFFER_FLAG_END_OF_STREAM); inputDone = true }
+                    else { c.queueInputBuffer(i, 0, n, ex.sampleTime, 0); ex.advance() }
+                }
+            }
+            val o = c.dequeueOutputBuffer(info, 10_000)
+            if (o == android.media.MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                val f = c.outputFormat
+                rate = f.getInteger(android.media.MediaFormat.KEY_SAMPLE_RATE)
+                channels = f.getInteger(android.media.MediaFormat.KEY_CHANNEL_COUNT)
+            } else if (o >= 0) {
+                val buf = c.getOutputBuffer(o)!!.order(java.nio.ByteOrder.nativeOrder()).asShortBuffer()
+                val frames = (info.size / 2) / channels.coerceAtLeast(1)
+                val step = rate / 16000.0
+                for (k in 0 until frames) {
+                    var sum = 0f
+                    for (ch in 0 until channels) sum += buf.get(k * channels + ch)
+                    val cur = sum / channels
+                    // pos 是下一个要出的样本落在输入里的位置（相对这一帧）
+                    while (pos <= 1.0 && heard < want) {
+                        val s = (prev + (cur - prev) * pos.toFloat()).toInt().coerceIn(-32768, 32767)
+                        pcm.write(s and 0xff); pcm.write((s shr 8) and 0xff)
+                        heard++
+                        pos += step
+                    }
+                    pos -= 1.0
+                    prev = cur
+                }
+                c.releaseOutputBuffer(o, false)
+                if (info.flags and android.media.MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) break
+            }
+        }
+        return pcm.toByteArray() to seconds
+    } finally {
+        runCatching { codec?.stop() }
+        runCatching { codec?.release() }
+        runCatching { ex.release() }
+    }
+}

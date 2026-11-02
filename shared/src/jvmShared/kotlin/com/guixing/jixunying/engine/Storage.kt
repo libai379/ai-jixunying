@@ -142,6 +142,12 @@ class Storage(val root: File) {
         if (extractedText != null) File(fileDir, att.id + ".txt").writeText(extractedText, Charsets.UTF_8)
     }
 
+    /** 文件不变，只改它的说明（读完视频记下画面、时长）；text 不是 null 时一起存上读到的文字。 */
+    fun updateFile(att: Attachment, extractedText: String?) {
+        writeAtomic(File(fileDir, att.id + ".json"), AppJson.encodeToString(Attachment.serializer(), att))
+        if (extractedText != null) File(fileDir, att.id + ".txt").writeText(extractedText, Charsets.UTF_8)
+    }
+
     fun fileMeta(id: String): Attachment? = runCatching {
         AppJson.decodeFromString(Attachment.serializer(), File(fileDir, "$id.json").readText(Charsets.UTF_8))
     }.getOrNull()

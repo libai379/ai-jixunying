@@ -7,6 +7,7 @@ import com.guixing.jixunying.model.AppState
 import com.guixing.jixunying.model.AccountInfo
 import com.guixing.jixunying.model.Attachment
 import com.guixing.jixunying.model.AttachmentKind
+import com.guixing.jixunying.model.ChannelPart
 import com.guixing.jixunying.model.BgJob
 import com.guixing.jixunying.model.CodeMode
 import com.guixing.jixunying.model.CodeSpec
@@ -373,12 +374,18 @@ class Engine(
                 AttachmentKind.DOCUMENT -> {
                     val text = storage.fileText(a.id)
                     val limit = if (latest) 80_000 else 4_000
-                    sb.append("\n\n[附件：").append(a.name).append("]")
-                    if (text == null) sb.append("（读不出文字：").append(a.note).append("）")
-                    else {
-                        sb.append("\n```\n").append(text.take(limit))
-                        if (text.length > limit) sb.append("\n…（共 ${text.length} 字，后面省略）")
-                        sb.append("\n```")
+                    if (a.isVideo) {
+                        // 和对话页一样：听到的话 + 画面（读过以后存在附件的说明里，任务那条消息可能还是读之前的样子）
+                        val meta = storage.fileMeta(a.id) ?: a
+                        appendVideo(meta, text, limit, vision && latest && meta.frames.isNotEmpty(), vision, sb, imgs)
+                    } else {
+                        sb.append("\n\n[附件：").append(a.name).append("]")
+                        if (text == null) sb.append("（读不出文字：").append(a.note).append("）")
+                        else {
+                            sb.append("\n```\n").append(text.take(limit))
+                            if (text.length > limit) sb.append("\n…（共 ${text.length} 字，后面省略）")
+                            sb.append("\n```")
+                        }
                     }
                 }
                 AttachmentKind.IMAGE, AttachmentKind.GENERATED_IMAGE -> {
@@ -1202,7 +1209,7 @@ class Engine(
         is Command.DeleteConversation -> {
             stop(c.id)
             // 步骤上挂的「AI 看过的图」（2026-10-22）也是附件文件，一起删
-            val atts = snapshot(c.id).flatMap { m -> m.attachments.map { it.id } + m.tools.mapNotNull { it.image.ifBlank { null } } }
+            val atts = snapshot(c.id).flatMap { m -> m.attachments.flatMap { listOf(it.id) + it.frames } + m.tools.mapNotNull { it.image.ifBlank { null } } }
             convs.remove(c.id)
             storage.deleteConversation(c.id, atts)
             // Code 会话的改动备份（<数据目录>/code/<对话 id>/）跟着会话一起删，别留在盘上白占地方
@@ -1393,7 +1400,9 @@ class Engine(
             addMessage(userMsg)
             touchConversation(conv.id, c.text.ifBlank { atts.firstOrNull()?.name ?: paths.firstOrNull()?.let { File(it).name }.orEmpty() })
             // 循环本身在 CodeAgent 里；同一个会话已经在跑就排队，前一个跑完接着跑
-            codeAgent.submit(conv.id, userMsg, c.fromPhone)
+            // 带视频的先读一遍（和对话页一样，2026-11-01）；不让界面等着
+            if (atts.any { it.isVideo }) scope.launch { digestVideosIn(userMsg); codeAgent.submit(conv.id, userMsg, c.fromPhone) }
+            else codeAgent.submit(conv.id, userMsg, c.fromPhone)
             CommandResult()
         }
         is Command.CodeStop -> { codeAgent.stop(c.convId); CommandResult() }
@@ -1795,8 +1804,14 @@ class Engine(
             emit(Event.Notice("「$name」超过 50MB，太大了", error = true)); return@withContext null
         }
         val id = newId()
+        val videoExt = name.substringAfterLast('.', "").lowercase()
         if (DocExtract.isImage(name, mime)) {
             val att = Attachment(id, name, DocExtract.imageMime(name, mime), bytes.size.toLong(), AttachmentKind.IMAGE)
+            storage.putFile(att, bytes, null)
+            att
+        } else if (mime.startsWith("video/") || videoExt in Attachment.VIDEO_EXTS) {
+            // 视频不抽文字（不再弹「读不出文字」）；发出去的时候读画面和声音（digestVideo）
+            val att = Attachment(id, name, if (mime.startsWith("video/")) mime else VideoMedia.mimeOf(name), bytes.size.toLong(), AttachmentKind.DOCUMENT)
             storage.putFile(att, bytes, null)
             att
         } else {
@@ -1843,6 +1858,8 @@ class Engine(
         if (c.text.isBlank() && c.attachmentIds.isEmpty() && c.paths.isEmpty()) return CommandResult(false, "空消息")
         // @ 了（或者开头直接喊了）不在这个对话里的成员：直接拉进来让他回答（以前会悄悄换成别人答）
         val direct = c.drawImage || c.makeVideo
+        // 还在等服务商恢复的那一轮不等了（见 chatPatiently）：这一句发出去就会把前面的一起答
+        supersedeBusyWait(conv.id)
         val invited = if (direct) emptyList() else outsidersCalled(c.text, conv)
         if (invited.isNotEmpty()) {
             updateState { s -> s.copy(conversations = s.conversations.map { if (it.id == conv.id) it.copy(memberIds = it.memberIds + invited.map { m -> m.id }) else it }) }
@@ -1862,6 +1879,7 @@ class Engine(
         launchFor(conv.id) { withContext(if (c.fromPhone) PhoneTurn() else kotlin.coroutines.EmptyCoroutineContext) {
             if (c.makeVideo) videoDirect(conv.id, userMsg, c.text.trim(), paths)
             else if (c.drawImage) drawDirect(conv.id, userMsg) else {
+                digestVideosIn(userMsg)
                 runTurn(conv.id, userMsg)
                 // 答完以后在后台：聊天太长就压缩，攒够了就挑出值得长期记住的
                 scope.launch { afterTurn(conv.id) }
@@ -2557,7 +2575,7 @@ class Engine(
 
     private fun userMsg(text: String) = buildJsonObject { put("role", "user"); put("content", text) }
 
-    private fun speakerName(m: Message) = when {
+    internal fun speakerName(m: Message) = when {
         m.role == Role.USER -> state.profile.name
         m.senderId == PAINTER_ID -> "画图助手"
         m.senderId == CHAIR_ID -> "会审主席"
@@ -2619,7 +2637,8 @@ class Engine(
         val (p, model) = Recorder.pick(state) ?: run { bg.failed(BgJob.MEMORY, BackgroundWatch.NO_RECORDER, titleOf(convId)); return }
         val existing = state.memories
         val conv = state.conversation(convId)
-        val window = fresh.takeLast(40)
+        // 用户消息里引用的是别人（AI）说过的话，不算用户说的：挑记忆时去掉（2026-11-01）
+        val window = fresh.takeLast(40).map { if (it.role == Role.USER) it.copy(content = Quotes.spoken(it.content)) else it }
         val prompt = Recorder.extractPrompt(existing, transcriptOf(window, 1500), state.profile.name,
             Recorder.topics(existing), conv?.memoryTopic.orEmpty(), conv?.memoryTopicByUser == true)
         val r = withContext(Dispatchers.IO) { llm.chat(p, model, listOf(userMsg(prompt)), null, null) { _, _ -> } }
@@ -2744,8 +2763,9 @@ class Engine(
     }
 
     /** @ 了、或者开头直接喊了名字（「阿麦，……」）、但不在这个对话里的成员。 */
-    private fun outsidersCalled(text: String, conv: Conversation): List<Member> =
-        (parseMentions(text, state.members) + Addressing.leading(text, state.members)).distinct().filter { it.id !in conv.memberIds }
+    private fun outsidersCalled(text: String, conv: Conversation): List<Member> = Quotes.spoken(text).let { t ->
+        (parseMentions(t, state.members) + Addressing.leading(t, state.members)).distinct().filter { it.id !in conv.memberIds }
+    }
 
     /** 找出文字里 @ 了哪些成员，按出现顺序；名字有包含关系时取最长的。 */
     fun parseMentions(text: String, members: List<Member>): List<Member> {
@@ -2763,10 +2783,12 @@ class Engine(
         val conv = state.conversation(convId) ?: return emptyList()
         val members = conv.memberIds.mapNotNull(state::member)
         if (members.isEmpty()) return emptyList()
-        val everyone = Regex("@(所有人|全体成员|全体|大家|all)", RegexOption.IGNORE_CASE).containsMatchIn(trigger.content)
-        val mentioned = parseMentions(trigger.content, members)
+        // 引用里出现的名字、@ 不算叫人（2026-11-01）：只看这个人自己说的
+        val said = Quotes.spoken(trigger.content)
+        val everyone = Regex("@(所有人|全体成员|全体|大家|all)", RegexOption.IGNORE_CASE).containsMatchIn(said)
+        val mentioned = parseMentions(said, members)
         // 没 @ 人、但直接喊了名字（「阿麦，画一张图」「让阿麦来」）：只让被叫到的回答
-        val named = if (everyone || mentioned.isNotEmpty() || members.size < 2) emptyList() else addressed(convId, trigger.content, members)
+        val named = if (everyone || mentioned.isNotEmpty() || members.size < 2) emptyList() else addressed(convId, said, members)
         val targets = when {
             everyone -> members
             mentioned.isNotEmpty() -> mentioned
@@ -3435,7 +3457,7 @@ class Engine(
             if (out.size >= limit.coerceAtLeast(1) || (out.isNotEmpty() && bytes > syncBatchBytes)) break
             // 只带文字：附件的文件在原来那台上，工具步骤太大（搜到的网页全文），想法留个开头
             val note = m.attachments.joinToString("") { "\n（附件「${it.name}」在原来那台设备上）" }
-            val slim = m.copy(content = m.content + note, attachments = emptyList(), tools = emptyList(), reasoning = m.reasoning.take(2000))
+            val slim = m.copy(content = m.content + note, attachments = emptyList(), quoted = emptyList(), tools = emptyList(), reasoning = m.reasoning.take(2000))
             bytes += AppJson.encodeToString(Message.serializer(), slim).length
             out += slim
         }
@@ -3593,15 +3615,43 @@ class Engine(
     suspend fun channelTurn(convId: String, text: String, attachmentIds: List<String>): List<Message> =
         channelTurn(convId, listOf(ChannelInput(text, attachmentIds)))
 
-    /** 渠道（微信）发来的一条：文字、附件、对方发出的时间（0 = 现在）。 */
-    data class ChannelInput(val text: String, val attachmentIds: List<String>, val at: Long = 0)
+    /**
+     * 渠道（微信）发来的一条：文字、附件、对方发出的时间（0 = 现在）；
+     * channelIds 是这条在微信里的编号（以后被引用时靠它找回来），quoted 是它引用的那条消息带的附件。
+     */
+    data class ChannelInput(val text: String, val attachmentIds: List<String>, val at: Long = 0,
+                            val channelIds: List<String> = emptyList(), val quoted: List<Attachment> = emptyList())
+
+    /**
+     * 这个渠道（一个微信联系人的几个对话）里编号是 id 的那条消息和它的那一段（2026-11-01：新版微信引用只给编号）。从新往旧找，找不到返回 null。
+     * 和官方插件的本地引用缓存一个思路，只是我们本来就存着聊天记录，不用另存一份，也不用过期清理；手机接的那几条同步过来也带着编号。
+     */
+    fun findChannelPart(channel: String, id: String): Pair<Message, ChannelPart>? {
+        for (c in state.conversations.filter { it.channel == channel }.sortedByDescending { it.updatedAt }) {
+            for (m in snapshot(c.id).asReversed()) {
+                m.channelParts.firstOrNull { it.id == id }?.let { return m to it }
+            }
+        }
+        return null
+    }
+
+    /** 回答发到微信以后记下每一条的编号。 */
+    fun noteChannelParts(convId: String, messageId: String, parts: List<ChannelPart>) {
+        if (parts.isEmpty()) return
+        updateMessage(convId, messageId) { it.copy(channelParts = it.channelParts + parts) }
+    }
+
+    /** 外部渠道的小事写进日志（jxy.log）。 */
+    internal fun logLine(tag: String, text: String) = storage.log(tag, text)
 
     /**
      * 几条一起进对话、按最后一条答一次（2026-10-30 用户：微信助理「后来新的那个话题，它似乎没有看到……每次回答都没有强制他去看上下文」）：
      * 以前连发几条是一条一条排队答，答第一条时后面几条还没进对话，AI 看不到，就一条条翻旧话题。
      * 每条带对方真正发出的时间（AI 的时钟按它算，不按轮到它的时间）。
+     * onBusy：服务商太忙、要等几分钟时告诉对方一声（chatPatiently）。
+     * 出错的回答也返回（status = ERROR，error 是给人看的说法）：微信里要说清楚是怎么回事。
      */
-    suspend fun channelTurn(convId: String, inputs: List<ChannelInput>): List<Message> {
+    suspend fun channelTurn(convId: String, inputs: List<ChannelInput>, onBusy: (suspend (String) -> Unit)? = null): List<Message> {
         var conv = state.conversation(convId) ?: return emptyList()
         val invited = outsidersCalled(inputs.joinToString("\n") { it.text }, conv)
         if (invited.isNotEmpty()) {
@@ -3610,24 +3660,31 @@ class Engine(
         }
         if (conv.memberIds.isEmpty()) return emptyList()
         var last: Message? = null
+        val added = mutableListOf<Message>()
         for (i in inputs) {
             val atts = i.attachmentIds.mapNotNull { storage.fileMeta(it) }
             if (i.text.isBlank() && atts.isEmpty()) continue
             val at = if (i.at > 0) minOf(i.at, now()) else now()
-            val m = Message(newId(), convId, Role.USER, USER_ID, i.text.trim(), attachments = atts, createdAt = at)
+            val m = Message(newId(), convId, Role.USER, USER_ID, i.text.trim(), attachments = atts, createdAt = at,
+                channelParts = i.channelIds.map { ChannelPart(it) }, quoted = i.quoted)
             addMessage(m)
+            added += m
             last = m
         }
         val userMsg = last ?: return emptyList()
         touchConversation(convId, null)
-        val job = scope.async { runTurn(convId, userMsg) }
+        val before = snapshot(convId).map { it.id }.toHashSet()
+        val job = scope.async(if (onBusy != null) BusyNotice(onBusy) else kotlin.coroutines.EmptyCoroutineContext) {
+            added.forEach { digestVideosIn(it) }
+            runTurn(convId, userMsg)
+        }
         running.getOrPut(convId) { ConcurrentHashMap.newKeySet() }.add(job)
         job.invokeOnCompletion { running[convId]?.remove(job) }
         val produced = try { job.await() } catch (e: CancellationException) { if (!job.isCancelled) throw e; emptyList() }
         scope.launch { afterTurn(convId) }
         kickEmbedding()
         val ids = produced.map { it.id }.toSet()
-        return snapshot(convId).filter { it.id in ids }
+        return snapshot(convId).filter { it.id in ids || (it.id !in before && it.role == Role.AI && it.status == MsgStatus.ERROR) }
     }
 
     fun memberName(id: String) = state.member(id)?.name
@@ -4030,7 +4087,8 @@ class Engine(
             val sources = mutableListOf<SearchSource>()
             if (wantSearch && !useTools) {
                 // 模型不会调工具：替它搜一次
-                val q = lastUserText(convId, cutoffId).take(120)
+                // 搜的是用户这句话，不是引用的那段（2026-11-01）；只有引用没有话时才搜引用
+                val q = lastUserText(convId, cutoffId).let { t -> Quotes.spoken(t).ifBlank { t } }.take(120)
                 if (q.isNotBlank()) {
                     val step = runSearch(q, sources, officialSearch)
                     updateMessage(convId, msg.id, persist = false) { it.copy(tools = it.tools + step.first) }
@@ -4070,7 +4128,9 @@ class Engine(
             withContext(UsageTag(UsageKinds.CHAT, member.id, convId)) { while (true) {
                 rounds++
                 val before = snapshot(convId).firstOrNull { it.id == msg.id }?.content?.length ?: 0
-                val r = llm.chat(provider, model.id, working, member.temperature, tools, extra, onSources, thinking) { c, rs -> appendDelta(convId, msg.id, c, rs) }
+                val r = chatPatiently(convId, msg.id, provider, model.id) {
+                    llm.chat(provider, model.id, working, member.temperature, tools, extra, onSources, thinking) { c, rs -> appendDelta(convId, msg.id, c, rs) }
+                }
                 usage = Usage(usage.prompt + r.usage.prompt, usage.completion + r.usage.completion, usage.cached + r.usage.cached, usage.millis + r.usage.millis)
                 if (r.toolCalls.isEmpty() || rounds >= MAX_TOOL_USES) break
                 // 这一轮说的是「我去查一下」「这页打不开，换个词再搜」之类的过程话，挪进推理过程，正文只留最后的回答
@@ -4120,13 +4180,190 @@ class Engine(
                     modelLabel = if (thinkingRefused) Prompts.modelLabel(state, member) else it.modelLabel)
             }
             return done
+        } catch (e: BusySuperseded) {
+            // 等服务商恢复时用户又说话了：这条撤掉，新的一轮把两句一起答
+            val list = messages(convId)
+            synchronized(list) { list.removeAll { it.id == msg.id } }
+            emit(Event.MessageRemoved(convId, msg.id))
+            save(convId)
+            return null
         } catch (e: CancellationException) {
             withContext(NonCancellable) { updateMessage(convId, msg.id) { it.copy(status = MsgStatus.STOPPED) } }
             throw e
         } catch (e: Throwable) {
+            // 界面和微信上只说人话（friendlyError），服务商的原话写进日志，查问题用
+            storage.log("JxyLlm", "${provider.name} ${model.id}：${e.message?.take(800)}")
             updateMessage(convId, msg.id) { it.copy(status = MsgStatus.ERROR, error = friendlyError(e, provider)) }
             return null
         }
+    }
+
+    /** 这一轮是外部渠道（微信）发起的：要等服务商恢复时告诉对方一声（界面上有步骤，微信里什么也看不到）。 */
+    private class BusyNotice(val say: suspend (String) -> Unit) : kotlin.coroutines.AbstractCoroutineContextElement(BusyNotice) {
+        companion object Key : kotlin.coroutines.CoroutineContext.Key<BusyNotice>
+    }
+
+    /** 等服务商恢复时用户又说话了（见 chatPatiently）。 */
+    private class BusySuperseded : Exception()
+
+    /** 正在等服务商恢复的对话 → 叫醒它（用户又说话了就不等了）。 */
+    private val busyWaits = ConcurrentHashMap<String, CompletableDeferred<Unit>>()
+
+    private fun supersedeBusyWait(convId: String) { busyWaits.remove(convId)?.complete(Unit) }
+
+    /** 这个渠道（微信联系人）又来消息了。 */
+    fun supersedeBusyWaits(channel: String) = state.conversations.filter { it.channel == channel }.forEach { supersedeBusyWait(it.id) }
+
+    /** 超过这么久算「要等一阵」：单聊才等，界面上记一步，微信里说一声（测试里调小）。 */
+    internal var busyShortMs = 20_000L
+    /** 服务商没说要等多久时，隔这么久再试一次（测试里调小）。 */
+    internal var busyBackoff = listOf(2_000L, 6_000L, 15_000L)
+
+    private fun worthWaiting(e: ApiException): Boolean = when (apiTrouble(e)) {
+        ApiTrouble.SERVER -> true
+        // 额度用完（ChatGPT 的 429 已经换成了人话）等几秒也没用
+        ApiTrouble.BUSY -> "额度" !in e.body
+        else -> false
+    }
+
+    /**
+     * 服务商一时忙不过来（过载、5xx、限流）时过一会儿自己再试，别把错直接甩给用户（2026-11-01 用户截图：ChatGPT 报
+     * server_is_overloaded，红框里一大段 JSON，微信里只说「这次没答上来」）。什么也没说出来才重试，说了一半的不重来。
+     * 服务商说了要等多久就照它说的等（这次是 326 秒）：单聊最多等两回、一回最多 15 分钟，界面上记一步、微信里说一声，
+     * 这期间用户再发一句就不等了（BusySuperseded）。没说的话 2、6、15 秒各试一次。群聊不等久的，别让一位拖住整桌。
+     * 官方 Codex 对这个错不自动重试，只提示「Selected model is at capacity. Please try a different model.」（openai/codex codex-rs/protocol/src/error.rs），
+     * 所以最后还是不行时，friendlyError 也让用户换别的成员。
+     */
+    private suspend fun <T> chatPatiently(convId: String, msgId: String, p: ProviderConfig, model: String, call: suspend () -> T): T {
+        fun said() = snapshot(convId).firstOrNull { it.id == msgId }?.let { it.content.length + it.reasoning.length } ?: 0
+        var quick = 0
+        var long = 0
+        var told = false
+        while (true) {
+            val before = said()
+            try {
+                return call()
+            } catch (e: ApiException) {
+                if (said() != before || !worthWaiting(e)) throw e
+                val hinted = retryAfterOf(e)
+                val group = (state.conversation(convId)?.memberIds?.size ?: 1) > 1
+                val wait = when {
+                    hinted != null && hinted > busyShortMs -> if (group || long >= 2 || hinted > 15 * 60_000) throw e else { long++; hinted }
+                    quick >= busyBackoff.size -> throw e
+                    else -> (hinted ?: busyBackoff[quick]).also { quick++ }
+                }
+                storage.log("JxyLlm", "${p.name} $model 忙（${e.message?.take(300)}），${wait / 1000} 秒后再试")
+                if (wait > busyShortMs) {
+                    val who = providerShortName(p)
+                    updateMessage(convId, msgId, persist = false) { it.copy(tools = it.tools + ToolStep("wait", "等 $who 恢复", note = "大约 ${waitText(wait)}后自动再试；不想等可以点停止，或者再发一句")) }
+                    if (!told) {
+                        told = true
+                        currentCoroutineContext()[BusyNotice]?.say?.invoke("$who 这会儿太忙，它说大约 ${waitText(wait)}后恢复。到时候我自动答；不想等就再发一句，我马上再试。")
+                    }
+                }
+                val wake = CompletableDeferred<Unit>()
+                busyWaits[convId] = wake
+                try {
+                    if (withTimeoutOrNull(wait) { wake.await(); true } == true) throw BusySuperseded()
+                } finally {
+                    busyWaits.remove(convId, wake)
+                }
+            }
+        }
+    }
+
+    private fun providerShortName(p: ProviderConfig?) = when {
+        p == null -> "模型服务"
+        Presets.isChatGpt(p) -> "ChatGPT"
+        else -> p.name
+    }
+
+    private fun waitText(ms: Long) = if (ms < 90_000) "${(ms + 999) / 1000} 秒" else "${(ms + 59_999) / 60_000} 分钟"
+
+    // ———————————————— 看视频（2026-11-01） ————————————————
+
+    /** 消息带的视频（自己发的、引用的）还没读过的读一遍，读到的记在附件上。 */
+    private suspend fun digestVideosIn(m: Message) {
+        val todo = (m.attachments + m.quoted).filter { it.isVideo && it.seconds == 0 && it.frames.isEmpty() }
+        for (a in todo) {
+            val done = try {
+                withTimeoutOrNull(5 * 60_000) { digestVideo(a) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                storage.log("JxyVideo", "${a.name} 没读成：${e.message?.take(300)}")
+                null
+            } ?: continue
+            fun List<Attachment>.fresh() = map { if (it.id == done.id) done else it }
+            updateMessage(m.convId, m.id) { it.copy(attachments = it.attachments.fresh(), quoted = it.quoted.fresh()) }
+        }
+    }
+
+    /**
+     * 让 AI 能「看」视频（用户：微信里引用视频读不到；以前连发来的视频都只写一句「暂时看不了」）。各家模型基本不直接收视频，
+     * 这里取几张画面给能看图的模型、把声音转成字。结果记在附件上，一段视频只读一遍。电脑靠 Edge 解码（程序不带 ffmpeg），手机用系统解码器。
+     * 听写按秒收费，用设置 → 语音 自动挑的那家，最长听 LISTEN_MAX_SEC。
+     */
+    private suspend fun digestVideo(a: Attachment): Attachment {
+        val meta = storage.fileMeta(a.id) ?: a
+        if (meta.seconds > 0 || meta.frames.isNotEmpty()) return meta
+        val file = storage.fileOf(a.id)
+        if (!file.isFile) return meta
+        val notes = mutableListOf<String>()
+        val browser = pageBrowser
+        val (frames, framesSec) = try {
+            withContext(Dispatchers.IO) { localVideoFrames(file, VIDEO_FRAMES, VIDEO_FRAME_SIDE) }
+                ?: browser?.let { b -> pageSlots.withPermit { b.fileFrames(file, VIDEO_FRAMES, VIDEO_FRAME_SIDE) } }
+                ?: (emptyList<ByteArray>() to 0.0).also { notes += "这台设备解不了视频（要电脑上的 Edge）" }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            storage.log("JxyVideo", "${a.name} 画面没取到：${e.message?.take(300)}")
+            notes += "画面解不开"
+            emptyList<ByteArray>() to 0.0
+        }
+        val frameIds = frames.mapIndexed { i, bytes ->
+            val id = newId()
+            storage.putFile(Attachment(id, "${a.name}_画面${i + 1}.jpg", "image/jpeg", bytes.size.toLong(), AttachmentKind.IMAGE), bytes, null)
+            id
+        }
+        val (pcm, audioSec) = try {
+            withContext(Dispatchers.IO) { localVideoAudio(file, LISTEN_MAX_SEC) }
+                ?: browser?.let { b -> pageSlots.withPermit { b.fileAudioPcm(file, LISTEN_MAX_SEC) } }
+                ?: (ByteArray(0) to 0.0)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            storage.log("JxyVideo", "${a.name} 声音没取到：${e.message?.take(300)}")
+            ByteArray(0) to 0.0
+        }
+        val seconds = maxOf(framesSec, audioSec)
+        var heard: String? = null
+        val wav = pcm.takeIf { it.isNotEmpty() }?.let { SpeechText.wavOf(16000, 1, 16, it) }
+        val parsed = wav?.let { SpeechText.parseWav(it) }
+        val target = speechTarget("", "", tts = false)
+        when {
+            wav == null || parsed == null -> notes += "没有声音"
+            SpeechText.isSilent(parsed) -> notes += "没有说话声"
+            target == null -> notes += "没设听写（设置 → 语音），听不到里面说的话"
+            else -> try {
+                heard = buildString {
+                    for (p in SpeechText.splitWav(wav, 120.0)) append(try { speech.transcribe(target.provider, target.model, p.bytes) } catch (_: Speech.NothingHeard) { "" })
+                }.trim()
+                if (heard.isNullOrEmpty()) notes += "没听出说了什么"
+                if (seconds > LISTEN_MAX_SEC + 1) notes += "只听了前 ${LISTEN_MAX_SEC / 60} 分钟"
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                storage.log("JxyVideo", "${a.name} 听写没成：${e.message?.take(300)}")
+                notes += "听写没成功"
+            }
+        }
+        val done = meta.copy(frames = frameIds, seconds = kotlin.math.ceil(seconds).toInt(), textChars = heard?.length ?: 0,
+            note = (listOf(meta.note) + notes).filter { it.isNotBlank() }.joinToString("；"))
+        storage.updateFile(done, heard)
+        storage.log("JxyVideo", "${a.name}：${done.seconds} 秒，${frameIds.size} 张画面，听到 ${done.textChars} 字${if (notes.isEmpty()) "" else "（" + notes.joinToString("；") + "）"}")
+        return done
     }
 
     private fun cleanReply(text: String, me: Member): String {
@@ -4137,7 +4374,7 @@ class Engine(
         t = t.replace(Regex("""^〔[^〕\n]{0,30}〕\s*"""), "")
         t = t.replace(Regex("""^【[^】\n]{0,24}\d{1,2}:\d{2}】\s*"""), "")
         // 学着聊天记录写「[附件：视频_119551.mp4]」（附件本来就单独显示在回答下面）
-        t = t.replace(Regex("""\s*\[附件：[^\]\n]{1,80}\]"""), "")
+        t = t.replace(Regex("""\s*\[(?:附件|视频)：[^\]\n]{1,80}\]"""), "")
         return t
     }
 
@@ -4905,6 +5142,9 @@ class Engine(
     private companion object {
         /** 听平台视频最长听多少秒（按秒收费，也省时间）。 */
         const val LISTEN_MAX_SEC = 600
+        /** 一段视频取几张画面、长边多大（给模型看，够认内容就行，省 token）。 */
+        const val VIDEO_FRAMES = 6
+        const val VIDEO_FRAME_SIDE = 1024
 
         /** 补全文件名时不进去翻的文件夹。 */
         val SKIP_DIRS = setOf(".git", "node_modules", "build", ".gradle", ".idea", "dist", "out", "target", ".venv", "venv", "__pycache__", ".next", ".kotlin")
@@ -5216,13 +5456,35 @@ class Engine(
         var used = 0
         val picked = ArrayDeque<Message>()
         for (m in usable.asReversed()) {
-            val cost = m.content.length + m.attachments.sumOf { minOf(it.textChars, 4000) } + 200
+            val cost = m.content.length + (m.attachments + m.quoted).sumOf { minOf(it.textChars, 4000) } + 200
             if (used + cost > budget && picked.isNotEmpty()) break
             used += cost
             picked.addFirst(m)
         }
         val lastUserIdx = picked.indexOfLast { it.role == Role.USER }
-        var imagesLeft = 6
+        // 这次带哪些图给模型：从新往旧挑（2026-11-01：以前从旧往新数，聊天里图一多，最新发的、刚引用的反而轮不上）；
+        // 同一张图（原来那条 + 引用它的那条）只带最新的那次。视频的画面只带最近的一段，不然每句话都多花几张图的钱
+        val seeImages = HashSet<String>()
+        val seeFrames = HashSet<String>()
+        if (vision) {
+            var imagesLeft = 6
+            var framesLeft = VIDEO_FRAMES
+            val taken = HashSet<String>()
+            for (m in picked.asReversed()) {
+                val mine = m.role == Role.AI && m.senderId == me.id
+                for (a in (m.attachments + m.quoted).asReversed()) {
+                    if (a.kind != AttachmentKind.DOCUMENT) {
+                        if (!mine && imagesLeft > 0 && (m.role == Role.USER || a.kind == AttachmentKind.GENERATED_IMAGE) && taken.add(a.id)) {
+                            seeImages += m.id + "/" + a.id
+                            imagesLeft--
+                        }
+                    } else if (a.frames.isNotEmpty() && m.role == Role.USER && a.frames.size <= framesLeft && taken.add(a.id)) {
+                        seeFrames += m.id + "/" + a.id
+                        framesLeft -= a.frames.size
+                    }
+                }
+            }
+        }
 
         data class Part(val role: String, val text: String, val images: List<String>)
         val parts = mutableListOf<Part>()
@@ -5242,27 +5504,40 @@ class Engine(
             // 每句话标上几点说的（2026-10-29 用户要 AI 感知时间的流逝）；自己说过的标在〔〕里，回答前 cleanReply 会把它学着写的去掉
             if (!mine) sb.append("【").append(speaker).append(" · ").append(Prompts.clock(m.createdAt)).append("】")
             else sb.append("〔").append(Prompts.clock(m.createdAt)).append("〕")
-            sb.append(stripThink(m.content))
+            val body = stripThink(m.content)
+            // 引用开头的话另起一行，「> 」才看得出是引用
+            if (body.startsWith(">")) sb.append('\n')
+            sb.append(body)
             val imgs = mutableListOf<String>()
-            for (a in m.attachments) {
+            for (a in m.attachments + m.quoted) {
+                val slot = m.id + "/" + a.id
                 when (a.kind) {
                     AttachmentKind.DOCUMENT -> {
                         val text = storage.fileText(a.id)
                         val limit = if (idx == lastUserIdx) 80_000 else 4_000
-                        sb.append("\n\n[附件：").append(a.name).append("]")
-                        if (text == null) sb.append("（读不出文字：").append(a.note).append("）")
-                        else {
-                            sb.append("\n```\n").append(text.take(limit))
-                            if (text.length > limit) sb.append("\n…（共 ${text.length} 字，后面省略）")
-                            sb.append("\n```")
+                        if (a.isVideo) {
+                            appendVideo(a, text, limit, slot in seeFrames, vision, sb, imgs)
+                        } else {
+                            sb.append("\n\n[附件：").append(a.name).append("]")
+                            if (text == null) sb.append("（读不出文字：").append(a.note).append("）")
+                            else {
+                                sb.append("\n```\n").append(text.take(limit))
+                                if (text.length > limit) sb.append("\n…（共 ${text.length} 字，后面省略）")
+                                sb.append("\n```")
+                            }
                         }
                     }
                     AttachmentKind.IMAGE, AttachmentKind.GENERATED_IMAGE -> {
-                        if (vision && !mine && imagesLeft > 0 && (m.role == Role.USER || a.kind == AttachmentKind.GENERATED_IMAGE)) {
-                            imageDataUrl(a)?.let { imgs += it; imagesLeft-- }
+                        val shown = slot in seeImages && imageDataUrl(a)?.also { imgs += it } != null
+                        if (!shown) {
+                            val what = if (a.kind == AttachmentKind.GENERATED_IMAGE) "生成的图片" else "图片"
+                            sb.append("\n[$what：").append(a.name)
+                            sb.append(when {
+                                !vision -> "，你看不到图片内容"
+                                !mine && (m.role == Role.USER || a.kind == AttachmentKind.GENERATED_IMAGE) -> "，太早了这次没带上，看不到"
+                                else -> ""
+                            }).append("]")
                         }
-                        val what = if (a.kind == AttachmentKind.GENERATED_IMAGE) "生成的图片" else "图片"
-                        if (imgs.isEmpty() || !vision) sb.append("\n[$what：").append(a.name).append(if (vision) "]" else "，你看不到图片内容]")
                     }
                 }
             }
@@ -5289,6 +5564,24 @@ class Engine(
                 }
             }
         }
+    }
+
+    /** 一段视频写给模型的样子（对话页和 Code 栏共用）：时长、听到的话、画面（showFrames 时把图放进 imgs）、读不出来的原因。 */
+    private fun appendVideo(a: Attachment, text: String?, limit: Int, showFrames: Boolean, vision: Boolean, sb: StringBuilder, imgs: MutableList<String>) {
+        sb.append("\n\n[视频：").append(a.name)
+        if (a.seconds > 0) sb.append("，").append(a.seconds).append(" 秒")
+        sb.append("]")
+        if (!text.isNullOrBlank()) {
+            sb.append("\n里面说的话（语音转文字，可能有同音错字，背景音乐的歌词也会被听进来）：\n```\n").append(text.take(limit))
+            if (text.length > limit) sb.append("\n…（共 ${text.length} 字，后面省略）")
+            sb.append("\n```")
+        }
+        if (showFrames) {
+            val urls = a.frames.mapNotNull { id -> storage.fileBytes(id)?.let { "data:image/jpeg;base64," + Base64.getEncoder().encodeToString(it) } }
+            imgs += urls
+            sb.append("\n（这条消息附的图里有 ${urls.size} 张是从这段视频里按时间先后取的画面）")
+        } else if (a.frames.isNotEmpty()) sb.append(if (vision) "\n（这段视频的画面这次没带上）" else "\n（这段视频的画面你看不到）")
+        if (a.note.isNotBlank()) sb.append("\n（").append(a.note).append("）")
     }
 
     private fun stripThink(s: String) = s.replace(Regex("<think>[\\s\\S]*?</think>"), "").trim()
@@ -5324,6 +5617,11 @@ class Engine(
                 return "本机模型的上下文开得太小${if (need != null && have != null) "：这次要 $need 个词元，它只开了 $have" else ""}。" +
                     "到 Ollama 的设置里把上下文长度（Context length）拉到 32k 或 64k（或者设环境变量 OLLAMA_CONTEXT_LENGTH=32768 再重开 Ollama），再试一次。"
             }
+            // 服务器过载：不是用户这边的问题（2026-11-01 用户截图：ChatGPT 的 server_is_overloaded，红框里一大段 JSON）
+            if ("overloaded" in lower || e.status == 529) {
+                val wait = retryAfterOf(e)?.let { "，它说大约 ${waitText(it)}后恢复" }.orEmpty()
+                return "${providerShortName(p)} 这会儿太忙了（它的服务器过载，不是你这边的问题）$wait。过会儿再试，或者先换别的成员。"
+            }
             val hint = when (apiTrouble(e)) {
                 ApiTrouble.KEY -> "API Key 不对或已失效"
                 ApiTrouble.BALANCE -> "余额或额度不足"
@@ -5332,10 +5630,24 @@ class Engine(
                 ApiTrouble.SERVER -> "服务商那边出错了，稍后再试"
                 ApiTrouble.OTHER -> "请求被拒绝"
             }
-            return "$hint（HTTP ${e.status}）：$body"
+            val detail = apiDetail(e.body)
+            return "$hint（HTTP ${e.status}）" + if (detail.isBlank()) "" else "：$detail"
         }
         val msg = e.message ?: e::class.simpleName ?: "未知错误"
         return if (isNetError(e)) "网络连不上：$msg${proxyHint(p)}" else msg
+    }
+
+    /** 服务商报错里给人看的那句（JSON 里的 message），不把整段 JSON 甩到界面上；原文写日志（reply 的 JxyLlm）。HTML 错误页不显示。 */
+    private fun apiDetail(body: String): String {
+        val t = body.trim()
+        if (t.startsWith("<")) return ""
+        val o = runCatching { Json.parse(t) as? JsonObject }.getOrNull() ?: return t.take(300)
+        val err = o["error"]
+        val msg = (err as? JsonObject)?.let { it.str("message") ?: it.str("msg") ?: it.str("code") }
+            ?: (err as? JsonPrimitive)?.contentOrNull
+            ?: o.str("message") ?: o.str("msg") ?: o.str("errmsg")
+            ?: (o["base_resp"] as? JsonObject)?.str("status_msg")
+        return (msg ?: t).take(300)
     }
 
     /** 服务商的报错是哪一类：看状态码和返回原文（friendlyError 和语音的短提示共用）。 */

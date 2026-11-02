@@ -31,3 +31,12 @@ expect fun networkLoad(): NetLoad
  * 只读的 adb logcat -d 能看到后台活出错的原因（2026-10-27 手机记忆连续出错 21 次，当时什么也看不到）。电脑上不抄。
  */
 expect fun platformLog(tag: String, text: String)
+
+/**
+ * 这台设备自己解码视频（手机：系统解码器）。按时间均匀取 count 张画面（JPEG，长边不超过 maxSide），返回 (画面, 整段多少秒)。
+ * 电脑返回 null，交给 Edge（PageBrowser.fileFrames）。
+ */
+expect fun localVideoFrames(file: java.io.File, count: Int, maxSide: Int): Pair<List<ByteArray>, Double>?
+
+/** 同上，取视频里的声音：16k 单声道 16 位 PCM（最多 maxSeconds 秒），返回 (PCM, 整段多少秒)。没有声轨时 PCM 是空的。电脑返回 null。 */
+expect fun localVideoAudio(file: java.io.File, maxSeconds: Int): Pair<ByteArray, Double>?

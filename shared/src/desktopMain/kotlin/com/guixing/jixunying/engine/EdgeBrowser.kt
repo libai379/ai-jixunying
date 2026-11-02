@@ -78,18 +78,126 @@ class EdgeBrowser(private val exe: File, private val profile: File) : PageBrowse
      * 新开一个后台标签页直接打开媒体地址（同源，fetch 不受跨域限制），在页面里 fetch 回来、用 OfflineAudioContext 解码
      * （按 16000 的采样率解码会自动重采样），混成单声道转 16 位，存在页面变量里，再分块用 base64 取回来。
      */
-    override suspend fun audioPcm(mediaUrl: String, maxSeconds: Int): Pair<ByteArray, Double> {
+    override suspend fun audioPcm(mediaUrl: String, maxSeconds: Int): Pair<ByteArray, Double> = decodePcm(mediaUrl, "location.href", maxSeconds)
+
+    /** 本机文件：程序临时开一个只认 127.0.0.1 的小服务把它递给浏览器（file:// 不能 fetch，画面也取不出来）。 */
+    override suspend fun fileAudioPcm(file: File, maxSeconds: Int): Pair<ByteArray, Double> =
+        serving(file) { page -> decodePcm(page, "'v'", maxSeconds) }
+
+    /**
+     * 取画面：在页面里 fetch 成 Blob（整段都在内存里，想跳到哪都行，不用服务支持分段）、放进一个不插进页面的 video，
+     * 跳到每个时间点画到 canvas 上存成 JPEG。声音关着。解不开（比如这台电脑没有 HEVC 解码）时报错，由调用处说明。
+     */
+    override suspend fun fileFrames(file: File, count: Int, maxSide: Int): Pair<List<ByteArray>, Double> = serving(file) { page ->
+        val c = ensure()
+        val target = c.send("Target.createTarget", buildJsonObject { put("url", "about:blank"); put("background", true) }).str("targetId")!!
+        try {
+            val session = c.send("Target.attachToTarget", buildJsonObject { put("targetId", target); put("flatten", true) }).str("sessionId")!!
+            c.send("Page.enable", session = session)
+            // 后台标签页不加载视频（loadeddata 等 30 秒也不来，11-01 实测）：让这个页面当自己是可见的，不用把窗口拉到前面抢焦点
+            c.send("Emulation.setFocusEmulationEnabled", buildJsonObject { put("enabled", true) }, session)
+            val loaded = c.waitEvent("Page.loadEventFired", session)
+            c.send("Page.navigate", buildJsonObject { put("url", page) }, session)
+            withTimeoutOrNull(15_000) { loaded.await() }
+            val grab = """
+                (async () => {
+                  const r = await fetch('v');
+                  if (!r.ok) return JSON.stringify({error: 'HTTP ' + r.status});
+                  const v = document.createElement('video');
+                  v.muted = true; v.playsInline = true; v.preload = 'auto';
+                  v.src = URL.createObjectURL(await r.blob());
+                  try {
+                    await new Promise((ok, no) => {
+                      v.onloadeddata = ok;
+                      v.onerror = () => no(new Error(v.error ? v.error.message : '解不开'));
+                      setTimeout(() => no(new Error('等了 30 秒没解出来')), 30000);
+                    });
+                  } catch (e) { return JSON.stringify({error: String(e.message || e)}); }
+                  if (!v.videoWidth) return JSON.stringify({error: '没有画面', seconds: v.duration});
+                  const scale = Math.min(1, $maxSide / Math.max(v.videoWidth, v.videoHeight));
+                  const cv = document.createElement('canvas');
+                  cv.width = Math.max(1, Math.round(v.videoWidth * scale));
+                  cv.height = Math.max(1, Math.round(v.videoHeight * scale));
+                  const g = cv.getContext('2d');
+                  const out = [];
+                  for (let i = 0; i < $count; i++) {
+                    await new Promise(ok => { v.onseeked = ok; setTimeout(ok, 8000); v.currentTime = v.duration * (i + 0.5) / $count; });
+                    g.drawImage(v, 0, 0, cv.width, cv.height);
+                    out.push(cv.toDataURL('image/jpeg', 0.8).split(',')[1]);
+                  }
+                  window.__jxyFrames = out;
+                  return JSON.stringify({frames: out.length, seconds: v.duration});
+                })()
+            """.trimIndent()
+            val r = c.send("Runtime.evaluate", buildJsonObject {
+                put("expression", grab); put("returnByValue", true); put("awaitPromise", true)
+            }, session, timeoutMs = 180_000)
+            val v = ((r["result"] as? JsonObject)?.get("value") as? JsonPrimitive)?.contentOrNull
+                ?: throw IllegalStateException("视频的画面取不出来：" + r.toString().take(200))
+            val info = Json.parse(v).jsonObject
+            info.str("error")?.let { throw IllegalStateException(it) }
+            val n = (info["frames"] as? JsonPrimitive)?.intOrNull ?: 0
+            val seconds = (info["seconds"] as? JsonPrimitive)?.contentOrNull?.toDoubleOrNull() ?: 0.0
+            val frames = (0 until n).map { i ->
+                val b64 = ((c.send("Runtime.evaluate", buildJsonObject { put("expression", "window.__jxyFrames[$i]"); put("returnByValue", true) }, session)["result"] as? JsonObject)
+                    ?.get("value") as? JsonPrimitive)?.contentOrNull ?: throw IllegalStateException("取画面失败")
+                java.util.Base64.getDecoder().decode(b64)
+            }
+            frames to seconds
+        } finally {
+            runCatching { c.send("Target.closeTarget", buildJsonObject { put("targetId", target) }) }
+        }
+    }
+
+    /**
+     * 只认 127.0.0.1、带随机路径的小服务（只用 java.base：打包的运行时不带 jdk.httpserver）：
+     * 路径「…/」是一张空白页（不直接打开视频，免得浏览器自己放出声音），「…/v」是这个文件。用完就关。
+     */
+    private suspend fun <T> serving(file: File, block: suspend (pageUrl: String) -> T): T {
+        val token = java.util.UUID.randomUUID().toString()
+        val server = java.net.ServerSocket(0, 8, java.net.InetAddress.getLoopbackAddress())
+        kotlin.concurrent.thread(isDaemon = true, name = "jxy-video-serve") {
+            while (!server.isClosed) {
+                val s = runCatching { server.accept() }.getOrNull() ?: break
+                kotlin.concurrent.thread(isDaemon = true) {
+                    runCatching {
+                        s.use { sock ->
+                            val r = sock.getInputStream().bufferedReader(Charsets.ISO_8859_1)
+                            val path = r.readLine()?.split(' ')?.getOrNull(1).orEmpty()
+                            while (true) { val l = r.readLine() ?: break; if (l.isEmpty()) break }
+                            val out = sock.getOutputStream()
+                            fun head(status: String, type: String, len: Long) =
+                                out.write("HTTP/1.1 $status\r\nContent-Type: $type\r\nContent-Length: $len\r\nConnection: close\r\n\r\n".toByteArray(Charsets.ISO_8859_1))
+                            when (path) {
+                                "/$token/" -> { val html = "<!doctype html><title>jxy</title>".toByteArray(); head("200 OK", "text/html", html.size.toLong()); out.write(html) }
+                                "/$token/v" -> { head("200 OK", "video/mp4", file.length()); file.inputStream().use { it.copyTo(out) } }
+                                else -> head("404 Not Found", "text/plain", 0)
+                            }
+                            out.flush()
+                        }
+                    }
+                }
+            }
+        }
+        try {
+            return block("http://127.0.0.1:${server.localPort}/$token/")
+        } finally {
+            runCatching { server.close() }
+        }
+    }
+
+    private suspend fun decodePcm(pageUrl: String, fetchExpr: String, maxSeconds: Int): Pair<ByteArray, Double> {
         val c = ensure()
         val target = c.send("Target.createTarget", buildJsonObject { put("url", "about:blank"); put("background", true) }).str("targetId")!!
         try {
             val session = c.send("Target.attachToTarget", buildJsonObject { put("targetId", target); put("flatten", true) }).str("sessionId")!!
             c.send("Page.enable", session = session)
             val loaded = c.waitEvent("Page.loadEventFired", session)
-            c.send("Page.navigate", buildJsonObject { put("url", mediaUrl) }, session)
+            c.send("Page.navigate", buildJsonObject { put("url", pageUrl) }, session)
             withTimeoutOrNull(30_000) { loaded.await() }
             val decode = """
                 (async () => {
-                  const r = await fetch(location.href);
+                  const r = await fetch($fetchExpr);
                   if (!r.ok) return JSON.stringify({error: 'HTTP ' + r.status});
                   const buf = await r.arrayBuffer();
                   const ctx = new OfflineAudioContext(1, 1, 16000);

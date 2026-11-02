@@ -491,6 +491,30 @@ data class Attachment(
     val generated: Boolean = false,
     /** 做文件的那台设备上另存的副本（带真名字，点开就用 Word / WPS 打开）；别的设备用不了这个路径。 */
     val savedPath: String = "",
+    /** 视频（2026-11-01）：从里面取的几张画面（文件区里的编号，界面上不单独显示），给能看图的模型看；听到的话存在 .txt，和文档抽出来的文字一样。 */
+    val frames: List<String> = emptyList(),
+    /** 视频多少秒；大于 0 也表示读过这段视频了，不用再读一遍。 */
+    val seconds: Int = 0,
+) {
+    val isVideo: Boolean get() = kind == AttachmentKind.DOCUMENT &&
+        (mime.startsWith("video/") || name.substringAfterLast('.', "").lowercase() in VIDEO_EXTS)
+
+    companion object {
+        val VIDEO_EXTS = setOf("mp4", "mov", "m4v", "webm", "mkv", "avi")
+    }
+}
+
+/**
+ * 一条消息在外部渠道（微信）里的编号（2026-11-01）。新版微信引用一条消息时可能只给编号（ref_msg.svr_id）、不给内容，
+ * 要靠这个到聊天记录里找回来。收到的一条微信消息挂在对应的用户消息上；AI 的一条回答可能拆成几条微信消息发（长文、图、文件），每条一个。
+ */
+@Serializable
+data class ChannelPart(
+    val id: String,
+    /** 这一条在微信里显示的文字；空 = 和消息正文一样（或者这一条发的是附件）。 */
+    val text: String = "",
+    /** 这一条发的是哪个附件（AI 画的图、做的文件）；空 = 不是发附件。 */
+    val attachmentId: String = "",
 )
 
 /** 导出的文件（「存成 Word」）：文件名 + base64 内容，界面拿去另存。 */
@@ -563,6 +587,10 @@ data class Message(
     val stage: String = "",
     /** 从别的设备同步来的（那台的名字），空 = 本机的；同步时只发本机的（2026-10-27，engine/DeviceSync）。 */
     val syncedFrom: String = "",
+    /** 这条在外部渠道（微信）里的编号，引用时靠它找回来（2026-11-01）。 */
+    val channelParts: List<ChannelPart> = emptyList(),
+    /** 用户引用的那条消息带的附件（文件还是原来那条的，不另存一份）：模型看得到，界面上显示在这句话上面（2026-11-01）。 */
+    val quoted: List<Attachment> = emptyList(),
 )
 
 /** 和这台电脑配对过的手机。key 是两边共享的加密密钥（Base64），只存在电脑和那台手机上。 */

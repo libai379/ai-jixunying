@@ -160,7 +160,7 @@ internal class ResponsesApi(private val proxyOf: () -> String?, private val base
             contentType(ContentType.Application.Json)
             setBody(body.toString())
         }.execute { resp ->
-            if (resp.status.value !in 200..299) throw ApiException(resp.status.value, resp.bodyAsText())
+            if (resp.status.value !in 200..299) throw ApiException(resp.status.value, resp.bodyAsText(), retryAfterHeader(resp.headers["retry-after-ms"], resp.headers["Retry-After"]))
             val ch = resp.bodyAsChannel()
             var accepted = false
             while (true) {

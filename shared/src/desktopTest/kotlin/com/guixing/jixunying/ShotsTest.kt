@@ -390,6 +390,21 @@ class ShotsTest {
                 tools = listOf(ToolStep("video", "橘猫在窗台上伸懒腰，午后阳光，镜头缓慢推近", note = "2 秒 · 480P · wan3.0-video")), createdAt = now - 85_800_000,
                 modelLabel = "mimo-v2.6-flash（小米 MiMo）"),
         ))
+        // 2026-11-01 微信里引用：引用块（长的只露几行）、引用的图和视频显示在这句话上面；服务商太忙时等的那一步；最后还是不行时的说法
+        val wxVideo = Attachment("a5", "微信视频_32815.mp4", "video/mp4", 6_780_122, AttachmentKind.DOCUMENT, seconds = 6)
+        st.putFile(wxVideo, ByteArray(16), null)
+        val longQuote = (1..12).joinToString("") { "这是引用的一条长回答的第 $it 句，微信里一条最长有一千八百字。" }
+        st.saveMessages("c2", listOf(
+            Message("w1", "c2", Role.USER, USER_ID, "> 阿德 · 11月2日 10:28：嗯，老想着抖个机灵，反而更假。\n\n这句 ai 味最重", createdAt = now - 3_100_000),
+            Message("w2", "c2", Role.AI, "ma", "假在我替你把话说完了。", createdAt = now - 3_090_000, modelLabel = "deepseek-flash（DeepSeek）"),
+            Message("w3", "c2", Role.USER, USER_ID, "> 小白 · 11月2日 10:30：[图片：图片_1.png]\n\n这张图里是什么", quoted = listOf(cat), createdAt = now - 3_080_000),
+            Message("w4", "c2", Role.USER, USER_ID, "> 阿德 · 11月2日 10:31：$longQuote\n\n第三句不对", createdAt = now - 3_070_000),
+            Message("w5", "c2", Role.USER, USER_ID, "", attachments = listOf(wxVideo), createdAt = now - 3_060_000),
+            Message("w6", "c2", Role.AI, "ma", "视频里她在介绍一瓶爽肤水。", tools = listOf(ToolStep("wait", "等 ChatGPT 恢复", note = "大约 6 分钟后自动再试；不想等可以点停止，或者再发一句")),
+                createdAt = now - 3_050_000, modelLabel = "deepseek-flash（DeepSeek）"),
+            Message("w7", "c2", Role.AI, "ma", status = MsgStatus.ERROR, createdAt = now - 3_040_000, modelLabel = "gpt-6.1-sol（ChatGPT 订阅）",
+                error = "ChatGPT 这会儿太忙了（它的服务器过载，不是你这边的问题），它说大约 6 分钟后恢复。过会儿再试，或者先换别的成员。"),
+        ))
         // Code 会话（c8）：一条做完了、带一处改动；一条正等着批准改 README
         File(root, "我的项目").mkdirs()
         val diffMain = """
@@ -925,6 +940,10 @@ class ShotsTest {
         val desktop = DesktopPlatform(fileLog = false) { null }
         shoot("desktop-decide-chat", 1280, 900, 1f, local, desktop, "conv:c14")
         shoot("desktop-decide-code", 1280, 820, 1f, local, desktop, "code:c12")
+        // 2026-11-01 微信里引用历史消息（引用块、引用的图、视频卡片）、服务商太忙的说法
+        shoot("phone-weixin-quote", 824, 2600, 2f, local, phone, "conv:c2")
+        shoot("phone-weixin-quote-320", 640, 2600, 2f, local, phone, "conv:c2")
+        shoot("desktop-weixin-quote", 1280, 1300, 1f, local, desktop, "conv:c2")
         // 2026-10-29 用户：「Code 为什么没有语音输入？狼人杀我怎么没找到？职业介绍的地方在哪儿？」——Code 栏输入框的话筒、侧栏第三栏叫「狼人杀」、开局页的身份介绍
         shoot("phone-remote-drawer-tabs", 824, 1784, 2f, on, phone, "conv:c1#drawer")
         shoot("phone-wolf-lobby-roles", 824, 3000, 2f, local, phone, "wolf")

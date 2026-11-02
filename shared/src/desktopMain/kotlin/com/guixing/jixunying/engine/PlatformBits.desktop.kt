@@ -25,6 +25,11 @@ actual fun shrinkImageToJpeg(bytes: ByteArray, maxSide: Int, maxBytes: Int): Byt
     return ByteArrayOutputStream().also { ImageIO.write(out, "jpg", it) }.toByteArray()
 }
 
+/** 电脑上视频交给 Edge 解码（PageBrowser.fileFrames / fileAudioPcm），这里不自己解。 */
+actual fun localVideoFrames(file: java.io.File, count: Int, maxSide: Int): Pair<List<ByteArray>, Double>? = null
+
+actual fun localVideoAudio(file: java.io.File, maxSeconds: Int): Pair<ByteArray, Double>? = null
+
 private val home get() = java.io.File(System.getProperty("user.home"))
 
 /** 文档文件夹可能被 OneDrive 接管（「OneDrive\文档」），两种都看。 */

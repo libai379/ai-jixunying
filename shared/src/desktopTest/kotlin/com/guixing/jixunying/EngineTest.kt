@@ -258,7 +258,8 @@ class EngineTest {
                             }
                             toolTexts.any { "素材不合要求" in it || "找不到素材" in it || "手机上发起的" in it } -> say("素材不行。")
                             // 聊天里要视频：先调 generate_video，做好了再说话
-                            hasTool("generate_video") && latest.contains("视频") && !sawTool -> {
+                            // （用户发的视频附件在聊天记录里写成「[视频：名字」，那不是要做视频）
+                            hasTool("generate_video") && latest.substringBefore("[视频：").contains("视频") && !sawTool -> {
                                 chunk("""{"tool_calls":[{"index":0,"id":"vid_1","type":"function","function":{"name":"generate_video","arguments":"{\"prompt\":\"海边日落\",\"duration\":\"3\"}"}}]}""")
                                 write("data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n")
                             }

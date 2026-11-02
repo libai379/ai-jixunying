@@ -30,6 +30,12 @@ interface PageBrowser {
      */
     suspend fun audioPcm(mediaUrl: String, maxSeconds: Int): Pair<ByteArray, Double>
 
+    /** 本机的一个视频文件（微信发来的、AI 做的）：声音解码成 16k 单声道 16 位 PCM，返回 (PCM, 整段多少秒)；解不开抛异常。 */
+    suspend fun fileAudioPcm(file: File, maxSeconds: Int): Pair<ByteArray, Double> = throw UnsupportedOperationException("这个浏览器不能读本机视频")
+
+    /** 本机的一个视频文件：按时间均匀取 count 张画面（JPEG，长边不超过 maxSide），返回 (画面, 整段多少秒)；解不开抛异常。 */
+    suspend fun fileFrames(file: File, count: Int, maxSide: Int): Pair<List<ByteArray>, Double> = throw UnsupportedOperationException("这个浏览器不能读本机视频")
+
     /** 浏览器已经开着（查登录状态时没开就不去开，免得一打开设置页就冒出一个 Edge）。 */
     fun running(): Boolean
 

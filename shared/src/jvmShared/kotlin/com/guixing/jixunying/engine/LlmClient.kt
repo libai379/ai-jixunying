@@ -38,7 +38,19 @@ class ChatResult(
     val finishReason: String?,
 )
 
-open class ApiException(val status: Int, val body: String) : Exception("HTTP $status：${body.take(400)}")
+open class ApiException(val status: Int, val body: String, val retryAfterMs: Long? = null) : Exception("HTTP $status：${body.take(400)}")
+
+/** 响应头里说的「过多久再试」（毫秒）：retry-after-ms 优先，retry-after 是秒（写成日期的不认）。 */
+internal fun retryAfterHeader(ms: String?, seconds: String?): Long? =
+    ms?.trim()?.toLongOrNull() ?: seconds?.trim()?.toLongOrNull()?.times(1000)
+
+/**
+ * 这次报错说了过多久再试：响应头，或者报错内容里写的（2026-11-01 ChatGPT 过载时是
+ * {"error":{…,"code":"server_is_overloaded","headers":{"retry-after":"326","retry-after-ms":"326000"}}}）。
+ */
+internal fun retryAfterOf(e: ApiException): Long? = e.retryAfterMs
+    ?: Regex(""""retry-after-ms"\s*:\s*"?(\d+)""").find(e.body)?.groupValues?.get(1)?.toLongOrNull()
+    ?: Regex(""""retry[-_]after"\s*:\s*"?(\d+)""").find(e.body)?.groupValues?.get(1)?.toLongOrNull()?.times(1000)
 
 /** 服务商已经画好（已经扣了钱），只是图片下载失败：照样记账。 */
 class ImageDownloadFailed(status: Int, body: String) : ApiException(status, body)
@@ -160,7 +172,7 @@ class LlmClient(private val proxyOf: (ProviderConfig) -> String?) {
         } catch (e: Throwable) {
             // 订阅额度不按钱算，也照样记一条次数（花费页按 0 元算）
             if (accepted.get()) runCatching { onUsage?.invoke(provider, model, Usage(), tag) }
-            if (e is ApiException) ResponsesApi.friendly(e.body)?.let { throw ApiException(e.status, it) }
+            if (e is ApiException) ResponsesApi.friendly(e.body)?.let { throw ApiException(e.status, it, retryAfterOf(e)) }
             throw e
         }
     }
@@ -222,7 +234,7 @@ class LlmClient(private val proxyOf: (ProviderConfig) -> String?) {
             contentType(ContentType.Application.Json)
             setBody(body.toString())
         }.execute { resp ->
-            if (resp.status.value !in 200..299) throw ApiException(resp.status.value, resp.bodyAsText())
+            if (resp.status.value !in 200..299) throw ApiException(resp.status.value, resp.bodyAsText(), retryAfterHeader(resp.headers["retry-after-ms"], resp.headers["Retry-After"]))
             // 第一块正常数据到了才算服务商接下了（MiniMax 会在 200 里用 base_resp 报错，那种不算，照常走重试）
             var accepted = false
             fun accept() { if (!accepted) { accepted = true; onAccepted() } }

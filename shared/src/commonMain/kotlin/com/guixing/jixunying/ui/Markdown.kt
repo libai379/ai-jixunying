@@ -178,7 +178,9 @@ private fun inline(text: String, sources: List<SearchSource>, base: SpanStyle = 
 }
 
 @Composable
-fun MarkdownText(text: String, modifier: Modifier = Modifier, sources: List<SearchSource> = emptyList(), color: Color = MaterialTheme.colorScheme.onSurface) {
+fun MarkdownText(text: String, modifier: Modifier = Modifier, sources: List<SearchSource> = emptyList(), color: Color = MaterialTheme.colorScheme.onSurface,
+                 /** 引用块最多露几行（多了点一下展开）；不限 = Int.MAX_VALUE。 */
+                 quoteLines: Int = Int.MAX_VALUE) {
     // LaTeX 公式先转成普通符号（这里显示不了 LaTeX）
     val blocks = remember(text) { parseBlocks(com.guixing.jixunying.model.MathText.plain(text)) }
     val body = MaterialTheme.typography.bodyLarge.copy(color = color)
@@ -194,9 +196,12 @@ fun MarkdownText(text: String, modifier: Modifier = Modifier, sources: List<Sear
                 is Block.Para -> Text(inline(b.text, sources), style = body)
                 is Block.Code -> CodeBlock(b.lang, b.code)
                 is Block.Quote -> Row(Modifier.fillMaxWidth()) {
+                    var open by remember(b.text) { mutableStateOf(false) }
                     Box(Modifier.width(3.dp).height(22.dp).background(MaterialTheme.colorScheme.primary.copy(alpha = 0.4f), RoundedCornerShape(2.dp)))
                     Spacer(Modifier.width(10.dp))
-                    Text(inline(b.text, sources), style = body.copy(color = MaterialTheme.colorScheme.onSurfaceVariant))
+                    Text(inline(b.text, sources), style = body.copy(color = MaterialTheme.colorScheme.onSurfaceVariant),
+                        maxLines = if (open) Int.MAX_VALUE else quoteLines, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                        modifier = if (quoteLines == Int.MAX_VALUE) Modifier else Modifier.clickable { open = !open })
                 }
                 is Block.ListItem -> Row(Modifier.padding(start = (b.indent * 18).dp)) {
                     Text(b.marker, style = body.copy(color = if (b.ordered) MaterialTheme.colorScheme.primary else Ext.c.subtle, fontWeight = FontWeight.SemiBold),

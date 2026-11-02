@@ -42,6 +42,9 @@
   - 两端同步（engine/DeviceSync.kt，2026-10-27）：手机接过的微信对话、两边各自记的账本，手机连上电脑就分批对齐（按内容去重，只发本机自己的：Message.syncedFrom、UsageRecord.origin 空的）；账本服务商按地址 + Key 指纹对到本机那家，手填余额估算两台一起扣。批次跟着网忙不忙、是不是手机流量变。以后再加「手机也能自己干」的功能，先想好它留下的东西要不要回电脑（教训 106）。
   - 电脑只许开一个（desktopApp/SingleInstance.kt，数据目录 app.lock）；设置 → 手机联机「开机自动启动」（HKCU Run）。
   - 已知限制：中转全断但电脑和手机都能上网时，手机看不到电脑，两边可能都答；三星等手机电池没设「不限制」时，锁屏久了还可能被关掉。
+  - 引用历史消息（2026-11-01，engine/Quotes.kt、WeixinBridge.resolveQuote）：新版微信的 ref_msg 可能只带编号 svr_id、不带内容（官方插件 docs/quote-cache_zh_CN.md）。收发的每条微信消息把编号记在聊天记录上（Message.channelParts，一条长回答拆几条发就几个，发图、发文件的记附件编号），引用时按编号到这个联系人的全部对话里找（Engine.findChannelPart，/新对话以后、重开以后、手机接的同步过来的都找得到），写成「> 谁 · 时间：内容」放在用户这句话前面，引用的附件放 Message.quoted（文件还是原来那份，不另存）。老版微信带内容的照旧用；partial_text 只引选中的一段（MD5 对不上就引整条）；这个功能以前收发的消息没有编号，引用时照实告诉 AI 看不到。日志 JxyWeixin 记每次引用有哪些字段、找没找到（不记内容）。判断叫了谁（@、喊名字）只看自己说的话（Quotes.spoken），引用里的名字不算；群里引某位 AI 的话时顺带 @ 它。
+- 看视频（2026-11-01，Engine.digestVideo）：模型基本不直接收视频，发出去时（微信发来的、对话页和 Code 栏拖进来的、引用的）取 6 张画面（Attachment.frames，给能看图的模型，只带最近一段的）+ 把声音转成字（存 .txt，设置 → 语音 自动挑的那家，按秒收费，最长 10 分钟），记在附件上不读第二遍。电脑靠 Edge 解码（PageBrowser.fileFrames / fileAudioPcm，程序临时开 127.0.0.1 小服务递文件；后台标签页要 Emulation.setFocusEmulationEnabled 才加载视频），手机用系统解码器（localVideoFrames / localVideoAudio）。这台电脑的 Edge 解不了 HEVC（实测「没有画面」），AI 会知道画面解不开，声音照样听。
+- 服务商一时忙不过来（2026-11-01，Engine.chatPatiently，对话页、微信都走）：过载、5xx、限流（不含额度用完、余额不足）且还没说出字时自己再试：服务商说了等多久就照它说的等（单聊最多两回、一回最多 15 分钟，记一步 ToolStep("wait")、微信里说一声，用户再发一句就不等了，那条撤掉、新的一轮一起答），没说的话 2、6、15 秒各试一次；群聊不等久的。报错只显示一句话（friendlyError：过载单独一句，别的取 JSON 里的 message），原文进日志 JxyLlm。微信里也发真正的原因（channelTurn 现在把出错的回答也返回）。
 
 ## 红线
 
@@ -76,6 +79,8 @@
   - jvmShared/relay：Crypto（AES-GCM）、MqttMulti（多中转 + 探测自检 + 切片信封）、RelayHost（电脑端）、RelayLink 和 pairWithHost（手机端）
   - desktopMain / androidMain：平台实现（PDFBox / pdfbox-android，ImageIO / BitmapFactory，二维码生成）
   - desktopTest：EngineTest（假模型服务器 + 假 iLink / CDN + 进程内 MQTT 服务器 Moquette，把全流程跑一遍）；ConfigMergeTest（同步不重复、启动合并重复）；ShotsTest（离屏截图，见下）；LiveRelayTest、LiveSearchTest、LiveSnoopTest 是真联网检查，设 JXY_LIVE=1（Snoop 用 JXY_SNOOP=配对码）才跑；LiveRecorderTest 设 JXY_LIVE_RECORDER=数据文件夹 才跑（用那份数据里的真 Key 试记录员）；LiveDrawPromptTest（JXY_LIVE_DRAW=数据文件夹，看四家写的画图描述，不画）；LiveDrawTest（JXY_LIVE_DRAW_REAL + JXY_DRAW_OUT + JXY_DRAW_MODELS，真画，花钱）；LiveStanceTest（JXY_LIVE_STANCE=数据文件夹，点名 10 句 + 四位真答两轮看立场档案，复制一份数据再用；JXY_LIVE_STANCE_ROUNDS=0 只测点名；一轮可能要四分钟）；LiveInstructionTest（JXY_LIVE_INSTR=数据文件夹，旧对话 / 新对话照不照新写的自定义指令，JXY_LIVE_INSTR_ONLY=成员名、JXY_LIVE_INSTR_RUNS=轮数）；LiveBrowserTest（JXY_LIVE_BROWSER=网址,…，真开 Edge 读平台页面；自动测试里 -Djxy.browser=off 不开真浏览器）
+  - WeixinQuoteTest：假 iLink + 假模型，引用（文字、图、视频、文件、部分引用、老版带内容）、看视频、服务商过载。真跑开关：LiveVideoReadTest（JXY_LIVE_VIDEOREAD=视频1,视频2 + JXY_VIDEOREAD_OUT=文件夹，真开 Edge 解视频、存画面，不花钱）；LiveWeixinQuoteTest（JXY_LIVE_WXQUOTE=数据文件夹 + JXY_LIVE_WXQUOTE_VIDEO=视频 + JXY_LIVE_WXQUOTE_MEMBER=成员，假微信 + 真模型 + 真 Edge + 真听写，花一点钱，只复制 state.json，别选 ChatGPT 订阅的成员）。注意 JXY_LIVE_VIDEO 是 LiveVideoTest（真做视频、花钱）的开关，别和读视频的混了
+  - androidApp/src/androidTest 的 VideoCheckRunner：在模拟器上真跑手机解视频（用法写在文件头；只对模拟器，自动测试碰不到安卓解码器）
   - 自动测试不扫开发机的真实文档（Gradle 给测试设了 -Djxy.docs.autoscan=false）
 - desktopApp/：桌面入口 Main.kt（启动 RelayHost）和打包配置
 - androidApp/：安卓入口 MainActivity.kt（本机引擎、扫码配对、选文件）

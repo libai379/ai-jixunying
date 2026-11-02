@@ -21,6 +21,8 @@ android {
         targetSdk = 36
         versionCode = 21
         versionName = "1.13.2"
+        // 只在模拟器上手动跑（用法见 src/androidTest 的 VideoCheckRunner），不进正式包
+        testInstrumentationRunner = "com.guixing.jixunying.VideoCheckRunner"
     }
     signingConfigs {
         if (keystoreProps.getProperty("storeFile") != null) {

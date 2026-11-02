@@ -387,14 +387,16 @@ private fun UserMessage(ctl: AppController, state: AppState, m: Message) {
     Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.End) {
         // 几点说的（2026-10-29 用户要每句话都带时间）
         Text(clockText(m.createdAt), style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, modifier = Modifier.padding(bottom = 3.dp))
-        if (m.attachments.isNotEmpty()) {
-            AttachmentStrip(ctl, m.attachments, alignEnd = true)
+        // 引用的那条带的图、视频、文件（微信里引用的，2026-11-01）也显示出来：AI 看到的就是这些
+        if (m.attachments.isNotEmpty() || m.quoted.isNotEmpty()) {
+            AttachmentStrip(ctl, m.attachments + m.quoted, alignEnd = true)
             Spacer(Modifier.height(6.dp))
         }
         if (m.content.isNotBlank()) {
             Surface(shape = RoundedCornerShape(18.dp, 4.dp, 18.dp, 18.dp), color = Ext.c.userBubble, modifier = Modifier.widthIn(max = 620.dp)) {
                 SelectionContainer {
-                    MarkdownText(m.content, Modifier.padding(horizontal = 14.dp, vertical = 10.dp), color = Ext.c.onUserBubble)
+                    // 引用块只露几行（微信里引用一条长回答时有一两千字），点一下展开
+                    MarkdownText(m.content, Modifier.padding(horizontal = 14.dp, vertical = 10.dp), color = Ext.c.onUserBubble, quoteLines = 4)
                 }
             }
         }
@@ -636,7 +638,7 @@ private fun ToolStepsView(tools: List<ToolStep>, streaming: Boolean) {
             Icon(Icons.Rounded.Language, null, Modifier.size(14.dp), tint = MaterialTheme.colorScheme.primary)
             Spacer(Modifier.width(6.dp))
             Text(
-                if (streaming) "$summary · 正在${if (latest.kind == "fetch") "读网页" else if (latest.kind == "image") "画图" else if (latest.kind == "video") "做视频" else "搜「${latest.input.take(16)}」"}…" else summary,
+                if (streaming) "$summary · ${if (latest.kind == "wait") latest.input else "正在" + if (latest.kind == "fetch") "读网页" else if (latest.kind == "image") "画图" else if (latest.kind == "video") "做视频" else "搜「${latest.input.take(16)}」"}…" else summary,
                 style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 520.dp),
             )
@@ -662,6 +664,8 @@ private fun ToolStepView(t: ToolStep) {
         // 听平台视频里说的话（2026-10-23）
         "listen" -> Icons.Rounded.Mic to ((if (t.ok) "听了视频" else "视频没听成") + if (t.note.isNotBlank()) " · ${t.note.take(40)}" else "")
         "video" -> Icons.Rounded.Movie to ((if (t.ok) "做视频：" else "视频没做成：") + t.input.take(30) + if (t.note.isNotBlank()) " · ${t.note.take(30)}" else "")
+        // 服务商太忙，等它恢复再试（2026-11-01）
+        "wait" -> Icons.Rounded.History to t.input
         else -> Icons.Rounded.Brush to (if (t.ok) "画图：${t.input.take(40)}" else "画图失败")
     }
     Column(Modifier.padding(bottom = 6.dp)) {
@@ -869,7 +873,8 @@ internal fun AttachmentStrip(ctl: AppController, atts: List<Attachment>, alignEn
                 }
             }
         }
-        docs.forEach { a -> if (a.generated) MadeFileChip(ctl, a) else DocChip(a) }
+        // 视频（微信发来的）也能点开放：和 AI 做的视频一样
+        docs.forEach { a -> if (a.generated || a.isVideo) MadeFileChip(ctl, a) else DocChip(a) }
     }
     preview?.let { ImagePreview(ctl, it) { preview = null } }
 }

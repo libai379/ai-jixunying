@@ -1,10 +1,13 @@
 package com.guixing.jixunying.engine
 
 import com.guixing.jixunying.model.AppJson
+import com.guixing.jixunying.model.Attachment
 import com.guixing.jixunying.model.AttachmentKind
+import com.guixing.jixunying.model.ChannelPart
 import com.guixing.jixunying.model.CommandResult
 import com.guixing.jixunying.model.Message
 import com.guixing.jixunying.model.MsgStatus
+import com.guixing.jixunying.model.Role
 import com.guixing.jixunying.model.WeixinBot
 import com.guixing.jixunying.model.WeixinInfo
 import io.ktor.client.plugins.timeout
@@ -105,6 +108,11 @@ class WeixinBridge(
         const val BOT_AGENT = "AIJixunying/1.13.2"
         /** 单独处理、不交给 AI 的几句话。 */
         val COMMANDS = setOf("/新对话", "新对话", "/new", "/帮助", "/help")
+        /** 官方插件 src/api/types.ts 里消息和消息项有的字段（多出来的记日志）。 */
+        private val MSG_KEYS = setOf("seq", "message_id", "from_user_id", "to_user_id", "client_id", "create_time_ms", "update_time_ms", "delete_time_ms",
+            "session_id", "group_id", "message_type", "message_state", "item_list", "context_token", "run_id")
+        private val ITEM_KEYS = setOf("type", "create_time_ms", "update_time_ms", "is_completed", "msg_id", "ref_msg", "text_item", "image_item", "voice_item",
+            "file_item", "video_item", "tool_call_start_item", "tool_call_result_item")
 
         /**
          * 发到微信前去掉引用编号：正文里的「[1]」「[2][3]」（来源列表不发了，编号留着就是对不上号的数字），
@@ -547,8 +555,15 @@ class WeixinBridge(
     /** 第一条到了以后等多久再答：连发的几条攒在一起（测试里调小）。 */
     internal var batchWaitMs = 1_500L
 
-    /** 一条微信消息拆出来的东西：文字、附件、回复要带的 context_token、对方发出的时间。 */
-    private class Incoming(val text: String, val attIds: List<String>, val ctx: String?, val at: Long)
+    /** 一条微信消息拆出来的东西：文字、附件、回复要带的 context_token、对方发出的时间、它在微信里的编号、它引用的那条带的附件。 */
+    private class Incoming(val text: String, val attIds: List<String>, val ctx: String?, val at: Long,
+                           val wxIds: List<String> = emptyList(), val quoted: List<Attachment> = emptyList())
+
+    /**
+     * 引用找回来的东西：引用块里写的话；原来那条带的附件（聊天记录里有的，文件不另存）；
+     * 这次才从微信下载的附件（老版微信把媒体带在引用里，聊天记录里没有）；引的是哪位 AI 的话（群里让它来接，和界面上点「引用」一样）。
+     */
+    private class Quoted(val text: String, val attachments: List<Attachment> = emptyList(), val ownAttIds: List<String> = emptyList(), val speaker: String? = null)
 
     private fun clientId() = "jxy-${System.currentTimeMillis()}-${bytesToHex(ByteArray(4).also(rnd::nextBytes))}"
 
@@ -738,6 +753,8 @@ class WeixinBridge(
                     }
                 }
             }.trySend(m)
+            // 上一句还在等服务商恢复的话不等了：新的一批把前面的一起答（先进队列再叫醒：那一轮要看队列里有没有新消息，决定说不说「没答上来」）
+            engine.supersedeBusyWaits("weixin:$from")
         }
 
         private fun markAnswered(m: JsonObject) {
@@ -777,10 +794,11 @@ class WeixinBridge(
                     sendText(from, inc.ctx, "好，换个新话题。之前的聊天还留在电脑上。")
                 }
                 "/帮助", "/help" ->
-                    sendText(from, inc.ctx, "直接发文字、图片、文件（PDF、Word、Excel 等）就行，${members.size} 位 AI 成员在电脑上回答。\n发「/新对话」开始一个新话题。\n想让 AI 画图就说「画一张……」。")
+                    sendText(from, inc.ctx, "直接发文字、图片、视频、文件（PDF、Word、Excel 等）就行，引用以前的消息也读得到，${members.size} 位 AI 成员在电脑上回答。\n发「/新对话」开始一个新话题。\n想让 AI 画图就说「画一张……」。")
             }
         }
 
+        @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
         private suspend fun turn(from: String, items: List<Incoming>) {
             val ctx = items.last().ctx
             val ws = engine.state.settings.weixin
@@ -791,58 +809,149 @@ class WeixinBridge(
                 while (isActive) { typing(from, ctx, true); delay(8_000) }
             }
             val replies = try {
-                engine.channelTurn(convId, items.map { Engine.ChannelInput(it.text, it.attIds, it.at) })
+                engine.channelTurn(convId, items.map { Engine.ChannelInput(it.text, it.attIds, it.at, it.wxIds, it.quoted) }) { sendText(from, ctx, it) }
             } finally {
                 typingJob.cancel()
                 typing(from, ctx, false)
             }
-            if (replies.isEmpty()) { sendText(from, ctx, "这次没答上来，可以在电脑上的「微信对话」里看看出了什么问题。"); return }
+            if (replies.isEmpty()) {
+                // 上一句等服务商恢复时又来了新消息（这一轮让位了）：新的一批马上就答，不用说什么
+                if (queues[from]?.isEmpty == false) return
+                sendText(from, ctx, "这次没答上来，可以在电脑上的「微信对话」里看看出了什么问题。")
+                return
+            }
             val multi = replies.map { it.senderId }.distinct().size > 1
             for (r in replies) sendReply(from, ctx, r, multi)
         }
 
-        /** 拆一条微信消息：文字、引用、语音转的字；图片和文件下载下来存成附件。 */
+        /** 把一条图片 / 文件 / 视频存成附件（只认本人发的，handle 拦过了）；下载不下来返回 null，原因写日志。 */
+        private suspend fun saveMedia(item: JsonObject, label: String): Attachment? {
+            val stamp = System.currentTimeMillis() % 100000
+            val type = item.int("type")
+            return try {
+                when (type) {
+                    2 -> {
+                        val img = item.obj("image_item")
+                        download(img?.obj("media"), img?.str("aeskey"))?.let { engine.upload("微信图片_$stamp.jpg", "image/jpeg", it) }
+                    }
+                    4 -> {
+                        val f = item.obj("file_item")
+                        download(f?.obj("media"), null)?.let { engine.upload(f?.str("file_name")?.takeIf { n -> n.isNotBlank() } ?: "微信文件", "application/octet-stream", it) }
+                    }
+                    5 -> download(item.obj("video_item")?.obj("media"), null)?.let { engine.upload("微信视频_$stamp.mp4", "video/mp4", it) }
+                    else -> null
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                engine.logLine("JxyWeixin", "$label 消息类型 $type 下载失败：${e.message?.take(200)}")
+                null
+            }
+        }
+
+        /** 拆一条微信消息：文字、引用、语音转的字；图片、文件、视频下载下来存成附件。 */
         private suspend fun parse(from: String, m: JsonObject): Incoming {
             // 回复要带「这一条」消息的 context_token（连发几条时，存下来的可能已经是后面那条的了）
             val ctx = m.str("context_token") ?: cursor.contextTokens[from]
             val parts = mutableListOf<String>()
             val attIds = mutableListOf<String>()
+            // 这条消息的编号（以后被引用时靠它找回来）：顶上的 message_id、每一项的 msg_id 都记（官方插件 getWeixinMessageId 两个都认）
+            val wxIds = LinkedHashSet<String>()
+            m.str("message_id")?.trim()?.takeIf { it.isNotEmpty() }?.let { wxIds += it }
+            var quote: Quoted? = null
             for (el in m.arr("item_list").orEmpty()) {
                 val item = el as? JsonObject ?: continue
-                item.obj("ref_msg")?.let { ref ->
-                    val quoted = listOfNotNull(ref.str("title")?.takeIf { it.isNotBlank() },
-                        ref.obj("message_item")?.obj("text_item")?.str("text")).joinToString(" | ")
-                    if (quoted.isNotBlank()) parts += "（引用：$quoted）"
-                }
+                item.str("msg_id")?.trim()?.takeIf { it.isNotEmpty() }?.let { wxIds += it }
+                if (quote == null) item.obj("ref_msg")?.let { quote = resolveQuote(from, it) }
                 when (item.int("type")) {
                     1 -> item.obj("text_item")?.str("text")?.let { parts += it }
                     3 -> parts += item.obj("voice_item")?.str("text")?.takeIf { it.isNotBlank() }?.let { "[语音] $it" } ?: "[一段语音，微信没转出文字]"
-                    2 -> {
-                        val img = item.obj("image_item")
-                        val bytes = runCatching { download(img?.obj("media"), img?.str("aeskey")) }.getOrNull()
-                        val att = bytes?.let { engine.upload("微信图片_${System.currentTimeMillis() % 100000}.jpg", "image/jpeg", it) }
-                        if (att != null) attIds += att.id else parts += "[一张图片，没下载下来]"
-                    }
-                    4 -> {
-                        val f = item.obj("file_item")
-                        val name = f?.str("file_name")?.takeIf { it.isNotBlank() } ?: "微信文件"
-                        val bytes = runCatching { download(f?.obj("media"), null) }.getOrNull()
-                        val att = bytes?.let { engine.upload(name, "application/octet-stream", it) }
-                        if (att != null) attIds += att.id else parts += "[文件「$name」没下载下来]"
-                    }
-                    5 -> parts += "[一段视频：暂时看不了视频内容]"
+                    2 -> saveMedia(item, "收到")?.let { attIds += it.id } ?: run { parts += "[一张图片，没下载下来]" }
+                    4 -> saveMedia(item, "收到")?.let { attIds += it.id } ?: run { parts += "[文件「${item.obj("file_item")?.str("file_name") ?: "微信文件"}」没下载下来]" }
+                    5 -> saveMedia(item, "收到")?.let { attIds += it.id } ?: run { parts += "[一段视频，没下载下来（可能太大，超过 50MB 的存不下）]" }
                     else -> parts += "[一条暂不支持的消息（比如合并转发的聊天记录），可以改发文字、截图或文件]"
                 }
             }
-            return Incoming(parts.joinToString("\n").trim(), attIds, ctx, m.long("create_time_ms") ?: 0L)
+            // 微信给了没见过的字段（比如引用换了地方放）：记下字段名（不记内容），不然又是读不到也没人知道
+            val oddKeys = (m.keys - MSG_KEYS) + m.arr("item_list").orEmpty().flatMap { (it as? JsonObject)?.keys.orEmpty() - ITEM_KEYS }
+            if (oddKeys.isNotEmpty()) engine.logLine("JxyWeixin", "消息里有没见过的字段：${oddKeys.distinct()}")
+            val said = parts.joinToString("\n").trim()
+            val q = quote
+            // 引的是某位 AI 的话：群里让它来接（和界面上点「引用」一样顺带 @ 它）；只有一位成员时不用
+            val text = when {
+                q == null -> said
+                q.speaker != null && membersFor().size > 1 -> "@${q.speaker} \n" + Quotes.compose(q.text, said)
+                else -> Quotes.compose(q.text, said)
+            }
+            return Incoming(text, attIds + q?.ownAttIds.orEmpty(), ctx, m.long("create_time_ms") ?: 0L, wxIds.toList(), q?.attachments.orEmpty())
+        }
+
+        /**
+         * 用户引用了一条消息（ref_msg）：新版微信可能只给编号（svr_id），不带内容（官方文档 docs/quote-cache_zh_CN.md：
+         * 「新版微信客户端可能只在引用消息中提供服务端消息 ID（svr_id），而不再携带被引用消息的正文或媒体内容」）。
+         * 先按编号到聊天记录里找（文字、图片、视频、文件都在）；找不到看引用里带没带内容（老版微信）；都没有就照实告诉 AI 引用了一条拿不到的消息。
+         * 日志只记有哪些字段和长度，不记内容：真实的 ref_msg 长什么样没见过原文（未确认），下次出问题看这一行。
+         */
+        private suspend fun resolveQuote(from: String, ref: JsonObject): Quoted? {
+            val item = ref.obj("message_item")
+            val title = ref.str("title")?.trim().orEmpty()
+            val id = ref.str("svr_id")?.trim()?.takeIf { it.isNotEmpty() } ?: item?.str("msg_id")?.trim()?.takeIf { it.isNotEmpty() }
+            val found = id?.let { engine.findChannelPart("weixin:$from", it) }
+            engine.logLine("JxyWeixin", "引用：字段 ${ref.keys} 编号=${id?.takeLast(6) ?: "无"} 标题 ${title.length} 字 内容字段 ${item?.keys ?: "无"} 类型=${item?.int("type") ?: "无"} " +
+                "聊天记录里${if (found != null) "找到了" else "没有"}")
+            if (found != null) return quotedFromHistory(found.first, found.second, ref.obj("partial_text"))
+            // 老版微信：内容直接带在引用里
+            val body = item?.let {
+                when (it.int("type")) {
+                    1 -> it.obj("text_item")?.str("text")
+                    3 -> it.obj("voice_item")?.str("text")?.takeIf { t -> t.isNotBlank() }?.let { t -> "[语音] $t" } ?: "[语音]"
+                    2 -> "[图片]"
+                    4 -> "[文件：${it.obj("file_item")?.str("file_name") ?: "微信文件"}]"
+                    5 -> "[视频]"
+                    else -> null
+                }
+            }?.trim().orEmpty()
+            val own = item?.takeIf { it.int("type") in setOf(2, 4, 5) }?.let { saveMedia(it, "引用里的") }
+            val inline = listOf(title, body).filter { it.isNotEmpty() }.joinToString(" | ")
+            if (inline.isNotEmpty()) return Quoted(Quotes.clip(inline), ownAttIds = listOfNotNull(own?.id))
+            if (id == null) return null
+            return Quoted("（引用了一条以前的消息，但这条的内容没存下来，看不到）")
+        }
+
+        private fun quotedFromHistory(m: Message, part: ChannelPart, partialRef: JsonObject?): Quoted {
+            val who = engine.speakerName(m)
+            val atts = when {
+                part.attachmentId.isNotEmpty() -> m.attachments.filter { it.id == part.attachmentId }
+                part.text.isNotEmpty() -> emptyList()  // 长回答拆开发的其中一段：只有字
+                else -> m.attachments
+            }
+            val full = when {
+                part.attachmentId.isNotEmpty() -> ""
+                part.text.isNotEmpty() -> part.text.removePrefix("【$who】\n")
+                m.role == Role.USER -> Quotes.spoken(m.content)
+                else -> m.content
+            }
+            // 只选了其中一段：校验对不上就引整条（官方插件同样不编内容）
+            val partial = partialRef?.let {
+                Quotes.Partial(it.str("start").orEmpty(), it.str("end").orEmpty(), it.int("startindex") ?: -1, it.int("endindex") ?: -1, it.str("quotemd5").orEmpty())
+            }
+            val body = Quotes.clip((partial?.let { Quotes.resolvePartial(full, it) } ?: full).trim())
+            val labels = atts.joinToString("\n") { a ->
+                "[" + (if (a.kind != AttachmentKind.DOCUMENT) "图片" else if (a.isVideo) "视频" else "文件") + "：" + a.name + "]"
+            }
+            val line = listOf(body, labels).filter { it.isNotEmpty() }.joinToString("\n")
+                .ifEmpty { "（这条的附件在另一台设备上，这里看不到）" }
+            val speaker = if (m.role == Role.AI) engine.memberName(m.senderId) else null
+            return Quoted("$who · ${Prompts.clock(m.createdAt)}：$line", atts, speaker = speaker)
         }
 
         private suspend fun sendReply(to: String, ctx: String?, r: Message, withName: Boolean) {
             val name = engine.memberName(r.senderId) ?: "AI"
+            val cleaned = plainText(r.content.replace(Regex("<think>[\\s\\S]*?</think>"), ""))
             val body = when (r.status) {
-                MsgStatus.ERROR -> "出错了：${r.error.take(300)}"
+                MsgStatus.ERROR -> if (cleaned.isBlank()) "这次没答上来：${r.error.take(300)}" else "$cleaned\n\n（后面没答完：${r.error.take(300)}）"
                 MsgStatus.STOPPED -> plainText(r.content).ifBlank { "（在电脑上被停止了）" }
-                else -> plainText(r.content.replace(Regex("<think>[\\s\\S]*?</think>"), ""))
+                else -> cleaned
             }
             // 来源列表不发到微信，正文里的 [1][2] 编号也去掉（2026-10-30 用户：「每次回答后面都加入来源最下面这一段，传到微信的时候自动过滤」）；
             // 出处在电脑、手机的 AI集训营 里照样看得到
@@ -850,24 +959,32 @@ class WeixinBridge(
                 if (withName) append("【").append(name).append("】\n")
                 append(withoutCitations(body))
             }.trim()
-            if (text.isNotBlank()) chunks(text).forEach { sendText(to, ctx, it) }
+            // 每发出去一条记下它的编号，以后被引用时找得回来（文字和正文一样的不再存一份）
+            val sent = mutableListOf<ChannelPart>()
+            if (text.isNotBlank()) chunks(text).forEach { piece ->
+                sendText(to, ctx, piece).getOrNull()?.let { id -> sent += ChannelPart(id, text = if (piece == r.content.trim()) "" else piece) }
+            }
             for (a in r.attachments.filter { it.kind == AttachmentKind.GENERATED_IMAGE }) {
                 val bytes = engine.fileBytes(a.id) ?: continue
-                runCatching { sendImage(to, ctx, bytes) }.onFailure { sendText(to, ctx, "（画好了一张图，但发到微信失败了：${it.message?.take(80)}。可以在 AI集训营 里看。）") }
+                runCatching { sendImage(to, ctx, bytes) }
+                    .onSuccess { id -> if (id != null) sent += ChannelPart(id, attachmentId = a.id) }
+                    .onFailure { sendText(to, ctx, "（画好了一张图，但发到微信失败了：${it.message?.take(80)}。可以在 AI集训营 里看。）") }
             }
             // AI 做的 Word / Excel 也发回微信；视频按视频消息发（2026-10-30 用户：「微信聊天里边用 MiniMax 生成的两个视频文件都读不到，qwen 生成的视频可以读到」——
             // 以前视频也当普通文件发（media_type 3、消息 type 4），微信里只是一个附件、不能直接播，大的打不开；官方插件 send-media.js 是 video/* 走视频）
             for (a in r.attachments.filter { it.generated && it.kind == AttachmentKind.DOCUMENT }) {
                 val bytes = engine.fileBytes(a.id) ?: continue
-                val video = a.mime.startsWith("video/") || a.name.substringAfterLast('.').lowercase() in setOf("mp4", "mov", "webm", "m4v")
-                runCatching { if (video) sendVideo(to, ctx, bytes) else sendFile(to, ctx, a.name, bytes) }
+                runCatching { if (a.isVideo) sendVideo(to, ctx, bytes) else sendFile(to, ctx, a.name, bytes) }
+                    .onSuccess { id -> if (id != null) sent += ChannelPart(id, attachmentId = a.id) }
                     .onFailure { sendText(to, ctx, "（做好了《${a.name}》，但发到微信失败了：${it.message?.take(80)}。可以在 AI集训营 里打开。）") }
             }
+            engine.noteChannelParts(r.convId, r.id, sent)
         }
 
         // ———————————————— 发消息 ————————————————
 
-        private suspend fun sendItem(to: String, ctx: String?, item: JsonObject) {
+        /** @return 微信给这条消息的编号（官方插件 sendMessage 的 SendMessageResp.message_id）；没给是 null。 */
+        private suspend fun sendItem(to: String, ctx: String?, item: JsonObject): String? {
             val acc = account
             val body = buildJsonObject {
                 putJsonObject("msg") {
@@ -884,9 +1001,14 @@ class WeixinBridge(
             val resp = post(baseOf(acc), "ilink/bot/sendmessage", body, acc.botToken, 15_000)
             val ret = resp.int("ret") ?: 0
             if (ret != 0) throw IllegalStateException("发消息失败（ret=$ret）：${resp.str("errmsg").orEmpty()}")
+            val id = resp.str("message_id")?.trim()?.takeIf { it.isNotEmpty() }
+            if (id == null && !warnedNoId) { warnedNoId = true; engine.logLine("JxyWeixin", "发消息没回编号（message_id）：这个微信发出去的消息被引用时找不回来") }
+            return id
         }
 
-        suspend fun sendText(to: String, ctx: String?, text: String) = runCatching {
+        @Volatile private var warnedNoId = false
+
+        suspend fun sendText(to: String, ctx: String?, text: String): Result<String?> = runCatching {
             sendItem(to, ctx, buildJsonObject { put("type", 1); putJsonObject("text_item") { put("text", text) } })
         }
 
@@ -903,9 +1025,9 @@ class WeixinBridge(
         }
 
         /** 把图片加密传到微信 CDN，再发一条图片消息。 */
-        private suspend fun sendImage(to: String, ctx: String?, plain: ByteArray) {
+        private suspend fun sendImage(to: String, ctx: String?, plain: ByteArray): String? {
             val u = uploadMedia(to, plain, 1)
-            sendItem(to, ctx, buildJsonObject {
+            return sendItem(to, ctx, buildJsonObject {
                 put("type", 2)
                 putJsonObject("image_item") {
                     putJsonObject("media") {
@@ -919,9 +1041,9 @@ class WeixinBridge(
         }
 
         /** 把文件（AI 做的 Word / Excel）加密传到微信 CDN，再发一条文件消息（照官方插件 sendFileMessageWeixin：上传 media_type 3，消息 type 4）。 */
-        private suspend fun sendFile(to: String, ctx: String?, name: String, plain: ByteArray) {
+        private suspend fun sendFile(to: String, ctx: String?, name: String, plain: ByteArray): String? {
             val u = uploadMedia(to, plain, 3)
-            sendItem(to, ctx, buildJsonObject {
+            return sendItem(to, ctx, buildJsonObject {
                 put("type", 4)
                 putJsonObject("file_item") {
                     putJsonObject("media") {
@@ -939,9 +1061,9 @@ class WeixinBridge(
          * 视频照官方插件 sendVideoMessageWeixin（@tencent-weixin/openclaw-weixin 2.4.10 dist/src/messaging/send.js）：
          * 上传 media_type 2（UploadMediaType.VIDEO），消息 type 5（MessageItemType.VIDEO），video_item 里是 media 和 video_size（密文字节数）；不用缩略图。
          */
-        private suspend fun sendVideo(to: String, ctx: String?, plain: ByteArray) {
+        private suspend fun sendVideo(to: String, ctx: String?, plain: ByteArray): String? {
             val u = uploadMedia(to, plain, 2)
-            sendItem(to, ctx, buildJsonObject {
+            return sendItem(to, ctx, buildJsonObject {
                 put("type", 5)
                 putJsonObject("video_item") {
                     putJsonObject("media") {
