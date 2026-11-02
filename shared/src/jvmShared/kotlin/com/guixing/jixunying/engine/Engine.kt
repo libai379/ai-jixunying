@@ -114,6 +114,7 @@ const val CODE_ID = "tool:code"
 /** 一次回答最多调几次工具（搜索、读网页、画图）。 */
 /** 一次回答最多用几次工具（2026-10-17 从 8 放到 40：对话栏也要能多步干活，读文件、改文件常常要十几步）。 */
 const val MAX_TOOL_USES = 40
+const val MAX_PHOTO_TRIES = 6
 
 const val NO_IMAGE_MODEL = "还没有能画图的服务商。到 设置 → 模型服务 添加任意一家能画图的平台并填 Key：千问AI平台或阿里百炼（千问图像，画里的中文字写得准）、" +
     "火山方舟（豆包 Seedream）、MiniMax（image-01）、智谱开放平台（cogview-3-flash 免费，但写不好字）等都行。加好以后在聊天里说「画一张……」就会自动用它，不用别的设置。"
@@ -4037,6 +4038,116 @@ class Engine(
         return att to r.revisedPrompt
     }
 
+    /** 每张 P 出来的图是从哪张原图来的：同一轮里从同一张原图重做，只留最后一张，试错的不发给用户。 */
+    private val photoRoots = ConcurrentHashMap<String, String>()
+
+    /** 对话里的图（从新到旧，文件名不分大小写）；name 空 = 最近的一张。 */
+    private fun convImage(convId: String, name: String): Attachment? {
+        val all = snapshot(convId).asReversed().asSequence().flatMap { (it.attachments + it.quoted).asReversed().asSequence() }.filter { it.kind != AttachmentKind.DOCUMENT }
+        if (name.isBlank()) return all.firstOrNull()
+        val short = name.substringAfterLast('/').substringAfterLast('\\')
+        return all.firstOrNull { it.name.equals(name, true) || it.name.equals(short, true) }
+    }
+
+    /** P 图（2026-11-02，engine/PhotoEdit.kt）：程序直接改原图，改完自己比对，结果给 AI 看一眼。回给模型的话都在这里。 */
+    private suspend fun editImage(convId: String, msgId: String, args: JsonObject, seen: MutableList<Pair<String, String>>?): String {
+        // 一轮最多试这么多次（11-02 训练：让换背景，阿麦拿色块一笔一笔拼海边，调了 12 次还没完，推理写了 22 万字）
+        if ((snapshot(convId).firstOrNull { it.id == msgId }?.tools?.count { it.kind == "photo" } ?: 0) >= MAX_PHOTO_TRIES)
+            return "这一轮已经 P 了 $MAX_PHOTO_TRIES 次，不能再试了。照实告诉用户做到哪一步、哪里做不到，别说做好了。"
+        val source = (args.str("source") ?: args.str("image") ?: args.str("name")).orEmpty().trim()
+        fun failed(why: String, label: String = source): String {
+            updateMessage(convId, msgId) { it.copy(tools = it.tools + ToolStep("photo", label.ifBlank { "P 图" }, ok = false, note = why)) }
+            return why
+        }
+        val att = convImage(convId, source)
+        val bytes: ByteArray
+        val sourceName: String
+        if (att != null) {
+            bytes = withContext(Dispatchers.IO) { storage.fileBytes(att.id) } ?: return failed("《${att.name}》的文件不在这台设备上，改不了。")
+            sourceName = att.name
+        } else {
+            val names = snapshot(convId).flatMap { it.attachments + it.quoted }.filter { it.kind != AttachmentKind.DOCUMENT }.map { it.name }.distinct().takeLast(12)
+            val notFound = if (source.isBlank()) "这个对话里还没有图片可以改。" else "找不到「$source」。" + if (names.isEmpty()) "这个对话里还没有图片。" else "这个对话里有：${names.joinToString("、")}。"
+            val f = File(source)
+            // 电脑上的文件：读的规矩和 read_document 一样；微信里只聊天的、手机上的不许
+            val conv = state.conversation(convId)
+            val chatOnly = conv?.channel?.startsWith("weixin:") == true && weixin?.readFilesFor(conv.channel.removePrefix("weixin:")) == false
+            if (source.isBlank() || isPhone || chatOnly || !f.isAbsolute || !f.isFile) return failed(notFound)
+            askToRead(convId, msgId, f)?.let { return failed(it) }
+            if (f.length() > 64L * 1024 * 1024) return failed("${f.name} 太大（${f.length() / 1024 / 1024} MB），最大 64 MB。")
+            bytes = withContext(Dispatchers.IO) { f.readBytes() }
+            sourceName = f.name
+        }
+        val root = att?.let { photoRoots[it.id] ?: it.id } ?: source
+        fun attach(a: Attachment, step: ToolStep) {
+            photoRoots[a.id] = root
+            var old = emptyList<Attachment>()
+            updateMessage(convId, msgId) { m ->
+                old = m.attachments.filter { it.id != a.id && photoRoots[it.id] == root }
+                m.copy(attachments = m.attachments.filter { x -> old.none { it.id == x.id } } + a, tools = m.tools + step)
+            }
+            old.forEach { storage.deleteFile(it.id); photoRoots.remove(it.id) }
+        }
+        return try {
+            // 有的模型不写 steps，直接把一步的内容写在外面
+            val steps = PhotoEdit.steps(args["steps"] ?: args["ops"] ?: args["operations"] ?: args["edits"] ?: args["actions"] ?: args.takeIf { "op" in it })
+            if (steps.isEmpty() && (args["resend"] as? JsonPrimitive)?.contentOrNull != "true") {
+                // 11-02 训练：阿米调的时候参数没写对，以前当成「原样再发」，它照样说裁好了
+                return failed("steps 是空的，这次什么也没改。要改就写 steps，比如 [{\"op\":\"crop\",\"box\":[左,上,右,下]}]；要把图原样再发一次写 resend: true。", "没写要改什么")
+            }
+            if (steps.isEmpty()) {
+                // 用户说没收到：原样再发一次，不用重做、不花钱
+                val ext = sourceName.substringAfterLast('.', "png").lowercase()
+                val a = Attachment(newId(), "图片_${now() % 1_000_000}.$ext", att?.mime ?: "image/$ext", bytes.size.toLong(), AttachmentKind.GENERATED_IMAGE, note = "P 图：《$sourceName》原样再发一次")
+                storage.putFile(a, bytes, null)
+                attach(a, ToolStep("photo", "原样再发一次《$sourceName》"))
+                return "这张图一点没改，会原样再发一次（和你的回答一起）。"
+            }
+            val done = withContext(Dispatchers.Default) {
+                val src = PhotoEdit.load(bytes) ?: throw PhotoEdit.Problem("这张图读不了（${sourceName}，格式不支持或者文件坏了）。")
+                val r = PhotoEdit.run(src, steps) { n ->
+                    convImage(convId, n)?.let { storage.fileBytes(it.id) }?.let { b -> PhotoEdit.load(b) }
+                }
+                var encoded = encodePixels(r.out)
+                var lossless = true
+                // 大照片存 PNG 太大（微信发不动）：换高质量 JPEG，框外肉眼看不出差别，但不再是一个像素不差
+                if (encoded.size > 6_000_000) { encoded = encodePixels(r.out, 95); lossless = false }
+                Triple(Triple(src, r, encoded), lossless, PhotoEdit.diff(src, r.out))
+            }
+            val (triple, lossless, diff) = done
+            val (src, r, encoded) = triple
+            val ext = if (lossless) "png" else "jpg"
+            val a = Attachment(newId(), "P图_${now() % 1_000_000}.$ext", if (lossless) "image/png" else "image/jpeg", encoded.size.toLong(), AttachmentKind.GENERATED_IMAGE,
+                note = "P 图（原图《$sourceName》）：${r.summary}".take(200))
+            storage.putFile(a, encoded, null)
+            val scale = maxOf(src.w, src.h).toDouble().let { if (it > PhotoEdit.VIEW_SIDE) it / PhotoEdit.VIEW_SIDE else 1.0 }
+            val measured = when {
+                diff == null -> "尺寸从 ${src.w}×${src.h} 变成 ${r.out.w}×${r.out.h}。"
+                diff.changed == 0 -> "程序比对：一个像素都没变，这次等于什么也没做。"
+                else -> "程序比对：尺寸没变（${r.out.w}×${r.out.h}），改了 ${diff.changed} 个像素（占全图 ${"%.2f".format(100.0 * diff.changed / diff.total)}%），" +
+                    "都在 [" + diff.box!!.joinToString(",") { (it / scale).toInt().toString() } + "] 里，这个范围外一个像素都没变。" +
+                    if (lossless) "" else "（图太大，存成了高质量 JPEG，范围外肉眼看不出差别。）"
+            }
+            val look = seen != null && imageDataUrl(a)?.also { seen += "你刚 P 好的《${a.name}》" to it } != null
+            attach(a, ToolStep("photo", r.label, note = (r.notes + measured).joinToString("\n")))
+            buildString {
+                append("P 好了：《").append(a.name).append("》。").append(measured).append("\n")
+                r.notes.forEach { append(it).append("\n") }
+                if (look) append("结果图附在下一条消息里，对照用户要的看一眼：该去的去干净了吗，别的地方坏了没有。对了再说做好了；不对就再调 edit_image（source 还写原图《").append(sourceName).append("》，从原图重来，这张就不发了）；做不到就照实说，别说做好了。")
+                else append("你看不到结果，把程序量到的照实说，请用户看看对不对。")
+                append("图会和你的回答一起发给用户，回答里不用讲过程。")
+            }
+        } catch (e: PhotoEdit.Problem) {
+            failed(e.message.orEmpty())
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            // 比如照片太大、内存不够（OutOfMemoryError）
+            storage.log("JxyPhoto", "P 图出错 ${sourceName}：${e.message ?: e}")
+            failed("这张图没 P 成：${e.message ?: e.javaClass.simpleName}。如实告诉用户。")
+        }
+    }
+
     /** 让一位成员发言，返回它的消息（失败返回 null）。 */
     private suspend fun reply(convId: String, member: Member, cutoffId: String?, independent: Boolean, calledBy: String?): Message? {
         val conv = state.conversation(convId) ?: return null
@@ -4080,12 +4191,12 @@ class Engine(
         val officeOn = state.settings.office.enabled
         // 电脑上：任意文件 / 文件夹都能读（收录范围外的先问用户；微信、手机发起的不许）
         val filesOn = !isPhone && !wxChatOnly
-        val useTools = toolsOk && (wantSearch || hasImageModel || hasVideo || memOn || docsOn || officeOn || filesOn)
+        val useTools = toolsOk && (wantSearch || hasImageModel || hasVideo || memOn || docsOn || officeOn || filesOn || model.vision)
 
         try {
             val working = mutableListOf<JsonObject>()
             val sys = Prompts.system(state, conv, member, canSearch = wantSearch, canDraw = hasImageModel && useTools,
-                canSeeImages = model.vision, independentRound = independent, calledBy = calledBy,
+                canSeeImages = model.vision, canEditImage = model.vision && useTools, independentRound = independent, calledBy = calledBy,
                 nativeSearch = native != NativeSearch.NONE, hasImageModel = hasImageModel,
                 memories = if (memOn) Recorder.forPrompt(state.memories, conv.memoryTopic) else emptyList(), canRemember = memOn && useTools,
                 memoryTopic = if (memOn) conv.memoryTopic else "",
@@ -4112,7 +4223,7 @@ class Engine(
             // MCP 外部工具（2026-10-18）：电脑上对话栏也能用，和 Code 栏同一套
             val mcp = if (useTools && filesOn) runCatching { mcpTools() }.getOrDefault(emptyList()) else emptyList()
             val tools = if (useTools) JsonArray(toolDefs(fnSearch, fetch = wantSearch || linkInAsk,
-                listen = (wantSearch || linkInAsk) && (pageBrowser != null && speechTarget("", "", tts = false) != null || hostBrowser?.online == true), draw = hasImageModel, native = native, memory = memOn, docs = docsOn, office = officeOn, files = filesOn, video = hasVideo) +
+                listen = (wantSearch || linkInAsk) && (pageBrowser != null && speechTarget("", "", tts = false) != null || hostBrowser?.online == true), draw = hasImageModel, native = native, memory = memOn, docs = docsOn, office = officeOn, files = filesOn, video = hasVideo, photo = model.vision) +
                 mcp.map { (n, _, t) -> buildJsonObject {
                     put("type", "function")
                     putJsonObject("function") { put("name", n); put("description", ("（外部工具 ${t.name}）" + t.description).take(1000)); put("parameters", t.inputSchema) }
@@ -4137,6 +4248,7 @@ class Engine(
             var usage = Usage()
             var rounds = 0
             var toolUses = 0
+            var checkedClaim = false
             // 这一段里调模型、画图都记在这位成员的账上
             withContext(UsageTag(UsageKinds.CHAT, member.id, convId)) { while (true) {
                 rounds++
@@ -4145,6 +4257,18 @@ class Engine(
                     llm.chat(provider, model.id, working, member.temperature, tools, extra, onSources, thinking) { c, rs -> appendDelta(convId, msg.id, c, rs) }
                 }
                 usage = Usage(usage.prompt + r.usage.prompt, usage.completion + r.usage.completion, usage.cached + r.usage.cached, usage.millis + r.usage.millis)
+                // 说东西做好了、发出去了，这一轮却一个工具都没调：退回去让它重说一次（只一次）。不靠模型自觉（2026-11-02 训练）
+                if (r.toolCalls.isEmpty() && toolUses == 0 && !checkedClaim && tools != null && Prompts.claimsDone(r.content) &&
+                    (snapshot(convId).lastOrNull { it.role == Role.USER }?.attachments?.isNotEmpty() == true || Prompts.asksToDo(lastUserText(convId, cutoffId)))) {
+                    checkedClaim = true
+                    updateMessage(convId, msg.id, persist = false) { m ->
+                        val cut = before.coerceIn(0, m.content.length)
+                        m.copy(content = m.content.substring(0, cut), reasoning = (m.reasoning + "\n\n" + m.content.substring(cut).trim()).trim())
+                    }
+                    working += buildJsonObject { put("role", "assistant"); put("content", r.content) }
+                    working += buildJsonObject { put("role", "user"); put("content", Prompts.CLAIM_CHECK) }
+                    continue
+                }
                 if (r.toolCalls.isEmpty() || rounds >= MAX_TOOL_USES) break
                 // 这一轮说的是「我去查一下」「这页打不开，换个词再搜」之类的过程话，挪进推理过程，正文只留最后的回答
                 updateMessage(convId, msg.id, persist = false) { m ->
@@ -4176,11 +4300,11 @@ class Engine(
                         put("content", result)
                     }
                 }
-                // read_document 读到的图片：工具结果里放不了图片，补一条 user 消息带上（和 Code 栏一样）
+                // read_document 读到的图片、刚画好和 P 好的图：工具结果里放不了图片，补一条 user 消息带上（和 Code 栏一样）
                 if (seen.isNotEmpty()) working += buildJsonObject {
                     put("role", "user")
                     putJsonArray("content") {
-                        add(buildJsonObject { put("type", "text"); put("text", "（这是刚才读到的图片：" + seen.joinToString("、") { it.first } + "）") })
+                        add(buildJsonObject { put("type", "text"); put("text", "（工具给你看的图，不是用户发的：" + seen.joinToString("、") { it.first } + "）") })
                         seen.forEach { (_, url) -> add(buildJsonObject { put("type", "image_url"); putJsonObject("image_url") { put("url", url) } }) }
                     }
                 }
@@ -4388,7 +4512,11 @@ class Engine(
         t = t.replace(Regex("""^【[^】\n]{0,24}\d{1,2}:\d{2}】\s*"""), "")
         // 学着聊天记录写「[附件：视频_119551.mp4]」（附件本来就单独显示在回答下面）
         t = t.replace(Regex("""\s*\[(?:附件|视频)：[^\]\n]{1,80}\]"""), "")
-        return t
+        // 学着程序记录写的（2026-11-02 训练，阿米）：图只有调工具才发得出去，写在字里什么也发不出去；段落中间也写了时间
+        t = t.replace(Regex("""\s*\[(?:你发给用户的图|生成的图片|图片)：[^\]\n]{1,240}\]"""), "")
+        t = t.replace(Regex("""\s*（程序(?:记录|检查)[^）\n]{0,400}）"""), "")
+        t = t.replace(Regex("""\s*〔\d{1,2}月\d{1,2}日[^〕\n]{0,16}〕\s*"""), "\n\n")
+        return t.trim()
     }
 
     private enum class NativeSearch { NONE, ZHIPU, QWEN }
@@ -4426,7 +4554,7 @@ class Engine(
     }
 
     private fun toolDefs(search: Boolean, fetch: Boolean, draw: Boolean, native: NativeSearch, memory: Boolean = false, docs: Boolean = false,
-                         office: Boolean = false, files: Boolean = false, video: Boolean = false, listen: Boolean = false): JsonArray = buildJsonArray {
+                         office: Boolean = false, files: Boolean = false, video: Boolean = false, listen: Boolean = false, photo: Boolean = false): JsonArray = buildJsonArray {
         when (native) {
             NativeSearch.ZHIPU -> add(buildJsonObject {
                 put("type", "web_search")
@@ -4467,11 +4595,59 @@ class Engine(
                 buildJsonObject { put("url", prop("作品链接或视频地址")) }, listOf("url"))
         }
         if (draw) {
-            fn("generate_image", "根据文字描述画一张图，画好后会直接显示给用户。",
+            fn("generate_image", "根据文字描述画一张全新的图，画好后和你的回答一起给用户。它只认文字，看不到任何现有的图，所以改不了图：用户要改一张已有的图时不能用它，画出来会是另一张图。",
                 buildJsonObject {
                     put("prompt", prop("画面描述：主体、风格、构图、光线、色彩，越具体越好"))
                     put("size", prop("可选，图片尺寸，如 1024x1024、1024x1792"))
                 }, listOf("prompt"))
+        }
+        // P 图（2026-11-02）：程序直接改原图的像素，和画图是两回事。要看得见图才知道改哪儿
+        if (photo) {
+            fun num(desc: String) = buildJsonObject { put("type", "number"); put("description", desc) }
+            fun box(desc: String) = buildJsonObject {
+                put("type", "array"); put("description", desc)
+                putJsonObject("items") { put("type", "number") }
+            }
+            fn("edit_image", "P 图：程序直接改一张现有图片的像素，不走画图模型，没动到的地方一个像素都不变，不花钱，马上好。" +
+                "能做：擦掉字、水印、笔迹、小东西（erase），打码（mosaic、blur），盖一块颜色（fill），裁剪（crop），转方向（rotate），翻转（flip），缩放（resize），写字（text，改字就是先 erase 再 text），画框标注（mark），调亮度对比度（adjust），把另一张图的一块贴上来（paste）。" +
+                "做不了要凭空造内容的：换背景、换衣服、给人加东西；它也不是画板，别拿色块一块块拼画面（拼不像，还很费时间），这种就照实说。坐标都是像素，左上角是 0,0，按图片旁边写的尺寸算。做完程序会告诉你改了哪些像素，结果图也会给你看。用户说没收到时，resend 写 true 把这张图原样再发一次（不花钱）。",
+                buildJsonObject {
+                    put("source", prop("要改哪张图：对话里图片旁边写的文件名。不填就是最近的一张。用户在图上画圈标位置、前面又有不带圈的原图时，填原图" + if (files) "；也可以是电脑上图片文件的完整路径" else ""))
+                    put("resend", buildJsonObject { put("type", "boolean"); put("description", "true：什么也不改，把这张图原样再发一次") })
+                    put("steps", buildJsonObject {
+                        put("type", "array")
+                        put("description", "按顺序做的操作。裁剪以后的坐标从裁剪后的左上角算起")
+                        putJsonObject("items") {
+                            put("type", "object")
+                            putJsonObject("properties") {
+                                put("op", buildJsonObject {
+                                    put("type", "string")
+                                    putJsonArray("enum") { PhotoEdit.OPS.forEach { add(it) } }
+                                    put("description", "erase 擦除（纯色背景上框不用画得很准，字被切到也会整个擦掉，旁边的气泡、头像不动）；mosaic 打码；blur 模糊；fill 盖色块；crop 裁剪；rotate 顺时针转；flip 翻转；resize 缩放；text 写字（紧接着 erase 写时，位置、颜色、大小自动照擦掉的那段）；mark 画框或圈；adjust 调色；paste 贴图")
+                                })
+                                put("box", box("[左, 上, 右, 下]，像素。erase、mosaic、blur、fill、crop、mark、paste 要给；text 紧接着 erase 时可以不给"))
+                                put("color", prop("颜色，#RRGGBB 或 红 橙 黄 绿 青 蓝 紫 粉 黑 白 灰。erase 带上它就只擦框里这个颜色的笔迹（比如用户画的红圈），别的不动"))
+                                put("text", prop("text：要写的字"))
+                                put("size", num("text：字号（像素），紧接着 erase 时不用给；mosaic：格子大小"))
+                                put("bold", buildJsonObject { put("type", "boolean"); put("description", "text：粗体") })
+                                put("align", prop("text：left / right，默认在框里居中"))
+                                put("angle", num("rotate：90、180、270，顺时针"))
+                                put("direction", prop("flip：horizontal 左右翻 / vertical 上下翻"))
+                                put("width", num("resize：宽（像素），只给一边就按比例"))
+                                put("height", num("resize：高（像素）"))
+                                put("percent", num("resize：按百分比"))
+                                put("shape", prop("mark：rect 框 / ellipse 圈"))
+                                put("thickness", num("mark：线粗（像素）"))
+                                put("brightness", num("adjust：亮度 -100 到 100"))
+                                put("contrast", num("adjust：对比度 -100 到 100"))
+                                put("saturation", num("adjust：饱和度 -100 到 100"))
+                                put("from", prop("paste：另一张图的文件名"))
+                                put("from_box", box("paste：取那张图的哪一块 [左, 上, 右, 下]，不填就是整张"))
+                            }
+                            putJsonArray("required") { add("op") }
+                        }
+                    })
+                }, emptyList())
         }
         if (video) {
             val v = state.settings.videoGen
@@ -5297,6 +5473,9 @@ class Engine(
                 try {
                     val f = makeOfficeFile(ext, args)
                     updateMessage(convId, msgId) { it.copy(attachments = it.attachments + f.att, tools = it.tools + ToolStep("file", f.att.name, note = "")) }
+                    // 11-02 训练：用户发 Word 说「只改日期，格式别变」，四位都说「其余内容和格式原样没动」，其实是按文字重做了一份
+                    (if (snapshot(convId).lastOrNull { it.role == Role.USER }?.attachments?.any { it.kind == AttachmentKind.DOCUMENT && !it.isVideo } == true)
+                        "注意：这是按文字新做的一份，不是在用户发来的文件上改的，原来的字体、排版、图片都没带过来，回答里要说清楚这一点。" else "") +
                     "已做好《${f.att.name}》（${f.att.note}），已经显示在你的回答下面，用户点开就能用。" +
                         (if (f.att.savedPath.isNotEmpty() && !isPhone) "电脑上另存在 ${f.att.savedPath}。" else "") +
                         "回答里简单说一下文件里有什么就行，不用把全文再贴一遍。"
@@ -5312,7 +5491,10 @@ class Engine(
                 try {
                     val r = paintAuto(prompt, args.str("size"))
                     updateMessage(convId, msgId) { it.copy(attachments = it.attachments + r.att, tools = it.tools + ToolStep("image", prompt)) }
-                    "图片已生成（用的是 ${r.label}），并已经显示给用户。"
+                    // 画完给它看一眼（2026-11-02：以前它从来看不到自己画了什么，画错了也说「做好了」）
+                    val look = seen != null && imageDataUrl(r.att)?.also { seen += "你刚画好的《${r.att.name}》" to it } != null
+                    "图片已生成（用的是 ${r.label}），会和你的回答一起给用户。" +
+                        if (look) "结果图附在下一条消息里，对照用户要的看一眼：对了简单说一句；画错了东西、字是乱的就照实说，别说画好了。" else "你看不到结果，简单说画好了，请用户看看对不对。"
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Throwable) {
@@ -5320,6 +5502,7 @@ class Engine(
                     "画图失败：${friendlyError(e)}。请告诉用户。"
                 }
             }
+            "edit_image" -> editImage(convId, msgId, args, seen)
             "generate_video" -> makeVideo(convId, msgId, args)
             "remember" -> {
                 val text = args.str("text").orEmpty()
@@ -5525,15 +5708,18 @@ class Engine(
         val seeFrames = HashSet<String>()
         if (vision) {
             var imagesLeft = 6
+            // 自己发过的图：最近两张也带上（2026-11-02：以前自己的图一律不给看，用户说「这张不对」时它根本不知道这张长什么样）
+            var mineLeft = 2
             var framesLeft = VIDEO_FRAMES
             val taken = HashSet<String>()
             for (m in picked.asReversed()) {
                 val mine = m.role == Role.AI && m.senderId == me.id
                 for (a in (m.attachments + m.quoted).asReversed()) {
                     if (a.kind != AttachmentKind.DOCUMENT) {
-                        if (!mine && imagesLeft > 0 && (m.role == Role.USER || a.kind == AttachmentKind.GENERATED_IMAGE) && taken.add(a.id)) {
+                        if ((if (mine) mineLeft > 0 else m.role == Role.USER || a.kind == AttachmentKind.GENERATED_IMAGE) && imagesLeft > 0 && taken.add(a.id)) {
                             seeImages += m.id + "/" + a.id
                             imagesLeft--
+                            if (mine) mineLeft--
                         }
                     } else if (a.frames.isNotEmpty() && m.role == Role.USER && a.frames.size <= framesLeft && taken.add(a.id)) {
                         seeFrames += m.id + "/" + a.id
@@ -5568,6 +5754,8 @@ class Engine(
             if (body.startsWith(">")) sb.append('\n')
             sb.append(body)
             val imgs = mutableListOf<String>()
+            val mineImgs = mutableListOf<String>()
+            val mineNotes = mutableListOf<String>()
             for (a in m.attachments + m.quoted) {
                 val slot = m.id + "/" + a.id
                 when (a.kind) {
@@ -5587,20 +5775,30 @@ class Engine(
                         }
                     }
                     AttachmentKind.IMAGE, AttachmentKind.GENERATED_IMAGE -> {
-                        val shown = slot in seeImages && imageDataUrl(a)?.also { imgs += it } != null
-                        if (!shown) {
-                            val what = if (a.kind == AttachmentKind.GENERATED_IMAGE) "生成的图片" else "图片"
-                            sb.append("\n[$what：").append(a.name)
-                            sb.append(when {
-                                !vision -> "，你看不到图片内容"
-                                !mine && (m.role == Role.USER || a.kind == AttachmentKind.GENERATED_IMAGE) -> "，太早了这次没带上，看不到"
-                                else -> ""
-                            }).append("]")
-                        }
+                        // assistant 消息里放不了图片（接口不认）：自己发过的图放到后面单独一条 user 里
+                        val shown = slot in seeImages && imageDataUrl(a)?.also { if (mine) mineImgs += it else imgs += it } != null
+                        // 文件名和尺寸每张都写（P 图要用）；自己发过的还写清做了什么、发出去没有：
+                        // 工具步骤不进聊天记录，以前它只看到自己说过「做好了」，用户一问「图呢」就以为没做，认错说「刚才没实际生成」（2026-11-02）
+                        val line = StringBuilder(a.name)
+                        if (shown) imageSizeLabel(a)?.let { line.append("，").append(it) }
+                        if (a.kind == AttachmentKind.GENERATED_IMAGE && a.note.isNotBlank()) line.append("，").append(if (a.note.startsWith("P 图")) a.note else "画的是：" + a.note.take(60))
+                        if (mine && m.channelParts.isNotEmpty()) line.append(if (m.channelParts.any { it.attachmentId == a.id }) "，已经发到微信" else "，发到微信没成功")
+                        line.append(when {
+                            !vision -> "，你看不到图片内容"
+                            shown -> ""
+                            mine -> "，这次没带上"
+                            m.role == Role.USER || a.kind == AttachmentKind.GENERATED_IMAGE -> "，太早了这次没带上，看不到"
+                            else -> ""
+                        })
+                        // 自己发过的图不能写进它自己的话里：11-02 训练，阿米学着这个样子自己写了一行「[你发给用户的图：…已经发到微信]」，其实一个工具都没调
+                        if (mine) mineNotes += line.toString()
+                        else sb.append("\n[").append(if (a.kind == AttachmentKind.GENERATED_IMAGE) "生成的图片" else "图片").append("：").append(line).append("]")
                     }
                 }
             }
             parts += Part(if (mine) "assistant" else "user", sb.toString(), imgs)
+            if (mineNotes.isNotEmpty()) parts += Part("user", "（程序记录，不是用户说的：你上面这条回答发给用户的图：" + mineNotes.joinToString("；") +
+                (if (mineImgs.isNotEmpty()) "。图长这样，给你看的，不是用户又发了图" else "") + "）", mineImgs)
         }
         // 合并相邻同角色消息（有的接口不允许连续两条 user）
         val merged = mutableListOf<Part>()
@@ -5645,12 +5843,34 @@ class Engine(
 
     private fun stripThink(s: String) = s.replace(Regex("<think>[\\s\\S]*?</think>"), "").trim()
 
-    /** 图片压到长边 1600 以内再发，省流量也省 token。 */
+    /**
+     * 图片压到长边 1600 以内再发，省流量也省 token。
+     * 带 EXIF 方向的照片先转正（2026-11-02 P 图时发现：解码库不管 EXIF，压缩后方向信息丢了，模型看到的是躺着的，写的坐标也对不上）。
+     */
     private fun imageDataUrl(a: Attachment): String? {
-        val bytes = storage.fileBytes(a.id) ?: return null
-        val shrunk = runCatching { shrinkImageToJpeg(bytes, 1600, 1_500_000) }.getOrNull()
-        val (data, mime) = if (shrunk != null) shrunk to "image/jpeg" else bytes to a.mime
-        return "data:$mime;base64," + Base64.getEncoder().encodeToString(data)
+        val raw = storage.fileBytes(a.id) ?: return null
+        val tilted = PhotoEdit.orientationOf(raw) != 1
+        // 转正要整张解码，每轮聊天记录里的图都要来一遍：转过的记下来（手机上一张照片要好一阵）
+        if (tilted) uprightMemo[a.id]?.let { return it }
+        val upright = if (tilted) PhotoEdit.uprightJpeg(raw) else null
+        val bytes = upright ?: raw
+        val shrunk = runCatching { shrinkImageToJpeg(bytes, PhotoEdit.VIEW_SIDE, 1_500_000) }.getOrNull()
+        val (data, mime) = if (shrunk != null) shrunk to "image/jpeg" else bytes to (if (upright != null) "image/jpeg" else a.mime)
+        val url = "data:$mime;base64," + Base64.getEncoder().encodeToString(data)
+        if (tilted) { if (uprightMemo.size >= 6) uprightMemo.clear(); uprightMemo[a.id] = url }
+        return url
+    }
+
+    private val uprightMemo = ConcurrentHashMap<String, String>()
+
+    private val imageSizes = ConcurrentHashMap<String, String>()
+
+    /** 「宽 1260 高 1168」：AI 看到的尺寸，P 图的坐标按它算。读不出来返回 null。 */
+    private fun imageSizeLabel(a: Attachment): String? {
+        imageSizes[a.id]?.let { return it }
+        val (w, h) = storage.fileBytes(a.id)?.let { PhotoEdit.sizeOf(it) } ?: return null
+        val (vw, vh) = PhotoEdit.viewSize(w, h)
+        return "${vw}×${vh} 像素".also { imageSizes[a.id] = it }
     }
 
     /** 报错原文里如果带出了 Key（比如 Key 里有换行，网络库报错会原样带出），打码。 */

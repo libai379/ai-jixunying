@@ -35,6 +35,27 @@ class VideoCheckRunner : Instrumentation() {
             out.append(com.guixing.jixunying.engine.Today.ahead(d).second).append('\n')
             out.append(com.guixing.jixunying.engine.DateMentions.notes("我生日是农历九月二十四，下周三交报告", d)).append('\n')
         }.onFailure { out.append("历法出错：").append(it).append('\n') }
+        // P 图在安卓上也跑一下（2026-11-02，engine/PhotoEdit.kt）：解码、存图、写字、画框都是安卓自己的实现，电脑上的测试碰不到
+        runCatching {
+            val pe = com.guixing.jixunying.engine.PhotoEdit
+            val gray = (0xFF shl 24) or 0xEDEDED
+            val p = com.guixing.jixunying.engine.Pixels(800, 600, IntArray(800 * 600) { gray })
+            com.guixing.jixunying.engine.drawTextOn(p, "昨天 晚上7:37", intArrayOf(280, 270, 520, 310), 0xAAAAAA, 32, false, "")
+            val ink = p.argb.count { it != gray }
+            val png = com.guixing.jixunying.engine.encodePixels(p)
+            val back = com.guixing.jixunying.engine.decodePixels(png)!!
+            out.append("写字 ").append(ink).append(" 个像素；PNG 存了再读 ").append(pe.diff(p, back)?.changed).append(" 个不一样；文件头尺寸 ").append(pe.sizeOf(png)).append('\n')
+            val steps = pe.steps(kotlinx.serialization.json.JsonPrimitive("""[{"op":"erase","box":[270,262,530,318]},{"op":"text","text":"今天 上午9:00"},{"op":"mark","box":[100,100,300,200],"shape":"ellipse","color":"红"},{"op":"mosaic","box":[400,400,700,500]},{"op":"crop","box":[0,50,800,550]},{"op":"rotate","angle":90}]"""))
+            val r = pe.run(back, steps) { null }
+            out.append("跑了：").append(r.summary).append("；结果 ").append(r.out.w).append('×').append(r.out.h).append('\n')
+            val erased = pe.run(back, pe.steps(kotlinx.serialization.json.JsonPrimitive("""[{"op":"erase","box":[270,262,530,318]}]"""))) { null }
+            out.append("只擦字：改了 ").append(pe.diff(back, erased.out)?.changed).append(" 个像素，范围 ").append(pe.diff(back, erased.out)?.box?.joinToString(",")).append("；还剩 ").append(erased.out.argb.count { it != gray }).append(" 个不是背景的像素\n")
+            val jpg = com.guixing.jixunying.engine.encodePixels(r.out, 90)
+            out.append("JPEG ").append(jpg.size).append(" 字节，文件头尺寸 ").append(pe.sizeOf(jpg)).append("，方向 ").append(pe.orientationOf(jpg)).append('\n')
+            val dir = File(targetContext.cacheDir, "frames").apply { mkdirs() }
+            File(dir, "photo-steps.png").writeBytes(com.guixing.jixunying.engine.encodePixels(r.out))
+            File(dir, "photo-erased.png").writeBytes(com.guixing.jixunying.engine.encodePixels(erased.out))
+        }.onFailure { out.append("P 图出错：").append(it).append('\n') }
         for (name in videos) {
             val f = File(dataDir, name)
             out.append("==== ").append(f.name).append("（").append(f.length()).append(" 字节）\n")

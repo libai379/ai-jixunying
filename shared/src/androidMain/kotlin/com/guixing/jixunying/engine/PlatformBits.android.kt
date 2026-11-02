@@ -31,6 +31,74 @@ actual fun shrinkImageToJpeg(bytes: ByteArray, maxSide: Int, maxBytes: Int): Byt
     return ByteArrayOutputStream().also { bmp.compress(Bitmap.CompressFormat.JPEG, 88, it) }.toByteArray()
 }
 
+actual fun decodePixels(bytes: ByteArray): Pixels? {
+    val opts = BitmapFactory.Options().apply { inPreferredConfig = Bitmap.Config.ARGB_8888; inScaled = false }
+    val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts) ?: return null
+    val out = IntArray(bmp.width * bmp.height)
+    bmp.getPixels(out, 0, bmp.width, 0, 0, bmp.width, bmp.height)
+    return Pixels(bmp.width, bmp.height, out).also { bmp.recycle() }
+}
+
+actual fun encodePixels(p: Pixels, jpegQuality: Int?): ByteArray {
+    val bmp = Bitmap.createBitmap(p.argb, p.w, p.h, Bitmap.Config.ARGB_8888)
+    val out = ByteArrayOutputStream()
+    if (jpegQuality == null) bmp.compress(Bitmap.CompressFormat.PNG, 100, out)
+    else {
+        // JPEG 没有透明：先铺白底
+        val flat = Bitmap.createBitmap(p.w, p.h, Bitmap.Config.ARGB_8888)
+        val c = android.graphics.Canvas(flat)
+        c.drawColor(android.graphics.Color.WHITE)
+        c.drawBitmap(bmp, 0f, 0f, null)
+        flat.compress(Bitmap.CompressFormat.JPEG, jpegQuality.coerceIn(1, 100), out)
+        flat.recycle()
+    }
+    bmp.recycle()
+    return out.toByteArray()
+}
+
+/** 画完把像素写回去。 */
+private fun drawOn(p: Pixels, draw: (android.graphics.Canvas) -> Unit) {
+    val bmp = Bitmap.createBitmap(p.argb, p.w, p.h, Bitmap.Config.ARGB_8888).copy(Bitmap.Config.ARGB_8888, true)
+    draw(android.graphics.Canvas(bmp))
+    bmp.getPixels(p.argb, 0, p.w, 0, 0, p.w, p.h)
+    bmp.recycle()
+}
+
+actual fun drawTextOn(p: Pixels, text: String, box: IntArray, color: Int, sizePx: Int, bold: Boolean, align: String) = drawOn(p) { c ->
+    val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+        this.color = color or (0xFF shl 24)
+        textSize = sizePx.toFloat()
+        typeface = if (bold) android.graphics.Typeface.DEFAULT_BOLD else android.graphics.Typeface.DEFAULT
+    }
+    val lines = text.split('\n')
+    // 比整张图还宽就缩小
+    while (lines.maxOf { paint.measureText(it) } > p.w - 4 && paint.textSize > 6f) paint.textSize -= 1f
+    val lineH = (paint.textSize * 1.3f).toInt()
+    val first = android.graphics.Rect().also { paint.getTextBounds(lines.first(), 0, lines.first().length, it) }
+    val inkH = first.height() + lineH * (lines.size - 1)
+    val centerY = (box[1] + box[3]) / 2f
+    lines.forEachIndexed { i, line ->
+        val ink = android.graphics.Rect().also { paint.getTextBounds(line, 0, line.length, it) }
+        val x = when (align) {
+            "left" -> box[0] - ink.left.toFloat()
+            "right" -> box[2] - ink.right.toFloat()
+            else -> (box[0] + box[2]) / 2f - (ink.left + ink.right) / 2f
+        }
+        val y = centerY - inkH / 2f - first.top + lineH * i
+        c.drawText(line, x, y, paint)
+    }
+}
+
+actual fun drawShapeOn(p: Pixels, shape: String, box: IntArray, color: Int, thickness: Int) = drawOn(p) { c ->
+    val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+        this.color = color or (0xFF shl 24)
+        style = android.graphics.Paint.Style.STROKE
+        strokeWidth = thickness.toFloat()
+    }
+    val r = android.graphics.RectF(box[0].toFloat(), box[1].toFloat(), box[2].toFloat(), box[3].toFloat())
+    if (shape == "ellipse") c.drawOval(r, paint) else c.drawRect(r, paint)
+}
+
 @Suppress("DEPRECATION")
 private val storageRoot get() = android.os.Environment.getExternalStorageDirectory()
 

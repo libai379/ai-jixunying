@@ -1700,7 +1700,7 @@ class EngineTest {
         assertEquals(com.guixing.jixunying.model.AttachmentKind.GENERATED_IMAGE, drawn.attachments.single().kind)
         assertEquals("画好了。", drawn.content)
         assertContentEquals(png, e.fileBytes(drawn.attachments.single().id))
-        assertTrue(requests.any { "你可以画图" in systemOf(it) })
+        assertTrue(requests.any { "你能画新图" in systemOf(it) })
         // 第二句的上下文里不该有第一句还没说完的半截回答
         val second = requests.first { r -> "顺便问一下你是谁" in r["messages"].toString() }
         assertFalse("画好了" in second["messages"].toString())

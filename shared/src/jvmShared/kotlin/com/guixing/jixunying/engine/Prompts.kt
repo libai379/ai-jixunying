@@ -73,6 +73,8 @@ object Prompts {
         canReadFiles: Boolean = false,
         /** 能用 calendar 工具查日历。 */
         canCalendar: Boolean = false,
+        /** 能用 edit_image P 图（要能看图、能调工具）。 */
+        canEditImage: Boolean = false,
     ): String {
         val profile = state.profile
         val others = conv.memberIds.filter { it != me.id }.mapNotNull { state.member(it) }
@@ -134,16 +136,22 @@ object Prompts {
             }
             appendLine()
             appendLine("【你能做什么】")
-            appendLine(if (canSeeImages) "- 你能看图：用户发来的图片会直接给你看。" else "- 你看不到图片：如果用户发了图，告诉他你这个模型不支持看图，可以换一个能看图的成员。")
+            appendLine(if (canSeeImages) "- 你能看图：用户发来的图片会直接给你看，每张旁边写着文件名和尺寸。" else "- 你看不到图片：如果用户发了图，告诉他你这个模型不支持看图，可以换一个能看图的成员；要 P 图也一样，你看不见就没法改。")
             appendLine("- 用户发来的文档（PDF、Word、Excel、PPT、代码、文本等）已经转成文字放在消息里，标有「附件」字样。")
-            if (canDraw) appendLine("- 你可以画图：用户要图片、要改图时调用 generate_image，提示词要具体（主体、风格、构图、光线、色彩）；用户说「改成……」就在上一张的基础上调整描述重新画。画完简单说明即可，不用把图再描述一遍。可以一边聊一边画。")
+            // P 图和画图是两回事（2026-11-02 用户：「现在的接口都是画图，我需要就是 P 图的……它不可能画准的」）。
+            // 这里以前写「用户要图片、要改图时调用 generate_image」「改成……就重新画」，AI 就拿只认文字的画图工具「改」用户的截图，连画四张假截图，每次都说做好了
+            if (canEditImage) appendLine("- 你能 P 图：用户要改一张已有的图（去掉字、水印、笔迹，打码，裁剪，转方向，改字，标注，调亮度，拼图），用 edit_image。程序直接改原图的像素，没动到的地方一个像素都不变，不花钱，马上好。先看清楚要动哪里，按图的尺寸写坐标。")
+            if (canDraw) appendLine("- 你能画新图：用户要一张新图时调用 generate_image，提示词要具体（主体、风格、构图、光线、色彩）。它只认文字，看不到任何现有的图，画出来永远是另一张，所以不能用它改用户的图、截图、照片。" +
+                if (canEditImage) "换背景、换衣服、加东西这种要凭空造内容的，edit_image 也做不了，拿色块一块块拼也拼不像：直接照实说，不用试；用户要的话可以照着描述重画一张，并且说清楚这是新画的，人和细节都会变。你自己画的图，用户说「改成……」就调整描述重画，也说一声是重画的。" else "用户要改已有的图时照实说做不了。")
             else if (hasImageModel) appendLine("- 你这个模型不会调用工具，没法自己画图。用户要图时，请他点输入框上的「直接画图」，再描述画面。")
             else appendLine("- 你现在不能画图：用户还没接入能画图的服务商。用户要图时告诉他：到 设置 → 模型服务 添加任意一家能画图的平台并填 Key（智谱开放平台的 cogview-3-flash 免费，MiniMax 的 image-01、豆包 Seedream 也行），加好之后直接说「画一张……」就行，不用别的设置。")
             if (canVideo) appendLine("- 你可以做短视频：用户明确要视频时调用 generate_video（按秒收费、要等一到几分钟，所以用户没要视频就别做）。描述写清主体、动作、场景、镜头和声音。" +
-                "也能拿这个对话里的图片、视频、文件，或者电脑上的文件、网页当素材：让图片动起来、照着参考做、改一段视频、把视频接长、按文档内容做视频。")
+                "也能拿这个对话里的图片、视频、文件，或者电脑上的文件、网页当素材：让图片动起来、照着参考做、改一段视频、把视频接长、按文档内容做视频。" +
+                "这些都是模型重新生成的，不是剪辑：剪掉前几秒、拼接、静音这种要一帧不差的做不了，照实说。")
             if (canMakeFiles) {
                 appendLine("- 你能做 Word、Excel 和 PPT 文件：用户要文档、报告、方案、通知、简历、合同这类要交出去的东西，或者要表格、清单、台账、统计表，或者要汇报、讲课、路演用的幻灯片时，用 create_word / create_excel / create_ppt 做成文件交给他；只是想在聊天里看个答案就直接回答。" +
-                    "文件内容要完整、能直接用；做好后在回答里简单说说文件里有什么。用户说「改一下」就按要求改好再做一份。")
+                    "文件内容要完整、能直接用；做好后在回答里简单说说文件里有什么。用户说「改一下」就按要求改好再做一份。" +
+                    "这是按文字重新做的一份：用户自己发来的文件，原来的排版、图片、样式不会带过来，要说清楚，别说成在原文件上改好了。")
             }
             if (docCount > 0) {
                 appendLine("- 你能查${profile.name}${deviceLabel}上的文档（收录了 $docCount 个）：问到他自己的文件、资料、合同、报告、表格、笔记里的内容时，先用 search_documents 找，再用 read_document 读原文，回答时说明出自哪个文件。不要说你看不到用户的文件。")
@@ -161,6 +169,10 @@ object Prompts {
             appendLine()
             appendLine("【说真话】")
             appendLine("- 不知道就说不知道。不编造数据、引用、链接、人名、书名、论文、代码接口；没把握的事实宁可不说，把握不大的地方在那句话里顺带点明。")
+            // 2026-11-02 同一个微信对话：工具明明成功了、图也发了，对方问「图呢」，AI 认错说「刚才没实际生成」，又花钱重画；真画错了的时候反而说「做好了」
+            appendLine("- 说做好了，就得真做好了：工具返回的结果（图会给你看）对照用户要的看过再说。没做、没做成、只做了一部分，都照实说。")
+            appendLine("- 你做过什么，以聊天记录为准：记录里写着「你发给用户的图」就是真发了。用户说没收到、没看到、你没做时，先看记录：做过就照实说做过，别为了认错说没发生过的事，也别重新花钱做一遍；没收到就用 edit_image（resend 写 true）再发一次。")
+            appendLine("- 同一个办法连着不行，第三次别再用同样的办法：说清楚卡在哪，换个办法或者请用户定。")
             if (canSearch && nativeSearch) {
                 appendLine("- 你可以联网：你所在的平台带官方联网搜索。涉及新闻、价格、版本、天气、赛事、政策、人物近况等有时效性的内容，或者你没把握的事实，先搜索再回答；用户给了网址可以用 fetch_url 打开看原文。")
                 appendLine("- 用了搜索结果的地方，在句末用 [1]、[2] 这样的编号标出处；不是从搜索结果里来的内容不标编号。")
@@ -208,6 +220,19 @@ object Prompts {
             append("现在轮到你（${me.name}）发言。")
         }
     }
+
+    private val CLAIMS = Regex("做好了|改好了|弄好了|P ?好了|去掉了|擦掉了|擦干净|打好码|打码了|裁好了|裁掉了|转好了|转正了|画好了|重画好|生成好了|已生成|已经生成|发给你了|发你了|已发给|已经发给|已经发到|图来了|图在这|图在下面|图在上面|文件在下面|你发给用户的图|generate_image|edit_image|create_word|create_excel|create_ppt|generate_video")
+    private val ASKS = Regex("图|画|照片|截图|P|文件|文档|表格|PPT|Word|Excel|视频|去掉|改|做|生成|发")
+
+    /** 这句回答像是在说东西做好了、发出去了（或者把工具调用写成了字，11-02 训练：Kimi 写过「generate_image prompt: …」）。 */
+    fun claimsDone(text: String): Boolean = CLAIMS.containsMatchIn(text)
+
+    /** 用户这句是不是要 AI 做点东西。 */
+    fun asksToDo(text: String): Boolean = ASKS.containsMatchIn(text)
+
+    /** AI 说做好了、一个工具都没调时退回去的话。图和文件写在字里发不出去。 */
+    const val CLAIM_CHECK = "（程序检查，不是用户说的：这一轮你一个工具都没调，上面却像是说东西做好了、发出去了。图和文件只有调工具才会真的做出来、发给用户，写在字里什么也发不出去。" +
+        "要做就现在调工具；做不了就照实说做不了；说的是以前已经做过的事，或者东西就写在回答里，就照实再答一遍。这句检查不用提。）"
 
     /** 不支持工具调用的模型：先替它搜一次，把结果塞进上下文。 */
     fun searchDigest(query: String, results: List<com.guixing.jixunying.model.SearchSource>): String = buildString {

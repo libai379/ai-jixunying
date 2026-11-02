@@ -404,6 +404,11 @@ class ShotsTest {
                 createdAt = now - 3_050_000, modelLabel = "deepseek-flash（DeepSeek）"),
             Message("w7", "c2", Role.AI, "ma", status = MsgStatus.ERROR, createdAt = now - 3_040_000, modelLabel = "gpt-6.1-sol（ChatGPT 订阅）",
                 error = "ChatGPT 这会儿太忙了（它的服务器过载，不是你这边的问题），它说大约 6 分钟后恢复。过会儿再试，或者先换别的成员。"),
+            // 2026-11-02 P 图：一步「P 图：擦除」，点开是程序量到的改了哪些像素
+            Message("w8", "c2", Role.USER, USER_ID, "把这张图里的字去掉", createdAt = now - 3_030_000),
+            Message("w9", "c2", Role.AI, "ma", "去掉了，别的地方没动。", attachments = listOf(cat),
+                tools = listOf(ToolStep("photo", "擦除", note = "程序比对：尺寸没变（1260×1168），改了 5986 个像素（占全图 0.41%），都在 [512,703,750,746] 里，这个范围外一个像素都没变。")),
+                createdAt = now - 3_020_000, modelLabel = "mimo-v2.6-flash（小米 MiMo）"),
         ))
         // Code 会话（c8）：一条做完了、带一处改动；一条正等着批准改 README
         File(root, "我的项目").mkdirs()
@@ -941,9 +946,9 @@ class ShotsTest {
         shoot("desktop-decide-chat", 1280, 900, 1f, local, desktop, "conv:c14")
         shoot("desktop-decide-code", 1280, 820, 1f, local, desktop, "code:c12")
         // 2026-11-01 微信里引用历史消息（引用块、引用的图、视频卡片）、服务商太忙的说法
-        shoot("phone-weixin-quote", 824, 2600, 2f, local, phone, "conv:c2")
-        shoot("phone-weixin-quote-320", 640, 2600, 2f, local, phone, "conv:c2")
-        shoot("desktop-weixin-quote", 1280, 1300, 1f, local, desktop, "conv:c2")
+        shoot("phone-weixin-quote", 824, 3200, 2f, local, phone, "conv:c2")
+        shoot("phone-weixin-quote-320", 640, 3200, 2f, local, phone, "conv:c2")
+        shoot("desktop-weixin-quote", 1280, 1600, 1f, local, desktop, "conv:c2")
         // 2026-10-29 用户：「Code 为什么没有语音输入？狼人杀我怎么没找到？职业介绍的地方在哪儿？」——Code 栏输入框的话筒、侧栏第三栏叫「狼人杀」、开局页的身份介绍
         shoot("phone-remote-drawer-tabs", 824, 1784, 2f, on, phone, "conv:c1#drawer")
         shoot("phone-wolf-lobby-roles", 824, 3000, 2f, local, phone, "wolf")

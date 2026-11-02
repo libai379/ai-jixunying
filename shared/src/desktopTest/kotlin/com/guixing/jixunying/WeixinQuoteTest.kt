@@ -314,6 +314,10 @@ class WeixinQuoteTest {
         wxInbox += inMsg("401", text("帮我画一只猫"))
         withTimeout(20_000) { while (wxSent.none { it.first["item_list"]!!.jsonArray[0].jsonObject["type"]!!.jsonPrimitive.content == "2" }) delay(20) }
         val imageId = wxSent.first { it.first["item_list"]!!.jsonArray[0].jsonObject["type"]!!.jsonPrimitive.content == "2" }.second
+        // 先发图、再发文字（2026-11-02：文字先到，对方就问「图呢」，AI 又花钱重画）
+        waitSent(2)
+        assertEquals("2", wxSent[0].first["item_list"]!!.jsonArray[0].jsonObject["type"]!!.jsonPrimitive.content, "图先发")
+        assertEquals("阿苗答：好的。", sentText(wxSent[1].first), "文字后发")
         val ai = withTimeout(5_000) { var a: Message; do { a = history(w.e).last { it.role == Role.AI }; delay(20) } while (a.channelParts.none { it.id == imageId }); a }
         val made = ai.attachments.single { it.kind == AttachmentKind.GENERATED_IMAGE }
         assertEquals(made.id, ai.channelParts.single { it.id == imageId }.attachmentId)

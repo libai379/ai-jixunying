@@ -794,7 +794,7 @@ class WeixinBridge(
                     sendText(from, inc.ctx, "好，换个新话题。之前的聊天还留在电脑上。")
                 }
                 "/帮助", "/help" ->
-                    sendText(from, inc.ctx, "直接发文字、图片、视频、文件（PDF、Word、Excel 等）就行，引用以前的消息也读得到，${members.size} 位 AI 成员在电脑上回答。\n发「/新对话」开始一个新话题。\n想让 AI 画图就说「画一张……」。")
+                    sendText(from, inc.ctx, "直接发文字、图片、视频、文件（PDF、Word、Excel 等）就行，引用以前的消息也读得到，${members.size} 位 AI 成员在电脑上回答。\n发「/新对话」开始一个新话题。\n想让 AI 画图就说「画一张……」，发张图说要改哪里 AI 能直接 P 图。")
             }
         }
 
@@ -961,9 +961,10 @@ class WeixinBridge(
             }.trim()
             // 每发出去一条记下它的编号，以后被引用时找得回来（文字和正文一样的不再存一份）
             val sent = mutableListOf<ChannelPart>()
-            if (text.isNotBlank()) chunks(text).forEach { piece ->
-                sendText(to, ctx, piece).getOrNull()?.let { id -> sent += ChannelPart(id, text = if (piece == r.content.trim()) "" else piece) }
-            }
+            // 先发图和文件，最后发文字（2026-11-02 查记录：以前文字先到，图要加密上传好几秒。「做好了」一到对方就问「图呢」，
+            // 两次都只比图做好晚 5～7 秒；AI 以为真没发，又花钱重画一张，还认错说「刚才没实际生成」）
+            val hasMedia = r.attachments.any { it.kind == AttachmentKind.GENERATED_IMAGE || (it.generated && it.kind == AttachmentKind.DOCUMENT) }
+            if (hasMedia) typing(to, ctx, true)
             for (a in r.attachments.filter { it.kind == AttachmentKind.GENERATED_IMAGE }) {
                 val bytes = engine.fileBytes(a.id) ?: continue
                 runCatching { sendImage(to, ctx, bytes) }
@@ -977,6 +978,10 @@ class WeixinBridge(
                 runCatching { if (a.isVideo) sendVideo(to, ctx, bytes) else sendFile(to, ctx, a.name, bytes) }
                     .onSuccess { id -> if (id != null) sent += ChannelPart(id, attachmentId = a.id) }
                     .onFailure { sendText(to, ctx, "（做好了《${a.name}》，但发到微信失败了：${it.message?.take(80)}。可以在 AI集训营 里打开。）") }
+            }
+            if (hasMedia) typing(to, ctx, false)
+            if (text.isNotBlank()) chunks(text).forEach { piece ->
+                sendText(to, ctx, piece).getOrNull()?.let { id -> sent += ChannelPart(id, text = if (piece == r.content.trim()) "" else piece) }
             }
             engine.noteChannelParts(r.convId, r.id, sent)
         }

@@ -3,6 +3,18 @@ package com.guixing.jixunying.engine
 /** 长边超过 maxSide 或体积超过 maxBytes 时压成 JPEG（发给模型前省流量和 token）；不需要压返回 null。 */
 expect fun shrinkImageToJpeg(bytes: ByteArray, maxSide: Int, maxBytes: Int): ByteArray?
 
+/** P 图用：解码成像素（不管 EXIF 方向，PhotoEdit.load 会转）；读不了返回 null。 */
+expect fun decodePixels(bytes: ByteArray): Pixels?
+
+/** 像素存成图片：jpegQuality 为 null 存 PNG（一个像素都不变），否则存 JPEG。 */
+expect fun encodePixels(p: Pixels, jpegQuality: Int? = null): ByteArray
+
+/** 在像素上写字（box 是原图坐标 [左, 上, 右, 下]；align：left / right，默认居中；字的笔画按实际范围对齐）。 */
+expect fun drawTextOn(p: Pixels, text: String, box: IntArray, color: Int, sizePx: Int, bold: Boolean, align: String)
+
+/** 在像素上画框（rect）或圈（ellipse）。 */
+expect fun drawShapeOn(p: Pixels, shape: String, box: IntArray, color: Int, thickness: Int)
+
 /** PDF 抽文字，返回 (文字, 说明)。电脑用 PDFBox，手机用 PDFBox 的安卓移植版。 */
 expect fun extractPdfText(bytes: ByteArray): Pair<String?, String>
 
