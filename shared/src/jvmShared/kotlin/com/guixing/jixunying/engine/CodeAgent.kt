@@ -425,6 +425,8 @@ class CodeAgent(private val host: CodeHost) {
         put("role", "system")
         put("content", buildString {
             append("你在帮用户改一个项目里的代码。\n")
+            // 今天几号（2026-11-02）：以前这里没有，只能看每句话前面标的时间，也不知道星期、农历
+            append("今天是 ").append(Today.describe(Today.date())).append("用户每句话前面标着几点说的，最新那句的时间就是现在。\n")
             append("项目文件夹：").append(spec.folder).append("（工具里的 path 可以写相对它的路径，比如 src/main.kt，也可以写完整路径，比如 G:\\资料\\说明.md）\n")
             if (spec.extraPaths.isNotEmpty()) append("另外加进工作区的：").append(spec.extraPaths.joinToString("；")).append('\n')
             append("电脑上任何地方的文件都能读；改工作区（项目文件夹和上面加进来的）外面的文件，程序会先问用户一声（用户开了「全部放开」就不问）。\n")

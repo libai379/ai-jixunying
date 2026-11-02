@@ -2552,10 +2552,21 @@ class Engine(
         if (!lock.tryLock()) return
         try {
             guard(BgJob.COMPACT, convId) { compactIfLong(convId) }
-            guard(BgJob.MEMORY, convId) { extractMemories(convId) }
+            guard(BgJob.MEMORY, convId) { extractMemories(convId, force = askedToRemember(convId)) }
         } finally {
             lock.unlock()
         }
+    }
+
+    /**
+     * 用户明说要记、AI 却没调 remember（11-02 真模型：阿开答「记住了」，其实什么也没记）：
+     * 让记录员马上挑一遍，不等攒够 4 句，也不看「自动挑记忆」开没开（用户自己要记的）。
+     */
+    private fun askedToRemember(convId: String): Boolean {
+        val all = snapshot(convId)
+        val lastUser = all.indexOfLast { it.role == Role.USER }
+        if (lastUser < 0 || !Regex("记住|记一下|记下|别忘").containsMatchIn(Quotes.spoken(all[lastUser].content))) return false
+        return all.drop(lastUser + 1).none { m -> m.tools.any { it.kind == "memory" && it.ok && !it.input.startsWith("查记忆") } }
     }
 
     private fun titleOf(convId: String) = state.conversation(convId)?.title.orEmpty()
@@ -2585,7 +2596,8 @@ class Engine(
 
     private fun transcriptOf(msgs: List<Message>, maxPerMessage: Int): String = buildString {
         for (m in msgs) {
-            append("【").append(speakerName(m)).append("】")
+            // 带上几号几点：摘要和记忆里「明天」「下周」才能写成具体日期（2026-11-02）
+            append("【").append(speakerName(m)).append(" · ").append(Prompts.clock(m.createdAt)).append("】")
             append(stripThink(m.content).take(maxPerMessage))
             m.attachments.forEach { a -> append("\n[附件：").append(a.name).append("]") }
             append("\n\n")
@@ -2630,7 +2642,7 @@ class Engine(
     /** 攒够 4 句用户的话，让记录员挑出值得长期记住的、关于用户本人的信息。 */
     internal suspend fun extractMemories(convId: String, force: Boolean = false) {
         val ms = state.settings.memory
-        if (!ms.enabled || !ms.autoExtract) return
+        if (!ms.enabled || (!ms.autoExtract && !force)) return
         val memo = storage.loadMemo(convId)
         val fresh = snapshot(convId).filter { it.status == MsgStatus.DONE && it.createdAt > memo.scannedUpToTime && it.content.isNotBlank() }
         if (fresh.isEmpty() || (!force && fresh.count { it.role == Role.USER } < 4)) return
@@ -4079,10 +4091,11 @@ class Engine(
                 memoryTopic = if (memOn) conv.memoryTopic else "",
                 otherTopics = if (memOn) Recorder.topics(state.memories).filter { it != conv.memoryTopic } else emptyList(),
                 docCount = if (docsOn && useTools) docs.count else 0, deviceLabel = if (isPhone) "这台手机" else "这台电脑",
-                canMakeFiles = officeOn && useTools, canReadFiles = filesOn && useTools, canVideo = hasVideo && useTools)
+                canMakeFiles = officeOn && useTools, canReadFiles = filesOn && useTools, canVideo = hasVideo && useTools, canCalendar = useTools)
             working += buildJsonObject { put("role", "system"); put("content", sys) }
             working += buildHistory(convId, member, cutoffId, excludeId = msg.id, vision = model.vision)
             remindInstructions(working)
+            noteDates(working, convId, cutoffId, msg.id)
 
             val sources = mutableListOf<SearchSource>()
             if (wantSearch && !useTools) {
@@ -4434,6 +4447,13 @@ class Engine(
             }
         })
         fun prop(desc: String) = buildJsonObject { put("type", "string"); put("description", desc) }
+        // 查日历：程序算，不花钱、不会错（2026-11-02）。模型自己换算农历、数日子常错
+        fn("calendar", "查日历：农历公历互相换算，查某一天星期几、节气、节日、放不放假、离今天多少天。今天和接下来两周设定里有；再远的、别的年份的，别心算，用它查。",
+            buildJsonObject {
+                put("solar", buildJsonObject { put("type", "string"); put("description", "公历日期，年-月-日，比如 2027-02-06") })
+                put("lunar", buildJsonObject { put("type", "string"); put("description", "农历日期，年-月-日，年是农历年，月日写数字，比如 2027-9-24 是 2027 年农历九月二十四") })
+                put("leap", buildJsonObject { put("type", "boolean"); put("description", "lunar 说的是闰月时写 true") })
+            }, emptyList())
         if (search) {
             fn("web_search", "联网搜索。遇到时效性信息、没把握的事实时使用。返回带编号的搜索结果（标题、链接、摘要）。",
                 buildJsonObject { put("query", prop("搜索关键词，简洁具体，中文问题用中文搜")) }, listOf("query"))
@@ -4486,10 +4506,10 @@ class Engine(
                 }, listOf("prompt"))
         }
         if (memory) {
-            fn("remember", "把关于用户的、以后的对话也用得上的信息记进长期记忆（身份、职业、所在地、偏好、对回答方式的要求、长期项目）。" +
+            fn("remember", "把关于用户的、以后的对话也用得上的信息记进长期记忆（身份、职业、所在地、生日和纪念日、偏好、对回答方式的要求、长期项目）。" +
                 "用户说「记住……」时一定要调用。不要记一次性的问题，不要记密码、Key、证件号。",
                 buildJsonObject {
-                    put("text", prop("要记的内容，一句完整的话，以用户为主语，例如「希望回答先给结论」"))
+                    put("text", prop("要记的内容，一句完整的话，以用户为主语，例如「希望回答先给结论」；说到时间的写成具体日期（「明天」写成几月几日），以后看才明白"))
                     put("kind", prop("类别：关于我 / 偏好 / 要求 / 事实"))
                     put("topic", prop("属于哪个话题 / 项目（例如「AI集训营」），只在聊这个话题时才用；关于用户本人的留空"))
                 }, listOf("text"))
@@ -5210,6 +5230,23 @@ class Engine(
                 else res.mapIndexed { i, r -> "[${start + i + 1}] ${r.title}\n${r.url}\n${r.snippet}" }.joinToString("\n\n")
             }
             "listen_video" -> listenVideo(convId, msgId, args.str("url").orEmpty())
+            "calendar" -> {
+                val solar = args.str("solar").orEmpty().trim()
+                val lunar = args.str("lunar").orEmpty().trim()
+                fun ymd(s: String) = s.split('-', '/', '.', '年', '月', '日').map { it.trim() }.filter { it.isNotEmpty() }.mapNotNull { it.toIntOrNull() }.takeIf { it.size == 3 }
+                val today = Today.date()
+                val (text, ok) = when {
+                    solar.isNotEmpty() -> ymd(solar)?.let { p -> runCatching { java.time.LocalDate.of(p[0], p[1], p[2]) }.getOrNull() }
+                        ?.let { Today.lookup(it, today) to true } ?: ("公历日期写成 年-月-日，而且要是真有的一天：$solar" to false)
+                    lunar.isNotEmpty() -> ymd(lunar)?.let { p ->
+                        Today.fromLunar(p[0], p[1], p[2], args.str("leap")?.trim() == "true")?.let { "农历 $lunar → " + Today.lookup(it, today) to true }
+                            ?: ("农历 ${p[0]} 年没有这一天（小月没有三十；闰月要这一年真有）" to false)
+                    } ?: ("农历日期写成 年-月-日（年是农历年，月日写数字）：$lunar" to false)
+                    else -> "solar 和 lunar 至少写一个" to false
+                }
+                updateMessage(convId, msgId, persist = false) { it.copy(tools = it.tools + ToolStep("calendar", solar.ifEmpty { "农历 $lunar" }, ok = ok)) }
+                text
+            }
             "fetch_url" -> {
                 val url = args.str("url").orEmpty()
                 if (!url.startsWith("http")) return "参数错误：url 要以 http 开头"
@@ -5427,7 +5464,10 @@ class Engine(
         if (custom.isEmpty() || working.none { it["role"]?.jsonPrimitive?.contentOrNull == "assistant" }) return
         val i = working.indexOfLast { it["role"]?.jsonPrimitive?.contentOrNull == "user" }
         if (i < 0) return
-        val note = "\n\n（我在设置里写的自定义指令：$custom）"
+        appendToUser(working, i, "\n\n（我在设置里写的自定义指令：$custom）")
+    }
+
+    private fun appendToUser(working: MutableList<JsonObject>, i: Int, note: String) {
         val m = working[i]
         val content = m["content"]
         val next = when {
@@ -5436,6 +5476,23 @@ class Engine(
             else -> return
         }
         working[i] = JsonObject(m + ("content" to next))
+    }
+
+    /**
+     * 用户这次说的话里写到了日期：程序算好离今天多远，附在这句话后面（只进这次请求，不存进聊天记录）。
+     * 2026-11-02 用户：「我生日是农历九月二十四」，AI 只回「记住了」，没反应过来就是今天。只给事实，要不要提、怎么说由模型定。
+     */
+    private fun noteDates(working: MutableList<JsonObject>, convId: String, cutoffId: String?, excludeId: String) {
+        val all = snapshot(convId)
+        val end = cutoffId?.let { id -> all.indexOfFirst { it.id == id } + 1 }?.takeIf { it > 0 } ?: all.size
+        // 用户最新说的：从后往前到上一条 AI 的回答为止（连发几条的都算）；引用里的不算
+        val said = all.subList(0, end).filter { it.id != excludeId && it.status != MsgStatus.STREAMING }.takeLastWhile { it.role == Role.USER }
+            .joinToString("\n") { Quotes.spoken(it.content) }
+        if (said.isBlank()) return
+        val notes = DateMentions.notes(said, Today.date())
+        if (notes.isEmpty()) return
+        val i = working.indexOfLast { it["role"]?.jsonPrimitive?.contentOrNull == "user" }
+        if (i >= 0) appendToUser(working, i, "\n\n（日历：" + notes.joinToString("；") + "）")
     }
 
     /**
@@ -5502,7 +5559,9 @@ class Engine(
             } + if (m.stage == "review") "·互评" else ""
             val sb = StringBuilder()
             // 每句话标上几点说的（2026-10-29 用户要 AI 感知时间的流逝）；自己说过的标在〔〕里，回答前 cleanReply 会把它学着写的去掉
-            if (!mine) sb.append("【").append(speaker).append(" · ").append(Prompts.clock(m.createdAt)).append("】")
+            // 用户最新那句写全（星期、农历）：日子就摆在他说的话旁边（2026-11-02）
+            if (!mine) sb.append("【").append(speaker).append(" · ")
+                .append(if (idx == lastUserIdx) Prompts.clockFull(m.createdAt) else Prompts.clock(m.createdAt)).append("】")
             else sb.append("〔").append(Prompts.clock(m.createdAt)).append("〕")
             val body = stripThink(m.content)
             // 引用开头的话另起一行，「> 」才看得出是引用

@@ -41,7 +41,8 @@ object Council {
 
     /** 主席汇总：问题、全部回答（代号）、全部互评（只标第几份）、程序算的平均名次。 */
     fun chairPrompt(question: String, answers: List<Pair<String, String>>, reviews: List<String>, avg: Map<Int, Double>): String = buildString {
-        append("你是这次会审的主席，要给用户写最终答案。\n\n用户的问题：\n").append(question.trim()).append("\n\n")
+        // 主席以前不知道今天几号（2026-11-02），「今年」「最新」这种题会按模型自己的旧印象汇总
+        append("你是这次会审的主席，要给用户写最终答案。今天是 ").append(Today.describe(Today.date())).append("\n\n用户的问题：\n").append(question.trim()).append("\n\n")
         append("几位 AI 各自独立的回答（隐去了名字）：\n\n")
         answers.forEach { (k, text) -> append("【回答").append(k).append("】\n").append(text.trim().take(6000)).append("\n\n") }
         if (reviews.isNotEmpty()) {

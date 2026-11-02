@@ -28,6 +28,13 @@ class VideoCheckRunner : Instrumentation() {
         val results = Bundle()
         val out = StringBuilder()
         val dataDir = targetContext.filesDir.parentFile!!
+        // 历法库在安卓上也跑一下（2026-11-02，engine/Today.kt）
+        runCatching {
+            val d = java.time.LocalDate.of(2026, 11, 2)
+            out.append(com.guixing.jixunying.engine.Today.describe(d)).append('\n')
+            out.append(com.guixing.jixunying.engine.Today.ahead(d).second).append('\n')
+            out.append(com.guixing.jixunying.engine.DateMentions.notes("我生日是农历九月二十四，下周三交报告", d)).append('\n')
+        }.onFailure { out.append("历法出错：").append(it).append('\n') }
         for (name in videos) {
             val f = File(dataDir, name)
             out.append("==== ").append(f.name).append("（").append(f.length()).append(" 字节）\n")

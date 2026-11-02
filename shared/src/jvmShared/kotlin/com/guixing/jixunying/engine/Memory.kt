@@ -43,6 +43,7 @@ object Recorder {
         appendLine("  ## 重要的事实、数据、链接、文件名")
         appendLine("  ## 还没解决的问题和待办")
         appendLine("- 写清楚谁说了什么（用名字）。数字、名称、代码接口照抄，不要改写。")
+        appendLine("- 聊天记录每句前面标着几月几日几点说的。今天是 ${Today.describe(Today.date())} 说到时间的（今天、明天、下周、最近）换算成具体日期再写，摘要以后才看得懂。")
         appendLine("- 不要编造，不要评价，不要加原文里没有的东西。")
         appendLine("- 尽量精炼，一般不超过 1500 字。直接输出摘要正文，不要开场白。")
         if (oldSummary.isNotBlank()) {
@@ -66,10 +67,11 @@ object Recorder {
         appendLine("你是记录员。下面是用户「$userName」和 AI 的一段聊天。找出值得长期记住的信息，以后的对话会用到。")
         appendLine()
         appendLine("两种记忆：")
-        appendLine("- 关于用户本人的（topic 留空）：身份、职业、所在城市、长期关心的事、对回答方式的要求和偏好、明确说「记住」的事。所有对话都会带上。")
+        appendLine("今天是 ${Today.describe(Today.date())} 聊天记录每句前面标着几月几日几点说的。")
+        appendLine("- 关于用户本人的（topic 留空）：身份、职业、所在城市、生日和纪念日、长期关心的事、对回答方式的要求和偏好、明确说「记住」的事。所有对话都会带上。")
         appendLine("- 某个话题 / 项目的（topic 写话题名）：用户长期在做的项目、长期关心的话题里定下的事、背景、要求，例如「AI集训营 的成员不再限定四家」。只在聊这个话题时带上。")
         appendLine("不要记：一次性的问题、闲聊内容、AI 说的话、密码 / Key / 身份证号 / 银行卡等敏感信息、只跟这次对话有关的细节。")
-        appendLine("每条写成一句完整的话（关于用户本人的以用户为主语，例如「在北京做产品经理」「希望回答先给结论」）。一次最多 3 条。")
+        appendLine("每条写成一句完整的话（关于用户本人的以用户为主语，例如「在北京做产品经理」「希望回答先给结论」）。说到时间的写成具体日期（「明天」「下周三」换算成几月几日），以后看才明白。一次最多 3 条。")
         appendLine("每条附上 quote：聊天记录里用户说的、能作为依据的那句原话，一字不改地抄（抄不出就留空）。")
         appendLine()
         if (topics.isNotEmpty()) {
@@ -93,11 +95,15 @@ object Recorder {
 
     fun tidyPrompt(items: List<MemoryItem>): String = buildString {
         appendLine("下面是关于一位用户的长期记忆，可能有重复、互相矛盾或过时的条目。请整理：合并重复的，矛盾的保留更新的（编号大的更新），删掉没用的。")
+        appendLine("今天是 ${Today.describe(Today.date())} 每条后面写着哪天记的；已经过去的一次性安排（比如上个月的出差）算过时，生日、纪念日这种每年都有的留着。")
         appendLine("不要新增原来没有的信息，措辞尽量保留原样。")
         appendLine()
         appendLine("带「话题」的是只在聊那个话题时才用的记忆；只合并同一话题里的，话题名照抄（没有话题的 topic 留空）。")
         appendLine()
-        items.forEachIndexed { i, m -> appendLine("${i + 1}. [${m.kind}]" + (if (m.topic.isNotBlank()) "[话题：${m.topic}]" else "") + " ${m.text}") }
+        items.forEachIndexed { i, m ->
+            appendLine("${i + 1}. [${m.kind}]" + (if (m.topic.isNotBlank()) "[话题：${m.topic}]" else "") + " ${m.text}" +
+                (if (m.updatedAt > 0) "（${Prompts.clock(m.updatedAt).substringBefore(' ')}记）" else ""))
+        }
         appendLine()
         append("输出 JSON 数组，不要别的文字：[{\"text\": \"…\", \"kind\": \"关于我|偏好|要求|事实\", \"topic\": \"\", \"from\": [原来的编号…]}]")
     }

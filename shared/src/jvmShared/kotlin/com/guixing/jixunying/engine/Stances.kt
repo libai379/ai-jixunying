@@ -240,6 +240,8 @@ object StanceJudge {
 
         val prompt = buildString {
             appendLine("以下是群聊里 AI 成员们对一个问题的不同立场，请你判断：")
+            // 裁判不知道今天几号的话，「今年」「最新」这种题会按模型自己的旧印象判（2026-11-02）
+            appendLine("（今天是 ${Today.describe(Today.date())}）")
             appendLine()
             appendLine("问题：$finalQ")
             appendLine()

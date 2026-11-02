@@ -666,6 +666,8 @@ private fun ToolStepView(t: ToolStep) {
         "video" -> Icons.Rounded.Movie to ((if (t.ok) "做视频：" else "视频没做成：") + t.input.take(30) + if (t.note.isNotBlank()) " · ${t.note.take(30)}" else "")
         // 服务商太忙，等它恢复再试（2026-11-01）
         "wait" -> Icons.Rounded.History to t.input
+        // 查日历（2026-11-02）
+        "calendar" -> Icons.Rounded.History to (if (t.ok) "查日历 ${t.input.take(40)}" else "日历查不到 ${t.input.take(40)}")
         else -> Icons.Rounded.Brush to (if (t.ok) "画图：${t.input.take(40)}" else "画图失败")
     }
     Column(Modifier.padding(bottom = 6.dp)) {

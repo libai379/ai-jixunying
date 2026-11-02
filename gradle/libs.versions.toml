@@ -27,6 +27,8 @@ pdfbox = { module = "org.apache.pdfbox:pdfbox", version.ref = "pdfbox" }
 pdfbox-android = "com.tom-roush:pdfbox-android:2.0.27.0"
 paho-mqtt = "org.eclipse.paho:org.eclipse.paho.client.mqttv3:1.2.5"
 moquette = "io.moquette:moquette-broker:0.17"
+# 农历、节气、节日、法定假日（2026-11-02；纯 Java、MIT，1950-2100 年和香港天文台对照表逐日核对过，见 docs/参考资料.md）
+lunar = "cn.6tail:lunar:1.7.7"
 zxing-core = "com.google.zxing:core:3.5.3"
 zxing-android-embedded = "com.journeyapps:zxing-android-embedded:4.3.0"
 androidx-activity-compose = "androidx.activity:activity-compose:1.13.0"

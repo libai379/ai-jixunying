@@ -4,8 +4,6 @@ import com.guixing.jixunying.model.AppState
 import com.guixing.jixunying.model.Conversation
 import com.guixing.jixunying.model.Member
 import com.guixing.jixunying.model.ReplyMode
-import java.time.ZoneId
-import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 
@@ -23,6 +21,20 @@ object Prompts {
      */
     fun clock(ms: Long): String =
         java.time.Instant.ofEpochMilli(ms).atZone(java.time.ZoneId.of("Asia/Shanghai")).format(java.time.format.DateTimeFormatter.ofPattern("M月d日 HH:mm", java.util.Locale.CHINA))
+
+    /** 用户最新那句话的时间，写全一点（星期、农历）：日子就摆在他说的话旁边，「我生日是农历九月二十四」时一眼对得上。 */
+    fun clockFull(ms: Long): String {
+        val t = java.time.Instant.ofEpochMilli(ms).atZone(Today.ZONE)
+        return Today.md(t.toLocalDate()) + " " + Today.weekName(t.toLocalDate()) + " 农历" + Today.lunarText(t.toLocalDate()) + " " +
+            t.format(DateTimeFormatter.ofPattern("HH:mm", Locale.CHINA))
+    }
+
+    /** 一条记忆是什么时候记的：「10月3日记」。说「下周」「最近」的旧记忆，看了才知道是哪个下周。 */
+    private fun recorded(ms: Long, today: java.time.LocalDate): String {
+        if (ms <= 0) return ""
+        val d = Today.date(ms)
+        return "（" + (if (d.year != today.year) "${d.year}年" else "") + Today.md(d) + "记）"
+    }
 
 
     fun modelLabel(state: AppState, m: Member): String {
@@ -59,11 +71,12 @@ object Prompts {
         canVideo: Boolean = false,
         /** 能读电脑上任意文件和文件夹（list_folder / read_document；收录范围外的程序先问用户，2026-10-17）。 */
         canReadFiles: Boolean = false,
+        /** 能用 calendar 工具查日历。 */
+        canCalendar: Boolean = false,
     ): String {
         val profile = state.profile
         val others = conv.memberIds.filter { it != me.id }.mapNotNull { state.member(it) }
-        val now = ZonedDateTime.now(ZoneId.of("Asia/Shanghai"))
-        val time = now.format(DateTimeFormatter.ofPattern("yyyy年M月d日 EEEE HH:mm", Locale.CHINA))
+        val today = Today.date()
 
         return buildString {
             appendLine("你是「${me.name}」，「AI集训营」这个聊天应用里的一位 AI 成员。")
@@ -88,17 +101,31 @@ object Prompts {
                 }
                 appendLine("- 聊天记录里，别人的发言会以「【名字】」开头标明是谁说的；你自己以前的发言就是 assistant 消息。")
             }
+            // 今天是什么日子（2026-11-02 用户：说了生日是农历九月二十四，AI 没反应过来就是今天。以前这里只有公历和星期，模型换算不了农历）。
+            // 现在几点不写在这里：每句话前面标着时间，最新那句就是现在。以前这句带着分钟，放在设定中间，每分钟一变，
+            // 后面的设定和整段聊天记录都用不上模型的提示词缓存（账本：gpt-6.1-sol 只有 5% 走缓存）。这一段一天才变一次。
+            appendLine()
+            appendLine("【今天】")
+            appendLine("- ${Today.describe(today)}")
+            memories.mapNotNull { m -> DateMentions.soon(m.text, today)?.let { "$it：${m.text}" } }.takeIf { it.isNotEmpty() }?.let {
+                appendLine("- 记忆里写到的日子，这几天对上的：${it.joinToString("；")}")
+            }
+            val (twoWeeks, later) = Today.ahead(today)
+            appendLine("- 接下来两周：$twoWeeks")
+            appendLine("- 再往后：$later")
+            if (canCalendar) appendLine("- 再远的日子、别的年份、农历公历换算，用 calendar 查，别心算。")
+            appendLine("- 聊天记录里每句话前面都标着是北京时间几点说的（你自己说过的标在〔〕里），最新那句的时间就是现在；看得出隔了多久、哪句先哪句后。你回答时不用自己写时间。")
             val aboutMe = memories.filter { it.topic.isBlank() }
             val topicMems = memories.filter { it.topic.isNotBlank() }
             if (memories.isNotEmpty() || otherTopics.isNotEmpty()) {
                 appendLine()
                 if (aboutMe.isNotEmpty()) {
-                    appendLine("【关于${profile.name}的长期记忆】（以前的对话里记下的，所有 AI 成员共用）")
-                    aboutMe.forEach { appendLine("- [${it.kind}] ${it.text}") }
+                    appendLine("【关于${profile.name}的长期记忆】（以前的对话里记下的，所有 AI 成员共用；括号里是哪天记的）")
+                    aboutMe.forEach { appendLine("- [${it.kind}] ${it.text}${recorded(it.updatedAt, today)}") }
                 }
                 if (topicMems.isNotEmpty()) {
                     appendLine("【这个对话的话题「$memoryTopic」的记忆】")
-                    topicMems.forEach { appendLine("- [${it.kind}] ${it.text}") }
+                    topicMems.forEach { appendLine("- [${it.kind}] ${it.text}${recorded(it.updatedAt, today)}") }
                 }
                 if (otherTopics.isNotEmpty() && canRemember)
                     appendLine("长期记忆里还有这些话题的记忆，聊到时用 recall_memory 查：${otherTopics.take(30).joinToString("、")}")
@@ -107,7 +134,6 @@ object Prompts {
             }
             appendLine()
             appendLine("【你能做什么】")
-            appendLine("- 现在是北京时间 $time。聊天记录里每句话前面都标着是北京时间几点说的（你自己说过的标在〔〕里），看得出隔了多久、哪句先哪句后；你回答时不用自己写时间。")
             appendLine(if (canSeeImages) "- 你能看图：用户发来的图片会直接给你看。" else "- 你看不到图片：如果用户发了图，告诉他你这个模型不支持看图，可以换一个能看图的成员。")
             appendLine("- 用户发来的文档（PDF、Word、Excel、PPT、代码、文本等）已经转成文字放在消息里，标有「附件」字样。")
             if (canDraw) appendLine("- 你可以画图：用户要图片、要改图时调用 generate_image，提示词要具体（主体、风格、构图、光线、色彩）；用户说「改成……」就在上一张的基础上调整描述重新画。画完简单说明即可，不用把图再描述一遍。可以一边聊一边画。")
@@ -127,9 +153,11 @@ object Prompts {
                     "消息里给了路径（比如拖进来的文件夹）就直接用。改文件之前程序会备份，用户能一键撤销；要不要先问用户由程序管。不要说你够不着用户的文件。")
             }
             if (canRemember) {
-                appendLine("- 你能记事：用户说「记住……」，或者说出了以后的对话也用得上的个人信息（身份、职业、所在地、偏好、对回答方式的要求、长期项目）时，调用 remember 记下来，记完简单说一句「记住了」。只跟某个项目 / 话题有关的，topic 写上话题名。密码、Key、证件号之类不要记。")
+                appendLine("- 你能记事：用户说「记住……」，或者说出了以后的对话也用得上的个人信息（身份、职业、所在地、生日和纪念日、偏好、对回答方式的要求、长期项目）时，调用 remember 记下来，记完简单说一句「记住了」。说到时间的写成具体日期（「明天」写成几月几日），以后看才明白。只跟某个项目 / 话题有关的，topic 写上话题名。密码、Key、证件号之类不要记。")
                 appendLine("- 你能翻以前的聊天：用户说「上次」「之前说过」「以前聊的」时，先用 search_history 搜以前的聊天记录再回答，别凭印象编。")
             }
+            // 11-02 真模型：用户说「明天早上八点提醒我开会」，有的答「到时候我会叫你」，其实程序没有这个能力，到点什么也不会发生
+            appendLine("- 你自己到不了点：只有用户发消息时你才会说话，定时提醒、到点发消息、过一阵主动找他，这些程序现在做不到，用户要的时候照实说。")
             appendLine()
             appendLine("【说真话】")
             appendLine("- 不知道就说不知道。不编造数据、引用、链接、人名、书名、论文、代码接口；没把握的事实宁可不说，把握不大的地方在那句话里顺带点明。")
