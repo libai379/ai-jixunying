@@ -4594,12 +4594,15 @@ class Engine(
 
     /**
      * 让 AI 能「看」视频（用户：微信里引用视频读不到；以前连发来的视频都只写一句「暂时看不了」）。各家模型基本不直接收视频，
-     * 这里取几张画面给能看图的模型、把声音转成字。结果记在附件上，一段视频只读一遍。电脑靠 Edge 解码（程序不带 ffmpeg），手机用系统解码器。
+     * 这里取几张画面给能看图的模型、把声音转成字。结果记在附件上，一段视频只读一遍。电脑画面用程序带的 FFmpeg（2026-11-03，微信视频是 HEVC，
+     * Edge 解不了），不行再交给 Edge；声音还是 Edge 取。手机用系统解码器。
      * 听写按秒收费，用设置 → 语音 自动挑的那家，最长听 LISTEN_MAX_SEC。
      */
     private suspend fun digestVideo(a: Attachment): Attachment {
         val meta = storage.fileMeta(a.id) ?: a
-        if (meta.seconds > 0 || meta.frames.isNotEmpty()) return meta
+        // 读过就不再读；以前画面解不开的（微信的 HEVC，2026-11-03 以前电脑只有 Edge）再读一遍，只重读一次
+        val retry = meta.seconds > 0 && meta.frames.isEmpty() && "画面解不开" in meta.note && "重读过" !in meta.note
+        if (meta.frames.isNotEmpty() || (meta.seconds > 0 && !retry)) return meta
         val file = storage.fileOf(a.id)
         if (!file.isFile) return meta
         val notes = mutableListOf<String>()
@@ -4652,8 +4655,10 @@ class Engine(
                 notes += "听写没成功"
             }
         }
+        if (retry) notes += "重读过"
+        val before = if (retry) meta.note.split("；").filter { it != "画面解不开" } else listOf(meta.note)
         val done = meta.copy(frames = frameIds, seconds = kotlin.math.ceil(seconds).toInt(), textChars = heard?.length ?: 0,
-            note = (listOf(meta.note) + notes).filter { it.isNotBlank() }.joinToString("；"))
+            note = (before + notes).filter { it.isNotBlank() }.distinct().joinToString("；"))
         storage.updateFile(done, heard)
         storage.log("JxyVideo", "${a.name}：${done.seconds} 秒，${frameIds.size} 张画面，听到 ${done.textChars} 字${if (notes.isEmpty()) "" else "（" + notes.joinToString("；") + "）"}")
         return done

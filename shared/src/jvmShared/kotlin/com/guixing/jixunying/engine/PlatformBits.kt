@@ -45,8 +45,8 @@ expect fun networkLoad(): NetLoad
 expect fun platformLog(tag: String, text: String)
 
 /**
- * 这台设备自己解码视频（手机：系统解码器）。按时间均匀取 count 张画面（JPEG，长边不超过 maxSide），返回 (画面, 整段多少秒)。
- * 电脑返回 null，交给 Edge（PageBrowser.fileFrames）。
+ * 这台设备自己解码视频（手机：系统解码器；电脑：程序带的 FFmpeg，2026-11-03）。按时间均匀取 count 张画面（JPEG，长边不超过 maxSide），返回 (画面, 整段多少秒)。
+ * 解不了返回 null，电脑上再交给 Edge（PageBrowser.fileFrames）。
  */
 expect fun localVideoFrames(file: java.io.File, count: Int, maxSide: Int): Pair<List<ByteArray>, Double>?
 

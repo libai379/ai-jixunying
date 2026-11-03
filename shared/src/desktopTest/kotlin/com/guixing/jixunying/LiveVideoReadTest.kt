@@ -20,6 +20,11 @@ class LiveVideoReadTest {
         try {
             for (f in files) {
                 println("==== ${f.name}（${f.length()} 字节）")
+                // 程序带的 FFmpeg（2026-11-03，微信视频是 HEVC，Edge 解不了）
+                val tf = System.currentTimeMillis()
+                val ff = com.guixing.jixunying.engine.localVideoFrames(f, 6, 1024)
+                println("FFmpeg 画面 ${ff?.first?.size ?: 0} 张，整段 ${ff?.second} 秒，用了 ${System.currentTimeMillis() - tf} ms")
+                ff?.first?.forEachIndexed { i, bytes -> File(out, "${f.nameWithoutExtension}-ffmpeg-$i.jpg").writeBytes(bytes) }
                 val t0 = System.currentTimeMillis()
                 runCatching { b.fileFrames(f, 6, 1024) }
                     .onFailure { println("画面解不开：${it.message}") }

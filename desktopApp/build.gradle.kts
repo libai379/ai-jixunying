@@ -18,11 +18,12 @@ compose.desktop {
     application {
         mainClass = "com.guixing.jixunying.MainKt"
         providers.gradleProperty("packageJdk").orNull?.let { javaHome = it }
-        jvmArgs += listOf("-Dfile.encoding=UTF-8", "-Xmx1g")
+        // --enable-native-access：FFmpeg（javacpp 加载本地库，2026-11-03）在新版 Java 上不加会警告，以后的版本会直接拦
+        jvmArgs += listOf("-Dfile.encoding=UTF-8", "-Xmx1g", "--enable-native-access=ALL-UNNAMED")
         nativeDistributions {
             targetFormats(TargetFormat.Msi, TargetFormat.Exe)
             packageName = "ai-jixunying"
-            packageVersion = "1.14.0"
+            packageVersion = "1.15.0"
             description = "AI集训营"
             // 发布者（Windows「程序和功能」里显示）；和 model/Presets.kt 的 APP_DEVELOPER 一致（用户 2026-10-14 定）
             vendor = "癸星科技"

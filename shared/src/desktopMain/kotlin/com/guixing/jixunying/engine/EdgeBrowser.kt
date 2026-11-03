@@ -310,6 +310,8 @@ class EdgeBrowser(private val exe: File, private val profile: File) : PageBrowse
             "--window-position=$OFF,$OFF", "--window-size=1200,860",
             // 窗口在屏幕外面时浏览器会当成「被挡住了」，降速或不加载视频：关掉这些省电行为
             "--disable-features=CalculateNativeWinOcclusion",
+            // 微信发来的视频是 HEVC（H.265，11-03 ffprobe 查的），Edge 默认解不了（画面全黑、videoWidth = 0）：打开平台的 HEVC 硬件解码
+            "--enable-features=PlatformHEVCDecoderSupport",
             "--disable-background-timer-throttling", "--disable-renderer-backgrounding", "--disable-backgrounding-occluded-windows",
             "about:blank",
         ).redirectErrorStream(true).redirectOutput(ProcessBuilder.Redirect.DISCARD).start()

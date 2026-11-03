@@ -19,8 +19,8 @@ android {
         applicationId = "com.guixing.jixunying"
         minSdk = 26
         targetSdk = 36
-        versionCode = 22
-        versionName = "1.14.0"
+        versionCode = 23
+        versionName = "1.15.0"
         // 只在模拟器上手动跑（用法见 src/androidTest 的 VideoCheckRunner），不进正式包
         testInstrumentationRunner = "com.guixing.jixunying.VideoCheckRunner"
     }

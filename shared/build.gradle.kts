@@ -61,6 +61,13 @@ kotlin {
                 implementation(libs.coroutines.swing)
                 implementation(libs.pdfbox)
                 implementation(libs.zxing.core)
+                // 电脑上取视频画面（2026-11-03 用户：「我从微信给他发视频文件他看不到」）：微信发来的是 HEVC，Edge 解不了；
+                // 带 FFmpeg（bytedeco 的 LGPL 版，只带 Windows 64 位的本地库，约 30 MB）。javacv 只要 FFmpegFrameGrabber，不带它拖进来的 OpenCV 那些
+                implementation("org.bytedeco:javacv:1.5.14") { isTransitive = false }
+                implementation("org.bytedeco:javacpp:1.5.14")
+                implementation("org.bytedeco:javacpp:1.5.14:windows-x86_64")
+                implementation("org.bytedeco:ffmpeg:8.1.2-1.5.14")
+                implementation("org.bytedeco:ffmpeg:8.1.2-1.5.14:windows-x86_64")
             }
         }
         val desktopTest by getting {

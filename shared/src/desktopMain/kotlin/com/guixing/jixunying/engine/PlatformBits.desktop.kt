@@ -116,8 +116,54 @@ actual fun drawShapeOn(p: Pixels, shape: String, box: IntArray, color: Int, thic
     if (shape == "ellipse") g.drawOval(x, y, w, h) else g.drawRect(x, y, w, h)
 }
 
-/** 电脑上视频交给 Edge 解码（PageBrowser.fileFrames / fileAudioPcm），这里不自己解。 */
-actual fun localVideoFrames(file: java.io.File, count: Int, maxSide: Int): Pair<List<ByteArray>, Double>? = null
+/**
+ * 电脑上取视频画面用程序带的 FFmpeg（2026-11-03）：微信发来的视频是 HEVC（H.265），Edge 解不了（画面全黑），
+ * 这台电脑也没装 Chrome 和 Windows 的 HEVC 扩展。FFmpeg 什么编码都能解，不联网。
+ * FFmpeg 加载不了（比如不是 Windows 64 位）或者这段解不开就返回 null，照旧交给 Edge（PageBrowser.fileFrames）。声音还是 Edge 取。
+ */
+actual fun localVideoFrames(file: java.io.File, count: Int, maxSide: Int): Pair<List<ByteArray>, Double>? = try {
+    VideoFrames.grab(file, count, maxSide)
+} catch (e: Throwable) {
+    // 本地库加载不了是 UnsatisfiedLinkError / NoClassDefFoundError（都是 Error），也退回 Edge；真正的虚拟机故障照抛
+    if (e is VirtualMachineError && e !is OutOfMemoryError) throw e
+    null
+}
+
+/** 用 FFmpeg（bytedeco javacv）按时间均匀取 count 张画面，JPEG，长边不超过 maxSide。 */
+internal object VideoFrames {
+    fun grab(file: java.io.File, count: Int, maxSide: Int): Pair<List<ByteArray>, Double>? {
+        org.bytedeco.ffmpeg.global.avutil.av_log_set_level(org.bytedeco.ffmpeg.global.avutil.AV_LOG_ERROR)
+        val g = org.bytedeco.javacv.FFmpegFrameGrabber(file)
+        try {
+            g.start()
+            if (g.imageWidth <= 0 || g.imageHeight <= 0) return null
+            val seconds = g.lengthInTime / 1_000_000.0
+            val conv = org.bytedeco.javacv.Java2DFrameConverter()
+            val out = mutableListOf<ByteArray>()
+            for (i in 0 until count) {
+                if (seconds > 0) g.setVideoTimestamp((seconds * (i + 0.5) / count * 1_000_000).toLong())
+                val frame = g.grabImage() ?: continue
+                val img = conv.convert(frame) ?: continue
+                out += jpegOf(img, maxSide)
+            }
+            return if (out.isEmpty()) null else out to seconds
+        } finally {
+            runCatching { g.stop() }
+            runCatching { g.release() }
+        }
+    }
+
+    private fun jpegOf(src: java.awt.image.BufferedImage, maxSide: Int): ByteArray {
+        val s = minOf(1.0, maxSide.toDouble() / maxOf(src.width, src.height))
+        val w = maxOf(1, (src.width * s).toInt()); val h = maxOf(1, (src.height * s).toInt())
+        val img = java.awt.image.BufferedImage(w, h, java.awt.image.BufferedImage.TYPE_INT_RGB)
+        val gr = img.createGraphics()
+        gr.setRenderingHint(java.awt.RenderingHints.KEY_INTERPOLATION, java.awt.RenderingHints.VALUE_INTERPOLATION_BILINEAR)
+        gr.drawImage(src, 0, 0, w, h, null)
+        gr.dispose()
+        return java.io.ByteArrayOutputStream().also { ImageIO.write(img, "jpg", it) }.toByteArray()
+    }
+}
 
 actual fun localVideoAudio(file: java.io.File, maxSeconds: Int): Pair<ByteArray, Double>? = null
 
