@@ -85,6 +85,11 @@ data class ImageGenSettings(
     val providerId: String = "",
     val modelId: String = "",
     val size: String = "1024x1024",
+    /**
+     * AI 自己换模型再试（2026-11-03 用户：「让 AI 也能调用模型，包括画图修图视频语音等等……如果一张图修不好，让他多试几个」）：
+     * 一次回答里画图、补画、做视频、配音，第一次照常做；再做的时候整次回答累计不超过这么多钱（元，按价格表估）。0 = 不再试。
+     */
+    val retryBudget: Double = 2.0,
 )
 
 /**

@@ -23,6 +23,7 @@ import com.guixing.jixunying.model.Event
 import com.guixing.jixunying.model.HistoryHit
 import com.guixing.jixunying.model.ImageChoice
 import com.guixing.jixunying.model.ImagePick
+import com.guixing.jixunying.model.MediaPick
 import com.guixing.jixunying.model.VideoMediaUse
 import com.guixing.jixunying.model.VideoPick
 import com.guixing.jixunying.model.JudgePick
@@ -3745,7 +3746,7 @@ class Engine(
      * 一个失败换下一个，最多试三个。某家是 Key 失效或欠费，这家别的画图模型也不用试了，直接换下一家。
      */
     private suspend fun paintAuto(prompt: String, size: String? = null, only: ImageChoice? = null): Painted {
-        val all = only?.let { listOf(it) } ?: ImagePick.resolve(state)
+        val all = only?.let { listOf(it) } ?: ImagePick.resolve(media)
         if (all.isEmpty()) throw IllegalStateException(NO_IMAGE_MODEL)
         fun key(c: ImageChoice) = c.providerId + "|" + c.modelId
         val recentlyFailed = all.filter { (imageFailures[key(it)] ?: 0L) > now() - 30 * 60_000 }
@@ -3874,11 +3875,13 @@ class Engine(
     private suspend fun makeVideo(convId: String, msgId: String, args: JsonObject): String {
         val prompt = args.str("prompt").orEmpty().ifBlank { return "参数错误：缺少 prompt" }
         val v = state.settings.videoGen
-        if (VideoPick.resolve(state) == null) return "做视频没开，或者没有能用的服务商（要千问AI平台、阿里百炼或 MiniMax 中国版的 Key）。请告诉用户到 设置 → 画图和视频 里看看。"
+        if (VideoPick.resolve(media) == null) return "做视频没开，或者没有能用的服务商（要千问AI平台、阿里百炼或 MiniMax 中国版的 Key）。请告诉用户到 设置 → 画图和视频 里看看。"
         val wanted = videoMediaArgs(args["media"]).getOrElse { return "参数错误：${it.message}" }
         val inputs = mutableListOf<VideoInput>()
         for ((use, source) in wanted) inputs += videoInput(convId, msgId, use, source).getOrElse { return it.message.orEmpty() }
-        val choice = VideoPick.resolve(state, inputs.map { it.use }.toSet()) ?: return "做视频的服务商不见了"
+        // AI 自己挑模型（2026-11-03）：写了 model 就用它（要有 Key、素材收得了）；没写照设置，素材收不了时自动换
+        val (picked, why) = MediaPick.video(media, args.str("model"), inputs.map { it.use }.toSet())
+        val choice = picked ?: return why ?: "做视频的服务商不见了"
         val p = state.provider(choice.providerId) ?: return "做视频的服务商不见了"
         val hasVideoIn = inputs.any { it.use == VideoMediaUse.VIDEO }
         // 时长：AI 说了就用；带视频的万相默认「智能时长」（官方建议编辑 / 延长用 -1）；其余用设置里的
@@ -3887,6 +3890,11 @@ class Engine(
         // 比例：带素材时默认按素材自适应
         val ratio = args.str("ratio")?.trim()?.takeIf { it.isNotEmpty() } ?: if (inputs.isNotEmpty()) "adaptive" else v.ratio
         VideoMedia.check(choice.model, inputs, duration)?.let { return "素材不合要求，没提交（不收费）：$it。请按要求改了再调，或者如实告诉用户。" }
+        // 再做一段之前看花钱上限（第一段不拦）：智能时长按素材最长的那段估
+        val estSecs = if (duration < 0) (inputs.mapNotNull { it.seconds }.maxOrNull()?.toInt() ?: v.duration) else VideoPick.durationFor(choice.model, duration)
+        val cost = MediaPick.videoCost(state, p.id, VideoPick.billingModel(choice.model.id, VideoPick.resolutionFor(choice.model, v.resolution)), estSecs)
+        spendGate(msgId, cost, "做一段视频")?.let { return it }
+        var swapped = ""
         val stepId = newId()
         fun step(persist: Boolean = false, f: (ToolStep) -> ToolStep) =
             updateMessage(convId, msgId, persist) { m -> m.copy(tools = m.tools.map { if (it.id == stepId) f(it) else it }) }
@@ -3917,6 +3925,8 @@ class Engine(
                 generated = true, savedPath = saveOfficeCopy(name, r.bytes))
             storage.putFile(att, r.bytes, null)
             updateMessage(convId, msgId) { m -> m.copy(attachments = m.attachments + att, tools = m.tools.map { if (it.id == stepId) it.copy(note = note + extra) else it }) }
+            spent(msgId, cost)
+            swapped = replaceOld(convId, msgId, args.str("replaces"), att.id)
             return "$note，文件名 $name"
         }
         var taskId: String? = null
@@ -3924,7 +3934,7 @@ class Engine(
             val r = videos.generate(p, choice.model.id, prompt, v.resolution, duration, ratio, v.audio, inputs, onTask = { taskId = it }) { s -> step { it.copy(note = s) } }
             val note = keep(r)
             val sw = if (choice.switched.isEmpty()) "" else "。${choice.switched}，要告诉用户"
-            "视频做好了（$note）$sw。已经显示给用户，点一下就能播放。简单说一句就行，不用再描述画面。"
+            "视频做好了（$note，约 ${MediaPick.yuan(cost)} 元）$sw。已经显示给用户，点一下就能播放。${swapped}简单说一句就行，不用再描述画面。"
         } catch (e: CancellationException) {
             // 用户点了停止：还在排队就取消（不收费）；已经在生成的取消不了，在后台接着等，做好了照样放回这条回答（反正要收钱）
             withContext(NonCancellable) {
@@ -4041,6 +4051,146 @@ class Engine(
     /** 每张 P 出来的图是从哪张原图来的：同一轮里从同一张原图重做，只留最后一张，试错的不发给用户。 */
     private val photoRoots = ConcurrentHashMap<String, String>()
 
+    // —— AI 自己挑模型、换着试（2026-11-03 用户：「让 AI 也能调用模型……如果一张图修不好，让他多试几个」）——
+
+    /**
+     * 只给训练题用：哪些服务商能拿来画图、补画、做视频、配音。训练题复制的是用户的真数据（带真 Key），
+     * AI 能自己挑模型以后可能挑到真的、花用户的钱，训练时只放行假服务。null = 都能用（正常使用）。
+     */
+    @Volatile var mediaFilter: ((ProviderConfig) -> Boolean)? = null
+
+    /** 挑画图 / 改图 / 视频 / 配音模型时看的状态（按 mediaFilter 过滤过服务商）。 */
+    private val media: AppState get() = mediaFilter?.let { f -> state.copy(providers = state.providers.filter(f)) } ?: state
+
+    /** 工具说明里列的能用的模型：「qwen-image-3.0（千问AI平台（阿里），约 0.18 元一张）」。 */
+    private fun modelsLine(list: List<ImageChoice>): String = list.distinctBy { it.modelId.lowercase() }.take(8).joinToString("；") { c ->
+        val y = MediaPick.imageCost(state, c.providerId, c.modelId)
+        "${c.modelId}（${c.providerName}，${if (y == 0.0) "免费" else "约 ${MediaPick.yuan(y)} 元一张"}）"
+    }.ifEmpty { "（没有）" }
+
+    /** 每条回答里画图、补画、做视频、配音做了几次、大概花了多少（元，按价格表估）。只留最近 200 条回答的。 */
+    private val replySpend: MutableMap<String, Pair<Int, Double>> = java.util.Collections.synchronizedMap(
+        object : LinkedHashMap<String, Pair<Int, Double>>() {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Pair<Int, Double>>?) = size > 200
+        })
+
+    /**
+     * 再做一次之前问一下：这条回答里第一次不拦（和以前一样）；之后整条回答累计（含这次）超过 ImageGenSettings.retryBudget 就不做，
+     * 返回回给模型的话；能做返回 null。
+     */
+    private fun spendGate(msgId: String, cost: Double, what: String): String? {
+        val (n, spent) = replySpend[msgId] ?: (0 to 0.0)
+        if (n == 0) return null
+        val cap = state.settings.imageGen.retryBudget
+        if (spent + cost <= cap + 1e-9) return null
+        return "不能再试了：这次回答已经做了 $n 次（画图、补画、视频、配音一起算），大约花了 ${MediaPick.yuan(spent)} 元；" +
+            "再$what 约 ${MediaPick.yuan(cost)} 元，会超过每次回答再试的上限 ${MediaPick.yuan(cap)} 元（用户在 设置 → 画图和视频 里定的）。" +
+            "从已经做出来的里挑最好的给用户，照实说试了哪些、哪个最好、哪里还不满意。"
+    }
+
+    private fun spent(msgId: String, cost: Double) {
+        synchronized(replySpend) { val (n, s) = replySpend[msgId] ?: (0 to 0.0); replySpend[msgId] = (n + 1) to (s + cost) }
+    }
+
+    /**
+     * 重做时把这次回答里旧的那个拿掉，用户只收到最好的：只认这条回答里 AI 做出来的（画的图、P 的图、视频、配音），
+     * 用户发来的、别的回答里的不动。返回给 AI 的半句。
+     */
+    private fun replaceOld(convId: String, msgId: String, name: String?, keepId: String): String {
+        val n = name.orEmpty().trim().substringAfterLast('/').substringAfterLast('\\')
+        if (n.isEmpty()) return ""
+        var gone: Attachment? = null
+        updateMessage(convId, msgId) { m ->
+            val old = m.attachments.firstOrNull { it.id != keepId && it.name.equals(n, ignoreCase = true) && (it.kind == AttachmentKind.GENERATED_IMAGE || it.generated) }
+            gone = old
+            if (old == null) m else m.copy(attachments = m.attachments.filter { it.id != old.id })
+        }
+        val g = gone ?: return "（replaces 写的《$n》不是这次回答里做的，没换掉。）"
+        storage.deleteFile(g.id)
+        photoRoots.remove(g.id)
+        return "旧的《${g.name}》换掉了，不发给用户。"
+    }
+
+    /**
+     * P 图里的「补画」（2026-11-03）：挑模型、管花钱上限，把截好的一块缩放成模型要的尺寸交出去，回来的缩回原大小（贴回去在 PhotoEdit.blendBack）。
+     * 做不成的原因用 PhotoEdit.Problem 抛出去，editImage 照常记成没做成的一步、原话回给模型。尺寸要求见 ImageGen.edit。
+     */
+    private suspend fun redrawFor(msgId: String, req: PhotoEdit.RedrawRequest): PhotoEdit.RedrawResult {
+        val all = MediaPick.editCandidates(media)
+        val c = MediaPick.edit(media, req.model) ?: throw PhotoEdit.Problem(
+            if (all.isEmpty()) "没有能改图的模型（要千问AI平台或阿里百炼的 Key），redraw 做不了。照实告诉用户。"
+            else "没有「${req.model}」这个能改图的模型。能用的：${modelsLine(all)}。")
+        val p = state.provider(c.providerId) ?: throw PhotoEdit.Problem("改图的服务商不见了。")
+        val cost = MediaPick.imageCost(state, p.id, c.modelId)
+        spendGate(msgId, cost, "补画一次")?.let { throw PhotoEdit.Problem(it) }
+        val m = c.modelId.lowercase()
+        val crop = req.crop
+        val (sw, sh) = when {
+            m.startsWith("wanx2.1") -> PhotoEdit.fitSides(crop.w, crop.h, 512, 4096)
+            m.startsWith("wan2.7") -> PhotoEdit.fitArea(crop.w, crop.h, 768 * 768, 2048 * 2048)
+            else -> PhotoEdit.fitArea(crop.w, crop.h, 512 * 512, 2048 * 2048)
+        }
+        val sent = if (sw == crop.w && sh == crop.h) crop else PhotoEdit.resize(crop, sw, sh)
+        val fx = sw.toDouble() / crop.w
+        val fy = sh.toDouble() / crop.h
+        val box = intArrayOf((req.box[0] * fx).toInt(), (req.box[1] * fy).toInt(),
+            kotlin.math.ceil(req.box[2] * fx).toInt().coerceAtMost(sw), kotlin.math.ceil(req.box[3] * fy).toInt().coerceAtMost(sh))
+        val mask = if (m.startsWith("wanx2.1")) encodePixels(PhotoEdit.maskOf(sw, sh, box)) else null
+        val tag = currentCoroutineContext()[UsageTag]
+        fun bill() {
+            recordUsage(p, c.modelId, Usage(), if (tag?.kind == UsageKinds.TEST) UsageKinds.TEST else UsageKinds.IMAGE, tag, images = 1)
+            spent(msgId, cost)
+        }
+        val res = try {
+            images.edit(p, c.modelId, encodePixels(sent, 95), req.prompt, "${sw}*${sh}", box, mask)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: ImageDownloadFailed) {
+            bill()
+            throw PhotoEdit.Problem("${c.modelId} 补好了（已经扣钱），但是${friendlyError(e)}。可以再试一次，或者照实告诉用户。")
+        } catch (e: Throwable) {
+            throw PhotoEdit.Problem("补画没做成（${c.modelId}）：${friendlyError(e)}。可以换个模型再试（model），或者照实告诉用户。")
+        }
+        bill()
+        val out = decodePixels(res.bytes) ?: throw PhotoEdit.Problem("${c.modelId} 回来的图读不了。")
+        return PhotoEdit.RedrawResult(PhotoEdit.resize(out, crop.w, crop.h), c.modelId,
+            "补画用的是 ${c.modelId}（${c.providerName}），约 ${MediaPick.yuan(cost)} 元。框里是模型画的，不是原来的样子，要跟用户说。")
+    }
+
+    /** 配音（2026-11-03）：把一段文字读成一个 wav 文件挂在回答上（微信里发成文件）。读出来按字数记账（Speech.onBilled）。 */
+    private suspend fun makeSpeech(convId: String, msgId: String, args: JsonObject): String {
+        val text = args.str("text").orEmpty().trim().ifEmpty { return "参数错误：缺少 text（要读的话）" }
+        val wanted = MediaPick.clean(args.str("model"))
+        val c = MediaPick.speech(media, wanted) ?: return if (wanted.isEmpty()) Speech.NO_TTS + "。照实告诉用户。"
+            else "没有「$wanted」这个配音模型（或者没配它的 Key）。能用的：${MediaPick.speechCandidates(media).joinToString("、") { it.modelId }.ifEmpty { "（没有）" }}。"
+        val p = state.provider(c.providerId) ?: return "配音的服务商不见了"
+        val cost = MediaPick.speechCost(state, p.id, c.modelId, text.length)
+        spendGate(msgId, cost, "配一段音")?.let { return it }
+        val st = state.settings.speech
+        val voice = args.str("voice").orEmpty().trim().ifEmpty { if (p.id == st.ttsProviderId) st.ttsVoice else "" }
+        return try {
+            val parts = speech.synthesize(p, c.modelId, voice, st.ttsSpeed, text)
+            spent(msgId, cost)
+            val wav = SpeechText.joinWav(parts.map { it.bytes }) ?: parts.singleOrNull()?.bytes
+                ?: return "读出来了，但几段的格式对不上，拼不成一个文件。照实告诉用户，或者换个模型再配。"
+            val secs = SpeechText.secondsOf(wav)
+            val name = "语音_${now() % 1_000_000}.wav"
+            val note = "${c.modelId}（${c.providerName}）" + (secs?.let { " · ${"%.1f".format(it)} 秒" } ?: "")
+            val att = Attachment(newId(), name, "audio/wav", wav.size.toLong(), AttachmentKind.DOCUMENT, note = note,
+                generated = true, savedPath = saveOfficeCopy(name, wav))
+            storage.putFile(att, wav, null)
+            updateMessage(convId, msgId) { it.copy(attachments = it.attachments + att, tools = it.tools + ToolStep("speech", text.take(200), note = note)) }
+            val swapped = replaceOld(convId, msgId, args.str("replaces"), att.id)
+            "配好了：《$name》（$note），会和你的回答一起给用户。${swapped}你听不到效果，简单说一句就行，请用户听听；不满意可以换模型或音色再配（写 replaces 换掉这段）。"
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            val why = speechFailText(e, p, "配音")
+            updateMessage(convId, msgId) { it.copy(tools = it.tools + ToolStep("speech", text.take(200), ok = false, note = why)) }
+            "配音没做成：$why。可以换个模型再试，或者告诉用户。"
+        }
+    }
+
     /** 对话里的图（从新到旧，文件名不分大小写）；name 空 = 最近的一张。 */
     private fun convImage(convId: String, name: String): Attachment? {
         val all = snapshot(convId).asReversed().asSequence().flatMap { (it.attachments + it.quoted).asReversed().asSequence() }.filter { it.kind != AttachmentKind.DOCUMENT }
@@ -4105,9 +4255,9 @@ class Engine(
             }
             val done = withContext(Dispatchers.Default) {
                 val src = PhotoEdit.load(bytes) ?: throw PhotoEdit.Problem("这张图读不了（${sourceName}，格式不支持或者文件坏了）。")
-                val r = PhotoEdit.run(src, steps) { n ->
+                val r = PhotoEdit.runAll(src, steps, { n ->
                     convImage(convId, n)?.let { storage.fileBytes(it.id) }?.let { b -> PhotoEdit.load(b) }
-                }
+                }) { req -> redrawFor(msgId, req) }
                 var encoded = encodePixels(r.out)
                 var lossless = true
                 // 大照片存 PNG 太大（微信发不动）：换高质量 JPEG，框外肉眼看不出差别，但不再是一个像素不差
@@ -4173,8 +4323,8 @@ class Engine(
         // 快速 / 深度：按这家的参数切换思考；关不掉、开不了的不传，回答上也不标
         val thinking = if (llm.thinkingDropped(provider, model.id)) null else Thinking.params(Thinking.rule(provider, model.id), member.thinking)
         if (thinking != null) updateMessage(convId, msg.id, persist = false) { it.copy(modelLabel = it.modelLabel + "· " + Thinking.label(member.thinking)) }
-        val hasImageModel = ImagePick.resolve(state).isNotEmpty()
-        val hasVideo = VideoPick.resolve(state) != null
+        val hasImageModel = ImagePick.resolve(media).isNotEmpty()
+        val hasVideo = VideoPick.resolve(media) != null
         val wantSearch = conv.webSearch
         // 用户这句话里贴了网址（比如抖音、小红书的分享链接）：没开「联网」也给读网页的工具（2026-10-23）
         val linkInAsk = snapshot(convId).lastOrNull { it.role == Role.USER }?.content?.contains("http") == true
@@ -4191,12 +4341,16 @@ class Engine(
         val officeOn = state.settings.office.enabled
         // 电脑上：任意文件 / 文件夹都能读（收录范围外的先问用户；微信、手机发起的不许）
         val filesOn = !isPhone && !wxChatOnly
+        // 配音（2026-11-03）：有一家能读出来的就给 generate_speech（只在本来就给工具时加，不为它单开工具）
+        val ttsOn = SpeechPick.forTts(media) != null
         val useTools = toolsOk && (wantSearch || hasImageModel || hasVideo || memOn || docsOn || officeOn || filesOn || model.vision)
+        val redrawOn = model.vision && useTools && MediaPick.editCandidates(media).isNotEmpty()
 
         try {
             val working = mutableListOf<JsonObject>()
             val sys = Prompts.system(state, conv, member, canSearch = wantSearch, canDraw = hasImageModel && useTools,
                 canSeeImages = model.vision, canEditImage = model.vision && useTools, independentRound = independent, calledBy = calledBy,
+                canRedraw = redrawOn, canSpeak = ttsOn && useTools, retryBudget = state.settings.imageGen.retryBudget,
                 nativeSearch = native != NativeSearch.NONE, hasImageModel = hasImageModel,
                 memories = if (memOn) Recorder.forPrompt(state.memories, conv.memoryTopic) else emptyList(), canRemember = memOn && useTools,
                 memoryTopic = if (memOn) conv.memoryTopic else "",
@@ -4223,7 +4377,8 @@ class Engine(
             // MCP 外部工具（2026-10-18）：电脑上对话栏也能用，和 Code 栏同一套
             val mcp = if (useTools && filesOn) runCatching { mcpTools() }.getOrDefault(emptyList()) else emptyList()
             val tools = if (useTools) JsonArray(toolDefs(fnSearch, fetch = wantSearch || linkInAsk,
-                listen = (wantSearch || linkInAsk) && (pageBrowser != null && speechTarget("", "", tts = false) != null || hostBrowser?.online == true), draw = hasImageModel, native = native, memory = memOn, docs = docsOn, office = officeOn, files = filesOn, video = hasVideo, photo = model.vision) +
+                listen = (wantSearch || linkInAsk) && (pageBrowser != null && speechTarget("", "", tts = false) != null || hostBrowser?.online == true), draw = hasImageModel, native = native, memory = memOn, docs = docsOn, office = officeOn, files = filesOn, video = hasVideo, photo = model.vision,
+                speak = ttsOn) +
                 mcp.map { (n, _, t) -> buildJsonObject {
                     put("type", "function")
                     putJsonObject("function") { put("name", n); put("description", ("（外部工具 ${t.name}）" + t.description).take(1000)); put("parameters", t.inputSchema) }
@@ -4554,7 +4709,8 @@ class Engine(
     }
 
     private fun toolDefs(search: Boolean, fetch: Boolean, draw: Boolean, native: NativeSearch, memory: Boolean = false, docs: Boolean = false,
-                         office: Boolean = false, files: Boolean = false, video: Boolean = false, listen: Boolean = false, photo: Boolean = false): JsonArray = buildJsonArray {
+                         office: Boolean = false, files: Boolean = false, video: Boolean = false, listen: Boolean = false, photo: Boolean = false,
+                         speak: Boolean = false): JsonArray = buildJsonArray {
         when (native) {
             NativeSearch.ZHIPU -> add(buildJsonObject {
                 put("type", "web_search")
@@ -4595,11 +4751,26 @@ class Engine(
                 buildJsonObject { put("url", prop("作品链接或视频地址")) }, listOf("url"))
         }
         if (draw) {
-            fn("generate_image", "根据文字描述画一张全新的图，画好后和你的回答一起给用户。它只认文字，看不到任何现有的图，所以改不了图：用户要改一张已有的图时不能用它，画出来会是另一张图。",
+            fn("generate_image", "根据文字描述画一张全新的图，画好后和你的回答一起给用户。它只认文字，看不到任何现有的图，所以改不了图：用户要改一张已有的图时不能用它，画出来会是另一张图。" +
+                "画出来不满意（字是乱的、画错了东西）可以换一个模型再画（model），写 replaces 换掉上一张，用户只收到最好的那张。",
                 buildJsonObject {
                     put("prompt", prop("画面描述：主体、风格、构图、光线、色彩，越具体越好"))
                     put("size", prop("可选，图片尺寸，如 1024x1024、1024x1792"))
+                    put("model", prop("可选，用哪个模型画，不填就用设置里的。能用的：" + modelsLine(ImagePick.candidates(media.providers))))
+                    put("replaces", prop("可选，这次回答里之前画的哪一张不要了（文件名），重画时写上，旧的就不发给用户"))
                 }, listOf("prompt"))
+        }
+        // 配音（2026-11-03）：用户要一段语音（读一段话、配个旁白）时用，做成音频文件发给用户
+        if (speak) {
+            fn("generate_speech", "把一段文字读成语音，做成音频文件，和你的回答一起给用户（微信里是一个文件）。用户要语音、要配音、要你读给他听的时候用；平常聊天不用。按字数收费，很便宜。" +
+                "你听不到读出来的效果，读错字、口音不对只能等用户说；用户说不满意可以换模型或音色再配，写 replaces 换掉上一段。",
+                buildJsonObject {
+                    put("text", prop("要读的话（只写要读出来的字，不要写说明）"))
+                    put("model", prop("可选，用哪个模型读，不填就用设置里的。能用的：" + MediaPick.speechCandidates(media).distinctBy { it.modelId }.take(8)
+                        .joinToString("；") { "${it.modelId}（${it.providerName}）" }))
+                    put("voice", prop("可选，音色（各家的音色名不一样，不知道就不填，用默认的）"))
+                    put("replaces", prop("可选，这次回答里之前配的哪一段不要了（文件名）"))
+                }, listOf("text"))
         }
         // P 图（2026-11-02）：程序直接改原图的像素，和画图是两回事。要看得见图才知道改哪儿
         if (photo) {
@@ -4608,9 +4779,13 @@ class Engine(
                 put("type", "array"); put("description", desc)
                 putJsonObject("items") { put("type", "number") }
             }
+            val editors = MediaPick.editCandidates(media)
             fn("edit_image", "P 图：程序直接改一张现有图片的像素，不走画图模型，没动到的地方一个像素都不变，不花钱，马上好。" +
                 "能做：擦掉字、水印、笔迹、小东西（erase），打码（mosaic、blur），盖一块颜色（fill），裁剪（crop），转方向（rotate），翻转（flip），缩放（resize），写字（text，改字就是先 erase 再 text），画框标注（mark），调亮度对比度（adjust），把另一张图的一块贴上来（paste）。" +
-                "做不了要凭空造内容的：换背景、换衣服、给人加东西；它也不是画板，别拿色块一块块拼画面（拼不像，还很费时间），这种就照实说。坐标都是像素，左上角是 0,0，按图片旁边写的尺寸算。做完程序会告诉你改了哪些像素，结果图也会给你看。用户说没收到时，resend 写 true 把这张图原样再发一次（不花钱）。",
+                (if (editors.isEmpty()) "做不了要凭空造内容的：换背景、换衣服、给人加东西；它也不是画板，别拿色块一块块拼画面（拼不像，还很费时间），这种就照实说。"
+                else "要凭空补内容的（复杂背景上去掉一样东西、框里加一样东西、换掉框里的东西）用 redraw：框里交给改图模型画，程序只把框里贴回原图，框外照样一个像素不变；这一步花钱（每次一张图的钱），模型补出来的是像、不是真的，要告诉用户。" +
+                    "框只框要改的那一小块（最多全图的一半），补得不好可以换个模型再补（model）。能不花钱做的（纯色背景擦字、从旁边贴一块草地盖住）先用不花钱的。整张换背景、换衣服这种框不出一小块的还是做不了；也别拿色块一块块拼画面。") +
+                "坐标都是像素，左上角是 0,0，按图片旁边写的尺寸算。做完程序会告诉你改了哪些像素，结果图也会给你看。用户说没收到时，resend 写 true 把这张图原样再发一次（不花钱）。",
                 buildJsonObject {
                     put("source", prop("要改哪张图：对话里图片旁边写的文件名。不填就是最近的一张。用户在图上画圈标位置、前面又有不带圈的原图时，填原图" + if (files) "；也可以是电脑上图片文件的完整路径" else ""))
                     put("resend", buildJsonObject { put("type", "boolean"); put("description", "true：什么也不改，把这张图原样再发一次") })
@@ -4622,10 +4797,15 @@ class Engine(
                             putJsonObject("properties") {
                                 put("op", buildJsonObject {
                                     put("type", "string")
-                                    putJsonArray("enum") { PhotoEdit.OPS.forEach { add(it) } }
-                                    put("description", "erase 擦除（纯色背景上框不用画得很准，字被切到也会整个擦掉，旁边的气泡、头像不动）；mosaic 打码；blur 模糊；fill 盖色块；crop 裁剪；rotate 顺时针转；flip 翻转；resize 缩放；text 写字（紧接着 erase 写时，位置、颜色、大小自动照擦掉的那段）；mark 画框或圈；adjust 调色；paste 贴图")
+                                    putJsonArray("enum") { (if (editors.isEmpty()) PhotoEdit.OPS - "redraw" else PhotoEdit.OPS).forEach { add(it) } }
+                                    put("description", "erase 擦除（纯色背景上框不用画得很准，字被切到也会整个擦掉，旁边的气泡、头像不动）；mosaic 打码；blur 模糊；fill 盖色块；crop 裁剪；rotate 顺时针转；flip 翻转；resize 缩放；text 写字（紧接着 erase 写时，位置、颜色、大小自动照擦掉的那段）；mark 画框或圈；adjust 调色；paste 贴图" +
+                                        if (editors.isEmpty()) "" else "；redraw 框里交给模型补画（花钱）")
                                 })
-                                put("box", box("[左, 上, 右, 下]，像素。erase、mosaic、blur、fill、crop、mark、paste 要给；text 紧接着 erase 时可以不给"))
+                                put("box", box("[左, 上, 右, 下]，像素。erase、mosaic、blur、fill、crop、mark、paste" + (if (editors.isEmpty()) "" else "、redraw") + " 要给；text 紧接着 erase 时可以不给"))
+                                if (editors.isNotEmpty()) {
+                                    put("prompt", prop("redraw：框里补成什么，写清楚和周围怎么接，比如「去掉这个人，补成和旁边一样的沙滩」「换成一只坐着的橘猫，光线和周围一样」"))
+                                    put("model", prop("redraw：用哪个模型补，不填用默认的。能用的：" + modelsLine(editors)))
+                                }
                                 put("color", prop("颜色，#RRGGBB 或 红 橙 黄 绿 青 蓝 紫 粉 黑 白 灰。erase 带上它就只擦框里这个颜色的笔迹（比如用户画的红圈），别的不动"))
                                 put("text", prop("text：要写的字"))
                                 put("size", num("text：字号（像素），紧接着 erase 时不用给；mosaic：格子大小"))
@@ -4656,9 +4836,11 @@ class Engine(
                 "可以只用文字描述，也可以带素材（media）：用图片当首帧 / 首尾帧（图生视频）；用图、视频、音频当参考（参考生视频，提示词里用「图1」「视频1」「音频1」按顺序指代）；" +
                 "给一段视频 + 提示词写明「编辑视频 / 去掉 / 替换 / 改成……」就是视频编辑，写明「向后延长 / 续写……」就是视频延长" +
                 (if (dashscope) "；给一个文档（docx、pdf、pptx、xlsx、txt、md 等）或一个公开网页，按里面的内容做视频" else "") +
-                "。首帧 / 尾帧不能和参考类混用。带输入视频的按「输入秒数 + 输出秒数」收费，比直接生成贵。程序会按素材自动挑能用的模型。",
+                "。首帧 / 尾帧不能和参考类混用。带输入视频的按「输入秒数 + 输出秒数」收费，比直接生成贵。不写 model 程序会按素材自动挑能用的模型。",
                 buildJsonObject {
                     put("prompt", prop("视频内容描述：主体、动作、场景、镜头运动、光线、风格、声音，越具体越好；编辑、延长时写清要怎么改、往哪边延长"))
+                    put("model", prop("可选，用哪个模型做，不填就用设置里的（素材收不了时自动换）。能用的：" + VideoPick.modelsFor(media.providers).joinToString("；") { it.id + "（" + it.label + "）" }))
+                    put("replaces", prop("可选，这次回答里之前做的哪一段视频不要了（文件名），重做时写上"))
                     put("duration", prop("可选，要做的秒数。用户没说就不填（默认 ${v.duration} 秒；带视频素材时默认智能时长，自动配合原视频）"))
                     put("ratio", prop("可选，画面比例：16:9、9:16、1:1、4:3、3:4、21:9，带素材时还可以 adaptive（跟素材一样）。用户没说就不填"))
                     put("media", buildJsonObject {
@@ -5488,21 +5670,31 @@ class Engine(
             }
             "generate_image" -> {
                 val prompt = args.str("prompt").orEmpty().ifBlank { return "参数错误：缺少 prompt" }
+                // AI 自己挑模型（2026-11-03）：写了 model 就只用它；没写照设置
+                val wanted = MediaPick.clean(args.str("model"))
+                val only = if (wanted.isEmpty()) null else MediaPick.image(media, wanted)
+                    ?: return "没有「$wanted」这个画图模型（或者没配它的 Key）。能用的：${modelsLine(ImagePick.candidates(media.providers))}。不写 model 就用设置里的。"
+                val planned = only ?: ImagePick.resolve(media).firstOrNull()
+                val cost = planned?.let { MediaPick.imageCost(state, it.providerId, it.modelId) } ?: 0.0
+                spendGate(msgId, cost, "画一张")?.let { return it }
                 try {
-                    val r = paintAuto(prompt, args.str("size"))
-                    updateMessage(convId, msgId) { it.copy(attachments = it.attachments + r.att, tools = it.tools + ToolStep("image", prompt)) }
+                    val r = paintAuto(prompt, args.str("size"), only)
+                    spent(msgId, cost)
+                    updateMessage(convId, msgId) { it.copy(attachments = it.attachments + r.att, tools = it.tools + ToolStep("image", prompt, note = "用的是 ${r.label}")) }
+                    val swapped = replaceOld(convId, msgId, args.str("replaces"), r.att.id)
                     // 画完给它看一眼（2026-11-02：以前它从来看不到自己画了什么，画错了也说「做好了」）
                     val look = seen != null && imageDataUrl(r.att)?.also { seen += "你刚画好的《${r.att.name}》" to it } != null
-                    "图片已生成（用的是 ${r.label}），会和你的回答一起给用户。" +
-                        if (look) "结果图附在下一条消息里，对照用户要的看一眼：对了简单说一句；画错了东西、字是乱的就照实说，别说画好了。" else "你看不到结果，简单说画好了，请用户看看对不对。"
+                    "图片已生成：《${r.att.name}》（用的是 ${r.label}，约 ${MediaPick.yuan(cost)} 元），会和你的回答一起给用户。$swapped" +
+                        if (look) "结果图附在下一条消息里，对照用户要的看一眼：对了简单说一句；画错了东西、字是乱的就照实说，别说画好了，也可以换个模型重画（model + replaces）。" else "你看不到结果，简单说画好了，请用户看看对不对。"
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Throwable) {
                     updateMessage(convId, msgId) { it.copy(tools = it.tools + ToolStep("image", prompt, ok = false, note = friendlyError(e))) }
-                    "画图失败：${friendlyError(e)}。请告诉用户。"
+                    "画图失败：${friendlyError(e)}。可以换个模型再试，或者告诉用户。"
                 }
             }
             "edit_image" -> editImage(convId, msgId, args, seen)
+            "generate_speech" -> makeSpeech(convId, msgId, args)
             "generate_video" -> makeVideo(convId, msgId, args)
             "remember" -> {
                 val text = args.str("text").orEmpty()

@@ -546,6 +546,19 @@ object SpeechText {
     /** 这段话有多少秒（不是能认出来的 wav 返回 null）。 */
     fun secondsOf(bytes: ByteArray): Double? = parseWav(bytes)?.seconds
 
+    /**
+     * 几段同样格式的 wav 接成一段（AI 配音存成一个文件用，2026-11-03）。同一家同一个音色读出来的格式一样；
+     * 有一段认不出、或者格式对不上就返回 null（不硬拼，拼了声音会变形）。
+     */
+    fun joinWav(parts: List<ByteArray>): ByteArray? {
+        val ws = parts.map { parseWav(it) ?: return null }
+        val f = ws.firstOrNull() ?: return null
+        if (ws.any { it.sampleRate != f.sampleRate || it.channels != f.channels || it.bits != f.bits }) return null
+        val data = java.io.ByteArrayOutputStream()
+        ws.forEach { data.write(it.data) }
+        return wavOf(f.sampleRate, f.channels, f.bits, data.toByteArray())
+    }
+
     /** 按采样率、声道、位深拼一个 wav（16 位 PCM，44 字节的头部）。 */
     fun wavOf(w: Wav): ByteArray = wavOf(w.sampleRate, w.channels, w.bits, w.data)
 

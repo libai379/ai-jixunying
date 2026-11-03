@@ -148,6 +148,12 @@ object Prices {
                 note = "按不思考的输出价算；开了思考输出贵很多（≤128K 档 8 元）")
             m.startsWith("qwen-image-3.0-pro") -> img(0.25)
             m.startsWith("qwen-image-3.0") -> img(0.18)
+            // 改图用的几个（千问AI平台「模型价格」model-prices.md 2026-11-03 原文，元 / 张；改图另收「图片输入」0.02 元 / 张，记账时没算进去）
+            m.startsWith("qwen-image-2.0-pro") -> img(0.5)
+            m.startsWith("qwen-image-2.0") -> img(0.2)
+            m.startsWith("qwen-image-2.1-pro") -> img(0.25)
+            m.startsWith("qwen-image-2.1-turbo") -> img(0.1)
+            m.startsWith("wanx2.1-imageedit") -> img(0.14)
             m.startsWith("wan2.7-image-pro") -> img(0.5)
             m.startsWith("wan2.7-image") || m.startsWith("wan2.6-image") || m.startsWith("wan2.6-t2i") -> img(0.2)
             // 做视频按秒，模型名后面带档位（VideoPick.billingModel）。阿里云百炼官方价格页华北 2（北京）2026-10-20 原文；

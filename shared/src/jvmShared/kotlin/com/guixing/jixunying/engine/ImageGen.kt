@@ -15,6 +15,7 @@ import kotlinx.coroutines.delay
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.add
+import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
@@ -162,6 +163,57 @@ class ImageGen(private val proxyOf: (ProviderConfig) -> String?) {
         return Result(bytes, mime, revised, note)
     }
 
+    /**
+     * 改图（2026-11-03，P 图里「补画」那一步用）：把一张图和一句话交给能改图的模型，返回整张新图；框外由 PhotoEdit 贴回原图，
+     * 所以模型动没动框外都不要紧。只接了千问AI平台 / 阿里百炼，出处 docs/参考资料.md「用户充值的千问AI平台能怎么改图」：
+     * - qwen-image-2.x / 3.x：multimodal-generation，content 里 image + text；size「宽*高」，总像素 512×512～2048×2048
+     * - wan2.7-image(-pro)：同一个接口；parameters.bbox_list 框出要改的地方（「原始图片的绝对像素坐标」，一张图最多 2 个框），
+     *   size 总像素 768×768～2048×2048
+     * - wanx2.1-imageedit：image2image/image-synthesis，只能异步；function = description_edit_with_mask，遮罩白色是要改的、
+     *   「蒙版图像的尺寸应与原始图像一致」，原图宽高各 512～4096
+     * image 统一传 JPEG（wan2.7 写明「PNG（不支持 Alpha 通道）」）。尺寸由调用的地方按上面的范围准备好。
+     */
+    suspend fun edit(provider: ProviderConfig, model: String, image: ByteArray, prompt: String, size: String, box: IntArray?, mask: ByteArray?): Result {
+        if (protocolOf(provider) != Protocol.DASHSCOPE) throw IllegalStateException("${provider.name} 的改图还没接：现在只能用千问AI平台或阿里百炼的模型改图")
+        val client = Http.client(proxyOf(provider))
+        val m = model.lowercase()
+        val img = "data:image/jpeg;base64," + Base64.getEncoder().encodeToString(image)
+        if (m.startsWith("wanx2.1-imageedit")) {
+            val body = buildJsonObject {
+                put("model", model)
+                putJsonObject("input") {
+                    put("function", if (mask != null) "description_edit_with_mask" else "description_edit")
+                    put("prompt", prompt)
+                    put("base_image_url", img)
+                    if (mask != null) put("mask_image_url", "data:image/png;base64," + Base64.getEncoder().encodeToString(mask))
+                }
+                putJsonObject("parameters") { put("n", 1) }
+            }
+            return dashScopeRun(client, provider, "/api/v1/services/aigc/image2image/image-synthesis", body, preferAsync = true)
+        }
+        val body = buildJsonObject {
+            put("model", model)
+            putJsonObject("input") {
+                putJsonArray("messages") {
+                    add(buildJsonObject {
+                        put("role", "user")
+                        putJsonArray("content") {
+                            add(buildJsonObject { put("image", img) })
+                            add(buildJsonObject { put("text", prompt) })
+                        }
+                    })
+                }
+            }
+            putJsonObject("parameters") {
+                put("n", 1); put("watermark", false); put("size", size)
+                if (box != null && m.startsWith("wan2.7")) putJsonArray("bbox_list") {
+                    add(buildJsonArray { add(buildJsonArray { box.forEach { add(it) } }) })
+                }
+            }
+        }
+        return dashScopeRun(client, provider, "/api/v1/services/aigc/multimodal-generation/generation", body, preferAsync = false)
+    }
+
     // —— 阿里百炼 / 千问AI平台：千问图像、通义万相 ——
     private suspend fun dashScope(client: HttpClient, p: ProviderConfig, model: String, prompt: String, size: String): Result {
         val m = model.lowercase()
@@ -186,16 +238,20 @@ class ImageGen(private val proxyOf: (ProviderConfig) -> String?) {
                 put("size", size.replace('x', '*')); put("n", 1); put("watermark", false); put("prompt_extend", true)
             }
         }
+        // 千问图像、新版万相（multimodal-generation、image-generation）官方文档是同步调用；老的 text2image 只能异步
+        return dashScopeRun(client, p, path, body, preferAsync = !(qwenStyle || newWan))
+    }
+
+    /** 千问AI平台 / 百炼：提交（同步或异步，被拒而且说的是同步 / 异步的问题就换另一种再试一次）、等任务做完、取图。 */
+    private suspend fun dashScopeRun(client: HttpClient, p: ProviderConfig, path: String, body: JsonObject, preferAsync: Boolean): Result {
         suspend fun submit(async: Boolean) = client.post(root(p) + path) {
             header("Authorization", "Bearer ${p.apiKey.trim()}")
             if (async) header("X-DashScope-Async", "enable")
             contentType(ContentType.Application.Json)
             setBody(body.toString())
         }
-        // 千问图像、新版万相（multimodal-generation、image-generation）官方文档是同步调用；老的 text2image 只能异步。
         // 先按文档的方式来，被拒而且报错说的是同步 / 异步的问题，就换另一种再试一次。
         // 千问AI平台对不支持异步的接口回 403「current user api does not support asynchronous calls」（2026-10-08 实测），不只是 400。
-        val preferAsync = !(qwenStyle || newWan)
         var resp = submit(async = preferAsync)
         if (resp.status.value == 400 || resp.status.value == 403) {
             val text = resp.bodyAsText()

@@ -988,6 +988,18 @@ private fun ImagePage(ctl: AppController, state: AppState) {
             style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, modifier = Modifier.padding(top = 6.dp))
     }
     Spacer(Modifier.height(12.dp))
+    // AI 自己换模型再试（2026-11-03 用户：「如果一张图修不好，让他多试几个，随便调用各种模型和工具」）
+    SectionCard {
+        FieldLabel("AI 换模型再试", "画得不好、P 得不好时，AI 会自己换一个模型再做。每次回答第一次不算，之后累计最多再花这么多（按价格表估，画图、P 图、视频、配音一起算）")
+        FlowRowCompat {
+            listOf(0.0 to "不再试", 1.0 to "1 元", 2.0 to "2 元", 5.0 to "5 元", 10.0 to "10 元").forEach { (v, label) ->
+                Box(Modifier.padding(end = 6.dp, bottom = 6.dp)) {
+                    ToggleChip(label, Icons.Rounded.Brush, ig.retryBudget == v) { save { it.copy(retryBudget = v) } }
+                }
+            }
+        }
+    }
+    Spacer(Modifier.height(12.dp))
     SectionCard {
         FieldLabel("默认尺寸", "AI 也可以按你说的比例改")
         FlowRowCompat {

@@ -13,6 +13,7 @@ import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
+import kotlin.math.sqrt
 
 /** 一张图的像素：ARGB，一行接一行。 */
 class Pixels(val w: Int, val h: Int, val argb: IntArray) {
@@ -25,17 +26,20 @@ class Pixels(val w: Int, val h: Int, val argb: IntArray) {
  * 就算把原图传给改图模型也不行：千问官方文档写的是重新出一张总像素约 1024×1024 的图，没有圈范围的参数（docs/参考资料.md「P 图」）。
  *
  * 所以这里不走任何模型：程序直接改原图的像素，没动到的地方一个像素都不变，不花钱，手机电脑一样跑。
+ * 例外是「补画」（redraw，2026-11-03）：框里要凭空补内容的才交给改图模型，程序只把框里贴回去，框外照样一个像素不变（见 blendBack）。
  * AI 只负责看图、说改哪里；改完程序自己比对改了多少、在哪，结果图再给 AI 看一眼，对了才算做好。
  * 坐标用「AI 看到的那张图」的像素（发给模型的图长边不超过 VIEW_SIDE，见 Engine.imageDataUrl），这里换算回原图。
  */
 object PhotoEdit {
     const val VIEW_SIDE = 1600
     const val MAX_STEPS = 20
+    /** 补画的框最多占全图多少（2026-11-03 训练：整张框进去等于整张重画，要留的东西也变了）。 */
+    const val MAX_REDRAW_SHARE = 0.5
 
     /** 回给模型的话（参数不对、位置不对之类），不是程序出错。 */
     class Problem(message: String) : Exception(message)
 
-    val OPS = listOf("erase", "mosaic", "blur", "fill", "crop", "rotate", "flip", "resize", "text", "mark", "adjust", "paste")
+    val OPS = listOf("erase", "mosaic", "blur", "fill", "crop", "rotate", "flip", "resize", "text", "mark", "adjust", "paste", "redraw")
 
     // ———————————————— 读图 ————————————————
 
@@ -695,13 +699,123 @@ object PhotoEdit {
     private val OP_NAMES = mapOf(
         "erase" to "擦除", "mosaic" to "打码", "blur" to "模糊", "fill" to "盖色块", "crop" to "裁剪", "rotate" to "转方向",
         "flip" to "翻转", "resize" to "缩放", "text" to "写字", "mark" to "标注", "adjust" to "调色", "paste" to "贴图",
+        "redraw" to "补画", "repaint" to "补画", "inpaint" to "补画",
     )
 
+    // ———————————————— 补画（2026-11-03）————————————————
+
     /**
-     * 按顺序做 steps。other：按文件名找对话里的另一张图（paste 用）。
+     * 补画：框里交给改图模型画（用户：「让 AI 也能调用模型……如果一张图修不好，让他多试几个」）。
+     * 这里只管截哪一块、怎么贴回去；挑模型、管花钱上限、缩放到模型要的尺寸在 Engine。
+     * crop：截好的一块（框四周带一圈参照）；box：框在这一块里的位置。
+     */
+    class RedrawRequest(val crop: Pixels, val box: IntArray, val prompt: String, val model: String?)
+
+    /** pixels：模型改好的这一块（和 crop 一样大）；label：用的哪个模型；note：给 AI 的话（花了多少钱之类）。 */
+    class RedrawResult(val pixels: Pixels, val label: String, val note: String = "")
+
+    /**
+     * 截哪一块给模型：框四周各留框长边的一半（48～640 像素）当参照，模型才补得和周围接得上；
+     * 长宽比不超过 3:1（万相 2.7 要 1:8～8:1，千问不超过 10:1，留余量），不够就把短的一边再放宽。
+     */
+    fun redrawCrop(w: Int, h: Int, b: IntArray): IntArray {
+        val m = (max(b[2] - b[0], b[3] - b[1]) / 2).coerceIn(48, 640)
+        var x0 = max(0, b[0] - m); var y0 = max(0, b[1] - m); var x1 = min(w, b[2] + m); var y1 = min(h, b[3] + m)
+        var guard = 0
+        while ((x1 - x0) > (y1 - y0) * 3 && (y0 > 0 || y1 < h) && guard++ < 4) {
+            val need = (x1 - x0) / 3 - (y1 - y0) + 1
+            val up = min(y0, (need + 1) / 2); y0 -= up; y1 = min(h, y1 + need - up)
+        }
+        guard = 0
+        while ((y1 - y0) > (x1 - x0) * 3 && (x0 > 0 || x1 < w) && guard++ < 4) {
+            val need = (y1 - y0) / 3 - (x1 - x0) + 1
+            val left = min(x0, (need + 1) / 2); x0 -= left; x1 = min(w, x1 + need - left)
+        }
+        return intArrayOf(x0, y0, x1, y1)
+    }
+
+    /** 等比缩放到总像素在 [minTotal, maxTotal] 里（不到 target 的放大到 target），宽高取 step 的倍数。千问、万相 2.7 用。 */
+    fun fitArea(w: Int, h: Int, minTotal: Int, maxTotal: Int, target: Int = 1024 * 1024, step: Int = 16): Pair<Int, Int> {
+        val area = w.toDouble() * h
+        val want = area.coerceAtLeast(target.toDouble()).coerceIn(minTotal.toDouble(), maxTotal.toDouble())
+        val s = sqrt(want / area)
+        var nw = max(step, (w * s / step).roundToInt() * step); var nh = max(step, (h * s / step).roundToInt() * step)
+        while (nw.toLong() * nh > maxTotal) { if (nw >= nh) nw -= step else nh -= step }
+        while (nw.toLong() * nh < minTotal) { if (nw <= nh) nw += step else nh += step }
+        return nw to nh
+    }
+
+    /** 等比缩放到每边在 [minSide, maxSide] 里（万相 2.1 通用图像编辑要宽高各 512～4096）。 */
+    fun fitSides(w: Int, h: Int, minSide: Int, maxSide: Int): Pair<Int, Int> {
+        var s = max(1.0, minSide.toDouble() / min(w, h))
+        if (max(w, h) * s > maxSide) s = maxSide.toDouble() / max(w, h)
+        return max(1, (w * s).roundToInt()) to max(1, (h * s).roundToInt())
+    }
+
+    /** 遮罩：框里白（要改的），框外黑（不动的）。 */
+    fun maskOf(w: Int, h: Int, b: IntArray): Pixels {
+        val black = (0xFF shl 24)
+        val out = IntArray(w * h) { black }
+        for (y in max(0, b[1]) until min(h, b[3])) for (x in max(0, b[0]) until min(w, b[2])) out[y * w + x] = black or 0xFFFFFF
+        return Pixels(w, h, out)
+    }
+
+    /**
+     * 把模型改好的这一块贴回去：只贴框里，框外一个像素不动。
+     * 先量框外那圈参照（模型本该不动的地方）整体偏了多少颜色：偏得小又整齐（每个通道平均不超过 24、散得不超过 24，
+     * 像是模型整张图调了色）就从贴进来的里扣掉，免得整块发灰发黄、接缝明显；偏得大或者乱（模型把那圈也重画了）就不扣，免得把要的内容扣坏；
+     * 框边上留一条渐变（框短边的十分之一，2～24 像素）接住；框贴着图边的那一边不用渐变（外面没东西要接）。
+     * 返回给 AI 的一句（扣了颜色才有）。
+     */
+    fun blendBack(p: Pixels, crop: IntArray, box: IntArray, r: Pixels): String {
+        val cw = crop[2] - crop[0]; val ch = crop[3] - crop[1]
+        require(r.w == cw && r.h == ch) { "补画回来的大小不对" }
+        val sum = LongArray(3); val sq = LongArray(3); var n = 0
+        for (y in 0 until ch) for (x in 0 until cw) {
+            if (x >= box[0] - 3 && x < box[2] + 3 && y >= box[1] - 3 && y < box[3] + 3) continue
+            val o = p.argb[(crop[1] + y) * p.w + crop[0] + x]; val m = r.argb[y * cw + x]
+            for (c in 0..2) { val sh = 16 - 8 * c; val d = (m shr sh and 255) - (o shr sh and 255); sum[c] += d.toLong(); sq[c] += d.toLong() * d }
+            n++
+        }
+        val off = IntArray(3)
+        if (n >= 64) {
+            val mean = DoubleArray(3) { sum[it].toDouble() / n }
+            val spread = DoubleArray(3) { sqrt((sq[it].toDouble() / n - mean[it] * mean[it]).coerceAtLeast(0.0)) }
+            if (spread.all { it <= 24.0 } && mean.all { abs(it) <= 24.0 }) for (c in 0..2) off[c] = mean[c].roundToInt()
+        }
+        val bw = box[2] - box[0]; val bh = box[3] - box[1]
+        val f = (min(bw, bh) / 10).coerceIn(2, 24)
+        val openL = crop[0] + box[0] <= 0; val openT = crop[1] + box[1] <= 0
+        val openR = crop[0] + box[2] >= p.w; val openB = crop[1] + box[3] >= p.h
+        for (y in box[1] until box[3]) for (x in box[0] until box[2]) {
+            var d = Int.MAX_VALUE
+            if (!openL) d = min(d, x - box[0]); if (!openR) d = min(d, box[2] - 1 - x)
+            if (!openT) d = min(d, y - box[1]); if (!openB) d = min(d, box[3] - 1 - y)
+            val t = if (d == Int.MAX_VALUE) 1.0 else ((d + 0.5) / f).coerceIn(0.0, 1.0)
+            val a = t * t * (3 - 2 * t)
+            val k = (crop[1] + y) * p.w + crop[0] + x
+            val o = p.argb[k]; val m = r.argb[y * cw + x]
+            var v = o and (0xFF shl 24)
+            for (c in 0..2) {
+                val sh = 16 - 8 * c
+                val ov = o shr sh and 255
+                val mv = ((m shr sh and 255) - off[c]).coerceIn(0, 255)
+                v = v or ((ov + (mv - ov) * a).roundToInt().coerceIn(0, 255) shl sh)
+            }
+            p.argb[k] = v
+        }
+        return if (off.any { it != 0 }) "模型回来的这块整体偏了颜色（红绿蓝 ${off.joinToString("/")}），贴回去时扣掉了。" else ""
+    }
+
+    /** 只有程序自己改像素的操作（没有补画）时用；有补画要走 runAll。 */
+    fun run(src: Pixels, steps: List<JsonObject>, other: (String) -> Pixels?): Outcome =
+        kotlinx.coroutines.runBlocking { runAll(src, steps, other, null) }
+
+    /**
+     * 按顺序做 steps。other：按文件名找对话里的另一张图（paste 用）；redraw：补画交给谁（null = 这里不能补画）。
      * 坐标按 AI 看到的尺寸写；裁剪以后从裁剪后的左上角算起；resize 以后按新尺寸算。
      */
-    fun run(src: Pixels, steps: List<JsonObject>, other: (String) -> Pixels?): Outcome {
+    suspend fun runAll(src: Pixels, steps: List<JsonObject>, other: (String) -> Pixels?, redraw: (suspend (RedrawRequest) -> RedrawResult)?): Outcome {
         if (steps.size > MAX_STEPS) throw Problem("一次最多 $MAX_STEPS 步，这次写了 ${steps.size} 步。这个工具不是画板，一块块拼画面拼不像；真做不了就照实告诉用户。")
         var p = src.copy()
         var scale = max(src.w, src.h).toDouble().let { if (it > VIEW_SIDE) it / VIEW_SIDE else 1.0 }
@@ -818,6 +932,25 @@ object PhotoEdit {
                         }
                     }
                     did += "贴上《$name》到 ${view(b)}"
+                }
+                "redraw", "repaint", "inpaint" -> {
+                    val cb = redraw ?: throw Problem("redraw（框里交给模型补画）这里用不了：没有能改图的模型。")
+                    val b = boxOf(s, "box", p, scale, op)!!
+                    // 11-03 训练：让换背景，好几位把整张图（99.99%）框进去交给模型，真模型会把要留的猫也重画掉
+                    val share = (b[2] - b[0]).toDouble() * (b[3] - b[1]) / (p.w.toDouble() * p.h)
+                    if (share > MAX_REDRAW_SHARE) throw Problem("redraw 一次最多补全图的一半，这次框了 ${(share * 100).roundToInt()}%。" +
+                        "框这么大，要留的东西（人、猫、字）也在框里，会被模型重画掉。整张换背景、换风格这种框不出一小块的，补画也做不了：" +
+                        "照实告诉用户；用户同意的话可以用 generate_image 照着描述重画一张，并说清楚是重画的。")
+                    val prompt = s.txt("prompt", "text", "content", "instruction", "what")
+                        ?: throw Problem("redraw 要写 prompt：框里补成什么，比如「补成和旁边一样的草地」「换成一只坐着的橘猫」。")
+                    val c = redrawCrop(p.w, p.h, b)
+                    val piece = crop(p, c)
+                    val inBox = intArrayOf(b[0] - c[0], b[1] - c[1], b[2] - c[0], b[3] - c[1])
+                    val r = cb(RedrawRequest(piece, inBox, prompt, s.txt("model")))
+                    val px = if (r.pixels.w == piece.w && r.pixels.h == piece.h) r.pixels else resize(r.pixels, piece.w, piece.h)
+                    blendBack(p, c, inBox, px).takeIf { it.isNotEmpty() }?.let { notes += it }
+                    if (r.note.isNotEmpty()) notes += r.note
+                    did += "补画 ${view(b)}（${r.label}）"
                 }
                 "" -> throw Problem("这一步没写 op：${s.toString().take(80)}。op 只能是 ${OPS.joinToString("、")}。")
                 else -> throw Problem("不认识的操作「$op」，只能是 ${OPS.joinToString("、")}。")

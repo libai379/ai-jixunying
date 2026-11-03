@@ -619,6 +619,7 @@ private fun ToolStepsView(tools: List<ToolStep>, streaming: Boolean) {
     val history = tools.count { it.kind == "history" }
     val memos = tools.count { it.kind == "memory" }
     val files = tools.count { it.kind == "file" }
+    val voices = tools.count { it.kind == "speech" }
     val summary = buildList {
         if (files > 0) add("做了 $files 个文件")
         if (searches > 0) add("联网搜了 $searches 次")
@@ -629,6 +630,7 @@ private fun ToolStepsView(tools: List<ToolStep>, streaming: Boolean) {
         if (images > 0) add("画了 $images 张图")
         if (photos > 0) add("P 了 $photos 次图")
         if (videos > 0) add("做了 $videos 段视频")
+        if (voices > 0) add("配了 $voices 段音")
     }.joinToString(" · ")
     val latest = tools.last()
     Column(Modifier.padding(bottom = 6.dp)) {
@@ -640,7 +642,7 @@ private fun ToolStepsView(tools: List<ToolStep>, streaming: Boolean) {
             Icon(Icons.Rounded.Language, null, Modifier.size(14.dp), tint = MaterialTheme.colorScheme.primary)
             Spacer(Modifier.width(6.dp))
             Text(
-                if (streaming) "$summary · ${if (latest.kind == "wait") latest.input else "正在" + if (latest.kind == "fetch") "读网页" else if (latest.kind == "image") "画图" else if (latest.kind == "photo") "P 图" else if (latest.kind == "video") "做视频" else "搜「${latest.input.take(16)}」"}…" else summary,
+                if (streaming) "$summary · ${if (latest.kind == "wait") latest.input else "正在" + if (latest.kind == "fetch") "读网页" else if (latest.kind == "image") "画图" else if (latest.kind == "photo") "P 图" else if (latest.kind == "video") "做视频" else if (latest.kind == "speech") "配音" else "搜「${latest.input.take(16)}」"}…" else summary,
                 style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 520.dp),
             )
@@ -672,6 +674,8 @@ private fun ToolStepView(t: ToolStep) {
         "calendar" -> Icons.Rounded.History to (if (t.ok) "查日历 ${t.input.take(40)}" else "日历查不到 ${t.input.take(40)}")
         // P 图：程序直接改原图（2026-11-02）
         "photo" -> Icons.Rounded.Edit to (if (t.ok) "P 图：${t.input.take(40)}" else "P 图没成：${t.note.ifBlank { t.input }.take(40)}")
+        // 配音（2026-11-03）
+        "speech" -> Icons.Rounded.Mic to ((if (t.ok) "配音：" else "配音没成：") + t.input.take(30) + if (t.note.isNotBlank()) " · ${t.note.take(30)}" else "")
         else -> Icons.Rounded.Brush to (if (t.ok) "画图：${t.input.take(40)}" else "画图失败")
     }
     Column(Modifier.padding(bottom = 6.dp)) {

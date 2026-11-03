@@ -2,6 +2,7 @@ package com.guixing.jixunying.engine
 
 import com.guixing.jixunying.model.AppState
 import com.guixing.jixunying.model.Conversation
+import com.guixing.jixunying.model.MediaPick
 import com.guixing.jixunying.model.Member
 import com.guixing.jixunying.model.ReplyMode
 import java.time.format.DateTimeFormatter
@@ -75,6 +76,12 @@ object Prompts {
         canCalendar: Boolean = false,
         /** 能用 edit_image P 图（要能看图、能调工具）。 */
         canEditImage: Boolean = false,
+        /** P 图里能用 redraw 交给改图模型补画（有千问AI平台 / 百炼的 Key，2026-11-03）。 */
+        canRedraw: Boolean = false,
+        /** 能用 generate_speech 配音（2026-11-03）。 */
+        canSpeak: Boolean = false,
+        /** AI 换模型再试：每次回答再试最多花多少钱（元，ImageGenSettings.retryBudget）。 */
+        retryBudget: Double = 2.0,
     ): String {
         val profile = state.profile
         val others = conv.memberIds.filter { it != me.id }.mapNotNull { state.member(it) }
@@ -140,9 +147,16 @@ object Prompts {
             appendLine("- 用户发来的文档（PDF、Word、Excel、PPT、代码、文本等）已经转成文字放在消息里，标有「附件」字样。")
             // P 图和画图是两回事（2026-11-02 用户：「现在的接口都是画图，我需要就是 P 图的……它不可能画准的」）。
             // 这里以前写「用户要图片、要改图时调用 generate_image」「改成……就重新画」，AI 就拿只认文字的画图工具「改」用户的截图，连画四张假截图，每次都说做好了
-            if (canEditImage) appendLine("- 你能 P 图：用户要改一张已有的图（去掉字、水印、笔迹，打码，裁剪，转方向，改字，标注，调亮度，拼图），用 edit_image。程序直接改原图的像素，没动到的地方一个像素都不变，不花钱，马上好。先看清楚要动哪里，按图的尺寸写坐标。")
+            if (canEditImage) appendLine("- 你能 P 图：用户要改一张已有的图（去掉字、水印、笔迹，打码，裁剪，转方向，改字，标注，调亮度，拼图），用 edit_image。程序直接改原图的像素，没动到的地方一个像素都不变，不花钱，马上好。先看清楚要动哪里，按图的尺寸写坐标。" +
+                if (canRedraw) "框里要凭空补内容的（复杂背景上去掉一样东西、框里加一样东西、换掉框里的东西）用 edit_image 的 redraw：框里交给改图模型画，程序只把框里贴回原图，框外照样不变；这一步花一张图的钱，补出来的是像、不是真的，要告诉用户。能不花钱的（纯色背景上擦字、打码、裁剪）别用 redraw。" else "")
             if (canDraw) appendLine("- 你能画新图：用户要一张新图时调用 generate_image，提示词要具体（主体、风格、构图、光线、色彩）。它只认文字，看不到任何现有的图，画出来永远是另一张，所以不能用它改用户的图、截图、照片。" +
-                if (canEditImage) "换背景、换衣服、加东西这种要凭空造内容的，edit_image 也做不了，拿色块一块块拼也拼不像：直接照实说，不用试；用户要的话可以照着描述重画一张，并且说清楚这是新画的，人和细节都会变。你自己画的图，用户说「改成……」就调整描述重画，也说一声是重画的。" else "用户要改已有的图时照实说做不了。")
+                if (canEditImage) (if (canRedraw) "整张换背景、换衣服这种框不出一块来的，edit_image 也做不了，拿色块一块块拼也拼不像：直接照实说，不用试；" else "换背景、换衣服、加东西这种要凭空造内容的，edit_image 也做不了，拿色块一块块拼也拼不像：直接照实说，不用试；") +
+                    "用户要的话可以照着描述重画一张，并且说清楚这是新画的，人和细节都会变。你自己画的图，用户说「改成……」就调整描述重画，也说一声是重画的。" else "用户要改已有的图时照实说做不了。")
+            if (canSpeak) appendLine("- 你能配音：用户要语音、要你读一段话、要配旁白时，调用 generate_speech 做成音频文件发给他（很便宜）。平常聊天不用。你听不到读出来的效果。")
+            // AI 自己挑模型（2026-11-03 用户：「让 AI 也能调用模型……如果一张图修不好，让他多试几个，随便调用各种模型和工具」）
+            if (canDraw || canRedraw || canVideo || canSpeak) appendLine("- 画图、补画、做视频、配音都能自己挑模型（工具里的 model，列着能用的和大概价钱），不写就用设置里的。" +
+                "做出来不满意（你看得到图：字是乱的、画错了、补得有接缝）就换一个模型再试，写 replaces 换掉不要的，用户只收到最好的；同一件事试了两三个还不行就停下照实说。" +
+                "再试有花钱上限：每次回答第一次不算，之后累计不超过 ${MediaPick.yuan(retryBudget)} 元，到了程序会拦。换过模型的，告诉用户试了哪几个、最后用的哪个、大约花了多少钱。")
             else if (hasImageModel) appendLine("- 你这个模型不会调用工具，没法自己画图。用户要图时，请他点输入框上的「直接画图」，再描述画面。")
             else appendLine("- 你现在不能画图：用户还没接入能画图的服务商。用户要图时告诉他：到 设置 → 模型服务 添加任意一家能画图的平台并填 Key（智谱开放平台的 cogview-3-flash 免费，MiniMax 的 image-01、豆包 Seedream 也行），加好之后直接说「画一张……」就行，不用别的设置。")
             if (canVideo) appendLine("- 你可以做短视频：用户明确要视频时调用 generate_video（按秒收费、要等一到几分钟，所以用户没要视频就别做）。描述写清主体、动作、场景、镜头和声音。" +
