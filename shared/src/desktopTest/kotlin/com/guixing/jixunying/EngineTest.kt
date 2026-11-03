@@ -72,8 +72,10 @@ import kotlin.test.assertTrue
 
 /** 用一个假的模型服务器把引擎跑一遍；联机用进程内的 MQTT 服务器（Moquette）代替公共中转。 */
 class EngineTest {
-    private val requests = Collections.synchronizedList(mutableListOf<JsonObject>())
-    private val imageRequests = Collections.synchronizedList(mutableListOf<String>())
+    // 假服务在别的线程往里加，测试一边等一边翻（requests.none { … }）：synchronizedList 翻的时候不加锁会抛
+    // ConcurrentModificationException（2026-11-03 councilMode 全量跑时偶发两次，单跑过），换成边翻边加也不出错的
+    private val requests = java.util.concurrent.CopyOnWriteArrayList<JsonObject>()
+    private val imageRequests = java.util.concurrent.CopyOnWriteArrayList<String>()
     /** 假的视频任务查了几次（第一次 RUNNING，之后 SUCCEEDED）。 */
     private val videoPolls = java.util.concurrent.atomic.AtomicInteger()
     private val mp4 = ByteArray(2048) { (it % 251).toByte() }
