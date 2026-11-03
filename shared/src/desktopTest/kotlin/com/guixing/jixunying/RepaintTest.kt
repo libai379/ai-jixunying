@@ -10,6 +10,7 @@ import com.guixing.jixunying.engine.encodePixels
 import com.guixing.jixunying.model.AppState
 import com.guixing.jixunying.model.Attachment
 import com.guixing.jixunying.model.AttachmentKind
+import com.guixing.jixunying.model.ChannelPart
 import com.guixing.jixunying.model.Command
 import com.guixing.jixunying.model.ImageGenSettings
 import com.guixing.jixunying.model.MediaPick
@@ -20,6 +21,7 @@ import com.guixing.jixunying.model.MsgStatus
 import com.guixing.jixunying.model.ProviderConfig
 import com.guixing.jixunying.model.Role
 import com.guixing.jixunying.model.Settings
+import com.guixing.jixunying.model.USER_ID
 import com.guixing.jixunying.model.VideoGenSettings
 import com.guixing.jixunying.model.VideoMediaUse
 import io.ktor.http.ContentType
@@ -38,12 +40,16 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import org.bytedeco.ffmpeg.global.avcodec
+import org.bytedeco.javacv.FFmpegFrameRecorder
+import org.bytedeco.javacv.Java2DFrameConverter
 import java.awt.Color
 import java.awt.image.BufferedImage
 import java.io.File
@@ -56,6 +62,7 @@ import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -73,7 +80,24 @@ class RepaintTest {
     private val edits = Collections.synchronizedList(mutableListOf<Pair<String, JsonObject>>())
     private val painted = Collections.synchronizedList(mutableListOf<String>())
     private val spoken = Collections.synchronizedList(mutableListOf<String>())
+    private val videoAsks = Collections.synchronizedList(mutableListOf<String>())
     private val served = ConcurrentHashMap<String, ByteArray>()
+
+    /** 一段 3 秒的真视频（FFmpeg 现做，MPEG-4，前一半红、后一半蓝，没有声音）：假万相做出来的就是它。 */
+    private val clip: ByteArray by lazy {
+        val f = File(dir, "clip-src.mp4")
+        val r = FFmpegFrameRecorder(f, 320, 240)
+        r.format = "mp4"; r.videoCodec = avcodec.AV_CODEC_ID_MPEG4; r.frameRate = 10.0; r.videoBitrate = 400_000
+        r.start()
+        val conv = Java2DFrameConverter()
+        repeat(30) { i ->
+            val img = BufferedImage(320, 240, BufferedImage.TYPE_3BYTE_BGR)
+            val g = img.createGraphics(); g.color = if (i < 15) Color(220, 30, 30) else Color(30, 30, 220); g.fillRect(0, 0, 320, 240); g.dispose()
+            r.record(conv.convert(img))
+        }
+        r.stop(); r.release()
+        f.readBytes().also { f.delete() }
+    }
     private lateinit var fake: EmbeddedServer<*, *>
     private var port = 0
     private lateinit var dir: File
@@ -147,6 +171,16 @@ class RepaintTest {
                     val b = encodePixels(flat(64, 64, if (painted.size == 1) 0x3366CC else 0xCC6633))
                     call.respondText("""{"data":[{"b64_json":"${Base64.getEncoder().encodeToString(b)}"}]}""", ContentType.Application.Json)
                 }
+                // 假万相做视频（只有异步）：做出来的是一段真的小视频（clip），程序要从里面取得出画面
+                post("/api/v1/services/aigc/video-generation/video-synthesis") {
+                    videoAsks += call.receiveText()
+                    call.respondText("""{"request_id":"r","output":{"task_id":"rv","task_status":"PENDING"}}""", ContentType.Application.Json)
+                }
+                get("/api/v1/tasks/rv") {
+                    call.respondText("""{"output":{"task_id":"rv","task_status":"SUCCEEDED","video_url":"http://127.0.0.1:$port/vid/clip.mp4"},"usage":{"duration":3.0,"output_video_duration":3.0,"video_count":1}}""",
+                        ContentType.Application.Json)
+                }
+                get("/vid/clip.mp4") { call.respondBytes(clip, ContentType.parse("video/mp4")) }
                 // 假智谱读出来：回一段 wav
                 post("/zhipu/v4/audio/speech") {
                     val body = Json.parseToJsonElement(call.receiveText()).jsonObject
@@ -452,5 +486,135 @@ class RepaintTest {
         assertNotNull(SpeechText.parseWav(Storage(dir).fileBytes(att.id)!!))
         assertEquals("speech", a.tools.single().kind)
         assertTrue("generate_speech" in requests[0]["tools"].toString())
+    }
+
+    // —— 做好的视频自己看一遍（2026-11-03 用户：「我要每次生成视频他也要看一遍」）——
+
+    private fun msgs(r: JsonObject) = r["messages"]!!.jsonArray.map { it.jsonObject }
+
+    private fun imagesIn(m: JsonObject) = (m["content"] as? JsonArray)?.count { (it as? JsonObject)?.get("type")?.jsonPrimitive?.content == "image_url" } ?: 0
+
+    private fun contentText(el: JsonElement?): String = when (el) {
+        is JsonPrimitive -> el.contentOrNull.orEmpty()
+        is JsonArray -> el.mapNotNull { (it as? JsonObject)?.get("text")?.jsonPrimitive?.contentOrNull }.joinToString("\n")
+        else -> ""
+    }
+
+    private suspend fun videoWorld(): Engine {
+        System.setProperty("jxy.videoPollMs", "30")
+        val e = world()
+        e.call(Command.SaveSettings(e.state.settings.copy(videoGen = e.state.settings.videoGen.copy(enabled = true))))
+        return e
+    }
+
+    /** 做好就看：取 6 张画面记在附件上，下一条消息里给它看，工具结果让它对照着说；下一轮聊天记录里还带 3 张，写在程序记录里。 */
+    @Test
+    fun watchesTheVideoItMade() = runBlocking {
+        val e = videoWorld()
+        val conv = e.newChat()
+        script += "generate_video" to """{"prompt":"红布慢慢变成蓝布","duration":"3"}"""
+        script += "" to "做好了，看了一遍：前面红、后面蓝。"
+        e.call(Command.SendMessage(conv, "做一段红布变蓝布的视频"))
+        val a = e.answer(conv)
+        assertEquals(MsgStatus.DONE, a.status, a.error)
+        assertEquals(1, videoAsks.size)
+        val v = a.attachments.single()
+        assertTrue(v.isVideo && v.generated, v.toString())
+        assertEquals(6, v.frames.size, "画面记在附件上：$v")
+        assertTrue(v.seconds in 2..4, v.toString())
+        assertTrue("没有声音" in v.note, v.note)
+        // 做好后那次请求：工具结果说看了几张、要照实说；紧跟一条带 6 张画面的消息（工具结果里放不了图）
+        val after = requests[1]
+        val tool = toolResults(after).last()
+        assertTrue("视频做好了" in tool && "取了 6 张画面" in tool && "照实说" in tool && "《${v.name}》" in tool, tool)
+        val shown = msgs(after).last()
+        assertEquals(6, imagesIn(shown))
+        assertTrue("你刚做好的《${v.name}》的 6 张画面" in contentText(shown["content"]), contentText(shown["content"]))
+        // 取的画面是按时间先后的：头一张红，最后一张蓝
+        val urls = (shown["content"] as JsonArray).mapNotNull { (it as? JsonObject)?.get("image_url")?.jsonObject?.get("url")?.jsonPrimitive?.content }
+        fun rgb(u: String) = javax.imageio.ImageIO.read(Base64.getDecoder().decode(u.substringAfter(",")).inputStream()).let { Color(it.getRGB(it.width / 2, it.height / 2)) }
+        assertTrue(rgb(urls.first()).red > 150 && rgb(urls.last()).blue > 150, "${rgb(urls.first())} / ${rgb(urls.last())}")
+
+        // 下一轮：这段视频带 3 张画面，写在程序记录（user）里，不写进它自己的话
+        script += "" to "前面红后面蓝。"
+        e.call(Command.SendMessage(conv, "刚才那段怎么样"))
+        e.answer(conv)
+        val all = msgs(requests.last())
+        val texts = all.joinToString("\n") { contentText(it["content"]) }
+        assertTrue("你上面这条回答发给用户的视频：${v.name}" in texts && "附了其中 3 张画面" in texts, texts.takeLast(800))
+        assertEquals(3, all.sumOf { imagesIn(it) })
+        all.filter { it["role"]?.jsonPrimitive?.content == "assistant" }.forEach {
+            assertFalse(v.name in contentText(it["content"]), it.toString())
+            assertEquals(0, imagesIn(it))
+        }
+    }
+
+    /** 以前做的、没看过的视频（这个功能以前做的那三段）：用户再问时先看一遍，最近三段各带 3 张画面；每段只读一次。 */
+    @Test
+    fun oldVideosAreWatchedBeforeAnswering() = runBlocking {
+        val st = Storage(dir)
+        val e = videoWorld()
+        val conv = e.newChat()
+        val t = System.currentTimeMillis()
+        val list = mutableListOf<Message>()
+        // 照用户 11-03 那段微信对话排：三段视频中间夹着问话，第一段到再问「哪个好」隔了 14 条
+        fun say(text: String) { list += Message("u${list.size}", conv, Role.USER, USER_ID, text, createdAt = t - 600_000 + list.size * 10_000) }
+        fun reply(text: String, video: Int? = null) {
+            val atts = video?.let { i ->
+                val model = listOf("wan3.0-video", "MiniMax-H3-Max", "happyhorse-1.1-t2v")[i]
+                listOf(Attachment("old$i", "视频_10000$i.mp4", "video/mp4", clip.size.toLong(), AttachmentKind.DOCUMENT, note = "15 秒 · 1080P · $model", generated = true)
+                    .also { st.putFile(it, clip, null) })
+            }.orEmpty()
+            list += Message("a${list.size}", conv, Role.AI, "m1", text, createdAt = t - 600_000 + list.size * 10_000, attachments = atts,
+                channelParts = atts.map { ChannelPart("w${list.size}", attachmentId = it.id) })
+        }
+        say("你生成一个美女跳舞的视频"); reply("好了，用的万相。", 0)
+        say("还有其他的什么模型"); reply("还有海螺、HappyHorse。")
+        say("在用海螺 H3 Max 做一个试试"); reply("好了，海螺 H3 Max。", 1)
+        say("还有一个模型 用那个模型，1.1"); reply("好了，HappyHorse 1.1。", 2)
+        say("这是个什么模型？哪家的？"); reply("阿里的。")
+        say("你觉得这三个视频哪个好"); reply("这三条的画面我这边没读到。")
+        say("你为什么读不到"); reply("生成工具没把画面回传给我。")
+        st.saveMessages(conv, list)
+        // 新开一个引擎读盘（上面那个已经把这个对话的空记录放在内存里了）
+        st.saveState(e.state)
+        val e2 = Engine(st, isPhone = true)
+        e2.call(Command.LoadMessages(conv))
+        script += "" to "第一段最好。"
+        e2.call(Command.SendMessage(conv, "这三个视频哪个好"))
+        e2.answer(conv)
+        val all = msgs(requests.last())
+        val texts = all.joinToString("\n") { contentText(it["content"]) }
+        for (i in 0..2) assertTrue("发给用户的视频：视频_10000$i.mp4" in texts, texts.takeLast(1500))
+        assertTrue("已经发到微信" in texts && "附了其中 3 张画面" in texts, texts.takeLast(1500))
+        assertEquals(9, all.filter { it["role"]?.jsonPrimitive?.content == "user" }.sumOf { imagesIn(it) }, "三段各 3 张")
+        all.filter { it["role"]?.jsonPrimitive?.content == "assistant" }.forEach { assertEquals(0, imagesIn(it)) }
+        // 读过的记在附件上；再问一句不再读
+        val made = e2.store.messages.value[conv]!!.filter { it.role == Role.AI && it.attachments.isNotEmpty() }.map { it.attachments.single() }
+        assertEquals(listOf(6, 6, 6), made.map { it.frames.size })
+        val frameFiles = File(dir, "files").listFiles()!!.count { it.name.endsWith(".json") }
+        script += "" to "还是第一段。"
+        e2.call(Command.SendMessage(conv, "确定吗"))
+        e2.answer(conv)
+        assertEquals(frameFiles, File(dir, "files").listFiles()!!.count { it.name.endsWith(".json") }, "没有再取一遍画面")
+    }
+
+    /** 一次回答里重做视频：replaces 换掉的那段，取过的画面一起删掉。 */
+    @Test
+    fun replacedVideoTakesItsFramesAlong() = runBlocking {
+        val e = videoWorld()
+        val conv = e.newChat()
+        script += "generate_video" to """{"prompt":"第一版","duration":"3"}"""
+        script += "generate_video" to """{"prompt":"第二版","duration":"3","replaces":"{{last}}"}"""
+        script += "" to "换成第二版了。"
+        e.call(Command.SendMessage(conv, "做一段视频"))
+        val a = e.answer(conv)
+        assertEquals(2, videoAsks.size)
+        val kept = a.attachments.single()
+        assertEquals(6, kept.frames.size)
+        assertTrue("换掉了" in toolResults(requests[2]).last(), toolResults(requests[2]).last())
+        // 文件区里只剩留下的那段和它的 6 张画面
+        val ids = File(dir, "files").listFiles()!!.filter { it.name.endsWith(".json") }.map { it.name.removeSuffix(".json") }.toSet()
+        assertEquals(setOf(kept.id) + kept.frames, ids)
     }
 }

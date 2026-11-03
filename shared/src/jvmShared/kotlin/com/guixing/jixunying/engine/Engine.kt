@@ -1883,6 +1883,7 @@ class Engine(
             if (c.makeVideo) videoDirect(conv.id, userMsg, c.text.trim(), paths)
             else if (c.drawImage) drawDirect(conv.id, userMsg) else {
                 digestVideosIn(userMsg)
+                digestRecentMade(conv.id)
                 runTurn(conv.id, userMsg)
                 // 答完以后在后台：聊天太长就压缩，攒够了就挑出值得长期记住的
                 scope.launch { afterTurn(conv.id) }
@@ -3691,6 +3692,7 @@ class Engine(
         val before = snapshot(convId).map { it.id }.toHashSet()
         val job = scope.async(if (onBusy != null) BusyNotice(onBusy) else kotlin.coroutines.EmptyCoroutineContext) {
             added.forEach { digestVideosIn(it) }
+            digestRecentMade(convId)
             runTurn(convId, userMsg)
         }
         running.getOrPut(convId) { ConcurrentHashMap.newKeySet() }.add(job)
@@ -3873,7 +3875,7 @@ class Engine(
      * 素材（media）：这个对话里的图 / 视频 / 文件（按名字）、电脑上的文件（路径，读的规矩和 read_document 一样）、公开网址；
      * 设置里选的模型收不了这些素材时自动换能收的（VideoPick.resolve），发之前本地先查一遍（VideoMedia.check）。
      */
-    private suspend fun makeVideo(convId: String, msgId: String, args: JsonObject): String {
+    private suspend fun makeVideo(convId: String, msgId: String, args: JsonObject, seen: MutableList<Pair<String, String>>? = null): String {
         val prompt = args.str("prompt").orEmpty().ifBlank { return "参数错误：缺少 prompt" }
         val v = state.settings.videoGen
         if (VideoPick.resolve(media) == null) return "做视频没开，或者没有能用的服务商（要千问AI平台、阿里百炼或 MiniMax 中国版的 Key）。请告诉用户到 设置 → 画图和视频 里看看。"
@@ -3896,6 +3898,7 @@ class Engine(
         val cost = MediaPick.videoCost(state, p.id, VideoPick.billingModel(choice.model.id, VideoPick.resolutionFor(choice.model, v.resolution)), estSecs)
         spendGate(msgId, cost, "做一段视频")?.let { return it }
         var swapped = ""
+        var made: Attachment? = null
         val stepId = newId()
         fun step(persist: Boolean = false, f: (ToolStep) -> ToolStep) =
             updateMessage(convId, msgId, persist) { m -> m.copy(tools = m.tools.map { if (it.id == stepId) f(it) else it }) }
@@ -3928,14 +3931,13 @@ class Engine(
             updateMessage(convId, msgId) { m -> m.copy(attachments = m.attachments + att, tools = m.tools.map { if (it.id == stepId) it.copy(note = note + extra) else it }) }
             spent(msgId, cost)
             swapped = replaceOld(convId, msgId, args.str("replaces"), att.id)
-            return "$note，文件名 $name"
+            made = att
+            return "$note，文件名《$name》"
         }
         var taskId: String? = null
-        return try {
-            val r = videos.generate(p, choice.model.id, prompt, v.resolution, duration, ratio, v.audio, inputs, onTask = { taskId = it }) { s -> step { it.copy(note = s) } }
-            val note = keep(r)
-            val sw = if (choice.switched.isEmpty()) "" else "。${choice.switched}，要告诉用户"
-            "视频做好了（$note，约 ${MediaPick.yuan(cost)} 元）$sw。已经显示给用户，点一下就能播放。${swapped}简单说一句就行，不用再描述画面。"
+        // 做视频这一段单独 try：后面「看一遍」时用户点停止，不能当成视频还在做（会再下载一份、再挂一次）
+        val done = try {
+            keep(videos.generate(p, choice.model.id, prompt, v.resolution, duration, ratio, v.audio, inputs, onTask = { taskId = it }) { s -> step { it.copy(note = s) } })
         } catch (e: CancellationException) {
             // 用户点了停止：还在排队就取消（不收费）；已经在生成的取消不了，在后台接着等，做好了照样放回这条回答（反正要收钱）
             withContext(NonCancellable) {
@@ -3952,6 +3954,8 @@ class Engine(
                         scope.launch(tag ?: kotlin.coroutines.EmptyCoroutineContext) {
                             try {
                                 keep(videos.await(p, choice.model.id, id, res, secs, images), "（点停止之后做完的）")
+                                // 回答已经停了，这次没人看；画面照样取好，以后几轮聊天记录里带得上
+                                made?.let { digestMade(convId, msgId, it) }
                             } catch (e2: VideoGen.DownloadFailed) {
                                 bill(e2.usage, e2.resolution)
                                 step(true) { it.copy(ok = false, note = "停了之后做完了（已按 ${VideoMedia.fmt(e2.seconds)} 秒收费），但是${e2.message}") }
@@ -3966,12 +3970,70 @@ class Engine(
         } catch (e: VideoGen.DownloadFailed) {
             bill(e.usage, e.resolution)
             step(true) { it.copy(ok = false, note = e.message.orEmpty()) }
-            "视频做好了（已按 ${VideoMedia.fmt(e.seconds)} 秒收费），但是${e.message}。请如实告诉用户。"
+            return "视频做好了（已按 ${VideoMedia.fmt(e.seconds)} 秒收费），但是${e.message}。请如实告诉用户。"
         } catch (e: Throwable) {
             step(true) { it.copy(ok = false, note = friendlyError(e)) }
-            "做视频失败：${friendlyError(e)}。请告诉用户。"
+            return "做视频失败：${friendlyError(e)}。请告诉用户。"
+        }
+        val sw = if (choice.switched.isEmpty()) "" else "。${choice.switched}，要告诉用户"
+        // 做好了先自己看一遍再说话（2026-11-03 用户：「我要每次生成视频他也要看一遍」）
+        val look = made?.let { watchMade(convId, msgId, it, seen) }.orEmpty()
+        return "视频做好了（${done}，约 ${MediaPick.yuan(cost)} 元）${sw}。已经显示给用户，点一下就能播放。${swapped}${look}"
+    }
+
+    /** AI 做好的视频取画面、听声音（和用户发来的视频同一套 digestVideo），记在附件上并换进那条回答；没读成返回 null（原因记日志）。 */
+    private suspend fun digestMade(convId: String, msgId: String, att: Attachment): Attachment? {
+        val done = try {
+            withTimeoutOrNull(3 * 60_000) { digestVideo(att) }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            storage.log("JxyVideo", "${att.name} 没读成：${e.message?.take(300)}")
+            null
+        } ?: return null
+        updateMessage(convId, msgId) { m -> m.copy(attachments = m.attachments.map { if (it.id == done.id) done else it }) }
+        return done
+    }
+
+    /**
+     * 做好的视频自己看一遍（2026-11-03 用户：「我要每次生成视频他也要看一遍」。以前它从来没看过自己做的视频，
+     * 用户问三段哪个好，它只知道文件名、模型和时长）。能看图的模型这一轮就在下一条消息里看到画面，听到的话写在工具结果里；
+     * 以后几轮聊天记录里也带（buildHistory 的 seeMade）。返回接在工具结果后面的话。
+     */
+    private suspend fun watchMade(convId: String, msgId: String, att: Attachment, seen: MutableList<Pair<String, String>>?): String {
+        val done = digestMade(convId, msgId, att) ?: return "程序没读成这段视频，你没看到成片：别描述画面、别说效果好，简单说做好了，请用户看看。"
+        val urls = if (seen == null) emptyList() else done.frames.mapNotNull { id -> storage.fileBytes(id)?.let { "data:image/jpeg;base64," + Base64.getEncoder().encodeToString(it) } }
+        // 一组画面只写一次说明（seen 里说明是空的不写）
+        urls.forEachIndexed { i, u -> seen?.add((if (i == 0) "你刚做好的《${done.name}》的 ${urls.size} 张画面（按时间先后）" else "") to u) }
+        val heard = storage.fileText(done.id)?.trim().orEmpty()
+        return buildString {
+            append(when {
+                urls.isNotEmpty() -> "程序从成片里按时间先后取了 ${urls.size} 张画面，附在下一条消息里给你看"
+                seen == null -> "你这个模型看不了图，看不到画面"
+                else -> "画面没取到"
+            })
+            if (heard.isNotEmpty()) append("；里面的声音转成文字是（可能有同音错字，背景音乐的歌词也会被听进来）：「${heard.take(1500)}」")
+            if (done.note.isNotBlank()) append("（读视频的记录：${done.note}）")
+            append(if (urls.isNotEmpty()) "。对照用户要的看一眼：好的话用一两句说说看到了什么；有明显毛病（脸或身体变形、手指不对、前后不像同一个人、穿帮、字是乱的、和要求不符）就照实说，别说做得很好，也可以换个模型重做（model + replaces）。"
+                else "。你没看到成片：别描述画面、别说效果好，简单说做好了，请用户看看。")
         }
     }
+
+    /**
+     * 最近几段 AI 做的视频还没读过的（这个功能以前做的、点停止后才做完的）先读一遍，聊天记录里才带得上画面。
+     * 回答前调；一段视频这次运行只试一次（解不开的不会每句话都再试）。
+     */
+    private suspend fun digestRecentMade(convId: String) {
+        val todo = snapshot(convId).takeLast(MADE_VIDEO_WINDOW)
+            .filter { it.role == Role.AI && it.status == MsgStatus.DONE }
+            .flatMap { m -> m.attachments.filter { it.isVideo && it.generated && it.frames.isEmpty() && it.seconds == 0 }.map { m to it } }
+            .takeLast(MADE_VIDEOS_SHOWN)
+            .filter { madeTried.add(it.second.id) }
+        for ((m, a) in todo) digestMade(convId, m.id, a)
+    }
+
+    /** digestRecentMade 这次运行试过的视频（附件编号）。 */
+    private val madeTried: MutableSet<String> = ConcurrentHashMap.newKeySet()
 
     /**
      * generate_video 的 media 参数：[{"use": "first_frame", "source": "图片_123.png"}, …]。
@@ -4108,6 +4170,8 @@ class Engine(
         }
         val g = gone ?: return "（replaces 写的《$n》不是这次回答里做的，没换掉。）"
         storage.deleteFile(g.id)
+        // 换掉的视频看过的话，取的画面一起删
+        g.frames.forEach { storage.deleteFile(it) }
         photoRoots.remove(g.id)
         return "旧的《${g.name}》换掉了，不发给用户。"
     }
@@ -4460,7 +4524,7 @@ class Engine(
                 if (seen.isNotEmpty()) working += buildJsonObject {
                     put("role", "user")
                     putJsonArray("content") {
-                        add(buildJsonObject { put("type", "text"); put("text", "（工具给你看的图，不是用户发的：" + seen.joinToString("、") { it.first } + "）") })
+                        add(buildJsonObject { put("type", "text"); put("text", "（工具给你看的图，不是用户发的：" + seen.map { it.first }.filter { it.isNotBlank() }.joinToString("、") + "）") })
                         seen.forEach { (_, url) -> add(buildJsonObject { put("type", "image_url"); putJsonObject("image_url") { put("url", url) } }) }
                     }
                 }
@@ -4838,7 +4902,7 @@ class Engine(
         if (video) {
             val v = state.settings.videoGen
             val dashscope = VideoPick.candidates(state.providers).any { VideoPick.vendorOf(it) == VideoPick.DASHSCOPE }
-            fn("generate_video", "做一段短视频（按秒收费，比画图贵；要一到几分钟），做好后会显示给用户、点开就能播放。只在用户明确要视频时用。" +
+            fn("generate_video", "做一段短视频（按秒收费，比画图贵；要一到几分钟），做好后会显示给用户、点开就能播放，程序还会从成片里取几张画面、听一遍声音给你看。只在用户明确要视频时用。" +
                 "可以只用文字描述，也可以带素材（media）：用图片当首帧 / 首尾帧（图生视频）；用图、视频、音频当参考（参考生视频，提示词里用「图1」「视频1」「音频1」按顺序指代）；" +
                 "给一段视频 + 提示词写明「编辑视频 / 去掉 / 替换 / 改成……」就是视频编辑，写明「向后延长 / 续写……」就是视频延长" +
                 (if (dashscope) "；给一个文档（docx、pdf、pptx、xlsx、txt、md 等）或一个公开网页，按里面的内容做视频" else "") +
@@ -5531,6 +5595,11 @@ class Engine(
         /** 一段视频取几张画面、长边多大（给模型看，够认内容就行，省 token）。 */
         const val VIDEO_FRAMES = 6
         const val VIDEO_FRAME_SIDE = 1024
+        /** AI 做的视频（2026-11-03）：聊天记录里带最近几段的画面、每段几张，只带最近多少条消息里的。 */
+        const val MADE_VIDEOS_SHOWN = 3
+        const val MADE_VIDEO_FRAMES = 3
+        // 20：用户 11-03 那三段从第一段到问「哪个好」隔了 13 条，12 条就漏了第一段
+        const val MADE_VIDEO_WINDOW = 20
 
         /** 补全文件名时不进去翻的文件夹。 */
         val SKIP_DIRS = setOf(".git", "node_modules", "build", ".gradle", ".idea", "dist", "out", "target", ".venv", "venv", "__pycache__", ".next", ".kotlin")
@@ -5703,7 +5772,7 @@ class Engine(
             }
             "edit_image" -> editImage(convId, msgId, args, seen)
             "generate_speech" -> makeSpeech(convId, msgId, args)
-            "generate_video" -> makeVideo(convId, msgId, args)
+            "generate_video" -> makeVideo(convId, msgId, args, seen)
             "remember" -> {
                 val text = args.str("text").orEmpty()
                 val kind = args.str("kind")?.trim()?.takeIf { it in Recorder.kinds } ?: "关于我"
@@ -5906,14 +5975,19 @@ class Engine(
         // 同一张图（原来那条 + 引用它的那条）只带最新的那次。视频的画面只带最近的一段，不然每句话都多花几张图的钱
         val seeImages = HashSet<String>()
         val seeFrames = HashSet<String>()
+        // AI 做的视频（自己的、别的成员的、「做视频」的）：最近几段各带几张画面（2026-11-03 用户问三段哪个好，它一张都没看过）
+        val seeMade = HashSet<String>()
         if (vision) {
             var imagesLeft = 6
             // 自己发过的图：最近两张也带上（2026-11-02：以前自己的图一律不给看，用户说「这张不对」时它根本不知道这张长什么样）
             var mineLeft = 2
             var framesLeft = VIDEO_FRAMES
+            var madeLeft = MADE_VIDEOS_SHOWN
             val taken = HashSet<String>()
-            for (m in picked.asReversed()) {
+            for ((i, m) in picked.withIndex().reversed()) {
                 val mine = m.role == Role.AI && m.senderId == me.id
+                // 做的视频太早了不带画面：不然之后每句话都多花几张图的钱
+                val recent = picked.size - i <= MADE_VIDEO_WINDOW
                 for (a in (m.attachments + m.quoted).asReversed()) {
                     if (a.kind != AttachmentKind.DOCUMENT) {
                         if ((if (mine) mineLeft > 0 else m.role == Role.USER || a.kind == AttachmentKind.GENERATED_IMAGE) && imagesLeft > 0 && taken.add(a.id)) {
@@ -5924,6 +5998,9 @@ class Engine(
                     } else if (a.frames.isNotEmpty() && m.role == Role.USER && a.frames.size <= framesLeft && taken.add(a.id)) {
                         seeFrames += m.id + "/" + a.id
                         framesLeft -= a.frames.size
+                    } else if (a.frames.isNotEmpty() && m.role == Role.AI && a.generated && recent && madeLeft > 0 && taken.add(a.id)) {
+                        seeMade += m.id + "/" + a.id
+                        madeLeft--
                     }
                 }
             }
@@ -5956,14 +6033,22 @@ class Engine(
             val imgs = mutableListOf<String>()
             val mineImgs = mutableListOf<String>()
             val mineNotes = mutableListOf<String>()
+            val mineVideos = mutableListOf<String>()
+            var mineFrames = 0
             for (a in m.attachments + m.quoted) {
                 val slot = m.id + "/" + a.id
                 when (a.kind) {
                     AttachmentKind.DOCUMENT -> {
                         val text = storage.fileText(a.id)
                         val limit = if (idx == lastUserIdx) 80_000 else 4_000
-                        if (a.isVideo) {
-                            appendVideo(a, text, limit, slot in seeFrames, vision, sb, imgs)
+                        if (a.isVideo && mine) {
+                            // 自己做的视频和自己画的图一样写进下面的程序记录（不写进它自己的话里，免得它学着写），画面附在那条后面
+                            val before = mineImgs.size
+                            mineVideos += madeVideoLine(a, text, m, slot in seeMade, vision, mineImgs)
+                            mineFrames += mineImgs.size - before
+                        } else if (a.isVideo) {
+                            appendVideo(a, text, limit, slot in seeFrames || slot in seeMade, vision, sb, imgs,
+                                if (slot in seeMade) spread(a.frames, MADE_VIDEO_FRAMES) else a.frames)
                         } else {
                             sb.append("\n\n[附件：").append(a.name).append("]")
                             if (text == null) sb.append("（读不出文字：").append(a.note).append("）")
@@ -5997,8 +6082,18 @@ class Engine(
                 }
             }
             parts += Part(if (mine) "assistant" else "user", sb.toString(), imgs)
-            if (mineNotes.isNotEmpty()) parts += Part("user", "（程序记录，不是用户说的：你上面这条回答发给用户的图：" + mineNotes.joinToString("；") +
-                (if (mineImgs.isNotEmpty()) "。图长这样，给你看的，不是用户又发了图" else "") + "）", mineImgs)
+            if (mineNotes.isNotEmpty() || mineVideos.isNotEmpty()) {
+                val said = listOfNotNull(
+                    mineNotes.takeIf { it.isNotEmpty() }?.let { "发给用户的图：" + it.joinToString("；") },
+                    mineVideos.takeIf { it.isNotEmpty() }?.let { "发给用户的视频：" + it.joinToString("；") })
+                val tail = when {
+                    mineImgs.isEmpty() -> ""
+                    mineFrames == 0 -> "。图长这样，给你看的，不是用户又发了图"
+                    mineFrames == mineImgs.size -> "。附的画面是从你做的视频里按时间先后取的，给你看的，不是用户又发了图"
+                    else -> "。附的图和视频画面是给你看的，不是用户又发了图"
+                }
+                parts += Part("user", "（程序记录，不是用户说的：你上面这条回答" + said.joinToString("；") + tail + "）", mineImgs)
+            }
         }
         // 合并相邻同角色消息（有的接口不允许连续两条 user）
         val merged = mutableListOf<Part>()
@@ -6024,7 +6119,8 @@ class Engine(
     }
 
     /** 一段视频写给模型的样子（对话页和 Code 栏共用）：时长、听到的话、画面（showFrames 时把图放进 imgs）、读不出来的原因。 */
-    private fun appendVideo(a: Attachment, text: String?, limit: Int, showFrames: Boolean, vision: Boolean, sb: StringBuilder, imgs: MutableList<String>) {
+    private fun appendVideo(a: Attachment, text: String?, limit: Int, showFrames: Boolean, vision: Boolean, sb: StringBuilder, imgs: MutableList<String>,
+                            frames: List<String> = a.frames) {
         sb.append("\n\n[视频：").append(a.name)
         if (a.seconds > 0) sb.append("，").append(a.seconds).append(" 秒")
         sb.append("]")
@@ -6034,11 +6130,37 @@ class Engine(
             sb.append("\n```")
         }
         if (showFrames) {
-            val urls = a.frames.mapNotNull { id -> storage.fileBytes(id)?.let { "data:image/jpeg;base64," + Base64.getEncoder().encodeToString(it) } }
+            val urls = frames.mapNotNull { id -> storage.fileBytes(id)?.let { "data:image/jpeg;base64," + Base64.getEncoder().encodeToString(it) } }
             imgs += urls
             sb.append("\n（这条消息附的图里有 ${urls.size} 张是从这段视频里按时间先后取的画面）")
         } else if (a.frames.isNotEmpty()) sb.append(if (vision) "\n（这段视频的画面这次没带上）" else "\n（这段视频的画面你看不到）")
         if (a.note.isNotBlank()) sb.append("\n（").append(a.note).append("）")
+    }
+
+    /** 自己做的视频在程序记录里的一句：名字和读视频的记录、发没发到微信、听到的话；show 时挑几张画面放进 imgs。 */
+    private fun madeVideoLine(a: Attachment, heard: String?, m: Message, show: Boolean, vision: Boolean, imgs: MutableList<String>): String {
+        val line = StringBuilder(a.name)
+        if (a.note.isNotBlank()) line.append("（").append(a.note).append("）")
+        if (m.channelParts.isNotEmpty()) line.append(if (m.channelParts.any { it.attachmentId == a.id }) "，已经发到微信" else "，发到微信没成功")
+        if (!heard.isNullOrBlank()) line.append("，里面的声音转成文字：「").append(heard.trim().take(600)).append("」")
+        val urls = if (!show) emptyList() else spread(a.frames, MADE_VIDEO_FRAMES).mapNotNull { id ->
+            storage.fileBytes(id)?.let { "data:image/jpeg;base64," + Base64.getEncoder().encodeToString(it) }
+        }
+        imgs += urls
+        line.append(when {
+            urls.isNotEmpty() -> "，附了其中 ${urls.size} 张画面"
+            a.frames.isEmpty() -> "，这段你没看过画面"
+            !vision -> "，你看不到画面"
+            else -> "，太早了这次没带画面"
+        })
+        return line.toString()
+    }
+
+    /** 从按时间排好的画面里均匀挑 n 张（头尾都要）。 */
+    private fun spread(frames: List<String>, n: Int): List<String> = when {
+        frames.size <= n -> frames
+        n <= 1 -> frames.take(n)
+        else -> List(n) { frames[it * (frames.size - 1) / (n - 1)] }
     }
 
     private fun stripThink(s: String) = s.replace(Regex("<think>[\\s\\S]*?</think>"), "").trim()
