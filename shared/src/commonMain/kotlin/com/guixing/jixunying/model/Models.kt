@@ -108,6 +108,8 @@ data class VideoGenSettings(
     val ratio: String = "16:9",
     /** 有声（wan3.0 能关；别的模型按它自己的默认）。 */
     val audio: Boolean = true,
+    /** 用户自己总结的做视频提示词写法（2026-11-03 用户：「我回头整理提示词」）：写进工具说明，AI 优先照它写。 */
+    val promptGuide: String = "",
 )
 
 /**

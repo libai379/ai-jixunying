@@ -1136,6 +1136,11 @@ private fun VideoSection(ctl: AppController, state: AppState) {
                 "点停止时，还在排队的任务会取消、不收费；已经开始生成的取消不了（千问只许取消排队中的），做完照样收费，视频还是会放回那条回答下面。" +
                 "实测提交后不到 3 秒就开始生成了，所以多数时候点停止已经来不及取消。",
             style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, modifier = Modifier.padding(top = 4.dp))
+        // 2026-11-03 用户：「根据提示词会变得非常真实……我回头整理提示词」
+        var guide by remember(v.promptGuide) { mutableStateOf(v.promptGuide) }
+        FieldLabel("你的提示词写法", "AI 写视频提示词时优先照这个（比如你试出来特别真实的写法、例子）。不填就照两家官方的写法")
+        AppTextField(guide, { guide = it.take(3000) }, singleLine = false, placeholder = "例：人物要写年龄、穿着；一律写「实拍，纪录片质感，手持镜头轻微晃动」……")
+        if (guide != v.promptGuide) Button(onClick = { save { it.copy(promptGuide = guide.trim()) } }, modifier = Modifier.padding(top = 6.dp)) { Text("保存") }
     }
 }
 

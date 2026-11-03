@@ -24,6 +24,7 @@ import com.guixing.jixunying.model.HistoryHit
 import com.guixing.jixunying.model.ImageChoice
 import com.guixing.jixunying.model.ImagePick
 import com.guixing.jixunying.model.MediaPick
+import com.guixing.jixunying.model.VideoPrompting
 import com.guixing.jixunying.model.VideoMediaUse
 import com.guixing.jixunying.model.VideoPick
 import com.guixing.jixunying.model.JudgePick
@@ -4836,7 +4837,9 @@ class Engine(
                 "可以只用文字描述，也可以带素材（media）：用图片当首帧 / 首尾帧（图生视频）；用图、视频、音频当参考（参考生视频，提示词里用「图1」「视频1」「音频1」按顺序指代）；" +
                 "给一段视频 + 提示词写明「编辑视频 / 去掉 / 替换 / 改成……」就是视频编辑，写明「向后延长 / 续写……」就是视频延长" +
                 (if (dashscope) "；给一个文档（docx、pdf、pptx、xlsx、txt、md 等）或一个公开网页，按里面的内容做视频" else "") +
-                "。首帧 / 尾帧不能和参考类混用。带输入视频的按「输入秒数 + 输出秒数」收费，比直接生成贵。不写 model 程序会按素材自动挑能用的模型。",
+                "。首帧 / 尾帧不能和参考类混用。带输入视频的按「输入秒数 + 输出秒数」收费，比直接生成贵。不写 model 程序会按素材自动挑能用的模型。" +
+                // 提示词写得好，同一个模型做出来真实得多（2026-11-03 用户）：按要用的模型给官方写法，用户自己的写法排最前
+                "提示词决定好坏，别只写一句话：" + VideoPrompting.guides(VideoPick.candidates(media.providers).mapNotNull { VideoPick.vendorOf(it) }.toSet(), v.promptGuide),
                 buildJsonObject {
                     put("prompt", prop("视频内容描述：主体、动作、场景、镜头运动、光线、风格、声音，越具体越好；编辑、延长时写清要怎么改、往哪边延长"))
                     put("model", prop("可选，用哪个模型做，不填就用设置里的（素材收不了时自动换）。能用的：" + VideoPick.modelsFor(media.providers).joinToString("；") { it.id + "（" + it.label + "）" }))

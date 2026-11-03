@@ -423,6 +423,20 @@ class RepaintTest {
         assertTrue(a.tools.first().note.contains("fake-b"), a.tools.first().note)
     }
 
+    /** 做视频的提示词写法：按有 Key 的那家给官方写法，用户自己的写法排最前。 */
+    @Test
+    fun videoToolCarriesPromptGuides() = runBlocking {
+        val e = world()
+        e.call(Command.SaveSettings(e.state.settings.copy(videoGen = e.state.settings.videoGen.copy(enabled = true, promptGuide = "我的写法：一律写实拍，手持镜头"))))
+        val conv = e.newChat()
+        script += "" to "好。"
+        e.call(Command.SendMessage(conv, "你好"))
+        e.answer(conv)
+        val video = requests[0]["tools"]!!.jsonArray.map { it.jsonObject["function"]!!.jsonObject }.first { it["name"]!!.jsonPrimitive.content == "generate_video" }["description"]!!.jsonPrimitive.content
+        assertTrue("我的写法：一律写实拍" in video && video.indexOf("我的写法") < video.indexOf("写给万相"), video)
+        assertTrue("固定机位" in video && "integrated_multimodal_description" !in video, "只有千问的 Key，不给 MiniMax 的写法")
+    }
+
     /** 配音：读成一个 wav 文件挂在回答上。 */
     @Test
     fun speechMakesAnAudioFile() = runBlocking {
