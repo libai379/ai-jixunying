@@ -64,7 +64,8 @@ object Presets {
         ProviderPreset("minimax", "MiniMax 中国版", GROUP_CN, "https://api.minimaxi.com/v1",
             // 下面几家的控制台地址 2026-10-12 换成了旧地址自动跳转到的新地址（curl -L 看最终网址），免得以后跳转撤了变 404
             "https://platform.minimax.cn/console/access?tab=api-keys",
-            listOf(m("MiniMax-M3", vision = true), img("image-01")), "M", 0xFFE5484D,
+            // 画图两个（2026-11-04 platform.minimaxi.com/docs/api-reference/image-generation-t2i 原文「可选值：image-01，image-01-live」）
+            listOf(m("MiniMax-M3", vision = true), img("image-01"), img("image-01-live")), "M", 0xFFE5484D,
             note = "MiniMax-M3 测评第 1；画图用 image-01"),
         ProviderPreset("mimo", "小米 MiMo", GROUP_CN, "https://api.xiaomimimo.com/v1",
             "https://platform.xiaomimimo.com/",
@@ -74,12 +75,26 @@ object Presets {
             // 旧地址 open.bigmodel.cn/usercenter/apikeys 登录后显示 404（用户 2026-10-12 手机截图），
             // 新地址出自官方快速上手 docs.bigmodel.cn/cn/guide/start/quick-start
             "https://bigmodel.cn/usercenter/proj-mgmt/apikeys",
-            listOf(m("glm-5.3"), m("GLM-5.3-Flash"), m("glm-4.6v", vision = true), img("cogview-4-250304"), img("cogview-3-flash")),
+            // 画图四个（2026-11-04 docs.bigmodel.cn 图像生成接口 model 的 enum：glm-image、cogview-4-250304、cogview-4、cogview-3-flash）
+            listOf(m("glm-5.3"), m("GLM-5.3-Flash"), m("glm-4.6v", vision = true),
+                img("glm-image"), img("cogview-4"), img("cogview-4-250304"), img("cogview-3-flash")),
             "Z", 0xFF1F2A44, note = "带官方联网搜索；画图 cogview-3-flash 免费",
             balanceUrl = "https://bigmodel.cn/finance-center/finance/overview"),
         ProviderPreset("qianwen", "千问AI平台（阿里）", GROUP_CN, "https://maas.qianwenaiapi.com/compatible-mode/v1",
             "https://platform.qianwenai.com/docs/api-reference/preparation/api-key",
-            listOf(m("qwen3.8-max"), img("qwen-image-3.0"), img("wan2.7-image")), "千", 0xFF6236FF,
+            // 画图：千问AI平台「图像生成模型」页的全部文生图模型（2026-11-04 原文 developer-guides/getting-started/image-models.md，
+            // 用户的 Key 逐个探过接口认不认，见 docs/参考资料.md「千问AI平台全部画图模型」）。不收的：wan2.6-image（文生图要流式）、
+            // 只能改图的 wan2.5-i2i-preview / wanx2.1-imageedit、涂鸦海报虚拟模特这些专用工具。kling/、vidu/ 是平台上的第三方，要先在控制台开通
+            listOf(m("qwen3.8-max"),
+                img("qwen-image-3.0-pro"), img("qwen-image-3.0"), img("qwen-image-2.1-pro"), img("qwen-image-2.1-turbo"),
+                img("qwen-image-2.0-pro"), img("qwen-image-2.0"),
+                img("wan2.7-image-pro"), img("wan2.7-image"), img("wan2.6-t2i"), img("wan2.5-t2i-preview"),
+                img("wan2.2-t2i-plus"), img("wan2.2-t2i-flash"), img("wanx2.1-t2i-plus"), img("wanx2.1-t2i-turbo"), img("wanx2.0-t2i-turbo"), img("wanx-v1"),
+                img("z-image-turbo"),
+                img("kling/kling-v3-image-generation"), img("kling/kling-v3-omni-image-generation"),
+                img("vidu/vidu-image_reference2image"), img("vidu/vidu-image-pro_reference2image"), img("vidu/vidu-image-lite_reference2image"),
+                img("vidu/viduq3-fast_reference2image"), img("vidu/viduq2-pro_reference2image"), img("vidu/viduq2-fast_reference2image")),
+            "千", 0xFF6236FF,
             note = "qwen3.8-max 即测评里的 Qwen3-Max；带官方联网搜索；画图千问图像 / 万相",
             balanceUrl = "https://platform.qianwenai.com/home"),
         ProviderPreset("moonshot", "Kimi 中国版", GROUP_CN, "https://api.moonshot.cn/v1",
@@ -201,6 +216,9 @@ object Presets {
 
     fun guessImageGen(model: String): Boolean {
         val s = model.lowercase()
+        // 平台上转卖的第三方（千问AI平台的 kling/…、vidu/…，2026-11-04）：名字里带 image 的才是画图（可灵、Vidu 也有视频）
+        if ('/' in s && ("kling" in s || "vidu" in s)) return "image" in s
+        if ("glm-image" in s) return true
         return listOf("cogview", "seedream", "kolors", "flux", "gpt-image", "dall-e", "wanx", "wan2.", "stable-diffusion", "qwen-image",
             "imagen", "image-01", "hy-image", "irag", "kling", "step-1x", "step-2x", "grok-2-image", "z-image").any { it in s }
     }

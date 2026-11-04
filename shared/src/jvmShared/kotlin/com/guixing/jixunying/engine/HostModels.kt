@@ -159,10 +159,13 @@ class HostModels(
         val host = remote.store.state.value
         val mine = engine.state
         var changed = false
-        for (hp in host.providers) {
-            if (hp.viaHost || !HostChatCodec.isLoopback(hp.baseUrl)) continue
+        val hostLocal = host.providers.filter { !it.viaHost && HostChatCodec.isLoopback(it.baseUrl) }
+        for (hp in hostLocal) {
             val old = mine.provider(hp.id)
             if (old != null && !old.viaHost) continue   // 手机上自己建过同号的，不碰
+            // 手机上删过的不再抄回来（2026-11-04 用户：「本地的那个模型……在模型列表里删掉，一直删不掉。删掉之后退出，再进入，还是在里面」）：
+            // 以前每 3 秒对一次，删了马上又抄回来（成员也跟着回来），SaveProvider 还把删除记录清掉了
+            if (old == null && mine.configDeleted.any { it.id == hp.id }) continue
             val copy = ProviderConfig(id = hp.id, presetId = hp.presetId, name = hp.name.removeSuffix("（电脑）") + "（电脑）",
                 baseUrl = hp.baseUrl, models = hp.models, enabled = hp.enabled, viaHost = true)
             if (old?.copy(updatedAt = 0) == copy) continue   // 改的时间（两端同步用）不算变
@@ -170,8 +173,17 @@ class HostModels(
             changed = true
             if (old == null) {
                 // 第一次抄过来：电脑上用它的成员也抄（同号）；以后手机上删了就不再加回来
-                host.members.filter { it.providerId == hp.id && mine.member(it.id) == null }
+                host.members.filter { it.providerId == hp.id && mine.member(it.id) == null && mine.configDeleted.none { d -> d.id == it.id } }
                     .forEach { engine.call(Command.SaveMember(it)) }
+            }
+        }
+        // 电脑上已经删了的本机模型：手机上借它的那份跟着删（以前一直留着，用不了也删不干净）。
+        // 电脑的状态还没传过来（服务商一个都没有）时不动，免得把借的全删了
+        if (host.providers.isNotEmpty()) {
+            val alive = hostLocal.map { it.id }.toSet()
+            for (p in engine.state.providers.filter { it.viaHost && it.id !in alive }) {
+                engine.call(Command.DeleteProvider(p.id))
+                changed = true
             }
         }
         return changed

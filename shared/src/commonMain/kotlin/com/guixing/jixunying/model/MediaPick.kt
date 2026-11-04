@@ -117,6 +117,14 @@ object MediaPick {
     /** 美元按 7.2 折成元，只用来估上限。 */
     private fun toCny(price: ModelPrice, v: Double) = if (price.currency == "USD") v * 7.2 else v
 
+    /** 画一张多少钱，写给 AI 看：「免费」「约 0.18 元一张」；价格表里没有的照实写「价钱没查到」（不拿估的上限冒充）。 */
+    fun imagePriceText(state: AppState, providerId: String, model: String): String {
+        val p = state.provider(providerId) ?: return "价钱没查到"
+        val price = price(state, p, model) ?: return "价钱没查到"
+        if (price.isFree) return "免费"
+        return price.perImage?.let { "约 ${yuan(toCny(price, it))} 元一张" } ?: "价钱没查到"
+    }
+
     /** 画一张 / 改一张大概多少钱（元）。 */
     fun imageCost(state: AppState, providerId: String, model: String): Double {
         val p = state.provider(providerId) ?: return UNKNOWN_IMAGE

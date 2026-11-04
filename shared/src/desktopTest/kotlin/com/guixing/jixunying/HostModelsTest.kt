@@ -95,12 +95,12 @@ class HostModelsTest {
             val hub = Hub(phone, linkFactory = { RelayLink(it) }, pairer = { c, n -> pairWithHost(c, n) }, deviceName = "测试手机")
             val hm = HostModels(hub, phone)
             hm.install()
-            // 没连上电脑：说清楚要电脑开着
-            phone.call(Command.SaveProvider(ProviderConfig("ollama1", "ollama", "Ollama（本机）（电脑）", "http://127.0.0.1:$ollamaPort/v1", viaHost = true)))
-            val off = phone.call(Command.TestProvider("ollama1", "qwen3.6:35b-a3b-coding"))
+            // 没连上电脑：说清楚要电脑开着（用另一个编号试：手机上删过的编号以后不再抄回来）
+            phone.call(Command.SaveProvider(ProviderConfig("ollama-off", "ollama", "Ollama（本机）（电脑）", "http://127.0.0.1:$ollamaPort/v1", viaHost = true)))
+            val off = phone.call(Command.TestProvider("ollama-off", "qwen3.6:35b-a3b-coding"))
             assertFalse(off.ok); assertTrue("电脑开着" in off.message, off.message)
             assertEquals(0, asked.get())
-            phone.call(Command.DeleteProvider("ollama1"))
+            phone.call(Command.DeleteProvider("ollama-off"))
 
             assertTrue(hub.pair(PairingCode(pc.state.hostId, pc.state.pairingSecret, "测试电脑", pc.state.settings.relay.brokers)).isSuccess)
             withTimeout(20_000) { while (hub.remote.value?.conn?.value !is ConnState.Connected || hub.remote.value?.store?.state?.value?.providers.isNullOrEmpty()) delay(100) }
@@ -136,6 +136,23 @@ class HostModelsTest {
             // 手机不能借这条路用电脑上的云端服务商
             val cloud = hub.remote.value!!.call(Command.HostChat("cloud1", "x", HostChatCodec.request(emptyList(), null, null, null, null)))
             assertFalse(cloud.ok)
+
+            // 2026-11-04 用户：「本地的那个模型……在模型列表里删掉，一直删不掉。删掉之后退出，再进入，还是在里面」：
+            // 手机上删了借电脑的本机模型，不再每 3 秒抄回来，成员也不跟着回来
+            phone.call(Command.DeleteProvider("ollama1"))
+            assertFalse(hm.syncFromHost())
+            assertEquals(null, phone.state.provider("ollama1"))
+            assertEquals(null, phone.state.member("mq"))
+            // 电脑上新加的本机模型照样抄；电脑上删了，手机上借它的那份跟着删
+            pc.call(Command.SaveProvider(ProviderConfig("lm1", "lmstudio", "LM Studio（本机）", "http://127.0.0.1:1234/v1", models = listOf(ModelInfo("m")))))
+            withTimeout(10_000) { while (hub.remote.value!!.store.state.value.providers.none { it.id == "lm1" }) delay(100) }
+            assertTrue(hm.syncFromHost())
+            assertTrue(phone.state.provider("lm1")!!.viaHost)
+            pc.call(Command.DeleteProvider("lm1"))
+            withTimeout(10_000) { while (hub.remote.value!!.store.state.value.providers.any { it.id == "lm1" }) delay(100) }
+            assertTrue(hm.syncFromHost())
+            assertEquals(null, phone.state.provider("lm1"), "电脑上删了，手机上借它的那份跟着删")
+            assertEquals(null, phone.state.provider("ollama1"), "删过的还是不回来")
         } finally {
             relay.stop(); broker.stopServer(); ollama.stop(100, 500)
         }

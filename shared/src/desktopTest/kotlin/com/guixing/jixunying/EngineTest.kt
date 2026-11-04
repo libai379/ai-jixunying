@@ -1178,7 +1178,10 @@ class EngineTest {
         e.call(Command.SaveProvider(ProviderConfig("pz", "zhipu", "智谱", "${base()}/bad/v1", "k", listOf(ModelInfo("glm-fake")))))
         e.call(Command.SaveProvider(ProviderConfig("pm", "minimax", "MiniMax", "${base()}/mm/v1", "k", listOf(ModelInfo("MiniMax-M3")))))
         val picks = com.guixing.jixunying.model.ImagePick.resolve(e.state)
-        assertEquals(listOf("qwen-image-3.0", "wan2.7-image", "cogview-4-250304", "image-01", "cogview-3-flash"), picks.map { it.modelId })
+        // 2026-11-04 起各家官方的画图模型都算进来（千问AI平台 25 个、智谱 4 个、MiniMax 2 个），只看排法：千问图像打头、免费的垫底
+        assertEquals("qwen-image-3.0", picks.first().modelId)
+        assertTrue(picks.map { it.modelId }.containsAll(listOf("wan2.7-image", "glm-image", "cogview-4-250304", "image-01", "image-01-live")), picks.map { it.modelId }.toString())
+        assertEquals("cogview-3-flash", picks.last().modelId)
         assertTrue(picks.last().free)
 
         val conv = e.call(Command.CreateConversation(listOf(ms[0].id))).data

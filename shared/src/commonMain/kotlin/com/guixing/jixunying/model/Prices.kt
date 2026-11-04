@@ -156,6 +156,21 @@ object Prices {
             m.startsWith("wanx2.1-imageedit") -> img(0.14)
             m.startsWith("wan2.7-image-pro") -> img(0.5)
             m.startsWith("wan2.7-image") || m.startsWith("wan2.6-image") || m.startsWith("wan2.6-t2i") -> img(0.2)
+            // 其余画图模型（2026-11-04 千问AI平台各模型页「模型价格」原文，元 / 张；分档的按 1K / 1080P 那档）
+            m.startsWith("z-image-turbo") -> img(0.1, note = "开思考的 0.2 元 / 张")
+            m.startsWith("wan2.5-t2i") -> img(0.2)
+            m.startsWith("wan2.2-t2i-plus") || m.startsWith("wanx2.1-t2i-plus") -> img(0.2)
+            m.startsWith("wan2.2-t2i-flash") || m.startsWith("wanx2.1-t2i-turbo") -> img(0.14)
+            m.startsWith("wanx2.0-t2i-turbo") -> img(0.04)
+            m == "wanx-v1" -> img(0.16)
+            m == "kling/kling-v3-image-generation" -> img(0.2)
+            m == "kling/kling-v3-omni-image-generation" -> img(0.2, note = "4K 0.4 元 / 张")
+            m == "vidu/vidu-image_reference2image" -> img(0.625, note = "2K 1 元、4K 1.47 元")
+            m == "vidu/vidu-image-pro_reference2image" -> img(1.6875, note = "2K 3.19 元、4K 5.13 元")
+            m == "vidu/vidu-image-lite_reference2image" -> img(0.3125)
+            m == "vidu/viduq3-fast_reference2image" -> img(0.46875)
+            m == "vidu/viduq2-pro_reference2image" -> img(0.9375)
+            m == "vidu/viduq2-fast_reference2image" -> img(0.28125)
             // 做视频按秒，模型名后面带档位（VideoPick.billingModel）。阿里云百炼官方价格页华北 2（北京）2026-10-20 原文；
             // 千问AI平台自己的价格页是动态加载的读不到，按百炼的算（画图两边一样）。wan3.0-video 写的是原价（页面写「限时 7 折」）
             m.startsWith("wan3.0-video-prime") -> videoPrice(m, mapOf("480P" to 0.45, "720P" to 0.9, "1080P" to 1.8))

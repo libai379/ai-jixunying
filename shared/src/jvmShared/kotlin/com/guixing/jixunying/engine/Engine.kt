@@ -3840,13 +3840,18 @@ class Engine(
     /**
      * 画一张图。设置里指定了模型就只用它；自动模式按候选顺序试（千问图像优先，见 ImagePick），
      * 一个失败换下一个，最多试三个。某家是 Key 失效或欠费，这家别的画图模型也不用试了，直接换下一家。
+     * 2026-11-04 各家画图模型补全以后一家有好几个（千问AI平台 25 个、智谱 4 个）：换的时候先换一家（每家先只试排最前的那个），
+     * 一家有模型半小时内失败过，这家整体排到后面——不然三次机会全耗在同一家（同一家的别的模型多半一样失败）。
      */
     private suspend fun paintAuto(prompt: String, size: String? = null, only: ImageChoice? = null): Painted {
         val all = only?.let { listOf(it) } ?: ImagePick.resolve(media)
         if (all.isEmpty()) throw IllegalStateException(NO_IMAGE_MODEL)
         fun key(c: ImageChoice) = c.providerId + "|" + c.modelId
-        val recentlyFailed = all.filter { (imageFailures[key(it)] ?: 0L) > now() - 30 * 60_000 }
-        val order = all - recentlyFailed.toSet() + recentlyFailed
+        fun failedRecently(c: ImageChoice) = (imageFailures[key(c)] ?: 0L) > now() - 30 * 60_000
+        val badProviders = all.filter(::failedRecently).map { it.providerId }.toSet()
+        fun spread(list: List<ImageChoice>): List<ImageChoice> = list.distinctBy { it.providerId }.let { firsts -> firsts + (list - firsts.toSet()) }
+        val order = spread(all.filter { it.providerId !in badProviders }) +
+            spread(all.filter { it.providerId in badProviders }.sortedBy { if (failedRecently(it)) 1 else 0 })
         val tried = mutableListOf<ImageChoice>()
         val deadProviders = mutableSetOf<String>()
         var first: Throwable? = null
@@ -4219,10 +4224,23 @@ class Engine(
     private val media: AppState get() = mediaFilter?.let { f -> state.copy(providers = state.providers.filter(f)) } ?: state
 
     /** 工具说明里列的能用的模型：「qwen-image-3.0（千问AI平台（阿里），约 0.18 元一张）」。 */
-    private fun modelsLine(list: List<ImageChoice>): String = list.distinctBy { it.modelId.lowercase() }.take(8).joinToString("；") { c ->
-        val y = MediaPick.imageCost(state, c.providerId, c.modelId)
-        "${c.modelId}（${c.providerName}，${if (y == 0.0) "免费" else "约 ${MediaPick.yuan(y)} 元一张"}）"
-    }.ifEmpty { "（没有）" }
+    /**
+     * 画图模型清单（写进工具说明）：全部列出来，按服务商分组，带价钱，标出设置里选的那个。
+     * 2026-11-04 用户：「你没把生图的所有链接，所有的模型都放进去，让 AI 去调用吗？……不要漏掉」——以前只列前 8 个，
+     * 千问AI平台的 12 个排在前面，把 MiniMax 的 image-01、智谱的 cogview 全挤掉了，AI 就答「MiniMax 没有画图接口，只能选千问」。
+     */
+    private fun modelsLine(list: List<ImageChoice>): String {
+        if (list.isEmpty()) return "（没有）"
+        val ig = media.settings.imageGen
+        val groups = list.distinctBy { it.providerId + "|" + it.modelId.lowercase() }.groupBy { it.providerId }.values
+        return groups.joinToString("；") { g ->
+            g.first().providerName + "：" + g.joinToString("、") { c ->
+                val mine = if (c.providerId == ig.providerId && c.modelId.equals(ig.modelId, ignoreCase = true)) "，设置里选的" else ""
+                "${c.modelId}（${MediaPick.imagePriceText(media, c.providerId, c.modelId)}$mine）"
+            }
+        } + (if (list.any { it.modelId.startsWith("kling/") || it.modelId.startsWith("vidu/") })
+            "。kling/、vidu/ 开头的是千问AI平台上的第三方模型，账号要先在千问AI平台控制台开通才能用" else "")
+    }
 
     /** 每条回答里画图、补画、做视频、配音做了几次、大概花了多少（元，按价格表估）。只留最近 200 条回答的。 */
     private val replySpend: MutableMap<String, Pair<Int, Double>> = java.util.Collections.synchronizedMap(
@@ -4732,9 +4750,21 @@ class Engine(
 
     // ———————————————— 看视频（2026-11-01） ————————————————
 
+    /**
+     * 这段视频要不要（再）读：没读过的；以前画面解不开、还没重读过的（微信的 HEVC，2026-11-03 以前电脑只有 Edge）。
+     * 2026-11-04 用户：「之前修的那个微信助手看不了视频文件，还是没有修好」——1.15.0 把「重读一次」写在 digestVideo 里，
+     * 可这里只挑 seconds == 0 的，以前读过一回（记了 25 秒、画面解不开）的根本进不去，重读从来没发生过。
+     */
+    private fun needsDigest(a: Attachment): Boolean {
+        if (!a.isVideo) return false
+        val meta = storage.fileMeta(a.id) ?: a
+        if (meta.frames.isNotEmpty()) return false
+        return meta.seconds == 0 || ("画面解不开" in meta.note && "重读过" !in meta.note)
+    }
+
     /** 消息带的视频（自己发的、引用的）还没读过的读一遍，读到的记在附件上。 */
     private suspend fun digestVideosIn(m: Message) {
-        val todo = (m.attachments + m.quoted).filter { it.isVideo && it.seconds == 0 && it.frames.isEmpty() }
+        val todo = (m.attachments + m.quoted).filter(::needsDigest)
         for (a in todo) {
             val done = try {
                 withTimeoutOrNull(5 * 60_000) { digestVideo(a) }
@@ -4746,6 +4776,10 @@ class Engine(
             } ?: continue
             fun List<Attachment>.fresh() = map { if (it.id == done.id) done else it }
             updateMessage(m.convId, m.id) { it.copy(attachments = it.attachments.fresh(), quoted = it.quoted.fresh()) }
+            // 同一段视频在这个对话里别的消息上（最早发来的那条、以前引用它的）也换成新读的，聊天记录里前后说法一致
+            for (o in snapshot(m.convId).filter { o -> o.id != m.id && (o.attachments + o.quoted).any { it.id == done.id } }) {
+                updateMessage(m.convId, o.id) { it.copy(attachments = it.attachments.fresh(), quoted = it.quoted.fresh()) }
+            }
         }
     }
 
@@ -4929,7 +4963,8 @@ class Engine(
                 "你听不到读出来的效果，读错字、口音不对只能等用户说；用户说不满意可以换模型或音色再配，写 replaces 换掉上一段。",
                 buildJsonObject {
                     put("text", prop("要读的话（只写要读出来的字，不要写说明）"))
-                    put("model", prop("可选，用哪个模型读，不填就用设置里的。能用的：" + MediaPick.speechCandidates(media).distinctBy { it.modelId }.take(8)
+                    // 全部列出来（以前只列前 8 个，后面的 AI 不知道有，2026-11-04）
+                    put("model", prop("可选，用哪个模型读，不填就用设置里的。能用的：" + MediaPick.speechCandidates(media).distinctBy { it.providerId + "|" + it.modelId }
                         .joinToString("；") { "${it.modelId}（${it.providerName}）" }))
                     put("voice", prop("可选，音色（各家的音色名不一样，不知道就不填，用默认的）"))
                     put("replaces", prop("可选，这次回答里之前配的哪一段不要了（文件名）"))

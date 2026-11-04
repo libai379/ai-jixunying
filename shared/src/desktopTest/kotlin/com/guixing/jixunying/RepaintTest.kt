@@ -163,6 +163,28 @@ class RepaintTest {
                 get("/api/v1/tasks/w1") {
                     call.respondText("""{"output":{"task_id":"w1","task_status":"SUCCEEDED","results":[{"url":"http://127.0.0.1:$port/img/w1"}]}}""", ContentType.Application.Json)
                 }
+                // 假千问AI平台的异步画图（2026-11-04）：可灵、Vidu 走 image-generation（要 X-DashScope-Async），老万相走 text2image；
+                // 提示词写「未开通」的照真平台那样：任务照建，然后失败「The product is not activated」
+                post("/api/v1/services/aigc/image-generation/generation") {
+                    val body = Json.parseToJsonElement(call.receiveText()).jsonObject
+                    edits += ("ig:" + call.request.headers["X-DashScope-Async"]) to body
+                    val id = "g${edits.size}"
+                    served[id] = encodePixels(flat(64, 64, 0x3366CC))
+                    if ("未开通" in body.toString()) served["$id-fail"] = ByteArray(0)
+                    call.respondText("""{"output":{"task_id":"$id","task_status":"PENDING"}}""", ContentType.Application.Json)
+                }
+                post("/api/v1/services/aigc/text2image/image-synthesis") {
+                    val body = Json.parseToJsonElement(call.receiveText()).jsonObject
+                    edits += ("t2i:" + call.request.headers["X-DashScope-Async"]) to body
+                    val id = "g${edits.size}"
+                    served[id] = encodePixels(flat(64, 64, 0x3366CC))
+                    call.respondText("""{"output":{"task_id":"$id","task_status":"PENDING"}}""", ContentType.Application.Json)
+                }
+                get("/api/v1/tasks/{id}") {
+                    val id = call.parameters["id"]!!
+                    if (served.containsKey("$id-fail")) call.respondText("""{"output":{"task_id":"$id","task_status":"FAILED","code":"InvalidParameter","message":"The product is not activated, please confirm that you have activated products and try again after activation."}}""", ContentType.Application.Json)
+                    else call.respondText("""{"output":{"task_id":"$id","task_status":"SUCCEEDED","choices":[{"finish_reason":"stop","message":{"role":"assistant","content":[{"image":"http://127.0.0.1:$port/img/$id","type":"image"}]}}]}}""", ContentType.Application.Json)
+                }
                 get("/img/{id}") { call.respondBytes(served[call.parameters["id"]]!!, ContentType.Image.PNG) }
                 // 假画图（OpenAI 风格）：记下用的哪个模型
                 post("/v1/images/generations") {
@@ -616,5 +638,112 @@ class RepaintTest {
         // 文件区里只剩留下的那段和它的 6 张画面
         val ids = File(dir, "files").listFiles()!!.filter { it.name.endsWith(".json") }.map { it.name.removeSuffix(".json") }.toSet()
         assertEquals(setOf(kept.id) + kept.frames, ids)
+    }
+
+    /**
+     * 2026-11-04 用户：「你得让 AI 看到所有的模型 调用所有的模型 不要漏掉」。以前工具说明只列前 8 个，用户的千问AI平台有 12 个画图模型排在前面，
+     * MiniMax 的 image-01、智谱的 cogview 全被挤掉，AI 答「MiniMax 没有画图接口」。现在全列（按服务商分组、带价钱），
+     * 各家官方的画图模型（千问AI平台全部文生图、智谱 glm-image / cogview-4、MiniMax image-01-live）都算进来。
+     */
+    @Test
+    fun aiSeesEveryImageModel() = runBlocking {
+        val qwenListed = listOf("qwen-image-2.0", "qwen-image-2.0-2026-03-03", "qwen-image-2.0-pro", "qwen-image-2.0-pro-2026-03-03", "qwen-image-2.0-pro-2026-04-22",
+            "qwen-image-2.0-pro-2026-06-22", "qwen-image-2.1-pro", "qwen-image-3.0", "qwen-image-3.0-pro", "wan2.7-image", "wan2.7-image-pro", "z-image-turbo")
+        val qw = ProviderConfig("pq", "qianwen", "假千问", "http://127.0.0.1:$port/compatible-mode/v1", "k", qwenListed.map { ModelInfo(it, tools = false, imageGen = true) })
+        val mm = ProviderConfig("pm", "minimax", "假MiniMax", "http://127.0.0.1:$port/v1", "k", listOf(ModelInfo("image-01", tools = false, imageGen = true)))
+        val zp = ProviderConfig("pz", "zhipu", "假智谱", "http://127.0.0.1:$port/v4", "k",
+            listOf(ModelInfo("cogview-4-250304", tools = false, imageGen = true), ModelInfo("cogview-3-flash", tools = false, imageGen = true)))
+        val all = com.guixing.jixunying.model.ImagePick.candidates(listOf(qw, mm, zp)).map { it.modelId }
+        for (m in listOf("image-01", "image-01-live", "glm-image", "cogview-4", "cogview-4-250304", "cogview-3-flash", "qwen-image-2.1-turbo", "wan2.6-t2i",
+                "wan2.5-t2i-preview", "wan2.2-t2i-flash", "wanx2.1-t2i-turbo", "wanx2.0-t2i-turbo", "wanx-v1", "kling/kling-v3-image-generation", "vidu/viduq2-fast_reference2image"))
+            assertTrue(m in all, "少了 $m：$all")
+        assertTrue(all.none { it == "wan2.6-image" || it == "wanx2.1-imageedit" }, "文生图要流式的、只能改图的不算画图模型")
+        // 平台上转卖的视频模型不能当画图模型
+        assertFalse(com.guixing.jixunying.model.Presets.guessImageGen("kling/kling-v3-video-generation"))
+        assertTrue(com.guixing.jixunying.model.Presets.guessImageGen("vidu/viduq3-fast_reference2image"))
+
+        // 真跑一轮：工具说明里全列出来
+        val e = world()
+        e.call(Command.SaveProvider(qw)); e.call(Command.SaveProvider(mm)); e.call(Command.SaveProvider(zp))
+        val conv = e.newChat()
+        e.call(Command.SendMessage(conv, "生图的还有哪个"))
+        e.answer(conv)
+        val draw = requests.last()["tools"]!!.jsonArray.map { it.jsonObject["function"]!!.jsonObject }.first { it["name"]!!.jsonPrimitive.content == "generate_image" }
+        val desc = draw["parameters"]!!.jsonObject["properties"]!!.jsonObject["model"]!!.jsonObject["description"]!!.jsonPrimitive.content
+        for (m in listOf("image-01（约 0.0", "image-01-live", "glm-image", "cogview-3-flash（免费）", "qwen-image-3.0（约 0.18 元一张）", "wanx2.0-t2i-turbo（约 0.04 元一张）",
+                "kling/kling-v3-image-generation", "vidu/viduq2-pro_reference2image", "fake-a（价钱没查到，设置里选的）", "假MiniMax：", "假智谱："))
+            assertTrue(m in desc, "说明里没有「$m」：$desc")
+        assertTrue("要先在千问AI平台控制台开通" in desc)
+    }
+
+    /**
+     * 千问AI平台每种画图模型走对接口（2026-11-04 照 API 参考核对，又用用户的 Key 故意传错尺寸逐个探过）：
+     * 万相 2.7 / 2.6、Z-Image 同步 multimodal-generation；可灵、Vidu 异步 image-generation；老万相异步 text2image；尺寸按各家的限制缩放。
+     */
+    @Test
+    fun eachQwenPlatformImageModelUsesItsOwnApi() = runBlocking {
+        val p = ProviderConfig("pq", "qianwen", "假千问", "http://127.0.0.1:$port/compatible-mode/v1", "k")
+        val gen = com.guixing.jixunying.engine.ImageGen { null }
+        fun last() = edits.last()
+        fun params() = last().second["parameters"]!!.jsonObject
+
+        gen.generate(p, "wan2.7-image", "一只猫", "1024x1792")
+        assertEquals("sync", last().first)
+        assertEquals("wan2.7-image", last().second["model"]!!.jsonPrimitive.content)
+        assertTrue(params()["size"]!!.jsonPrimitive.content.let { s -> s.split('*').let { it[0].toInt() * it[1].toInt() in 589_824..4_194_304 } })
+
+        gen.generate(p, "kling/kling-v3-image-generation", "一只猫", "1024x1792")
+        assertEquals("ig:enable", last().first, "可灵只能异步")
+        assertEquals("9:16", params()["aspect_ratio"]!!.jsonPrimitive.content)
+        assertEquals("2k", params()["resolution"]!!.jsonPrimitive.content)
+        assertTrue(last().second["input"]!!.jsonObject["messages"] != null)
+
+        gen.generate(p, "vidu/viduq2-fast_reference2image", "一只猫", "1024x1792")
+        assertEquals("ig:enable", last().first)
+        assertEquals("768*1376", params()["size"]!!.jsonPrimitive.content, "Vidu 只能从固定尺寸里挑")
+        gen.generate(p, "vidu/vidu-image_reference2image", "一只猫", "1792x1024")
+        assertEquals("1920*1088", params()["size"]!!.jsonPrimitive.content)
+
+        gen.generate(p, "wanx2.1-t2i-turbo", "一只猫", "1024x1792")
+        assertEquals("t2i:enable", last().first)
+        assertEquals("一只猫", last().second["input"]!!.jsonObject["prompt"]!!.jsonPrimitive.content)
+        val (w, h) = params()["size"]!!.jsonPrimitive.content.split('*').map { it.toInt() }
+        assertTrue(w in 512..1440 && h in 512..1440 && w % 16 == 0 && h % 16 == 0 && h > w, "每边 512～1440：${w}x$h")
+
+        // 平台上的第三方没开通：说清楚要去开通
+        val err = runCatching { gen.generate(p, "vidu/viduq2-fast_reference2image", "未开通", "1024x1024") }.exceptionOrNull()
+        assertTrue(err?.message?.contains("还没开通") == true, err?.message)
+
+        // 尺寸缩放
+        assertEquals(1024 to 1024, com.guixing.jixunying.engine.ImageGen.fitSize(1024, 1024, 512L * 512, 1440L * 1440, 512, 1440))
+        val (fw, fh) = com.guixing.jixunying.engine.ImageGen.fitSize(1080, 1920, 512L * 512, 1L shl 22, 512, 2048, 32)
+        assertTrue(fw % 32 == 0 && fh % 32 == 0 && fw.toLong() * fh <= (1L shl 22), "${fw}x$fh")
+        assertEquals("1:1", com.guixing.jixunying.engine.ImageGen.klingAspect(1000, 1100))
+    }
+
+    /**
+     * 2026-11-04 用户：「之前修的那个微信助手看不了视频文件，还是没有修好」：11-03 电脑只有 Edge 时读过一回（25 秒、画面解不开）的 HEVC 视频，
+     * 1.15.0 说下次用到时重读，可挑「要读的视频」时只挑没读过的（seconds == 0），重读从来没发生。现在引用它就重读一次，画面给 AI 看。
+     */
+    @Test
+    fun undecodableVideoIsReadAgain() = runBlocking {
+        val e = world()
+        // JXY_REAL_VIDEO=真视频文件：拿用户那段真的 HEVC 微信视频走一遍（不花钱：模型是假的、没配听写）
+        val bytes = System.getenv("JXY_REAL_VIDEO")?.let { File(it).readBytes() } ?: clip
+        val old = Attachment("oldvid", "微信视频_18621.mp4", "video/mp4", bytes.size.toLong(), AttachmentKind.DOCUMENT, seconds = 25, note = "画面解不开")
+        Storage(dir).putFile(old, bytes, null)
+        val conv = e.channelConversation("weixin:me@im.wechat", "微信对话", listOf("m1"), webSearch = false)
+        e.channelTurn(conv, listOf(Engine.ChannelInput("> 小白 · 11月3日 13:18：[视频：微信视频_18621.mp4]\n\n你还是继续来分析这个视频", emptyList(), quoted = listOf(old))))
+        val meta = Storage(dir).fileMeta("oldvid")!!
+        println("重读：${bytes.size} 字节，${meta.seconds} 秒，${meta.frames.size} 张画面，${meta.note}")
+        assertEquals(6, meta.frames.size, "重读取到了画面：${meta.note}")
+        assertTrue("重读过" in meta.note && "画面解不开" !in meta.note, meta.note)
+        val asked = requests.last()["messages"]!!.jsonArray.map { it.jsonObject }.filter { it["role"]?.jsonPrimitive?.content == "user" }
+        val imgs = asked.sumOf { m -> (m["content"] as? JsonArray)?.count { it.jsonObject["type"]?.jsonPrimitive?.content == "image_url" } ?: 0 }
+        assertTrue(imgs >= 6, "画面带给模型了（$imgs 张）")
+        // 只重读一次：再引用不再读
+        val files = File(dir, "files").listFiles()!!.size
+        e.channelTurn(conv, listOf(Engine.ChannelInput("再看看", emptyList(), quoted = listOf(Storage(dir).fileMeta("oldvid")!!))))
+        assertEquals(files, File(dir, "files").listFiles()!!.size)
     }
 }

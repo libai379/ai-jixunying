@@ -73,6 +73,61 @@ class ImageGen(private val proxyOf: (ProviderConfig) -> String?) {
             return options.minBy { kotlin.math.abs(it.second - r) }.first
         }
 
+        /** 可灵（经千问AI平台）只认 16:9、9:16、1:1（API 参考 kling-image-generation/create-task 的 aspect_ratio enum），挑最接近的。 */
+        fun klingAspect(w: Int, h: Int): String {
+            val r = w.toDouble() / h.coerceAtLeast(1)
+            return listOf("1:1" to 1.0, "16:9" to 16 / 9.0, "9:16" to 9 / 16.0).minBy { kotlin.math.abs(kotlin.math.ln(it.second / r)) }.first
+        }
+
+        /**
+         * Vidu（经千问AI平台）的尺寸只能从固定几种里挑（API 参考 vidu-image-generation/create-task「可用尺寸列表」1K 档），按宽高比挑最近的。
+         * vidu-image / pro / lite 一套，viduq3-fast、viduq2-pro / fast 一套。
+         */
+        fun viduSize(model: String, w: Int, h: Int): String {
+            val list = if ("viduq" in model.lowercase())
+                listOf(1024 to 1024, 768 to 1376, 848 to 1264, 896 to 1200, 928 to 1152, 1152 to 928, 1200 to 896, 1264 to 848, 1376 to 768, 1584 to 672)
+            else listOf(1024 to 1024, 720 to 1440, 1440 to 720, 1024 to 768, 768 to 1024, 1920 to 1088, 1088 to 1920, 1536 to 1024, 1024 to 1536, 1920 to 816, 816 to 1920)
+            val r = w.toDouble() / h.coerceAtLeast(1)
+            val (bw, bh) = list.minBy { (a, b) -> kotlin.math.abs(kotlin.math.ln(a.toDouble() / b / r)) }
+            return "$bw*$bh"
+        }
+
+        /**
+         * 千问AI平台各画图模型能收的尺寸（2026-11-04 故意传 1*1 探出来的报错原文）：
+         * qwen-image「between 262144 (512x512) and 6553600 (2560x2560)」（表里写最大 2048×2048，按 2048 来）；z-image「262144 and 4194304」；
+         * wan2.7「589824 and 16777216」（wan2.7-image 表里最大 2048×2048）；wan2.6-t2i、wan2.5-t2i「589824 and 2073600」；
+         * wan2.2、wanx2.1「Either width or height should be between 512 and 1440」；wanx2.0、wanx-v1「divided by 8」。保持宽高比缩放，取 16 的倍数。
+         */
+        fun dashScopeSize(model: String, w: Int, h: Int): Pair<Int, Int> {
+            val m = model.lowercase()
+            fun sq(n: Int) = n.toLong() * n
+            return when {
+                m.startsWith("qwen-image") || m.startsWith("z-image") -> fitSize(w, h, sq(512), sq(2048), 256, 2048)
+                m.startsWith("wan2.7") -> fitSize(w, h, sq(768), sq(2048), 384, 2048)
+                m.startsWith("wan2.6") || m.startsWith("wan2.5") -> fitSize(w, h, sq(768), sq(1440), 384, 2048)
+                else -> fitSize(w, h, sq(512), sq(1440), 512, 1440)
+            }
+        }
+
+        /** 保持宽高比，把尺寸缩放到总像素 [minPixels, maxPixels]、每边 [minSide, maxSide] 里，取 step 的倍数。 */
+        fun fitSize(w0: Int, h0: Int, minPixels: Long, maxPixels: Long, minSide: Int, maxSide: Int, step: Int = 16): Pair<Int, Int> {
+            var w = w0.coerceAtLeast(1).toDouble()
+            var h = h0.coerceAtLeast(1).toDouble()
+            fun scale(s: Double) { w *= s; h *= s }
+            if (w * h > maxPixels) scale(kotlin.math.sqrt(maxPixels / (w * h)))
+            if (w * h < minPixels) scale(kotlin.math.sqrt(minPixels / (w * h)))
+            if (maxOf(w, h) > maxSide) scale(maxSide / maxOf(w, h))
+            if (minOf(w, h) < minSide) scale(minSide / minOf(w, h))
+            val lo = ((minSide + step - 1) / step) * step
+            val hi = (maxSide / step) * step
+            var fw = (Math.round(w / step) * step).toInt().coerceIn(lo, hi)
+            var fh = (Math.round(h / step) * step).toInt().coerceIn(lo, hi)
+            // 取整以后总像素出了范围：一格一格挪回来
+            while (fw.toLong() * fh > maxPixels && (fw > lo || fh > lo)) { if (fw >= fh && fw > lo) fw -= step else fh -= step }
+            while (fw.toLong() * fh < minPixels && (fw < hi || fh < hi)) { if (fw <= fh && fw < hi) fw += step else fh += step }
+            return fw to fh
+        }
+
         fun parseSize(size: String): Pair<Int, Int>? {
             val parts = size.lowercase().split('x', '*', ':')
             val w = parts.getOrNull(0)?.trim()?.toIntOrNull() ?: return null
@@ -128,10 +183,17 @@ class ImageGen(private val proxyOf: (ProviderConfig) -> String?) {
     private suspend fun openAi(client: HttpClient, p: ProviderConfig, model: String, prompt: String, size: String): Result {
         val silicon = protocolOf(p) == Protocol.SILICONFLOW
         val zhipu = p.presetId == "zhipu" || p.baseUrl.contains("bigmodel.cn")
+        // 智谱的尺寸（2026-11-04 故意传 1x1 探出来的报错原文）：glm-image「长宽均需满足512px-2880px之间,且为32整数倍,并保证最大像素数不超过2^22px」，
+        // cogview「…且为16整数倍,并保证最大像素数不超过2^21px」。1080x1920 这种直接发会被拒，缩放取整
+        val sendSize = if (!zhipu) size else parseSize(size)?.let { (w, h) ->
+            val glm = model.lowercase().startsWith("glm-image")
+            val (fw, fh) = fitSize(w, h, 512L * 512, if (glm) 1L shl 22 else 1L shl 21, 512, 2048, if (glm) 32 else 16)
+            "${fw}x$fh"
+        } ?: size
         fun body(noMark: Boolean) = buildJsonObject {
             put("model", model)
             put("prompt", prompt)
-            if (silicon) put("image_size", size) else put("size", size)
+            if (silicon) put("image_size", size) else put("size", sendSize)
             if (!silicon) put("n", 1)
             if (p.baseUrl.contains("volces.com")) { put("response_format", "url"); put("watermark", false) }
             // 智谱（2026-10-28 用户：「生图都带 AI 生成，改」）：watermark_enabled = false 关掉显式和隐式水印。官方文档
@@ -214,20 +276,30 @@ class ImageGen(private val proxyOf: (ProviderConfig) -> String?) {
         return dashScopeRun(client, provider, "/api/v1/services/aigc/multimodal-generation/generation", body, preferAsync = false)
     }
 
-    // —— 阿里百炼 / 千问AI平台：千问图像、通义万相 ——
+    // —— 阿里百炼 / 千问AI平台：千问图像、通义万相、Z-Image，平台上的可灵、Vidu ——
+    /**
+     * 哪个模型走哪个接口（2026-11-04 照千问AI平台 API 参考核对，又用用户的 Key 故意传错尺寸逐个探过，见 docs/参考资料.md「千问AI平台全部画图模型」）：
+     * - 同步 multimodal-generation（input.messages）：qwen-image、z-image-turbo、wan2.7-image(-pro)、wan2.6-t2i。
+     *   以前 wan2.6 / 2.7 发的是 image-generation 同步，平台回 403「does not support synchronous calls」，靠换异步再试才画成
+     * - 异步 image-generation/generation（input.messages，要 X-DashScope-Async）：kling/…（aspect_ratio 只有 16:9、9:16、1:1，resolution 1k / 2k）、
+     *   vidu/…（size 只能从固定的几种里挑，n 只能 1）
+     * - 异步 text2image/image-synthesis（input.prompt）：wan2.5-t2i-preview、wan2.2-t2i-*、wanx2.1-t2i-*、wanx2.0-t2i-turbo、wanx-v1
+     */
     private suspend fun dashScope(client: HttpClient, p: ProviderConfig, model: String, prompt: String, size: String): Result {
         val m = model.lowercase()
-        val qwenStyle = m.startsWith("qwen-image") || m.startsWith("z-image")
-        val newWan = m.startsWith("wan2.6") || m.startsWith("wan2.7")
+        val kling = m.startsWith("kling/")
+        val vidu = m.startsWith("vidu/")
+        val sync = m.startsWith("qwen-image") || m.startsWith("z-image") || m.startsWith("wan2.7") || m.startsWith("wan2.6")
         val path = when {
-            qwenStyle -> "/api/v1/services/aigc/multimodal-generation/generation"
-            newWan -> "/api/v1/services/aigc/image-generation/generation"
+            sync -> "/api/v1/services/aigc/multimodal-generation/generation"
+            kling || vidu -> "/api/v1/services/aigc/image-generation/generation"
             else -> "/api/v1/services/aigc/text2image/image-synthesis"
         }
+        val (w, h) = parseSize(size) ?: (1024 to 1024)
         val body = buildJsonObject {
             put("model", model)
             putJsonObject("input") {
-                if (qwenStyle || newWan) putJsonArray("messages") {
+                if (sync || kling || vidu) putJsonArray("messages") {
                     add(buildJsonObject {
                         put("role", "user")
                         putJsonArray("content") { add(buildJsonObject { put("text", prompt) }) }
@@ -235,11 +307,18 @@ class ImageGen(private val proxyOf: (ProviderConfig) -> String?) {
                 } else put("prompt", prompt)
             }
             putJsonObject("parameters") {
-                put("size", size.replace('x', '*')); put("n", 1); put("watermark", false); put("prompt_extend", true)
+                put("n", 1); put("watermark", false)
+                when {
+                    kling -> { put("aspect_ratio", klingAspect(w, h)); put("resolution", if (maxOf(w, h) >= 1536) "2k" else "1k") }
+                    vidu -> put("size", viduSize(m, w, h))
+                    else -> {
+                        val (fw, fh) = dashScopeSize(m, w, h)
+                        put("size", "$fw*$fh"); put("prompt_extend", true)
+                    }
+                }
             }
         }
-        // 千问图像、新版万相（multimodal-generation、image-generation）官方文档是同步调用；老的 text2image 只能异步
-        return dashScopeRun(client, p, path, body, preferAsync = !(qwenStyle || newWan))
+        return dashScopeRun(client, p, path, body, preferAsync = !sync)
     }
 
     /** 千问AI平台 / 百炼：提交（同步或异步，被拒而且说的是同步 / 异步的问题就换另一种再试一次）、等任务做完、取图。 */
@@ -266,7 +345,12 @@ class ImageGen(private val proxyOf: (ProviderConfig) -> String?) {
                 val out = t["output"] as? JsonObject
                 when (out?.str("task_status")) {
                     "SUCCEEDED" -> t
-                    "FAILED", "CANCELED", "UNKNOWN" -> throw ApiException(200, "生成失败：" + (out.str("message") ?: out.str("code")).orEmpty())
+                    "FAILED", "CANCELED", "UNKNOWN" -> {
+                        val why = (out.str("message") ?: out.str("code")).orEmpty()
+                        // 平台上的第三方（可灵、Vidu）账号没开通时任务照样建、然后失败（2026-11-04 用户的 Key 实测）
+                        throw ApiException(200, if ("not activated" in why.lowercase())
+                            "这个模型在千问AI平台上还没开通，要先到千问AI平台控制台开通（平台原话：$why）" else "生成失败：$why")
+                    }
                     else -> null
                 }
             }
@@ -287,7 +371,9 @@ class ImageGen(private val proxyOf: (ProviderConfig) -> String?) {
             header("Authorization", "Bearer ${p.apiKey.trim()}")
             contentType(ContentType.Application.Json)
             setBody(buildJsonObject {
-                put("model", model); put("prompt", prompt); put("aspect_ratio", aspectOf(size))
+                // image-01-live 不收 21:9（官方文档「21:9 (1344x576) (仅适用于 image-01)」）
+                val ar = aspectOf(size).let { if (it == "21:9" && model.lowercase() == "image-01-live") "16:9" else it }
+                put("model", model); put("prompt", prompt); put("aspect_ratio", ar)
                 put("response_format", "base64"); put("n", 1); put("prompt_optimizer", true)
                 // 官方文档写默认就是 false（platform.minimax.cn image-generation-t2i），写明白免得哪天改了默认
                 put("aigc_watermark", false)
