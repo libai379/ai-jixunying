@@ -38,8 +38,11 @@ import javax.crypto.spec.SecretKeySpec
  */
 class ImageGen(private val proxyOf: (ProviderConfig) -> String?) {
 
-    /** note：要告诉用户的一句（比如智谱没签免责声明、这张还带水印）；空 = 没有。 */
-    class Result(val bytes: ByteArray, val mime: String, val revisedPrompt: String?, val note: String = "")
+    /**
+     * note：要告诉用户的一句（比如智谱没签免责声明、这张还带水印）；空 = 没有。
+     * added：程序按模型补在提示词后面的那句（ImageTuning，2026-11-04）；空 = 没补。
+     */
+    class Result(val bytes: ByteArray, val mime: String, val revisedPrompt: String?, val note: String = "", val added: String = "")
 
     enum class Protocol { OPENAI, SILICONFLOW, DASHSCOPE, MINIMAX, KLING, MODELSCOPE }
 
@@ -97,13 +100,17 @@ class ImageGen(private val proxyOf: (ProviderConfig) -> String?) {
          * qwen-image「between 262144 (512x512) and 6553600 (2560x2560)」（表里写最大 2048×2048，按 2048 来）；z-image「262144 and 4194304」；
          * wan2.7「589824 and 16777216」（wan2.7-image 表里最大 2048×2048）；wan2.6-t2i、wan2.5-t2i「589824 and 2073600」；
          * wan2.2、wanx2.1「Either width or height should be between 512 and 1440」；wanx2.0、wanx-v1「divided by 8」。保持宽高比缩放，取 16 的倍数。
+         * 千问图像、万相 2.7 只限总像素和宽高比（1:8～8:1），单边可以过 2048：官方 2K 推荐尺寸 3:4 是 1728*2368（文生图指南「各像素范围下的推荐分辨率」）。
+         * qwen-image-3.0-pro 压在 1K 档（ImageTuning.QWEN_PRO_1K_MAX）：超过算 2K、贵一倍。
          */
         fun dashScopeSize(model: String, w: Int, h: Int): Pair<Int, Int> {
             val m = model.lowercase()
             fun sq(n: Int) = n.toLong() * n
             return when {
-                m.startsWith("qwen-image") || m.startsWith("z-image") -> fitSize(w, h, sq(512), sq(2048), 256, 2048)
-                m.startsWith("wan2.7") -> fitSize(w, h, sq(768), sq(2048), 384, 2048)
+                m.startsWith("qwen-image-3.0-pro") -> fitSize(w, h, sq(512), com.guixing.jixunying.model.ImageTuning.QWEN_PRO_1K_MAX, 256, 4096)
+                m.startsWith("qwen-image") -> fitSize(w, h, sq(512), sq(2048), 256, 4096)
+                m.startsWith("z-image") -> fitSize(w, h, sq(512), sq(2048), 256, 2048)
+                m.startsWith("wan2.7") -> fitSize(w, h, sq(768), sq(2048), 384, 4096)
                 m.startsWith("wan2.6") || m.startsWith("wan2.5") -> fitSize(w, h, sq(768), sq(1440), 384, 2048)
                 else -> fitSize(w, h, sq(512), sq(1440), 512, 1440)
             }
@@ -128,6 +135,12 @@ class ImageGen(private val proxyOf: (ProviderConfig) -> String?) {
             return fw to fh
         }
 
+        /** 保持宽高比，把尺寸放大或缩小到总像素约等于 target（再交给各家的范围去取整）。 */
+        fun scaleToPixels(w: Int, h: Int, target: Long): Pair<Int, Int> {
+            val s = kotlin.math.sqrt(target.toDouble() / (w.toLong() * h).coerceAtLeast(1))
+            return (w * s).toInt().coerceAtLeast(1) to (h * s).toInt().coerceAtLeast(1)
+        }
+
         fun parseSize(size: String): Pair<Int, Int>? {
             val parts = size.lowercase().split('x', '*', ':')
             val w = parts.getOrNull(0)?.trim()?.toIntOrNull() ?: return null
@@ -136,15 +149,21 @@ class ImageGen(private val proxyOf: (ProviderConfig) -> String?) {
         }
     }
 
-    suspend fun generate(provider: ProviderConfig, model: String, prompt: String, size: String): Result {
+    /**
+     * 画一张。plan 是按模型细调好的东西（ImageTuning：补审美的一句、反向提示词、改写开关、分辨率），不传就按模型算；
+     * 对比测试时可以传自己的（固定 seed、改开关）。
+     */
+    suspend fun generate(provider: ProviderConfig, model: String, prompt: String, size: String,
+                         plan: com.guixing.jixunying.model.ImageTuning.Plan = com.guixing.jixunying.model.ImageTuning.plan(model, prompt)): Result {
         val client = Http.client(proxyOf(provider))
-        return when (protocolOf(provider)) {
-            Protocol.OPENAI, Protocol.SILICONFLOW -> openAi(client, provider, model, prompt, size)
-            Protocol.DASHSCOPE -> dashScope(client, provider, model, prompt, size)
-            Protocol.MINIMAX -> miniMax(client, provider, model, prompt, size)
-            Protocol.KLING -> kling(client, provider, model, prompt, size)
-            Protocol.MODELSCOPE -> modelScope(client, provider, model, prompt, size)
+        val r = when (protocolOf(provider)) {
+            Protocol.OPENAI, Protocol.SILICONFLOW -> openAi(client, provider, model, plan.prompt, size)
+            Protocol.DASHSCOPE -> dashScope(client, provider, model, plan, size)
+            Protocol.MINIMAX -> miniMax(client, provider, model, plan, size)
+            Protocol.KLING -> kling(client, provider, model, plan.prompt, size)
+            Protocol.MODELSCOPE -> modelScope(client, provider, model, plan.prompt, size)
         }
+        return if (plan.added.isEmpty()) r else Result(r.bytes, r.mime, r.revisedPrompt, r.note, plan.added)
     }
 
     private fun base(p: ProviderConfig) = p.baseUrl.trimEnd('/')
@@ -284,8 +303,10 @@ class ImageGen(private val proxyOf: (ProviderConfig) -> String?) {
      * - 异步 image-generation/generation（input.messages，要 X-DashScope-Async）：kling/…（aspect_ratio 只有 16:9、9:16、1:1，resolution 1k / 2k）、
      *   vidu/…（size 只能从固定的几种里挑，n 只能 1）
      * - 异步 text2image/image-synthesis（input.prompt）：wan2.5-t2i-preview、wan2.2-t2i-*、wanx2.1-t2i-*、wanx2.0-t2i-turbo、wanx-v1
+     * 按模型细调的参数（2026-11-04，ImageTuning）：分辨率按「同样的钱画到最大」放大；反向提示词新接口放 parameters、老万相放 input
+     * （API 参考 wan-text-to-image-v2 原文：input.negative_prompt）；prompt_extend 照 ImageTuning.rewrite（z-image 关、万相 2.7 不发改发 thinking_mode）。
      */
-    private suspend fun dashScope(client: HttpClient, p: ProviderConfig, model: String, prompt: String, size: String): Result {
+    private suspend fun dashScope(client: HttpClient, p: ProviderConfig, model: String, plan: com.guixing.jixunying.model.ImageTuning.Plan, size: String): Result {
         val m = model.lowercase()
         val kling = m.startsWith("kling/")
         val vidu = m.startsWith("vidu/")
@@ -295,16 +316,20 @@ class ImageGen(private val proxyOf: (ProviderConfig) -> String?) {
             kling || vidu -> "/api/v1/services/aigc/image-generation/generation"
             else -> "/api/v1/services/aigc/text2image/image-synthesis"
         }
-        val (w, h) = parseSize(size) ?: (1024 to 1024)
+        val (w0, h0) = parseSize(size) ?: (1024 to 1024)
+        val (w, h) = plan.pixels?.let { scaleToPixels(w0, h0, it) } ?: (w0 to h0)
         val body = buildJsonObject {
             put("model", model)
             putJsonObject("input") {
                 if (sync || kling || vidu) putJsonArray("messages") {
                     add(buildJsonObject {
                         put("role", "user")
-                        putJsonArray("content") { add(buildJsonObject { put("text", prompt) }) }
+                        putJsonArray("content") { add(buildJsonObject { put("text", plan.prompt) }) }
                     })
-                } else put("prompt", prompt)
+                } else {
+                    put("prompt", plan.prompt)
+                    plan.negative?.let { put("negative_prompt", it) }
+                }
             }
             putJsonObject("parameters") {
                 put("n", 1); put("watermark", false)
@@ -313,7 +338,10 @@ class ImageGen(private val proxyOf: (ProviderConfig) -> String?) {
                     vidu -> put("size", viduSize(m, w, h))
                     else -> {
                         val (fw, fh) = dashScopeSize(m, w, h)
-                        put("size", "$fw*$fh"); put("prompt_extend", true)
+                        put("size", "$fw*$fh")
+                        if (sync) plan.negative?.let { put("negative_prompt", it) }
+                        if (m.startsWith("wan2.7")) put("thinking_mode", true) else plan.rewrite?.let { put("prompt_extend", it) }
+                        plan.seed?.let { put("seed", it) }
                     }
                 }
             }
@@ -366,15 +394,17 @@ class ImageGen(private val proxyOf: (ProviderConfig) -> String?) {
     }
 
     // —— MiniMax image-01 ——
-    private suspend fun miniMax(client: HttpClient, p: ProviderConfig, model: String, prompt: String, size: String): Result {
+    private suspend fun miniMax(client: HttpClient, p: ProviderConfig, model: String, plan: com.guixing.jixunying.model.ImageTuning.Plan, size: String): Result {
         val o = client.post(base(p) + "/image_generation") {
             header("Authorization", "Bearer ${p.apiKey.trim()}")
             contentType(ContentType.Application.Json)
             setBody(buildJsonObject {
                 // image-01-live 不收 21:9（官方文档「21:9 (1344x576) (仅适用于 image-01)」）
                 val ar = aspectOf(size).let { if (it == "21:9" && model.lowercase() == "image-01-live") "16:9" else it }
-                put("model", model); put("prompt", prompt); put("aspect_ratio", ar)
-                put("response_format", "base64"); put("n", 1); put("prompt_optimizer", true)
+                put("model", model); put("prompt", plan.prompt); put("aspect_ratio", ar)
+                // prompt_optimizer：官方默认 false；以前一直开着，长描述被它改（ImageTuning.rewrite）
+                put("response_format", "base64"); put("n", 1); put("prompt_optimizer", plan.rewrite ?: false)
+                plan.seed?.let { put("seed", it) }
                 // 官方文档写默认就是 false（platform.minimax.cn image-generation-t2i），写明白免得哪天改了默认
                 put("aigc_watermark", false)
             }.toString())
@@ -382,13 +412,31 @@ class ImageGen(private val proxyOf: (ProviderConfig) -> String?) {
         val br = o["base_resp"] as? JsonObject
         val code = br?.get("status_code")?.jsonPrimitive?.intOrNull ?: 0
         if (code != 0) throw ApiException(400, "MiniMax：" + br?.str("status_msg").orEmpty() + "（$code）")
+        // 被它的内容安全检查拦下的张数（API 参考原文 failed_count「因内容安全检查失败而未返回的图片数量」；示例里是字符串 "0"）
+        val blocked = (o["metadata"] as? JsonObject)?.str("failed_count")?.toIntOrNull() ?: 0
+        if (blocked > 0) throw ApiException(200, "MiniMax：这张被它的内容安全检查拦下了，没出图。换个说法或换个模型再画")
         val data = o["data"] as? JsonObject ?: throw ApiException(200, "返回里没有图片")
-        (data["image_base64"] as? JsonArray)?.firstOrNull()?.jsonPrimitive?.content?.let {
-            return Result(Base64.getDecoder().decode(it), sniffMime(it), null)
-        }
-        val url = (data["image_urls"] as? JsonArray)?.firstOrNull()?.jsonPrimitive?.content ?: throw ApiException(200, "返回里没有图片")
-        val (bytes, mime) = download(client, url)
+        val (bytes, mime) = (data["image_base64"] as? JsonArray)?.firstOrNull()?.jsonPrimitive?.content?.let { Base64.getDecoder().decode(it) to sniffMime(it) }
+            ?: download(client, (data["image_urls"] as? JsonArray)?.firstOrNull()?.jsonPrimitive?.content ?: throw ApiException(200, "返回里没有图片"))
+        if (looksBlank(bytes)) throw ApiException(200, "MiniMax 回来的是一张灰底空图（多半是被它的内容安全检查换掉了），没画成。换个说法或换个模型再画")
         return Result(bytes, mime, null)
+    }
+
+    /**
+     * 几乎一整张中灰（2026-11-04 实测：MiniMax 有一次回了张灰底带零星彩点的图当结果，状态码照样是成功；
+     * 抽样 99.6% 的点和中间色每个通道差不到 12，中间色约 (128,126,129)。正常的暗调人像同样的算法是 84%）。
+     * 只认中灰：黑底、白底的正常图（星空、白底图标）不误伤。
+     */
+    internal fun looksBlank(bytes: ByteArray): Boolean {
+        val px = runCatching { decodePixels(bytes) }.getOrNull() ?: return false
+        val step = maxOf(1, px.argb.size / 40_000)
+        val sample = (px.argb.indices step step).map { px.argb[it] }
+        if (sample.isEmpty()) return false
+        fun ch(c: Int, s: Int) = (c shr s) and 255
+        val med = sample.sortedBy { ch(it, 16) + ch(it, 8) + ch(it, 0) }[sample.size / 2]
+        if (listOf(16, 8, 0).any { ch(med, it) !in 80..176 }) return false
+        val near = sample.count { c -> listOf(16, 8, 0).all { s -> kotlin.math.abs(ch(c, s) - ch(med, s)) <= 12 } }
+        return near >= sample.size * 0.98
     }
 
     // —— 可灵 Kling ——

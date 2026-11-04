@@ -719,6 +719,29 @@ class RepaintTest {
         val (fw, fh) = com.guixing.jixunying.engine.ImageGen.fitSize(1080, 1920, 512L * 512, 1L shl 22, 512, 2048, 32)
         assertTrue(fw % 32 == 0 && fh % 32 == 0 && fw.toLong() * fh <= (1L shl 22), "${fw}x$fh")
         assertEquals("1:1", com.guixing.jixunying.engine.ImageGen.klingAspect(1000, 1100))
+
+        // 按模型细调（2026-11-04，ImageTuning）：补的那句、反向提示词、改写开关、分辨率都发到对的地方
+        val woman = "写实人像照片，原创成年东亚女性，25岁左右，黑色吊带裙，坐在黑色地面上"
+        val r = gen.generate(p, "qwen-image-3.0", woman, "1024x1365")
+        assertEquals("sync", last().first)
+        val text = last().second["input"]!!.jsonObject["messages"]!!.jsonArray[0].jsonObject["content"]!!.jsonArray[0].jsonObject["text"]!!.jsonPrimitive.content
+        assertTrue(text.startsWith(woman) && text.endsWith(r.added) && "时尚人像摄影" in r.added, text)
+        assertTrue("显老" in params()["negative_prompt"]!!.jsonPrimitive.content)
+        assertEquals("true", params()["prompt_extend"]!!.jsonPrimitive.content)
+        val (sw, sh) = params()["size"]!!.jsonPrimitive.content.split('*').map { it.toInt() }
+        assertTrue(sw.toLong() * sh > 3_900_000 && sh > sw, "qwen-image-3.0 1K、2K 同价，按 2K 画：${sw}x$sh")
+
+        gen.generate(p, "z-image-turbo", woman, "1024x1024")
+        assertEquals("false", params()["prompt_extend"]!!.jsonPrimitive.content, "z-image 开改写算思考档，贵一倍")
+        assertTrue(params()["negative_prompt"] == null)
+
+        gen.generate(p, "wan2.7-image-pro", woman, "1024x1024")
+        assertTrue(params()["prompt_extend"] == null && params()["negative_prompt"] == null, "万相 2.7 不收这两个")
+        assertEquals("true", params()["thinking_mode"]!!.jsonPrimitive.content)
+        assertEquals("2048*2048", params()["size"]!!.jsonPrimitive.content, "万相 2.7 默认就是 2K")
+
+        gen.generate(p, "wanx2.1-t2i-turbo", "一只猫", "1024x1024")
+        assertTrue(last().second["input"]!!.jsonObject["negative_prompt"] != null && params()["negative_prompt"] == null, "老万相的反向提示词放在 input 里")
     }
 
     /**

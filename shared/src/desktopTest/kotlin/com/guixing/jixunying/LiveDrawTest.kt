@@ -25,20 +25,34 @@ class LiveDrawTest {
         val state = Storage(File(dir)).loadState() ?: return@runBlocking
         val cands = com.guixing.jixunying.model.ImagePick.candidates(state.providers)
         val gen = ImageGen { null }
-        val prompt = "一只橘猫趴在木头窗台上晒太阳，窗外是蓝天和几朵白云，写实摄影风格，柔和的自然光"
+        // JXY_DRAW_PROMPT_FILE：换成自己的描述（2026-11-04 拿用户在微信里测的那段人像描述对比细调前后）；JXY_DRAW_TAG 加在文件名后面
+        val prompt = System.getenv("JXY_DRAW_PROMPT_FILE")?.let { File(it).readText().trim() }
+            ?: "一只橘猫趴在木头窗台上晒太阳，窗外是蓝天和几朵白云，写实摄影风格，柔和的自然光"
+        val tag = System.getenv("JXY_DRAW_TAG")?.let { "-$it" }.orEmpty()
         for (w in wanted) {
-            val model = w.substringBefore('@')
-            val size = w.substringAfter('@', "1024x1024")
+            // 模型@尺寸!开关：「!raw」= 不细调（照旧发：不补、不放大、没有反向提示词）；「!rewrite」「!norewrite」= 只改平台改写开关；「!seed=123」固定种子
+            val model = w.substringBefore('@').substringBefore('!')
+            val size = w.substringAfter('@', "1024x1024").substringBefore('!')
+            val flags = w.split('!').drop(1)
             val c = cands.firstOrNull { it.modelId.equals(model, ignoreCase = true) } ?: run { println("$model：没有能调它的服务商"); continue }
             val p = state.provider(c.providerId)!!
+            var plan = com.guixing.jixunying.model.ImageTuning.plan(model, prompt)
+            for (f in flags) plan = when {
+                f == "raw" -> plan.copy(prompt = prompt, added = "", negative = null, pixels = null)
+                f == "rewrite" -> plan.copy(rewrite = true)
+                f == "norewrite" -> plan.copy(rewrite = false)
+                f.startsWith("seed=") -> plan.copy(seed = f.substringAfter('=').toLong())
+                else -> plan
+            }
             val t0 = System.currentTimeMillis()
-            runCatching { gen.generate(p, model, prompt, size) }
+            runCatching { gen.generate(p, model, prompt, size, plan) }
                 .onSuccess { r ->
                     val (iw, ih) = com.guixing.jixunying.engine.PhotoEdit.sizeOf(r.bytes) ?: (0 to 0)
-                    val f = File(out, model.replace('/', '_') + "." + r.mime.substringAfter('/').replace("jpeg", "jpg"))
+                    val f = File(out, model.replace('/', '_') + flags.joinToString("") { "-" + it.replace('=', '_') } + tag + "." + r.mime.substringAfter('/').replace("jpeg", "jpg"))
                     f.writeBytes(r.bytes)
-                    println("$model（${c.providerName}，要 $size）画好了 ${(System.currentTimeMillis() - t0) / 1000.0} 秒，${iw}x$ih，${r.bytes.size / 1024} KB → ${f.name}" +
-                        (if (r.note.isNotBlank()) "；提醒：${r.note.take(60)}" else "；没有额外提醒"))
+                    println("$model（${c.providerName}，要 $size，${flags.joinToString(",").ifEmpty { "细调" }}）画好了 ${(System.currentTimeMillis() - t0) / 1000.0} 秒，${iw}x$ih，${r.bytes.size / 1024} KB → ${f.name}" +
+                        (if (r.note.isNotBlank()) "；提醒：${r.note.take(60)}" else "") + (if (r.added.isNotEmpty()) "；补了：${r.added}" else "；没补") +
+                        "；反向提示词：${if (plan.negative == null) "无" else "有"}；改写：${plan.rewrite}")
                 }
                 .onFailure { println("$model（${c.providerName}，要 $size）失败 ${(System.currentTimeMillis() - t0) / 1000.0} 秒：${it.message?.take(300)}") }
         }

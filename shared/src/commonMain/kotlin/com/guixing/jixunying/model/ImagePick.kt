@@ -32,13 +32,17 @@ object ImagePick {
         return id.startsWith("step-1x") || id.startsWith("step-2x") || id.startsWith("step-image")
     }
 
-    private val topModels = listOf("seedream", "gpt-image", "hy-image", "wan2", "kling")
+    // 可灵 2026-11-04 拿掉：用户实测手脚畸形，放弃（ImageTuning）
+    private val topModels = listOf("seedream", "gpt-image", "hy-image", "wan2")
 
-    /** 画质档次，越小越靠前。 */
+    /** 画质档次，越小越靠前。用户实测放弃的（ImageTuning.Verdict.DROP：可灵、智谱 CogView-4 / GLM-Image、MiniMax）垫底，实测能用的（万相 2.7）进第一档。 */
     private fun tier(model: String): Int {
         val id = model.lowercase()
+        val verdict = ImageTuning.profile(model).verdict
         return when {
+            verdict == ImageTuning.Verdict.DROP -> 9
             "qwen-image" in id -> 0
+            verdict == ImageTuning.Verdict.KEEP -> 1
             id in freeModels -> 3
             topModels.any { it in id } -> 1
             else -> 2
@@ -99,7 +103,8 @@ object ImagePick {
                 return listOf(ImageChoice(p.id, p.name, ig.modelId, free, inferred = false, note = noteOf(p, ig.modelId, free)))
             }
         }
-        return candidates(state.providers)
+        // 自动挑：用户实测放弃的不用（除非只剩它们）；设置里点名的照用（上面）
+        return candidates(state.providers).let { all -> all.filterNot { ImageTuning.dropped(it.modelId) }.ifEmpty { all } }
     }
 
     /** 自动模式（没有有效的指定）。 */

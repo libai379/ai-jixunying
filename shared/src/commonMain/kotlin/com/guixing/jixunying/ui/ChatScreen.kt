@@ -869,7 +869,8 @@ internal fun AttachmentStrip(ctl: AppController, atts: List<Attachment>, alignEn
     Column(horizontalAlignment = if (alignEnd) Alignment.End else Alignment.Start, verticalArrangement = Arrangement.spacedBy(6.dp)) {
         val images = atts.filter { it.kind != AttachmentKind.DOCUMENT }
         val docs = atts.filter { it.kind == AttachmentKind.DOCUMENT }
-        if (images.isNotEmpty()) Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        // 一排横着放，左右能滑（2026-11-04 用户：一次画了五张，手机上只看得到第一张和第二张一条边）
+        if (images.isNotEmpty()) Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             images.forEach { a ->
                 val img = rememberImage(ctl, a.id)
                 val side = if (large) 300.dp else 120.dp

@@ -8,6 +8,7 @@ import com.guixing.jixunying.model.AccountInfo
 import com.guixing.jixunying.model.Attachment
 import com.guixing.jixunying.model.AttachmentKind
 import com.guixing.jixunying.model.ChannelPart
+import com.guixing.jixunying.model.ImageTuning
 import com.guixing.jixunying.model.BgJob
 import com.guixing.jixunying.model.CodeMode
 import com.guixing.jixunying.model.CodeSpec
@@ -3912,7 +3913,8 @@ class Engine(
     /** 自动模式下画图失败过的模型（比如这个 Key 没开通画图），半小时内排到后面。 */
     private val imageFailures = ConcurrentHashMap<String, Long>()
 
-    private class Painted(val att: Attachment, val revisedPrompt: String?, val label: String)
+    /** added：程序按模型补在提示词后面的那句（ImageTuning）；空 = 没补。 */
+    private class Painted(val att: Attachment, val revisedPrompt: String?, val label: String, val added: String = "")
 
     /**
      * 画一张图。设置里指定了模型就只用它；自动模式按候选顺序试（千问图像优先，见 ImagePick），
@@ -3938,9 +3940,9 @@ class Engine(
             val p = state.provider(c.providerId) ?: continue
             tried += c
             try {
-                val (att, revised) = paint(p to c.modelId, prompt, size)
+                val d = paint(p to c.modelId, prompt, size)
                 imageFailures.remove(key(c))
-                return Painted(att, revised, "${c.modelId}（${c.providerName}）")
+                return Painted(d.att, d.revisedPrompt, "${c.modelId}（${c.providerName}）", d.added)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Throwable) {
@@ -4297,7 +4299,9 @@ class Engine(
     /** 画图的提醒（智谱水印）这次开程序说过了没有。 */
     @Volatile private var imageNoteShown = false
 
-    private suspend fun paint(target: Pair<ProviderConfig, String>, prompt: String, size: String? = null): Pair<Attachment, String?> {
+    private class Drawn(val att: Attachment, val revisedPrompt: String?, val added: String)
+
+    private suspend fun paint(target: Pair<ProviderConfig, String>, prompt: String, size: String? = null): Drawn {
         // 画成一张记一张（成员在聊天里画的记在成员账上；测试画的算测试）。画好了只是下载失败的也已经扣钱，照样记
         val tag = currentCoroutineContext()[UsageTag]
         fun bill() = recordUsage(target.first, target.second, Usage(), if (tag?.kind == UsageKinds.TEST) UsageKinds.TEST else UsageKinds.IMAGE, tag, images = 1)
@@ -4309,10 +4313,23 @@ class Engine(
         bill()
         // 智谱没签去水印的免责声明：这张还带水印，告诉用户去哪儿签（一次开程序只说一回）
         if (r.note.isNotBlank() && !imageNoteShown) { imageNoteShown = true; emit(Event.Notice(r.note)) }
-        val ext = r.mime.substringAfter('/').replace("jpeg", "jpg")
-        val att = Attachment(newId(), "图片_${System.currentTimeMillis() % 1_000_000}.$ext", r.mime, r.bytes.size.toLong(), AttachmentKind.GENERATED_IMAGE, note = prompt.take(200))
-        storage.putFile(att, r.bytes, null)
-        return att to r.revisedPrompt
+        val (bytes, mime) = compactImage(r.bytes, r.mime)
+        val ext = mime.substringAfter('/').replace("jpeg", "jpg")
+        val att = Attachment(newId(), "图片_${System.currentTimeMillis() % 1_000_000}.$ext", mime, bytes.size.toLong(), AttachmentKind.GENERATED_IMAGE, note = prompt.take(200))
+        storage.putFile(att, bytes, null)
+        return Drawn(att, r.revisedPrompt, r.added)
+    }
+
+    /**
+     * 大 PNG 存成 JPEG（质量 92，看不出差别）：2026-11-04 起千问、万相按 2K 画（ImageTuning.targetPixels），一张 PNG 四五 MB 到六七 MB，
+     * 手机遥控电脑时一段一段取、微信发也慢。带透明的、本来就不大的不动。
+     */
+    private fun compactImage(bytes: ByteArray, mime: String): Pair<ByteArray, String> {
+        if (mime != "image/png" || bytes.size <= 2_000_000) return bytes to mime
+        val px = runCatching { decodePixels(bytes) }.getOrNull() ?: return bytes to mime
+        if (px.argb.any { it ushr 24 != 255 }) return bytes to mime
+        val jpg = runCatching { encodePixels(px, 92) }.getOrNull() ?: return bytes to mime
+        return if (jpg.size < bytes.size) jpg to "image/jpeg" else bytes to mime
     }
 
     /** 每张 P 出来的图是从哪张原图来的：同一轮里从同一张原图重做，只留最后一张，试错的不发给用户。 */
@@ -4342,10 +4359,29 @@ class Engine(
         return groups.joinToString("；") { g ->
             g.first().providerName + "：" + g.joinToString("、") { c ->
                 val mine = if (c.providerId == ig.providerId && c.modelId.equals(ig.modelId, ignoreCase = true)) "，设置里选的" else ""
-                "${c.modelId}（${MediaPick.imagePriceText(media, c.providerId, c.modelId)}$mine）"
+                // 用户 11-04 实测定的去留（ImageTuning）：放弃的标出来，留下的标「能用」
+                val verdict = when (ImageTuning.profile(c.modelId).verdict) {
+                    ImageTuning.Verdict.DROP -> "，用户实测后放弃（手脚畸形），点名才用"
+                    ImageTuning.Verdict.KEEP -> "，用户实测能用"
+                    ImageTuning.Verdict.UNTESTED -> ""
+                }
+                "${c.modelId}（${MediaPick.imagePriceText(media, c.providerId, c.modelId)}$mine$verdict）"
             }
         } + (if (list.any { it.modelId.startsWith("kling/") || it.modelId.startsWith("vidu/") })
             "。kling/、vidu/ 开头的是千问AI平台上的第三方模型，账号要先在千问AI平台控制台开通才能用" else "")
+    }
+
+    /**
+     * 各家画图的脾气（用户 11-04 实测，ImageTuning），写进 generate_image 的说明：AI 挑模型、写描述时照着来。
+     * 只列这次能用的模型里有说法的几家。
+     */
+    private fun imageTips(list: List<ImageChoice>): String {
+        val notes = list.map { ImageTuning.profile(it.modelId) }.filter { it.note.isNotEmpty() }.distinctBy { it.family }
+        if (notes.isEmpty()) return ""
+        return "各家画图的脾气（用户实测）：" + notes.joinToString("；") { "${it.family}：${it.note}" } +
+            "。用户定的规矩：手脚画畸形的模型直接放弃（硬条件），审美不行的靠调；不能只靠一个模型，留下的几家轮着用、互相顶替；" +
+            "实在调不过来就别调了，不要为了它浪费额度——同一个模型改了描述重画，同样的毛病又出来，就别在它身上接着花钱，换留下的别家，或者照实告诉用户。" +
+            "画年轻女性写实人像时，程序会按模型自动在描述后面补审美的话（千问、万相防显老、防素人脸），你照常把主体、姿势、服装、光线写清楚就行。"
     }
 
     /** 每条回答里画图、补画、做视频、配音做了几次、大概花了多少（元，按价格表估）。只留最近 200 条回答的。 */
@@ -5083,7 +5119,8 @@ class Engine(
         }
         if (draw) {
             fn("generate_image", "根据文字描述画一张全新的图，画好后和你的回答一起给用户。它只认文字，看不到任何现有的图，所以改不了图：用户要改一张已有的图时不能用它，画出来会是另一张图。" +
-                "画出来不满意（字是乱的、画错了东西）可以换一个模型再画（model），写 replaces 换掉上一张，用户只收到最好的那张。",
+                "画出来不满意（字是乱的、画错了东西）可以换一个模型再画（model），写 replaces 换掉上一张，用户只收到最好的那张。" +
+                    imageTips(ImagePick.candidates(media.providers)),
                 buildJsonObject {
                     put("prompt", prop("画面描述：主体、风格、构图、光线、色彩，越具体越好"))
                     put("size", prop("可选，图片尺寸，如 1024x1024、1024x1792"))
@@ -6029,6 +6066,7 @@ class Engine(
                     // 画完给它看一眼（2026-11-02：以前它从来看不到自己画了什么，画错了也说「做好了」）
                     val look = seen != null && imageDataUrl(r.att)?.also { seen += "你刚画好的《${r.att.name}》" to it } != null
                     "图片已生成：《${r.att.name}》（用的是 ${r.label}，约 ${MediaPick.yuan(cost)} 元），会和你的回答一起给用户。$swapped" +
+                        (if (r.added.isNotEmpty()) "程序按这个模型的脾气在描述后面补了一句：「${r.added}」。" else "") +
                         if (look) "结果图附在下一条消息里，对照用户要的看一眼：对了简单说一句；画错了东西、字是乱的就照实说，别说画好了，也可以换个模型重画（model + replaces）。" else "你看不到结果，简单说画好了，请用户看看对不对。"
                 } catch (e: CancellationException) {
                     throw e
