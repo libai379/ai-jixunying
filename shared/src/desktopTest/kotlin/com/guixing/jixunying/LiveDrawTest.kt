@@ -12,6 +12,37 @@ import kotlin.test.Test
  * 会花钱（千问 qwen-image-3.0 每张 0.18 元），跑之前算好预算。不打印 Key。
  */
 class LiveDrawTest {
+    /**
+     * 每个模型真画一张（2026-11-04 用户：「你测试」——核对补全进来的画图模型都画得出、接口和尺寸都对）。
+     * JXY_LIVE_DRAW_EACH=数据文件夹（复制一份 state.json 再用），JXY_DRAW_OUT=存图的文件夹，JXY_DRAW_EACH=模型@尺寸,…（尺寸不写就 1024x1024）。
+     * 服务商按 ImagePick.candidates 找（预设推断的也算，和 AI 调的时候一样）。花钱，跑之前算好；不打印 Key；不记进用户的账本。
+     */
+    @Test
+    fun drawEachOnce() = runBlocking {
+        val dir = System.getenv("JXY_LIVE_DRAW_EACH") ?: return@runBlocking
+        val out = File(System.getenv("JXY_DRAW_OUT") ?: return@runBlocking).apply { mkdirs() }
+        val wanted = System.getenv("JXY_DRAW_EACH")?.split(',')?.map { it.trim() }?.filter { it.isNotEmpty() } ?: return@runBlocking
+        val state = Storage(File(dir)).loadState() ?: return@runBlocking
+        val cands = com.guixing.jixunying.model.ImagePick.candidates(state.providers)
+        val gen = ImageGen { null }
+        val prompt = "一只橘猫趴在木头窗台上晒太阳，窗外是蓝天和几朵白云，写实摄影风格，柔和的自然光"
+        for (w in wanted) {
+            val model = w.substringBefore('@')
+            val size = w.substringAfter('@', "1024x1024")
+            val c = cands.firstOrNull { it.modelId.equals(model, ignoreCase = true) } ?: run { println("$model：没有能调它的服务商"); continue }
+            val p = state.provider(c.providerId)!!
+            val t0 = System.currentTimeMillis()
+            runCatching { gen.generate(p, model, prompt, size) }
+                .onSuccess { r ->
+                    val (iw, ih) = com.guixing.jixunying.engine.PhotoEdit.sizeOf(r.bytes) ?: (0 to 0)
+                    val f = File(out, model.replace('/', '_') + "." + r.mime.substringAfter('/').replace("jpeg", "jpg"))
+                    f.writeBytes(r.bytes)
+                    println("$model（${c.providerName}，要 $size）画好了 ${(System.currentTimeMillis() - t0) / 1000.0} 秒，${iw}x$ih，${r.bytes.size / 1024} KB → ${f.name}")
+                }
+                .onFailure { println("$model（${c.providerName}，要 $size）失败 ${(System.currentTimeMillis() - t0) / 1000.0} 秒：${it.message?.take(300)}") }
+        }
+    }
+
     @Test
     fun drawWithRealModels() = runBlocking {
         val dir = System.getenv("JXY_LIVE_DRAW_REAL") ?: return@runBlocking
