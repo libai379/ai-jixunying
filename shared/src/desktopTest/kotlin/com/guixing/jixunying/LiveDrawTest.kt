@@ -37,7 +37,8 @@ class LiveDrawTest {
                     val (iw, ih) = com.guixing.jixunying.engine.PhotoEdit.sizeOf(r.bytes) ?: (0 to 0)
                     val f = File(out, model.replace('/', '_') + "." + r.mime.substringAfter('/').replace("jpeg", "jpg"))
                     f.writeBytes(r.bytes)
-                    println("$model（${c.providerName}，要 $size）画好了 ${(System.currentTimeMillis() - t0) / 1000.0} 秒，${iw}x$ih，${r.bytes.size / 1024} KB → ${f.name}")
+                    println("$model（${c.providerName}，要 $size）画好了 ${(System.currentTimeMillis() - t0) / 1000.0} 秒，${iw}x$ih，${r.bytes.size / 1024} KB → ${f.name}" +
+                        (if (r.note.isNotBlank()) "；提醒：${r.note.take(60)}" else "；没有额外提醒"))
                 }
                 .onFailure { println("$model（${c.providerName}，要 $size）失败 ${(System.currentTimeMillis() - t0) / 1000.0} 秒：${it.message?.take(300)}") }
         }
