@@ -111,7 +111,8 @@ fun WeixinPage(ctl: AppController, state: AppState) {
         wx.bots.forEach { b ->
             BotRow(b, state, isDesktop = platform.isDesktop,
                 onReadFiles = if (canToggle) { on -> ctl.run(Command.WeixinSetReadFiles(b.botId, on)) } else null,
-                onUnbind = { confirmUnbind = b.botId })
+                onUnbind = { confirmUnbind = b.botId },
+                onRename = if (!b.shared) { n -> ctl.run(Command.WeixinRename(b.botId, n)) } else null)
             // 手机自己扫码绑了、电脑也绑了同一个微信：后绑的会把先绑的顶掉
             if (!b.shared && b.userId.isNotEmpty() && host?.weixin?.bots?.any { it.userId == b.userId } == true)
                 Text("这个微信电脑上也绑了。一个微信只能绑一台设备，后绑的会把先绑的顶掉。建议在手机上解除它，手机会自动改用电脑的绑定。",
@@ -228,34 +229,64 @@ fun WeixinPage(ctl: AppController, state: AppState) {
             Button({ confirmUnbind = null; ctl.run(Command.WeixinUnbind(botId)) },
                 colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)) { Text("解除绑定") }
         }) {
-            Text((b?.let { "解除「${botName(it, state, platform.isDesktop)}」。" } ?: "") +
+            Text((b?.let { "解除「${botName(it, wx.bots)}」。" } ?: "") +
                 "解除后这个微信里的助理不再回复，「微信对话」聊天记录保留，别的微信照常。以后可以重新扫码绑定。", style = MaterialTheme.typography.bodyMedium)
         }
     }
 }
 
-/** 一个微信叫什么：微信没给昵称，用本人编号开头几位 + 谁绑的。 */
-private fun botName(b: WeixinBot, state: AppState, isDesktop: Boolean): String {
-    val who = when {
-        b.boundBy.isEmpty() -> if (b.shared) "电脑上绑的" else if (isDesktop) "这台电脑上绑的" else "这台设备上绑的"
-        else -> (state.devices.firstOrNull { it.id == b.boundBy }?.name?.let { "「$it」绑的" } ?: "一台手机绑的")
-    }
-    val id = b.userId.substringBefore('@').let { if (it.length > 6) it.take(6) + "…" else it }.ifBlank { b.botId.substringBefore('@').take(6) }
-    return "微信 $id · $who"
+/**
+ * 一个微信叫什么：用户起的名字；没起按绑定先后叫「微信 1」「微信 2」。
+ * 以前用本人编号开头 6 位 + 谁绑的，用户两个微信的编号开头都是 o9cq80、又都是电脑上绑的，显示得一模一样（2026-11-04 用户：「分不清是哪个手机的」）。
+ */
+internal fun botName(b: WeixinBot, all: List<WeixinBot>): String {
+    if (b.name.isNotBlank()) return b.name
+    val i = all.sortedBy { it.boundAt }.indexOfFirst { it.botId == b.botId }
+    return if (all.size <= 1 || i < 0) "微信" else "微信 ${i + 1}"
 }
 
-/** 列表里的一个微信：叫什么、状态、最近一条；电脑上能开关「读电脑上的文件」；能单独解绑。 */
+/** 谁绑的、哪天绑的（帮用户认出是哪个微信）。 */
+private fun botWho(b: WeixinBot, state: AppState, isDesktop: Boolean): String {
+    val who = when {
+        b.boundBy.isEmpty() -> if (b.shared) "电脑上绑的" else if (isDesktop) "这台电脑上绑的" else "这台设备上绑的"
+        else -> (state.devices.firstOrNull { it.id == b.boundBy }?.name?.let { "「$it」遥控电脑时绑的" } ?: "一台手机绑的")
+    }
+    // 老数据、测试数据里绑定时间可能是 0 或很小的数（显示成 1970 年），不写日子
+    return if (b.boundAt > 1_500_000_000_000L) "${formatTime(b.boundAt)} $who" else who
+}
+
+/** 列表里的一个微信：叫什么、状态、最近一条；能起名字；电脑上能开关「读电脑上的文件」；能单独解绑。 */
 @Composable
-private fun BotRow(b: WeixinBot, state: AppState, isDesktop: Boolean, onReadFiles: ((Boolean) -> Unit)?, onUnbind: (() -> Unit)?) {
+private fun BotRow(b: WeixinBot, state: AppState, isDesktop: Boolean, onReadFiles: ((Boolean) -> Unit)?, onUnbind: (() -> Unit)?,
+                   onRename: ((String) -> Unit)? = null) {
+    var renaming by remember(b.botId) { mutableStateOf(false) }
     Column(Modifier.padding(top = 10.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
-                Text(botName(b, state, isDesktop), style = MaterialTheme.typography.bodyMedium)
+                Text(botName(b, state.weixin.bots), style = MaterialTheme.typography.bodyMedium)
+                Text(botWho(b, state, isDesktop), style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
                 if (b.status.isNotBlank()) Text(b.status, style = MaterialTheme.typography.bodySmall,
                     color = if (b.status.startsWith("已连接")) Ext.c.success else Ext.c.subtle)
-                if (b.lastMessageAt > 0) Text("最近一条：${formatTime(b.lastMessageAt)}", style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
+                if (b.lastMessageAt > 0 || b.lastText.isNotBlank()) Text("最近一条" + (if (b.lastMessageAt > 0) "（${formatTime(b.lastMessageAt)}）" else "") +
+                    (if (b.lastText.isNotBlank()) "：「${b.lastText}」" else ""), style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
+                if (b.name.isBlank() && state.weixin.bots.size > 1)
+                    Text(if (onRename != null) "看最近一条认出是谁的微信，点「起名」，对话列表里就按这个名字显示" else "名字在电脑上起：侧栏顶上切到电脑，设置 → 微信",
+                        style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
             }
+            if (onRename != null) TextButton(onClick = { renaming = true }) { Text(if (b.name.isBlank()) "起名" else "改名") }
             if (onUnbind != null) TextButton(onClick = onUnbind) { Text("解除", color = MaterialTheme.colorScheme.error) }
+        }
+        if (renaming && onRename != null) {
+            var name by remember(b.botId) { mutableStateOf(b.name) }
+            AppDialog("给这个微信起个名字", onDismiss = { renaming = false }, width = 420.dp, actions = {
+                TextButton(onClick = { renaming = false }) { Text("取消") }
+                Button(onClick = { onRename(name); renaming = false }) { Text("保存") }
+            }) {
+                Text("现在叫「${botName(b, state.weixin.bots)}」，" + (if (b.lastText.isNotBlank()) "最近一条是「${b.lastText}」。" else "") +
+                    "起了名字，它的微信对话在列表里就叫这个名字。空着保存 = 不要名字。",
+                    style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle, modifier = Modifier.padding(bottom = 8.dp))
+                AppTextField(name, { name = it.take(20) }, placeholder = "比如：三星手机、华为手机、妈妈")
+            }
         }
         if (onReadFiles != null) SwitchRow("能读电脑上的文件", if (b.readFiles) "这个微信里 AI 能搜「我的文档」、读收录范围里的文件" else "只聊天：这个微信里 AI 不碰电脑上的文件", b.readFiles, onReadFiles)
         else if (!b.shared && b.boundBy.isNotEmpty()) Text(if (b.readFiles) "能读电脑上的文件" else "只聊天，不读电脑上的文件（在电脑上能改）",

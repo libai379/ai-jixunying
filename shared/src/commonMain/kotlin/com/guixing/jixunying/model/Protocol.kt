@@ -307,6 +307,8 @@ sealed interface Command {
     @Serializable data class WeixinUnbind(val botId: String) : Command
     /** 微信助理：这个微信里 AI 能不能读电脑上的文件。只能在电脑上改。 */
     @Serializable data class WeixinSetReadFiles(val botId: String, val on: Boolean) : Command
+    /** 微信助理：给一个微信起名字（空 = 不要名字）；它的微信对话标题跟着换（2026-11-04）。手机遥控电脑时也能改。 */
+    @Serializable data class WeixinRename(val botId: String, val name: String) : Command
     /** 电脑关机时由哪台手机接微信（设备编号；"none" = 都不接；空 = 不指定）。只能在电脑上改。 */
     @Serializable data class WeixinSetBackup(val deviceId: String) : Command
 

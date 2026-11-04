@@ -61,6 +61,8 @@ private data class WeixinAccount(
     val boundBy: String = "",
     /** 这个微信里 AI 能不能读电脑上的文件（收录范围、我的文档）。电脑自己绑的默认能，手机绑的默认只聊天。 */
     val readFiles: Boolean = true,
+    /** 用户起的名字（2026-11-04，见 WeixinBot.name）；跟着绑定一起同步给手机。 */
+    val name: String = "",
 )
 
 @Serializable
@@ -315,6 +317,27 @@ class WeixinBridge(
         bot.home.deleteRecursively()
     }
 
+    /**
+     * 给一个微信起名字（2026-11-04 用户：「微信助手的名字，我分不清是哪个手机的」）。它的微信对话标题跟着换（没手动改过标题的）。
+     * 名字跟着绑定走：电脑上绑的在电脑上改（手机遥控电脑时也行），同步给手机；手机本机看到的电脑那份不在手机上改（下次同步会被盖掉）。
+     */
+    fun rename(botId: String, name: String): CommandResult {
+        val bot = bots.firstOrNull { it.account.botId == botId } ?: return CommandResult(false, "没有这个微信")
+        if (bot.account.shared) return CommandResult(false, "这个微信是电脑上绑的，名字跟着电脑：切到「电脑」再改，改了手机这边跟着变")
+        val clean = name.replace(Regex("\\s+"), " ").trim().take(20)
+        val old = bot.account.name
+        if (clean == old) return CommandResult()
+        bot.account = bot.account.copy(name = clean)
+        bot.save()
+        engine.retitleChannel("weixin:${bot.account.userId}", old, clean)
+        publish()
+        return CommandResult()
+    }
+
+    /** 这个微信联系人的对话该叫什么：起了名用名字，没起叫「微信对话」。 */
+    fun titleFor(userId: String): String =
+        bots.firstOrNull { it.account.userId == userId && it.account.name.isNotBlank() }?.account?.name ?: "微信对话"
+
     /** 电脑上：这个微信里 AI 能不能读电脑上的文件。 */
     fun setReadFiles(botId: String, on: Boolean): CommandResult {
         val bot = bots.firstOrNull { it.account.botId == botId } ?: return CommandResult(false, "没有这个微信")
@@ -365,10 +388,13 @@ class WeixinBridge(
         for (b in list) {
             val acc = b.account.copy(shared = true)
             val mine = bots.firstOrNull { it.account.botId == acc.botId }
-            // 已经有了：只更新开关、谁绑的（凭证和进度不动）
+            // 已经有了：只更新开关、谁绑的、名字（凭证和进度不动）
             if (mine != null && mine.account.shared) {
-                if (mine.account.readFiles != acc.readFiles || mine.account.boundBy != acc.boundBy) {
-                    mine.account = mine.account.copy(readFiles = acc.readFiles, boundBy = acc.boundBy); mine.save(); publish()
+                if (mine.account.readFiles != acc.readFiles || mine.account.boundBy != acc.boundBy || mine.account.name != acc.name) {
+                    val oldName = mine.account.name
+                    mine.account = mine.account.copy(readFiles = acc.readFiles, boundBy = acc.boundBy, name = acc.name); mine.save()
+                    if (oldName != acc.name) engine.retitleChannel("weixin:${acc.userId}", oldName, acc.name)
+                    publish()
                 }
                 continue
             }
@@ -599,7 +625,8 @@ class WeixinBridge(
 
         fun ref() = BotRef(account.botId, account.userId, account.shared, account.boundBy)
 
-        fun view() = WeixinBot(account.botId, account.userId, status, answering, account.boundAt, lastMessageAt, account.boundBy, account.readFiles, account.shared)
+        fun view() = WeixinBot(account.botId, account.userId, status, answering, account.boundAt, lastMessageAt, account.boundBy, account.readFiles, account.shared,
+            name = account.name, lastText = runCatching { engine.channelPreview("weixin:${account.userId}") }.getOrNull().orEmpty())
 
         fun bundle(): WeixinShareBundle {
             val now = System.currentTimeMillis()
@@ -790,7 +817,7 @@ class WeixinBridge(
             if (members.isEmpty()) { sendText(from, inc.ctx, "电脑上的 AI集训营 还没有 AI 成员，先在电脑上添加一位。"); return }
             when (inc.text) {
                 "/新对话", "新对话", "/new" -> {
-                    engine.newChannelConversation("weixin:$from", "微信对话", members, ws.webSearch)
+                    engine.newChannelConversation("weixin:$from", titleFor(from), members, ws.webSearch)
                     sendText(from, inc.ctx, "好，换个新话题。之前的聊天还留在电脑上。")
                 }
                 "/帮助", "/help" ->
@@ -804,7 +831,7 @@ class WeixinBridge(
             val ws = engine.state.settings.weixin
             val members = membersFor()
             if (members.isEmpty()) { sendText(from, ctx, "电脑上的 AI集训营 还没有 AI 成员，先在电脑上添加一位。"); return }
-            val convId = engine.channelConversation("weixin:$from", "微信对话", members, ws.webSearch)
+            val convId = engine.channelConversation("weixin:$from", titleFor(from), members, ws.webSearch)
             val typingJob = scope.launch {
                 while (isActive) { typing(from, ctx, true); delay(8_000) }
             }

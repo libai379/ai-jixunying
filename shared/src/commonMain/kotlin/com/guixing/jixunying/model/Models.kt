@@ -282,6 +282,13 @@ data class WeixinBot(
     val readFiles: Boolean = true,
     /** 手机上：从电脑同步来的。 */
     val shared: Boolean = false,
+    /**
+     * 用户给这个微信起的名字（2026-11-04 用户：「微信助手的名字，我分不清是哪个手机的」——微信不给昵称，两个微信的编号开头又一样，
+     * 设置里都显示成「微信 o9cq80…」、对话列表里都叫「微信对话」）。空 = 没起，界面上按绑定先后叫「微信 1」「微信 2」。起了名，它的微信对话标题跟着换。
+     */
+    val name: String = "",
+    /** 这个微信最近发来的一句（开头几个字），帮用户认出是哪个微信。 */
+    val lastText: String = "",
 )
 
 @Serializable

@@ -1496,11 +1496,28 @@ class EngineTest {
             assertTrue(pcWx.readFilesFor("you@im.wechat"))
             assertTrue(pc.call(Command.WeixinSetReadFiles("bot2@im.bot", false)).ok)
 
+            // 起名（2026-11-04 用户：「微信助手的名字，我分不清是哪个手机的」）：手机遥控电脑时改，电脑上它的微信对话标题跟着换，别的不动
+            assertEquals("我这边只聊天吗", pc.state.weixin.bots.first { it.botId == "bot2@im.bot" }.lastText, "最近一句帮着认是谁的微信")
+            assertTrue(com.guixing.jixunying.engine.code.PhoneGate.check(Command.WeixinRename("bot2@im.bot", "华为"), pc.state).refusal == null, "改名手机也能做")
+            assertTrue(remoteA.call(Command.WeixinRename("bot2@im.bot", "  华为 ")).ok)
+            assertEquals("华为", pc.state.weixin.bots.first { it.botId == "bot2@im.bot" }.name)
+            assertEquals("华为", pc.state.conversations.first { it.channel == "weixin:you@im.wechat" }.title)
+            assertEquals("微信对话", pc.state.conversations.first { it.channel == "weixin:me@im.wechat" }.title, "别的微信不动")
+            assertEquals("华为", Json.parseToJsonElement(File(dir, "pc4/weixin/bots/bot2_im.bot/account.json").readText()).jsonObject["name"]?.jsonPrimitive?.content,
+                "名字存进这个微信自己的文件")
+            // 用户自己改过标题的不跟着换
+            val meConv = pc.state.conversations.first { it.channel == "weixin:me@im.wechat" }
+            pc.call(Command.UpdateConversation(meConv.copy(title = "我自己起的")))
+            assertTrue(pc.call(Command.WeixinRename("bot1@im.bot", "三星")).ok)
+            assertEquals("我自己起的", pc.state.conversation(meConv.id)!!.title)
+
             // 手机 A 拿两份（自己的 + 电脑的），都待命；手机 B 只拿电脑那份
             com.guixing.jixunying.engine.WeixinHandover(hub, phone, phoneWx).start()
             phoneWx.start()
             withTimeout(30_000) { while (phoneWx.refs().size < 2) delay(100) }
             assertEquals(setOf("bot1@im.bot", "bot2@im.bot"), phoneWx.refs().map { it.botId }.toSet())
+            withTimeout(10_000) { while (phone.state.weixin.bots.firstOrNull { it.botId == "bot2@im.bot" }?.name != "华为") delay(50) }
+            assertFalse(phone.call(Command.WeixinRename("bot2@im.bot", "乱改")).ok, "电脑绑的名字跟着电脑，手机本机不改")
             withTimeout(10_000) { while (phone.state.weixin.bots.any { it.status != com.guixing.jixunying.engine.WeixinHandover.STANDBY }) delay(50) }
             val hubB = Hub(phoneB, linkFactory = { RelayLink(it) }, pairer = { c, n -> pairWithHost(c, n) }, deviceName = "手机B")
             assertTrue(hubB.pair(PairingCode(pc.state.hostId, pc.state.pairingSecret, "测试电脑", pc.state.settings.relay.brokers)).isSuccess)
@@ -1522,6 +1539,7 @@ class EngineTest {
             delay(1_000)
             assertEquals(1, replyTo("you@im.wechat").size)
             assertTrue("小米" in replyTo("you@im.wechat").single(), "A 答它自己绑的")
+            assertEquals("华为", phone.state.conversations.first { it.channel == "weixin:you@im.wechat" }.title, "手机上的微信对话也按名字叫")
 
             // 电脑解绑 A 绑的那个：A 跟着删，电脑那个还在
             pc.call(Command.SaveSettings(pc.state.settings.copy(weixin = ws.copy(enabled = true))))
@@ -1535,6 +1553,36 @@ class EngineTest {
             wxNextBind = Triple("tok", "bot1@im.bot", "me@im.wechat")
             phoneWx.stop(); pcWx.stop(); relay.stop(); broker.stopServer()
         }
+    }
+
+    /**
+     * 2026-11-04 用户：「电脑关闭之后，微信助手连接不上手机，你看记录就知道」——电脑关机后手机接班，可微信对话的成员阿苗用的是 ChatGPT 订阅
+     * （凭据只在电脑上），手机连答三句都是「还没用 ChatGPT 登录」。现在换手机 设置 → 微信 里选的成员代答，在微信里说一声（同一个对话两小时一次），
+     * 对话的成员不改（电脑开了还是阿苗）。
+     */
+    @Test
+    fun weixinStandInWhenMemberCannotAnswerHere() = runBlocking {
+        val phone = Engine(Storage(File(dir, "standin").also { it.mkdirs() }), isPhone = true)
+        phone.call(Command.SaveProvider(ProviderConfig("p1", "custom", "假服务商", "${base()}/v1", "sk-test", listOf(ModelInfo("fake-chat")))))
+        phone.call(Command.SaveProvider(ProviderConfig("pg", com.guixing.jixunying.model.Presets.CHATGPT, "ChatGPT 订阅", "https://api.openai.com/v1", "", listOf(ModelInfo("gpt-x", vision = true)))))
+        phone.call(Command.SaveMember(Member("miao", "阿苗", providerId = "pg", modelId = "gpt-x")))
+        phone.call(Command.SaveMember(Member("de", "阿德", providerId = "p1", modelId = "fake-chat")))
+        phone.call(Command.SaveMember(Member("fish", "大肥鱼", providerId = "p1", modelId = "fake-chat")))
+        val s = phone.state.settings
+        phone.call(Command.SaveSettings(s.copy(weixin = s.weixin.copy(memberIds = listOf("fish")),
+            search = s.search.copy(engine = SearchEngine.TAVILY), relay = s.relay.copy(enabled = false))))
+        val conv = phone.channelConversation("weixin:me@im.wechat", "微信对话", listOf("miao"), webSearch = false)
+        val notices = mutableListOf<String>()
+        val r1 = phone.channelTurn(conv, listOf(Engine.ChannelInput("看看这个抖音链接", emptyList()))) { notices += it }
+        assertEquals(listOf("fish"), r1.map { it.senderId }, "换手机上选的大肥鱼答（不是成员列表第一位阿德）")
+        assertEquals(MsgStatus.DONE, r1.single().status)
+        val n = notices.single()
+        assertTrue("电脑不在线" in n && "阿苗" in n && "ChatGPT" in n && "大肥鱼" in n, n)
+        val r2 = phone.channelTurn(conv, listOf(Engine.ChannelInput("现在可以了吗", emptyList()))) { notices += it }
+        assertEquals(listOf("fish"), r2.map { it.senderId })
+        assertEquals(1, notices.size, "同一个对话两小时内只说一次")
+        assertEquals(listOf("miao"), phone.state.conversation(conv)!!.memberIds, "对话的成员不改")
+        phone.close()
     }
 
     /** 2026-10-30 真回答里出过「〔11月x日〕」开头、正文里夹「[附件：视频_119551.mp4]」：学聊天记录的格式写的，回答里去掉。 */

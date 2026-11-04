@@ -83,6 +83,13 @@ object SocialLinks {
           const vids = [...document.querySelectorAll('video')].map(v => v.currentSrc || v.src || ((v.querySelector('source') || {}).src)).filter(s => s && !s.startsWith('blob:'));
           out.videos = [...new Set(vids)].slice(0, 5);
           out.images = [...new Set([...document.images].filter(i => i.naturalWidth >= 300 && i.naturalHeight >= 300).map(i => i.currentSrc || i.src))].slice(0, 20);
+          // 抖音图文作品自己的图（2026-11-04 实测）：地址里带 biz_tag=aweme_images，封面是 pcweb_cover、评论表情是 aweme_comment、
+          // 相关推荐的封面带 WEBPC_RELATED；作品的图全放在页面上（12 张的那条 12 张都在），按页面顺序；同一张换了参数的只留一个
+          const postKeys = new Set();
+          out.postImages = [...document.images].map(i => i.currentSrc || i.src)
+            .filter(s => s && s.indexOf('biz_tag=aweme_images') >= 0)
+            .filter(s => { const k = s.split('?')[0].split('~')[0]; if (postKeys.has(k)) return false; postKeys.add(k); return true; })
+            .slice(0, 40);
           try {
             const st = window.__INITIAL_STATE__;
             const m = st && st.note && (st.note.noteDetailMap || (st.note._value && st.note._value.noteDetailMap));
@@ -112,6 +119,20 @@ object SocialLinks {
         (page["note"] as? JsonObject)?.str("video")?.takeIf { it.isNotBlank() }
             ?: (page["videos"] as? JsonArray)?.mapNotNull { (it as? JsonPrimitive)?.content }?.firstOrNull { "douyinstatic.com" !in it }
 
+    /**
+     * 作品自己的图（小红书笔记的、抖音图文的），按顺序；不是图文（视频、普通网页）返回空。
+     * 以前只把小红书的图片地址写进文字、抖音的一张都不提，模型看不到图（2026-11-04 用户：抖音图文「与 Claude Code 的神级对话」，对话全在两张图里，AI 只读到标题和作者）。
+     */
+    fun postImages(page: JsonObject): List<String> {
+        val list = ((page["note"] as? JsonObject)?.get("images") as? JsonArray)?.takeIf { it.isNotEmpty() } ?: (page["postImages"] as? JsonArray)
+        return list?.mapNotNull { (it as? JsonPrimitive)?.content?.trim()?.takeIf { s -> s.startsWith("http") } }?.distinct().orEmpty()
+    }
+
+    /** 页面上「1/12」那种翻页计数写的一共几张（抖音图文顶上有）；没有返回 null。 */
+    fun imageCount(page: JsonObject): Int? =
+        page.str("text").orEmpty().lineSequence().map { it.trim() }
+            .firstNotNullOfOrNull { Regex("""^1/(\d{1,3})$""").matchEntire(it)?.groupValues?.get(1)?.toIntOrNull() }
+
     /** 页面是登录页、验证码页（没拿到内容）。 */
     fun blocked(page: JsonObject): Boolean {
         // 小红书的笔记数据读到了就算读到（页面上同时有个登录框，文字又短）
@@ -135,7 +156,8 @@ object SocialLinks {
             note.str("likes")?.takeIf { it.isNotBlank() }?.let { appendLine("点赞：$it") }
             (note["tags"] as? JsonArray)?.mapNotNull { (it as? JsonPrimitive)?.content }?.takeIf { it.isNotEmpty() }?.let { appendLine("话题：" + it.joinToString("、")) }
             note.str("desc")?.takeIf { it.isNotBlank() }?.let { appendLine("正文：\n$it") }
-            (note["images"] as? JsonArray)?.mapNotNull { (it as? JsonPrimitive)?.content }?.takeIf { it.isNotEmpty() }?.let { appendLine("图片 ${it.size} 张：" + it.take(9).joinToString(" ")) }
+            // 图另外下载下来给模型看（Engine.showPostImages），这里只写张数，不贴一长串地址
+            (note["images"] as? JsonArray)?.size?.takeIf { it > 0 }?.let { appendLine("图片 $it 张") }
             note.str("video")?.takeIf { it.isNotBlank() }?.let { appendLine("视频地址：$it") }
             appendLine()
         } else {

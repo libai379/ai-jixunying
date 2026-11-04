@@ -59,6 +59,29 @@ class DeviceSyncTest {
         usage.forEach { at -> led.add(UsageRecord(at, "chat", pid, "DeepSeek", "deepseek", "deepseek-v4.1-flash", prompt = 100, completion = (at % 1000).toInt(), memberId = mid)) }
     }
 
+    /**
+     * 2026-11-04：电脑关机时手机接了三句，电脑开机又从微信补收了这三句，同步过来每句出现两次（AI 也看到两遍）。
+     * 同一条微信消息按微信给的编号认：对方那份用户消息不再搬，对方的回答照搬。
+     */
+    @Test
+    fun sameWeixinMessageNotDuplicated() {
+        val t = System.currentTimeMillis() - 3600_000L
+        seed(File(dir, "pc2"), "p-pc", "m-pc", "c-pc", listOf("u1" to t + 1, "a1" to t + 2), emptyList())
+        val st = Storage(File(dir, "pc2"))
+        st.saveMessages("c-pc", st.loadMessages("c-pc") + Message("u-pc", "c-pc", Role.USER, USER_ID, "看看这个抖音链接", createdAt = t + 10,
+            channelParts = listOf(com.guixing.jixunying.model.ChannelPart("7523415456144057608"))))
+        val pc = Engine(st).also { engines += it }
+        val batch = com.guixing.jixunying.model.ChannelBatch(ch, "微信对话", listOf(
+            Message("u-ph", "c-ph", Role.USER, USER_ID, "看看这个抖音链接", createdAt = t + 10,
+                channelParts = listOf(com.guixing.jixunying.model.ChannelPart("7523415456144057608"))),
+            Message("a-ph", "c-ph", Role.AI, "m-ph", "", createdAt = t + 11, status = com.guixing.jixunying.model.MsgStatus.ERROR, error = "还没用 ChatGPT 登录"),
+            Message("u-ph2", "c-ph", Role.USER, USER_ID, "现在可以了吗", createdAt = t + 20,
+                channelParts = listOf(com.guixing.jixunying.model.ChannelPart("7523415636260136328")))),
+            members = mapOf("m-ph" to "阿德"))
+        assertEquals(2, pc.importChannel(batch, "手机 测试"))
+        assertEquals(listOf("u1", "a1", "u-pc", "a-ph", "u-ph2"), Storage(File(dir, "pc2")).loadMessages("c-pc").map { it.id })
+    }
+
     @Test
     fun ledgerAndWeixinBothWays() = runBlocking<Unit> {
         val mqttPort = ServerSocket(0).use { it.localPort }

@@ -24,6 +24,8 @@ class LiveBrowserTest {
                     val plat = SocialLinks.platformOf(u)
                     println("blocked=${SocialLinks.blocked(p)}")
                     println(if (plat != null) SocialLinks.format(plat, p).take(2500) else p.toString().take(2500))
+                    // 页面上取到的原始图片地址（format 不一定都写进去）
+                    println("原始图片：" + p["images"] + "\nog:image：" + p["ogImage"] + "\n笔记图片：" + (p["note"] as? kotlinx.serialization.json.JsonObject)?.get("images"))
                     System.getenv("JXY_LIVE_AUDIO")?.let { outDir ->
                         val v = (p["note"] as? kotlinx.serialization.json.JsonObject)?.get("video")?.let { (it as kotlinx.serialization.json.JsonPrimitive).content }?.takeIf { it.isNotBlank() }
                             ?: (p["videos"] as? kotlinx.serialization.json.JsonArray)?.map { (it as kotlinx.serialization.json.JsonPrimitive).content }?.firstOrNull { "douyinstatic" !in it }

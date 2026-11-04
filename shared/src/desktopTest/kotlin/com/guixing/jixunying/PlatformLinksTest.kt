@@ -23,8 +23,10 @@ import io.ktor.server.cio.CIO
 import io.ktor.server.engine.EmbeddedServer
 import io.ktor.server.engine.embeddedServer
 import io.ktor.server.request.receiveText
+import io.ktor.server.response.respondBytes
 import io.ktor.server.response.respondText
 import io.ktor.server.response.respondTextWriter
+import io.ktor.server.routing.get
 import io.ktor.server.routing.post
 import io.ktor.server.routing.routing
 import kotlinx.coroutines.delay
@@ -58,15 +60,20 @@ class PlatformLinksTest {
     private lateinit var fake: EmbeddedServer<*, *>
     private var port = 0
     @Volatile private var asrCalls = 0
+    /** 假抖音图床收到的下载（Referer）。 */
+    private val imgFetches = Collections.synchronizedList(mutableListOf<String>())
     private lateinit var dir: File
 
     /** 假浏览器：按网址回事先存好的页面（照 10-23 真读到的样子删减）。 */
-    private class FakeBrowser : PageBrowser {
+    private class FakeBrowser(val imgBase: String = "") : PageBrowser {
         val opened = Collections.synchronizedList(mutableListOf<String>())
         override suspend fun snapshot(url: String, script: String, settleMs: Long): JsonObject {
             opened += url
             assertEquals(SocialLinks.EXTRACT_JS, script)
             val json = when {
+                // 11-04 真读到的抖音图文（删减）：两张图都在页面上，地址带 biz_tag=aweme_images；顶上「1/2」
+                "/note/" in url -> """{"url":"$url","title":"","desc":"","text":"精选\n推荐\n登录\n1499\n434\n1/2\n个人观点，仅供参考\nAllenの朋友圈\n与 Claude Code 的神级对话。#ai吐槽大会 #Claude 神级对话\n发布时间：2026-11-02 23:28:38\n评论(434)","videos":[],"images":[],
+                    "postImages":["$imgBase/img/1.webp?biz_tag=aweme_images&x-signature=a","$imgBase/img/2.webp?biz_tag=aweme_images&x-signature=b"]}"""
                 "douyin.com" in url -> """{"url":"$url","title":"","desc":"","text":"精选\n推荐\n第83集 | 医者医人，亦可被人间治愈。#小城良方\n3095\n162\n发布时间：2026-10-16 07:22\n全部评论\n这个是真想看，21号我们一起追","videos":["https://lf-douyin-pc-web.douyinstatic.com/obj/douyin-pc-web/uuu_265.mp4","https://v5-dy-ov.zjcdn.com/video/abc.mp4"],"images":[]}"""
                 "xiaohongshu.com" in url -> """{"url":"$url","title":"小红书","text":"登录后推荐更懂你的笔记\n扫码","videos":[],"images":[],
                     "note":{"title":"","desc":"#阿凡达3讨论团[话题]#","type":"video","user":"电梯爱看","images":["http://sns-webpic-qc.xhscdn.com/a.webp"],"likes":"700","tags":["阿凡达3讨论团","电影阿凡达3"],"video":"http://sns-video-zl.xhscdn.com/stream/1.mp4"}}"""
@@ -120,6 +127,11 @@ class PlatformLinksTest {
                         }
                     }
                 }
+                // 假抖音图床：回一张 2000×1200 的 WEBP（电脑上 ImageIO 解不了 WEBP，要走 Skia）
+                get("/img/{n}") {
+                    imgFetches += call.request.headers["Referer"].orEmpty()
+                    call.respondBytes(webp(2000, 1200), ContentType("image", "webp"))
+                }
                 // 假的智谱听写：每段回一句
                 post("/v1/audio/transcriptions") {
                     call.receiveText()
@@ -133,6 +145,92 @@ class PlatformLinksTest {
 
     @AfterTest
     fun cleanup() { fake.stop(500, 1_000); dir.deleteRecursively() }
+
+    private fun webp(w: Int, h: Int): ByteArray {
+        val surface = org.jetbrains.skia.Surface.makeRasterN32Premul(w, h)
+        surface.canvas.clear(0xFF3366CC.toInt())
+        surface.canvas.drawRect(org.jetbrains.skia.Rect.makeXYWH(100f, 100f, w / 2f, h / 2f), org.jetbrains.skia.Paint().apply { color = 0xFFFFFFFF.toInt() })
+        return surface.makeImageSnapshot().encodeToData(org.jetbrains.skia.EncodedImageFormat.WEBP, 80)!!.bytes
+    }
+
+    /**
+     * 真开 Edge 读真的抖音图文、真下载作品的图，假模型只负责调 fetch_url（不花钱）：看 AI 实际收到的图。
+     * JXY_LIVE_POSTIMG=作品链接，JXY_POSTIMG_OUT=把发给模型的图存到哪个文件夹。
+     */
+    @Test
+    fun livePostImages() = runBlocking<Unit> {
+        val link = System.getenv("JXY_LIVE_POSTIMG") ?: return@runBlocking
+        val out = File(System.getenv("JXY_POSTIMG_OUT") ?: error("要设 JXY_POSTIMG_OUT")).also { it.mkdirs() }
+        val profile = kotlin.io.path.createTempDirectory("jxy-browser").toFile()
+        val browser = com.guixing.jixunying.engine.EdgeBrowser(com.guixing.jixunying.engine.EdgeBrowser.findBrowser() ?: error("找不到 Edge"), profile)
+        try {
+            val e = Engine(Storage(File(dir, "live")), browserFactory = { browser })
+            e.call(Command.SaveProvider(ProviderConfig("p1", "custom", "假服务商", "http://127.0.0.1:$port/v1", "sk-test", listOf(ModelInfo("m", vision = true)))))
+            e.call(Command.SaveMember(Member("a1", "阿看", providerId = "p1", modelId = "m")))
+            val conv = e.call(Command.CreateConversation(listOf("a1"))).data
+            e.call(Command.UpdateConversation(e.state.conversation(conv)!!.copy(webSearch = false)))
+            val t0 = System.currentTimeMillis()
+            e.call(Command.SendMessage(conv, "看看这个抖音链接 $link"))
+            withTimeout(180_000) { while (e.store.messages.value[conv].orEmpty().lastOrNull { it.role == Role.AI }?.status != MsgStatus.DONE) delay(100) }
+            val last = requests.last()
+            val tool = last["messages"]!!.jsonArray.last { it.jsonObject["role"]?.jsonPrimitive?.content == "tool" }.jsonObject["content"]!!.jsonPrimitive.content
+            println("用了 ${System.currentTimeMillis() - t0} ms\n工具结果：\n" + tool.take(1500))
+            val pics = last["messages"]!!.jsonArray.map { it.jsonObject }.filter { it["role"]?.jsonPrimitive?.content == "user" && it["content"] is JsonArray }
+                .flatMap { it["content"]!!.jsonArray.map { p -> p.jsonObject } }
+            pics.filter { it["type"]?.jsonPrimitive?.content == "text" }.forEach { println("附图说明：" + it["text"]!!.jsonPrimitive.content) }
+            pics.filter { it["type"]?.jsonPrimitive?.content == "image_url" }.forEachIndexed { i, p ->
+                val bytes = java.util.Base64.getDecoder().decode(p["image_url"]!!.jsonObject["url"]!!.jsonPrimitive.content.substringAfter(","))
+                val img = javax.imageio.ImageIO.read(bytes.inputStream())
+                val f = File(out, "post-${i + 1}.jpg").also { it.writeBytes(bytes) }
+                println("图 ${i + 1}：${img.width}×${img.height}，${bytes.size / 1024} KB → $f")
+            }
+        } finally { browser.close(); profile.deleteRecursively() }
+    }
+
+    /**
+     * 2026-11-04 用户在微信发抖音图文「与 Claude Code 的神级对话」，对话全在两张图里，AI 只读到标题和作者（「图没到我眼前」）。
+     * 现在：作品的图下载下来（带 Referer）、WEBP 转成 JPEG（长边 1600），附在工具结果后面给能看图的模型看；看不了图的照实说。
+     */
+    @Test
+    fun douyinNoteImagesShownToModel() = runBlocking<Unit> {
+        assertTrue(webp(10, 10).copyOfRange(8, 12).decodeToString() == "WEBP")
+        val browser = FakeBrowser("http://127.0.0.1:$port")
+        val e = Engine(Storage(File(dir, "data")), browserFactory = { browser })
+        e.call(Command.SaveProvider(ProviderConfig("p1", "custom", "假服务商", "http://127.0.0.1:$port/v1", "sk-test", listOf(ModelInfo("m", vision = true), ModelInfo("t", vision = false)))))
+        e.call(Command.SaveMember(Member("a1", "阿看", providerId = "p1", modelId = "m")))
+        e.call(Command.SaveMember(Member("a2", "阿盲", providerId = "p1", modelId = "t")))
+        val link = "https://www.douyin.com/note/7703797444894883451"
+        suspend fun ask(member: String): Pair<String, JsonObject> {
+            val conv = e.call(Command.CreateConversation(listOf(member))).data
+            e.call(Command.UpdateConversation(e.state.conversation(conv)!!.copy(webSearch = false)))
+            requests.clear()
+            e.call(Command.SendMessage(conv, "0.28 复制打开抖音，看看【Allenの朋友圈的图文作品】与 Claude Code 的神级对话 $link"))
+            withTimeout(30_000) { while (e.store.messages.value[conv].orEmpty().lastOrNull { it.role == Role.AI }?.status != MsgStatus.DONE) delay(30) }
+            val last = requests.last()
+            val tool = last["messages"]!!.jsonArray.last { it.jsonObject["role"]?.jsonPrimitive?.content == "tool" }.jsonObject["content"]!!.jsonPrimitive.content
+            return tool to last
+        }
+
+        val (seenText, req) = ask("a1")
+        assertTrue("与 Claude Code 的神级对话" in seenText && "2 张图都附在后面" in seenText, seenText)
+        assertFalse("x-signature" in seenText, "不贴一长串图片地址")
+        val pics = req["messages"]!!.jsonArray.map { it.jsonObject }.filter { it["role"]?.jsonPrimitive?.content == "user" && it["content"] is JsonArray }
+            .flatMap { it["content"]!!.jsonArray.map { p -> p.jsonObject } }.filter { it["type"]?.jsonPrimitive?.content == "image_url" }
+        assertEquals(2, pics.size, "两张图都给模型看")
+        val first = pics[0]["image_url"]!!.jsonObject["url"]!!.jsonPrimitive.content
+        assertTrue(first.startsWith("data:image/jpeg;base64,"))
+        val img = javax.imageio.ImageIO.read(java.util.Base64.getDecoder().decode(first.substringAfter(",")).inputStream())
+        assertEquals(1600 to 960, img.width to img.height, "WEBP 解开、缩到长边 1600")
+        assertEquals(listOf("https://www.douyin.com/", "https://www.douyin.com/"), imgFetches.toList(), "下载带 Referer")
+        val step = e.store.messages.value.values.flatten().last { it.role == Role.AI && it.senderId == "a1" }.tools.last { it.kind == "fetch" }
+        assertTrue(step.ok && step.note == "图文 2 张", step.note)
+
+        // 看不了图的模型：不下载，照实说看不了
+        imgFetches.clear()
+        val (blindText, _) = ask("a2")
+        assertTrue("看不了图" in blindText && "一共 2 张图" in blindText, blindText)
+        assertTrue(imgFetches.isEmpty())
+    }
 
     @Test
     fun recognizeBlockAndFormat() {

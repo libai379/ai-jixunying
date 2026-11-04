@@ -100,6 +100,9 @@ import com.guixing.jixunying.model.AppJson
 import com.guixing.jixunying.model.ConfigBundle
 import com.guixing.jixunying.model.MemoryBundle
 import com.guixing.jixunying.model.MemoryTombstone
+import io.ktor.client.request.get
+import io.ktor.client.request.header
+import io.ktor.client.statement.bodyAsBytes
 import java.io.File
 import java.util.Base64
 import java.util.UUID
@@ -1684,6 +1687,7 @@ class Engine(
         is Command.UpdateDownload -> startUpdateDownload()
         is Command.HostFetchUpdate -> hostFetchUpdate(c)
         is Command.WeixinSetReadFiles -> weixin?.setReadFiles(c.botId, c.on) ?: CommandResult(false, "这台设备没有接微信助理")
+        is Command.WeixinRename -> weixin?.rename(c.botId, c.name) ?: CommandResult(false, "这台设备没有接微信助理")
         // 手机经加密线路来要绑定（RelayHost 只放已配对的手机进来）
         is Command.WeixinShare -> weixin?.shareAccount()?.let { CommandResult(data = it) } ?: CommandResult(false, "电脑上还没绑定微信")
         is Command.WeixinShareAll -> weixin?.shareFor(kotlin.coroutines.coroutineContext[RemoteDevice]?.id.orEmpty())?.let { CommandResult(data = it) }
@@ -2813,6 +2817,7 @@ class Engine(
             conv.replyMode == ReplyMode.MENTION_ONLY -> listOf(members.first())
             else -> members
         }
+            .let { if (conv.channel.startsWith("weixin:")) standIns(convId, it) else it }
         // 会审模式：对大家提的问题（不是只叫了某几位）走「独立回答 → 匿名互评 → 主席汇总」，不接力
         val council = conv.council && targets.size > 1 && mentioned.isEmpty() && named.isEmpty()
         val independent = targets.size > 1 && (conv.replyMode != ReplyMode.RELAY || council)
@@ -2851,6 +2856,61 @@ class Engine(
         }
         // 微信里：互评太长不发，发各自的回答和主席汇总
         return all + councilMsgs.filter { it.stage != "review" }
+    }
+
+    /**
+     * 这位成员现在在这台设备上答得了吗（只看配置，不调模型）：答不了返回原因（给人看的半句话），答得了返回 null。
+     * ChatGPT 订阅的凭据只在登录的那台设备上（不同步，见 ChatGptAuth）；手机上「经电脑问」的本机模型要连着电脑。
+     */
+    private fun cannotAnswerHere(m: Member): String? {
+        val p = state.provider(m.providerId) ?: return "还没配置模型"
+        if (m.modelId.isBlank()) return "还没选模型"
+        if (!p.enabled) return "服务商「${p.name}」停用了"
+        if (Presets.isChatGpt(p)) return when {
+            chatgptAuth.creds.signedIn -> null
+            isPhone -> "它用的 ChatGPT 订阅只在电脑上登录了，手机上没登录"
+            else -> "它用的 ChatGPT 订阅还没登录"
+        }
+        if (p.viaHost) return if (hostBrowser?.online == true) null else "它用的是电脑本机的模型，电脑现在连不上"
+        if (p.apiKey.isBlank() && !HostChatCodec.isLoopback(p.baseUrl)) return "服务商「${p.name}」没填 Key"
+        return null
+    }
+
+    private fun canSeeImages(m: Member): Boolean =
+        state.provider(m.providerId)?.models?.firstOrNull { it.id == m.modelId }?.vision ?: Presets.guessVision(m.modelId)
+
+    /** 微信里换人代答说过一声的时间（对话 + 成员 → 时间）：同一个对话两小时内只说一次。 */
+    private val standInSaidAt = ConcurrentHashMap<String, Long>()
+
+    /**
+     * 微信里：该答的成员在这台设备上答不了，换一位答得了的代答（2026-11-04 用户：「电脑关闭之后，微信助手连接不上手机，你看记录就知道」）。
+     * 起因：11-03 夜里电脑关机（北京时间 00:04），三分钟后用户在微信发抖音链接，手机接班了，可这个微信对话的成员阿苗用的是 ChatGPT 订阅，
+     * 只在电脑上登录过，手机连着三句都回「还没用 ChatGPT 登录」。
+     * 先找这台设备 设置 → 微信 里选的回答成员，再按成员列表的顺序找；这一轮带了图的优先能看图的。谁都答不了就照旧（让它报原来的错）。
+     * 换了在微信里说一声（BusyNotice），对话记录里看得到是谁答的。
+     */
+    private suspend fun standIns(convId: String, targets: List<Member>): List<Member> {
+        if (targets.none { cannotAnswerHere(it) != null }) return targets
+        val recent = snapshot(convId).takeLastWhile { it.role == Role.USER }
+        val withImages = recent.any { u -> u.attachments.any { it.kind == AttachmentKind.IMAGE || it.isVideo } || u.quoted.isNotEmpty() }
+        val pool = (state.settings.weixin.memberIds.mapNotNull(state::member) + state.members).distinctBy { it.id }
+        val out = mutableListOf<Member>()
+        for (m in targets) {
+            val why = cannotAnswerHere(m)
+            if (why == null) { out += m; continue }
+            val free = pool.filter { it.id != m.id && it.id !in out.map { o -> o.id } && targets.none { t -> t.id == it.id } && cannotAnswerHere(it) == null }
+            val sub = (if (withImages) free.firstOrNull(::canSeeImages) else null) ?: free.firstOrNull()
+            if (sub == null) { out += m; continue }
+            storage.log("JxyWeixin", "「${m.name}」答不了（$why），由「${sub.name}」代答")
+            val key = "$convId|${m.id}"
+            if (now() - (standInSaidAt[key] ?: 0L) > 2 * 3_600_000L) {
+                standInSaidAt[key] = now()
+                val who = if (isPhone) "电脑不在线，手机接班。" else ""
+                currentCoroutineContext()[BusyNotice]?.say?.invoke("$who「${m.name}」这会儿答不了：$why。这次由「${sub.name}」回答。")
+            }
+            out += sub
+        }
+        return out.distinctBy { it.id }
     }
 
     // ———————————————— 会审模式（1.5.0） ————————————————
@@ -3381,6 +3441,35 @@ class Engine(
         emit(Event.State(state))
     }
 
+    /**
+     * 微信起了名（或改了名）：这个渠道的对话标题跟着换（2026-11-04）。只换还叫默认名（「微信对话」「微信」）或旧名字的，用户自己改过的标题不动。
+     * editedAt 记成现在：两端同步时「谁改得晚听谁的」，手机上的那份跟着换。
+     */
+    fun retitleChannel(channel: String, oldName: String, newName: String) {
+        val title = newName.ifBlank { "微信对话" }
+        val auto = setOf("微信对话", "微信") + listOfNotNull(oldName.takeIf { it.isNotBlank() })
+        val t = now()
+        var changed = false
+        updateState { s -> s.copy(conversations = s.conversations.map { c ->
+            if (c.channel == channel && c.title in auto && c.title != title) { changed = true; c.copy(title = title, editedAt = t) } else c
+        }) }
+        if (changed) storage.log("JxyWeixin", "微信改名，对话标题换成「$title」")
+    }
+
+    /** 这个渠道最近发来的一句（开头 18 个字；只有图、视频、文件的写一句说明），设置 → 微信 里帮用户认出是哪个微信。 */
+    fun channelPreview(channel: String): String {
+        val conv = state.conversations.filter { it.channel == channel }.maxByOrNull { it.updatedAt } ?: return ""
+        val m = snapshot(conv.id).lastOrNull { it.role == Role.USER } ?: return ""
+        val text = m.content.replace(Regex("\\s+"), " ").trim()
+        return when {
+            text.isNotEmpty() -> if (text.length > 18) text.take(18) + "…" else text
+            m.attachments.any { it.isVideo } -> "（发了视频）"
+            m.attachments.any { it.kind == AttachmentKind.IMAGE } -> "（发了图片）"
+            m.attachments.isNotEmpty() -> "（发了文件）"
+            else -> ""
+        }
+    }
+
     /** 某个渠道（比如某个微信用户）最近的那个对话；没有就新建一个。 */
     fun channelConversation(channel: String, title: String, memberIds: List<String>, webSearch: Boolean): String {
         state.conversations.filter { it.channel == channel }.maxByOrNull { it.updatedAt }?.let { c ->
@@ -3527,10 +3616,14 @@ class Engine(
                 editedAt = meta.editedAt) }) }
         }
         val id = convId
-        val have = convsOfKey(state, b.channel).flatMap { snapshot(it.id) }.map { it.id }.toHashSet()
+        val local = convsOfKey(state, b.channel).flatMap { snapshot(it.id) }
+        val have = local.map { it.id }.toHashSet()
+        // 同一条微信消息两边各收了一份（2026-11-04：电脑关机时手机接了三句，电脑开机又从微信补收了这三句，同步过来每句出现两次）：
+        // 按微信给的编号认，对方那份用户消息不再搬
+        val wxIds = local.filter { it.role == Role.USER }.flatMap { m -> m.channelParts.map { it.id } }.filter { it.isNotBlank() }.toHashSet()
         // 这边删过这个微信对话：删之前的不再搬回来
         val gone = state.convDeleted.firstOrNull { it.id == b.channel }?.deletedAt ?: 0
-        val fresh = b.messages.filter { it.createdAt > gone && have.add(it.id) }
+        val fresh = b.messages.filter { it.createdAt > gone && have.add(it.id) && !(it.role == Role.USER && it.channelParts.any { p -> p.id in wxIds }) }
         if (fresh.isEmpty()) return 0
         val list = messages(id)
         synchronized(list) {
@@ -5600,6 +5693,8 @@ class Engine(
         const val MADE_VIDEO_FRAMES = 3
         // 20：用户 11-03 那三段从第一段到问「哪个好」隔了 13 条，12 条就漏了第一段
         const val MADE_VIDEO_WINDOW = 20
+        /** 平台图文作品一次最多给模型看几张图（2026-11-04；一张长边 1600 约一千多 token）。 */
+        const val POST_IMAGES_SHOWN = 9
 
         /** 补全文件名时不进去翻的文件夹。 */
         val SKIP_DIRS = setOf(".git", "node_modules", "build", ".gradle", ".idea", "dist", "out", "target", ".venv", "venv", "__pycache__", ".next", ".kotlin")
@@ -5705,7 +5800,10 @@ class Engine(
                                 ToolStep("fetch", url, listOf(SearchSource(platform.name, url)), ok = false, note = "${platform.name}要登录或被拦")
                         } else {
                             SocialLinks.videoOf(page)?.let { pageVideos[url] = it }
-                            SocialLinks.format(platform, page) to ToolStep("fetch", url, listOf(SearchSource(platform.name + " · " + url.take(60), url)), ok = true)
+                            val pics = SocialLinks.postImages(page)
+                            val picNote = if (pics.isEmpty()) "" else showPostImages(platform, page, pics, seen)
+                            (SocialLinks.format(platform, page) + picNote) to ToolStep("fetch", url, listOf(SearchSource(platform.name + " · " + url.take(60), url)), ok = true,
+                                note = if (pics.isEmpty()) "" else "图文 ${SocialLinks.imageCount(page)?.coerceAtLeast(pics.size) ?: pics.size} 张")
                         }
                     } catch (e: CancellationException) {
                         throw e
@@ -6184,6 +6282,62 @@ class Engine(
     }
 
     private val uprightMemo = ConcurrentHashMap<String, String>()
+
+    /**
+     * 平台作品自己的图（抖音图文、小红书笔记）下载下来，给能看图的模型看（2026-11-04）。
+     * 起因：用户在微信里发抖音图文「与 Claude Code 的神级对话」，对话全在两张图里；读页面只把文字交给 AI，图一张都没给，AI 答「图没到我眼前」。
+     * 图只在这一轮给 AI 看（seen），不存成附件：存了会跟着回答发回微信。
+     * 返回接在工具结果后面的说明：几张、看到了几张、没看到的照实说。
+     */
+    private suspend fun showPostImages(platform: SocialLinks.Platform, page: JsonObject, pics: List<String>, seen: MutableList<Pair<String, String>>?): String {
+        val total = SocialLinks.imageCount(page)?.coerceAtLeast(pics.size) ?: pics.size
+        if (seen == null) return "\n\n这是图文作品，一共 $total 张图，内容主要在图里。你这个模型看不了图，图里写了什么、画了什么都不知道；" +
+            "只按上面的文字说，图里的内容别猜，照实告诉用户（换一位能看图的成员就能看）。"
+        val want = pics.take(POST_IMAGES_SHOWN)
+        val referer = page.str("url")?.let { runCatching { java.net.URI(it) }.getOrNull() }?.let { "${it.scheme}://${it.host}/" } ?: platform.loginUrl
+        // 同时最多下 3 张：一张原图解开要几十 MB（手机上 9 张一起解可能内存不够）
+        val gate = kotlinx.coroutines.sync.Semaphore(3)
+        val got = coroutineScope { want.map { u -> async(Dispatchers.IO) { gate.withPermit { postImageJpeg(u, referer) } } }.awaitAll() }
+        val ok = got.filterNotNull()
+        ok.forEachIndexed { i, jpg ->
+            seen += (if (i == 0) "${platform.name}作品的图（一共 $total 张，这是${if (ok.size == total) "全部" else "其中 ${ok.size} 张"}，按顺序）" else "") to
+                ("data:image/jpeg;base64," + Base64.getEncoder().encodeToString(jpg))
+        }
+        storage.log("JxyPage", "${platform.name}图文：$total 张，取到 ${pics.size} 个地址，下载下来 ${ok.size} 张")
+        return when {
+            ok.isEmpty() -> "\n\n这是图文作品，一共 $total 张图，内容主要在图里，但图没下载下来，你看不到。只按上面的文字说，图里的内容别猜，照实告诉用户图没打开。"
+            ok.size < total -> "\n\n这是图文作品，一共 $total 张图，内容主要在图里。其中 ${ok.size} 张已经附在后面给你看（按顺序），" +
+                "另外 ${total - ok.size} 张没拿到${if (pics.size > want.size) "（一次最多看 $POST_IMAGES_SHOWN 张）" else ""}。回答时说清楚你看的是哪几张，没看到的别猜。"
+            else -> "\n\n这是图文作品，$total 张图都附在后面给你看（按顺序），内容主要在图里，照图里的内容回答。"
+        }
+    }
+
+    /** 下载一张作品图，转成给模型看的 JPEG（长边不超过 PhotoEdit.VIEW_SIDE）；下不来、解不开返回 null，原因写日志。 */
+    private suspend fun postImageJpeg(url: String, referer: String): ByteArray? = try {
+        val resp = withTimeoutOrNull(25_000) {
+            Http.client(null).get(url) { header("Referer", referer); header("User-Agent", Http.UA) }
+        } ?: throw IllegalStateException("25 秒没下载完")
+        if (resp.status.value !in 200..299) throw IllegalStateException("HTTP ${resp.status.value}")
+        val bytes = resp.bodyAsBytes()
+        if (bytes.size > 30 * 1024 * 1024) throw IllegalStateException("图太大（${bytes.size / 1024 / 1024} MB）")
+        viewJpeg(bytes) ?: throw IllegalStateException("图解不开（${bytes.size} 字节）")
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Throwable) {
+        storage.log("JxyPage", "作品图没拿到：${e.message ?: e.javaClass.simpleName}（${url.substringBefore('?').takeLast(60)}）")
+        null
+    }
+
+    /**
+     * 网上下载的图转成给模型看的 JPEG（长边不超过 VIEW_SIDE）。
+     * 电脑上 ImageIO 不认 WEBP（抖音的图都是 webp），shrinkImageToJpeg 解不开就返回 null；再用 decodePixels（电脑上退到 Skia，认 WEBP）解开自己缩。
+     */
+    private fun viewJpeg(bytes: ByteArray): ByteArray? {
+        runCatching { shrinkImageToJpeg(bytes, PhotoEdit.VIEW_SIDE, 1_500_000) }.getOrNull()?.let { return it }
+        val px = runCatching { decodePixels(bytes) }.getOrNull() ?: return null
+        val (w, h) = PhotoEdit.viewSize(px.w, px.h)
+        return runCatching { encodePixels(if (w == px.w && h == px.h) px else PhotoEdit.resize(px, w, h), 88) }.getOrNull()
+    }
 
     private val imageSizes = ConcurrentHashMap<String, String>()
 
