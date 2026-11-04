@@ -1356,9 +1356,10 @@ class EngineTest {
         val keyB64 = Base64.getEncoder().encodeToString(wxKey)
         wxInbox += msg(98765432109876543, """{"type":1,"text_item":{"text":"你好"}}""")
         withTimeout(20_000) { while (wxSent.none { "我是小智" in it }) delay(50) }
-        // 2026-10-30：连发的几条（图 + 话、再一句要画图）一起进对话、按最后一句答一次，不再一条一条翻旧话题
-        wxInbox += msg(2, """{"type":2,"image_item":{"media":{"encrypt_query_param":"img1","aes_key":"$keyB64","encrypt_type":1}}},{"type":1,"text_item":{"text":"看看这张"}}""")
-        wxInbox += msg(3, """{"type":1,"text_item":{"text":"帮我画一只猫"}}""")
+        // 2026-10-30：连发的几条（图 + 话、再一句要画图）一起进对话、按最后一句答一次，不再一条一条翻旧话题。
+        // 2026-11-04 起不再固定等 1.5 秒：同一次收到的几条一起答（这里两条放在一次里给）；分开到的，前一句还没答完就打断合在一起答（WeixinQuoteTest）
+        wxInbox += msg(2, """{"type":2,"image_item":{"media":{"encrypt_query_param":"img1","aes_key":"$keyB64","encrypt_type":1}}},{"type":1,"text_item":{"text":"看看这张"}}""") +
+            "," + msg(3, """{"type":1,"text_item":{"text":"帮我画一只猫"}}""")
         // 陌生人发来的不理（只回答扫码绑定的本人）
         wxInbox += msg(5, """{"type":1,"text_item":{"text":"我是陌生人"}}""", from = "stranger@im.wechat")
         withTimeout(20_000) { while (wxSent.none { "画好了" in it }) delay(50) }

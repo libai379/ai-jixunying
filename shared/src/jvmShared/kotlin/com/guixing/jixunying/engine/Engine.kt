@@ -74,6 +74,7 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.StateFlow
@@ -2834,9 +2835,9 @@ class Engine(
         val councilMsgs = if (council) runCouncil(convId, trigger, firstAnswers) else emptyList()
         if (council) produced = emptyList()
 
-        // AI 之间互相 @：被 @ 的接着说，最多接力 maxMentionChain 轮
+        // AI 之间互相 @：被 @ 的接着说，最多接力 maxMentionChain 轮（微信里用户插话了就不接力，下一轮一起答）
         var depth = 0
-        while (produced.isNotEmpty() && depth < state.settings.maxMentionChain) {
+        while (produced.isNotEmpty() && depth < state.settings.maxMentionChain && convId !in superseded) {
             depth++
             val next = mutableListOf<Message>()
             val currentMembers = state.conversation(convId)?.memberIds?.mapNotNull(state::member) ?: return all
@@ -3784,17 +3785,55 @@ class Engine(
      * onBusy：服务商太忙、要等几分钟时告诉对方一声（chatPatiently）。
      * 出错的回答也返回（status = ERROR，error 是给人看的说法）：微信里要说清楚是怎么回事。
      */
-    suspend fun channelTurn(convId: String, inputs: List<ChannelInput>, onBusy: (suspend (String) -> Unit)? = null): List<Message> {
-        var conv = state.conversation(convId) ?: return emptyList()
+    suspend fun channelTurn(convId: String, inputs: List<ChannelInput>, onBusy: (suspend (String) -> Unit)? = null): List<Message> =
+        channelTurnEx(convId, inputs, onBusy).messages
+
+    /**
+     * 渠道这一轮答出来的：messages 是要发回去的；interrupted = 还没答完用户又发了新消息、这一轮让位了（interruptChannel），
+     * 这时 messages 里只有已经画好的图那几条（没有字），由下一轮一起发出去。
+     */
+    class ChannelReply(val messages: List<Message>, val interrupted: Boolean)
+
+    /** 正在答的渠道对话（interruptChannel 只打断这些）。 */
+    private val channelRunning: MutableSet<String> = ConcurrentHashMap.newKeySet()
+    /** 这一轮要让位的渠道对话：答的循环每一步开头看一眼（reply）。 */
+    private val superseded: MutableSet<String> = ConcurrentHashMap.newKeySet()
+    /** 正在调模型的那一步（「对话编号/消息编号」→ 那次调用），插话时直接停掉。 */
+    private val liveCalls = ConcurrentHashMap<String, Job>()
+
+    /**
+     * 微信又来消息了，这个联系人的对话还没答完（还没发出去）：打断它（2026-11-04 用户：「不要做时间等待，比如 code 在执行任务的时候，
+     * 它在思考的时候可以打断，直接插入话……如果说已经输出完了，那就直接回复；如果没有思考完，那就打断，再重新整理」）。
+     * 在想、在写字的马上停；在画图的画完再停（「如果开始画了，那就画出来，然后等着一块儿输出回复」）。返回 true = 打断了一轮。
+     */
+    fun interruptChannel(channel: String): Boolean {
+        var hit = false
+        for (c in state.conversations.filter { it.channel == channel && it.id in channelRunning }) {
+            superseded += c.id
+            hit = true
+            liveCalls.filterKeys { it.startsWith(c.id + "/") }.values.forEach { it.cancel() }
+        }
+        return hit
+    }
+
+    /** 这一轮被用户插话打断了（reply 里抛，reply 自己收住）。 */
+    private class ChannelSuperseded : Exception()
+
+    /** 这一轮真有回答被截住了的渠道对话（channelTurnEx 据此判断要不要整轮让位）。 */
+    private val cutShort: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
+    suspend fun channelTurnEx(convId: String, inputs: List<ChannelInput>, onBusy: (suspend (String) -> Unit)? = null): ChannelReply {
+        val none = ChannelReply(emptyList(), false)
+        var conv = state.conversation(convId) ?: return none
         // 手机接班时用户喊代答的那位（2026-11-04「大肥鱼」）不算拉人进群：拉进来以后对话成了两位，答不了的那位又要人顶，阿麦就冒出来了
         val standingIn = conv.memberIds.mapNotNull(state::member).any { cannotAnswerHere(it) != null }
         val invited = outsidersCalled(inputs.joinToString("\n") { it.text }, conv)
             .filterNot { m -> standingIn && weixinAnswerers().any { it.id == m.id } }
         if (invited.isNotEmpty()) {
             updateState { s -> s.copy(conversations = s.conversations.map { if (it.id == conv.id) it.copy(memberIds = it.memberIds + invited.map { m -> m.id }) else it }) }
-            conv = state.conversation(convId) ?: return emptyList()
+            conv = state.conversation(convId) ?: return none
         }
-        if (conv.memberIds.isEmpty()) return emptyList()
+        if (conv.memberIds.isEmpty()) return none
         var last: Message? = null
         val added = mutableListOf<Message>()
         for (i in inputs) {
@@ -3807,9 +3846,11 @@ class Engine(
             added += m
             last = m
         }
-        val userMsg = last ?: return emptyList()
+        val userMsg = last ?: return none
         touchConversation(convId, null)
         val before = snapshot(convId).map { it.id }.toHashSet()
+        superseded -= convId
+        channelRunning += convId
         val job = scope.async(if (onBusy != null) BusyNotice(onBusy) else kotlin.coroutines.EmptyCoroutineContext) {
             added.forEach { digestVideosIn(it) }
             digestRecentMade(convId)
@@ -3817,11 +3858,20 @@ class Engine(
         }
         running.getOrPut(convId) { ConcurrentHashMap.newKeySet() }.add(job)
         job.invokeOnCompletion { running[convId]?.remove(job) }
-        val produced = try { job.await() } catch (e: CancellationException) { if (!job.isCancelled) throw e; emptyList() }
+        val produced = try {
+            try { job.await() } catch (e: CancellationException) { if (!job.isCancelled) throw e; emptyList() }
+        } finally {
+            channelRunning -= convId
+        }
+        // 真被截住了才算打断：打断信号来的时候这一轮已经答完（「已经输出完了，那就直接回复」）就照常发，新消息下一轮答
+        superseded.remove(convId)
+        val interrupted = cutShort.remove(convId)
         scope.launch { afterTurn(convId) }
         kickEmbedding()
         val ids = produced.map { it.id }.toSet()
-        return snapshot(convId).filter { it.id in ids || (it.id !in before && it.role == Role.AI && it.status == MsgStatus.ERROR) }
+        // 被打断的这一轮：只把画好的图那几条交回去（没有字），出错的不发（下一轮一起答）
+        if (interrupted) return ChannelReply(snapshot(convId).filter { it.id in ids && it.attachments.isNotEmpty() }, true)
+        return ChannelReply(snapshot(convId).filter { it.id in ids || (it.id !in before && it.role == Role.AI && it.status == MsgStatus.ERROR) }, false)
     }
 
     fun memberName(id: String) = state.member(id)?.name
@@ -3952,7 +4002,8 @@ class Engine(
                     media.forEach { (use, source) -> add(buildJsonObject { put("use", use); put("source", source) }) }
                 }
             }
-            val r = withContext(UsageTag(UsageKinds.VIDEO, convId = convId)) { makeVideo(convId, msg.id, args) }
+            // 用户点的「直接做视频」：本来就是明确要做，不用再问
+            val r = withContext(UsageTag(UsageKinds.VIDEO, convId = convId)) { makeVideo(convId, msg.id, args, confirmed = true) }
             val ok = r.startsWith("视频做好了（") && "收费），但是" !in r
             val sw = Regex("。(.+?)，要告诉用户").find(r)?.groupValues?.get(1)
             updateMessage(convId, msg.id) {
@@ -4000,10 +4051,38 @@ class Engine(
      * 素材（media）：这个对话里的图 / 视频 / 文件（按名字）、电脑上的文件（路径，读的规矩和 read_document 一样）、公开网址；
      * 设置里选的模型收不了这些素材时自动换能收的（VideoPick.resolve），发之前本地先查一遍（VideoMedia.check）。
      */
-    private suspend fun makeVideo(convId: String, msgId: String, args: JsonObject, seen: MutableList<Pair<String, String>>? = null): String {
+    /** AI 问过「做不做视频」的对话 → 问的时间（半小时内用户答应了才算确认）。 */
+    private val videoAsked = ConcurrentHashMap<String, Long>()
+
+    /**
+     * 做视频之前要用户明确说过（2026-11-04 用户：「如果生成视频，那必须得确认一次，没有明确说生成的话，就不要继续生成」）。
+     * 起因：用户在微信里连发「同类型最牛的那个拿出来做比较」、一张照片、「就生成这张图」，AI 没等后面两条就先动手了——画图几毛钱无所谓，做视频一段要好几块到十几块。
+     * 用户这次的话（上一条 AI 回答以后的几句）明确要视频就放行；不然退回去让 AI 先问一句；问过以后用户答应了也放行。
+     */
+    private fun videoGate(convId: String, msgId: String, estimate: String): String? {
+        val all = snapshot(convId)
+        val idx = all.indexOfFirst { it.id == msgId }.let { if (it < 0) all.size else it }
+        val said = all.subList(0, idx).takeLastWhile { it.role == Role.USER }.joinToString("\n") { Quotes.spoken(it.content) }
+        if (Prompts.asksForVideo(said)) return null
+        val asked = videoAsked[convId]
+        if (asked != null && now() - asked < 30 * 60_000L && Prompts.saysYes(said)) { videoAsked.remove(convId); return null }
+        videoAsked[convId] = now()
+        return "没做：用户这次没有明确说要做视频，做视频贵（$estimate），不能自己先做。先用一句话问用户：做不做、用哪个模型、多长、大概多少钱；用户明确说做了再调 generate_video。"
+    }
+
+    private suspend fun makeVideo(convId: String, msgId: String, args: JsonObject, seen: MutableList<Pair<String, String>>? = null,
+                                  confirmed: Boolean = false): String {
         val prompt = args.str("prompt").orEmpty().ifBlank { return "参数错误：缺少 prompt" }
         val v = state.settings.videoGen
         if (VideoPick.resolve(media) == null) return "做视频没开，或者没有能用的服务商（要千问AI平台、阿里百炼或 MiniMax 中国版的 Key）。请告诉用户到 设置 → 画图和视频 里看看。"
+        if (!confirmed) run {
+            val (c, _) = MediaPick.video(media, args.str("model"), emptySet())
+            val est = c?.let { ch ->
+                val secs = VideoPick.durationFor(ch.model, args.str("duration")?.filter { it.isDigit() }?.toIntOrNull() ?: v.duration)
+                "这段 ${ch.model.id} ${secs} 秒大约 ${MediaPick.yuan(MediaPick.videoCost(state, ch.providerId, VideoPick.billingModel(ch.model.id, VideoPick.resolutionFor(ch.model, v.resolution)), secs))} 元"
+            } ?: "一段要好几块钱"
+            videoGate(convId, msgId, est)?.let { return it }
+        }
         val wanted = videoMediaArgs(args["media"]).getOrElse { return "参数错误：${it.message}" }
         val inputs = mutableListOf<VideoInput>()
         for ((use, source) in wanted) inputs += videoInput(convId, msgId, use, source).getOrElse { return it.message.orEmpty() }
@@ -4609,10 +4688,25 @@ class Engine(
             var checkedClaim = false
             // 这一段里调模型、画图都记在这位成员的账上
             withContext(UsageTag(UsageKinds.CHAT, member.id, convId)) { while (true) {
+                // 微信里用户插话了（interruptChannel）：每一步开头停。画图这类工具已经在跑的跑完才到这里（画好的图留着）
+                if (convId in superseded) throw ChannelSuperseded()
                 rounds++
                 val before = snapshot(convId).firstOrNull { it.id == msg.id }?.content?.length ?: 0
-                val r = chatPatiently(convId, msg.id, provider, model.id) {
-                    llm.chat(provider, model.id, working, member.temperature, tools, extra, onSources, thinking) { c, rs -> appendDelta(convId, msg.id, c, rs) }
+                val r = try {
+                    coroutineScope {
+                        val call = async {
+                            chatPatiently(convId, msg.id, provider, model.id) {
+                                llm.chat(provider, model.id, working, member.temperature, tools, extra, onSources, thinking) { c, rs -> appendDelta(convId, msg.id, c, rs) }
+                            }
+                        }
+                        val key = "$convId/${msg.id}"
+                        liveCalls[key] = call
+                        try { call.await() } finally { liveCalls.remove(key) }
+                    }
+                } catch (e: CancellationException) {
+                    // 模型还在想、在写字时被插话掐断（interruptChannel 只停这一步，整轮本身没被停）
+                    if (convId in superseded && currentCoroutineContext().isActive) throw ChannelSuperseded()
+                    throw e
                 }
                 usage = Usage(usage.prompt + r.usage.prompt, usage.completion + r.usage.completion, usage.cached + r.usage.cached, usage.millis + r.usage.millis)
                 // 说东西做好了、发出去了，这一轮却一个工具都没调：退回去让它重说一次（只一次）。不靠模型自觉（2026-11-02 训练）
@@ -4677,6 +4771,19 @@ class Engine(
             return done
         } catch (e: BusySuperseded) {
             // 等服务商恢复时用户又说话了：这条撤掉，新的一轮把两句一起答
+            val list = messages(convId)
+            synchronized(list) { list.removeAll { it.id == msg.id } }
+            emit(Event.MessageRemoved(convId, msg.id))
+            save(convId)
+            return null
+        } catch (e: ChannelSuperseded) {
+            // 微信里还没答完用户又发了消息（2026-11-04）：没说完的话扔掉，新的一轮把几句一起重新整理。
+            // 已经画好的图留着这条（字清空），由下一轮的回答一起发出去；什么都没做出来的整条撤掉
+            cutShort += convId
+            val made = snapshot(convId).firstOrNull { it.id == msg.id }?.attachments.orEmpty()
+            if (made.isNotEmpty()) {
+                return updateMessage(convId, msg.id) { it.copy(content = "", reasoning = "", status = MsgStatus.DONE) }
+            }
             val list = messages(convId)
             synchronized(list) { list.removeAll { it.id == msg.id } }
             emit(Event.MessageRemoved(convId, msg.id))

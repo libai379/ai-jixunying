@@ -578,8 +578,11 @@ class WeixinBridge(
         setLogin("等太久了，二维码已失效，请重新点「绑定微信」", "", false)
     }
 
-    /** 第一条到了以后等多久再答：连发的几条攒在一起（测试里调小）。 */
-    internal var batchWaitMs = 1_500L
+    /**
+     * 第一条到了以后等多久再答。2026-11-04 起不等（用户：「不要做时间等待」）：来了就答，答的时候又来消息就打断重答
+     * （Engine.interruptChannel）。同一次收到的几条照样一起答。留着这个口子给测试。
+     */
+    internal var batchWaitMs = 0L
 
     /** 一条微信消息拆出来的东西：文字、附件、回复要带的 context_token、对方发出的时间、它在微信里的编号、它引用的那条带的附件。 */
     private class Incoming(val text: String, val attIds: List<String>, val ctx: String?, val at: Long,
@@ -763,12 +766,13 @@ class WeixinBridge(
                     kotlinx.coroutines.channels.Channel<JsonObject>(kotlinx.coroutines.channels.Channel.UNLIMITED).also { ch ->
                         scope.launch {
                             for (first in ch) {
-                                // 连发几条、或者 AI 答上一句时又来了几条：等一小会儿，攒在一起答一次（2026-10-30 用户：「后来新的那个话题，它似乎没有看到」）
-                                delay(batchWaitMs)
+                                // 同一次收到的几条、AI 答上一句时又来的几条攒在一起答一次（2026-10-30 用户：「后来新的那个话题，它似乎没有看到」）；
+                                // 不再固定等（2026-11-04），答的时候来新消息由 enqueue 打断（engine.interruptChannel）
+                                if (batchWaitMs > 0) delay(batchWaitMs)
                                 val batch = mutableListOf(first)
-                                while (true) batch += ch.tryReceive().getOrNull() ?: break
                                 try {
-                                    processBatch(from, batch)
+                                    // 处理（下载图片、视频）的时候又到的几条也并进这一批：一直收到开始答为止；开始答以后再来的由 enqueue 打断
+                                    processBatch(from, batch) { ch.tryReceive().getOrNull()?.also { batch += it } }
                                 } catch (e: CancellationException) {
                                     // 整个助理在关：退出；只是这一批被取消：接着处理下一批（处理者没了，后面的消息就永远没人管）
                                     if (!isActive) throw e
@@ -782,7 +786,13 @@ class WeixinBridge(
             }.trySend(m)
             // 上一句还在等服务商恢复的话不等了：新的一批把前面的一起答（先进队列再叫醒：那一轮要看队列里有没有新消息，决定说不说「没答上来」）
             engine.supersedeBusyWaits("weixin:$from")
+            // 上一句还没答完（还没发出去）：打断，新的一批把几句一起重新整理（2026-11-04 用户：「如果没有思考完，那就打断，再重新整理」）。
+            // 已经答完在发的不打断（「已经输出完了，那就直接回复」），新消息排在后面照常答
+            engine.interruptChannel("weixin:$from")
         }
+
+        /** 被插话打断的那几轮已经画好的图（每个联系人一份）：跟下一条回答一起发（「画出来，然后等着一块儿输出回复」）。 */
+        private val carried = ConcurrentHashMap<String, MutableList<Message>>()
 
         private fun markAnswered(m: JsonObject) {
             val at = m.long("create_time_ms") ?: return
@@ -794,9 +804,12 @@ class WeixinBridge(
          * 一批消息：「/新对话」这种命令照顺序单独处理，命令之间的几条一起放进对话、答一次；
          * 回复带最后一条的 context_token（答的是最新的）。
          */
-        private suspend fun processBatch(from: String, batch: List<JsonObject>) {
+        private suspend fun processBatch(from: String, batch: List<JsonObject>, more: () -> JsonObject? = { null }) {
             val pending = mutableListOf<Incoming>()
-            for (m in batch) {
+            var i = 0
+            while (true) {
+                // 这一批的处理完了再看一眼队列：处理的时候新到的接着并进来（more 会把它加进 batch，答完一起记成已答）
+                val m = if (i < batch.size) batch[i++] else (more() ?: break).also { i = batch.size }
                 val inc = parse(from, m)
                 if (inc.text in COMMANDS) {
                     if (pending.isNotEmpty()) { turn(from, pending.toList()); pending.clear() }
@@ -837,18 +850,26 @@ class WeixinBridge(
             val typingJob = scope.launch {
                 while (isActive) { typing(from, ctx, true); delay(8_000) }
             }
-            val replies = try {
-                engine.channelTurn(convId, items.map { Engine.ChannelInput(it.text, it.attIds, it.at, it.wxIds, it.quoted) }) { sendText(from, ctx, it) }
+            val res = try {
+                engine.channelTurnEx(convId, items.map { Engine.ChannelInput(it.text, it.attIds, it.at, it.wxIds, it.quoted) }) { sendText(from, ctx, it) }
             } finally {
                 typingJob.cancel()
                 typing(from, ctx, false)
             }
+            if (res.interrupted) {
+                // 用户插话了：这一轮什么都不发，画好的图攒着，下一批（已经在队列里）答完一起发
+                if (res.messages.isNotEmpty()) carried.getOrPut(from) { mutableListOf() } += res.messages
+                return
+            }
+            val replies = res.messages
             if (replies.isEmpty()) {
                 // 上一句等服务商恢复时又来了新消息（这一轮让位了）：新的一批马上就答，不用说什么
                 if (queues[from]?.isEmpty == false) return
                 sendText(from, ctx, "这次没答上来，可以在电脑上的「微信对话」里看看出了什么问题。")
                 return
             }
+            // 先发被打断那几轮画好的图，再发这次的回答（图先文字后，和 sendReply 一样）
+            carried.remove(from)?.forEach { sendReply(from, ctx, it, false) }
             val multi = replies.map { it.senderId }.distinct().size > 1
             for (r in replies) sendReply(from, ctx, r, multi)
         }

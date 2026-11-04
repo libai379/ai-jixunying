@@ -72,6 +72,8 @@ class WeixinQuoteTest {
     @Volatile private var busyBody = ""
     @Volatile private var busyStatus = HttpStatusCode.InternalServerError
     private val modelCalls = AtomicInteger(0)
+    /** 假画图收到的请求数（插话那道看只画了一张）。 */
+    private val imageCalls = AtomicInteger(0)
     @Volatile private var asrCalls = 0
     private val wxKey = ByteArray(16) { (it * 7 + 3).toByte() }
     private val keyB64 = Base64.getEncoder().encodeToString(wxKey)
@@ -123,22 +125,34 @@ class WeixinQuoteTest {
                     val lastUser = msgs.last { it["role"]?.jsonPrimitive?.content == "user" }
                     val wantsCat = "画一只猫" in contentText(lastUser["content"])
                     val drew = msgs.any { it["role"]?.jsonPrimitive?.content == "tool" }
+                    // 插话那几道（2026-11-04）：上一条 AI 回答以后用户说的几句；带「合并」就把它们原样念出来，带「慢慢说」就慢慢吐字
+                    val tail = msgs.takeLastWhile { it["role"]?.jsonPrimitive?.content != "assistant" }
+                        .filter { it["role"]?.jsonPrimitive?.content == "user" }.map { contentText(it["content"]) }
+                    val slow = tail.any { "慢慢说" in it }
+                    // 连着的几句在请求里拼成一段（每句前面「【小白 · 时间】」），拆开一句句取
+                    val echo = if (tail.any { "合并" in it }) tail.flatMap { t -> t.split("【").mapNotNull { s -> s.substringAfter("】", "").trim().takeIf { it.isNotEmpty() } } }
+                        .joinToString("+") else null
                     call.respondTextWriter(ContentType.Text.EventStream) {
                         fun delta(d: String) { write("data: {\"choices\":[{\"index\":0,\"delta\":$d}]}\n\n"); flush() }
                         if (wantsCat && !drew && req["tools"]?.toString()?.contains("generate_image") == true) {
-                            val fn = JsonObject(mapOf("name" to JsonPrimitive("generate_image"), "arguments" to JsonPrimitive("""{"prompt":"一只猫"}""")))
+                            val prompt = if (tail.any { "慢慢画" in it }) "慢猫" else "一只猫"
+                            val fn = JsonObject(mapOf("name" to JsonPrimitive("generate_image"), "arguments" to JsonPrimitive("""{"prompt":"$prompt"}""")))
                             val tc = JsonObject(mapOf("index" to JsonPrimitive(0), "id" to JsonPrimitive("t1"), "type" to JsonPrimitive("function"), "function" to fn))
                             delta(JsonObject(mapOf("tool_calls" to JsonArray(listOf(tc)))).toString())
                             write("data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n")
                         } else {
-                            delta(JsonObject(mapOf("content" to JsonPrimitive("${who}答：好的。"))).toString())
+                            delta(JsonObject(mapOf("content" to JsonPrimitive("${who}答："))).toString())
+                            if (slow) Thread.sleep(2_500)
+                            delta(JsonObject(mapOf("content" to JsonPrimitive(echo ?: "好的。"))).toString())
                             write("data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n")
                         }
                         write("data: [DONE]\n\n"); flush()
                     }
                 }
                 post("/v1/images/generations") {
-                    call.receiveText()
+                    val body = call.receiveText()
+                    imageCalls.incrementAndGet()
+                    if ("慢" in body) delay(2_500)
                     call.respondText("""{"data":[{"b64_json":"${Base64.getEncoder().encodeToString(png)}"}]}""", ContentType.Application.Json)
                 }
                 post("/v1/audio/transcriptions") {
@@ -257,6 +271,43 @@ class WeixinQuoteTest {
             assertEquals(listOf("大肥鱼答：好的。"), wxSent.map { sentText(it.first) }, "「$t」只有手机上选的大肥鱼答")
         }
         assertEquals(listOf("m0"), w.e.state.conversations.single { it.channel == "weixin:me@im.wechat" }.memberIds)
+        w.bridge.stop()
+    }
+
+    /**
+     * 2026-11-04 用户连发「同类型最牛的那个拿出来做比较」、一张照片、「就生成这张图」，AI 没等后面两条，单独答了第一句（还先画了一张）。
+     * 用户：「不要做时间等待……如果说已经输出完了，那就直接回复；如果没有思考完，那就打断，再重新整理」。
+     * 还在写字时来了新消息：前面没说完的扔掉，几句合在一起只答一次。
+     */
+    @Test
+    fun newMessageInterruptsAnUnfinishedAnswer() = runBlocking {
+        val w = world("阿苗")
+        wxInbox += inMsg("901", text("合并 慢慢说 第一句"))
+        withTimeout(10_000) { while (modelCalls.get() < 1) delay(20) }
+        delay(500)
+        wxInbox += inMsg("902", text("第二句"))
+        waitSent(1)
+        delay(3_500)
+        val texts = wxSent.map { sentText(it.first) }
+        assertEquals(1, texts.size, "只答一次：$texts")
+        assertTrue("第一句" in texts[0]!! && "第二句" in texts[0]!!, "两句合在一起答：${texts[0]}")
+        assertEquals(1, history(w.e).count { it.role == Role.AI }, "没说完的那条撤掉了")
+        w.bridge.stop()
+    }
+
+    /** 已经开始画图了：图画完留着，和合在一起的那条回答一起发（先图后字），不重画。 */
+    @Test
+    fun interruptedDrawingIsSentWithTheFinalAnswer() = runBlocking {
+        val w = world("阿苗")
+        w.e.call(Command.SaveProvider(ProviderConfig("pimg", "zhipu", "画图", "${base()}/v1", "k", listOf(ModelInfo("cogview-3-flash", imageGen = true, tools = false)))))
+        wxInbox += inMsg("911", text("慢慢画一只猫"))
+        withTimeout(10_000) { while (imageCalls.get() < 1) delay(20) }
+        wxInbox += inMsg("912", text("再加顶帽子"))
+        waitSent(2)
+        delay(1_500)
+        val kinds = wxSent.map { if (sentText(it.first) != null) "字" else "图" }
+        assertEquals(listOf("图", "字"), kinds, "被打断那轮画好的图和最后的回答一起发")
+        assertEquals(1, imageCalls.get(), "图只画了一张")
         w.bridge.stop()
     }
 

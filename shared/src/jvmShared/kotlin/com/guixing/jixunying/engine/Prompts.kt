@@ -251,6 +251,20 @@ object Prompts {
     /** 用户这句是不是要 AI 做点东西。 */
     fun asksToDo(text: String): Boolean = ASKS.containsMatchIn(text)
 
+    private val VIDEO_WORDS = Regex("(?i)视频|短片|片子|动起来|动态|海螺|万相|happyhorse|wan3|h3|vidu|可灵")
+    private val VIDEO_GO = Regex("生成|做|来一|来个|来段|拍|弄|整|搞|出一|试试|试一|再来|换|编辑|改|剪|延长|接|续|变成|合成|转成|配|加")
+    private val YES = Regex("(?i)好|行|可以|做|生成|确认|嗯|对|来|ok|搞|整|开始|没问题|要|就这|按你|中|妥")
+    private val NO = Regex("不|别|算了|先不|等等|等一下|取消")
+
+    /**
+     * 用户这几句明确要做视频（2026-11-04 用户：「如果生成视频，那必须得确认一次，没有明确说生成的话，就不要继续生成」）：
+     * 说到视频（或做视频的模型名）又说了要做。「你生成一个美女跳舞的视频」「在用海螺 H3 Max 做一个试试」算；「同类型最牛的那个拿出来做比较」不算。
+     */
+    fun asksForVideo(text: String): Boolean = VIDEO_WORDS.containsMatchIn(text) && VIDEO_GO.containsMatchIn(text)
+
+    /** AI 问过「做不做视频」以后，用户这句是答应（短句、没有否定）。 */
+    fun saysYes(text: String): Boolean = text.trim().length in 1..30 && YES.containsMatchIn(text) && !NO.containsMatchIn(text)
+
     /** AI 说做好了、一个工具都没调时退回去的话。图和文件写在字里发不出去。 */
     const val CLAIM_CHECK = "（程序检查，不是用户说的：这一轮你一个工具都没调，上面却像是说东西做好了、发出去了。图和文件只有调工具才会真的做出来、发给用户，写在字里什么也发不出去。" +
         "要做就现在调工具；做不了就照实说做不了；说的是以前已经做过的事，或者东西就写在回答里，就照实再答一遍。这句检查不用提。）"

@@ -746,4 +746,32 @@ class RepaintTest {
         e.channelTurn(conv, listOf(Engine.ChannelInput("再看看", emptyList(), quoted = listOf(Storage(dir).fileMeta("oldvid")!!))))
         assertEquals(files, File(dir, "files").listFiles()!!.size)
     }
+
+    /**
+     * 2026-11-04 用户：「如果生成视频，那必须得确认一次，没有明确说生成的话，就不要继续生成」。
+     * 用户没明确要视频，AI 自己想做：不做，退回去让它先问；问过以后用户答应了才做。明确说了的照常直接做（上面几道）。
+     */
+    @Test
+    fun videoNeedsAClearAsk() = runBlocking {
+        val e = videoWorld()
+        val conv = e.newChat()
+        script += "generate_video" to """{"prompt":"海边日落","duration":"3"}"""
+        script += "" to "要不要用万相做一段 3 秒的？"
+        e.call(Command.SendMessage(conv, "同类型最牛的那个拿出来做比较"))
+        e.answer(conv)
+        assertEquals(0, videoAsks.size, "没明确要视频，不做")
+        val refused = toolResults(requests.last()).last()
+        assertTrue("没做：用户这次没有明确说要做视频" in refused && "元" in refused, refused)
+        // 问过了，用户答应：做
+        script += "generate_video" to """{"prompt":"海边日落","duration":"3"}"""
+        script += "" to "做好了。"
+        e.call(Command.SendMessage(conv, "做吧"))
+        e.answer(conv)
+        assertEquals(1, videoAsks.size, "答应了才做")
+        // 判断用的话
+        assertTrue(com.guixing.jixunying.engine.Prompts.asksForVideo("在用海螺 H3 Max 做一个试试"))
+        assertTrue(com.guixing.jixunying.engine.Prompts.asksForVideo("你生成一个美女跳舞的视频"))
+        assertFalse(com.guixing.jixunying.engine.Prompts.asksForVideo("就生成这张图"))
+        assertFalse(com.guixing.jixunying.engine.Prompts.saysYes("先不做了"))
+    }
 }
