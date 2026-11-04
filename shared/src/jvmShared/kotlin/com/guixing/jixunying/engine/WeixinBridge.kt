@@ -832,6 +832,8 @@ class WeixinBridge(
             val members = membersFor()
             if (members.isEmpty()) { sendText(from, ctx, "电脑上的 AI集训营 还没有 AI 成员，先在电脑上添加一位。"); return }
             val convId = engine.channelConversation("weixin:$from", titleFor(from), members, ws.webSearch)
+            // 哪台设备在接微信，就用那台自己选的成员答（电脑阿苗、手机大肥鱼），不用对面同步过来的
+            engine.alignChannelMembers(convId, members)
             val typingJob = scope.launch {
                 while (isActive) { typing(from, ctx, true); delay(8_000) }
             }

@@ -237,6 +237,29 @@ class WeixinQuoteTest {
         return e.store.messages.value[conv.id]!!
     }
 
+    /**
+     * 2026-11-04 用户：「电脑手机之间切换，又不是 AI 之间抢，你怎么搞」。手机上的微信对话是从电脑同步来的，成员是电脑的阿苗；
+     * 电脑一关，手机要用它自己 设置 → 微信 选的大肥鱼答，而且只有它一位——喊它的名字、发表情都不会再冒出阿麦。
+     */
+    @Test
+    fun weixinAnsweredByThisDevicesOwnPick() = runBlocking {
+        val w = world("大肥鱼")
+        w.e.call(Command.SaveProvider(ProviderConfig("pg", com.guixing.jixunying.model.Presets.CHATGPT, "ChatGPT 订阅", "https://api.openai.com/v1", "", listOf(ModelInfo("gpt-x")))))
+        w.e.call(Command.SaveMember(Member("miao", "阿苗", providerId = "pg", modelId = "gpt-x")))
+        w.e.call(Command.SaveMember(Member("mai", "阿麦", providerId = "p1", modelId = "fake-chat")))
+        // 从电脑同步来的那份：成员是阿苗
+        w.e.channelConversation("weixin:me@im.wechat", "微信对话", listOf("miao"), webSearch = false)
+        for ((i, t) in listOf("哈喽", "大肥鱼", "[旺柴]").withIndex()) {
+            wxSent.clear()
+            wxInbox += inMsg("${801 + i}", text(t))
+            waitSent(1)
+            delay(800)
+            assertEquals(listOf("大肥鱼答：好的。"), wxSent.map { sentText(it.first) }, "「$t」只有手机上选的大肥鱼答")
+        }
+        assertEquals(listOf("m0"), w.e.state.conversations.single { it.channel == "weixin:me@im.wechat" }.memberIds)
+        w.bridge.stop()
+    }
+
     /** 用户那张截图的情形：引用助理刚说的一句，ref_msg 只带编号。AI 要看得到被引用的话，界面上也看得到。 */
     @Test
     fun quoteAiReplyById() = runBlocking {

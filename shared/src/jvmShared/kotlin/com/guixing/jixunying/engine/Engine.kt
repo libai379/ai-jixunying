@@ -2886,31 +2886,51 @@ class Engine(
      * 微信里：该答的成员在这台设备上答不了，换一位答得了的代答（2026-11-04 用户：「电脑关闭之后，微信助手连接不上手机，你看记录就知道」）。
      * 起因：11-03 夜里电脑关机（北京时间 00:04），三分钟后用户在微信发抖音链接，手机接班了，可这个微信对话的成员阿苗用的是 ChatGPT 订阅，
      * 只在电脑上登录过，手机连着三句都回「还没用 ChatGPT 登录」。
-     * 先找这台设备 设置 → 微信 里选的回答成员，再按成员列表的顺序找；这一轮带了图的优先能看图的。谁都答不了就照旧（让它报原来的错）。
+     * 只从这台设备 设置 → 微信 里选的回答成员里找（没选就是成员列表第一位，和 WeixinBridge.membersFor 一样）；这一轮带了图的优先能看图的。
+     * 选的那位已经在答（比如用户喊了它的名字），就不再另找一位，答不了的这位这轮不答；谁都答不了就照旧（让它报原来的错）。
+     * 2026-11-04 用户：「阿麦怎么出现了，我只选了一个大肥鱼」——以前选的那位已经在答时，按成员列表往下找，把阿麦拉出来顶阿苗。
      * 换了在微信里说一声（BusyNotice），对话记录里看得到是谁答的。
      */
     private suspend fun standIns(convId: String, targets: List<Member>): List<Member> {
         if (targets.none { cannotAnswerHere(it) != null }) return targets
         val recent = snapshot(convId).takeLastWhile { it.role == Role.USER }
         val withImages = recent.any { u -> u.attachments.any { it.kind == AttachmentKind.IMAGE || it.isVideo } || u.quoted.isNotEmpty() }
-        val pool = (state.settings.weixin.memberIds.mapNotNull(state::member) + state.members).distinctBy { it.id }
-        val out = mutableListOf<Member>()
+        val pool = weixinAnswerers().filter { cannotAnswerHere(it) == null }
+        val out = targets.filter { cannotAnswerHere(it) == null }.toMutableList()
         for (m in targets) {
-            val why = cannotAnswerHere(m)
-            if (why == null) { out += m; continue }
-            val free = pool.filter { it.id != m.id && it.id !in out.map { o -> o.id } && targets.none { t -> t.id == it.id } && cannotAnswerHere(it) == null }
+            val why = cannotAnswerHere(m) ?: continue
+            val free = pool.filter { p -> out.none { it.id == p.id } }
             val sub = (if (withImages) free.firstOrNull(::canSeeImages) else null) ?: free.firstOrNull()
-            if (sub == null) { out += m; continue }
-            storage.log("JxyWeixin", "「${m.name}」答不了（$why），由「${sub.name}」代答")
+            val answering = when {
+                sub != null -> { out += sub; listOf(sub) }
+                out.isNotEmpty() -> out.toList()
+                else -> { out += m; continue }   // 谁都答不了：照旧让它报原来的错
+            }
+            val names = answering.joinToString("、") { "「${it.name}」" }
+            storage.log("JxyWeixin", "「${m.name}」答不了（$why），这次由 $names 回答")
             val key = "$convId|${m.id}"
             if (now() - (standInSaidAt[key] ?: 0L) > 2 * 3_600_000L) {
                 standInSaidAt[key] = now()
                 val who = if (isPhone) "电脑不在线，手机接班。" else ""
-                currentCoroutineContext()[BusyNotice]?.say?.invoke("$who「${m.name}」这会儿答不了：$why。这次由「${sub.name}」回答。")
+                currentCoroutineContext()[BusyNotice]?.say?.invoke("$who「${m.name}」这会儿答不了：$why。这次由 $names 回答。")
             }
-            out += sub
         }
         return out.distinctBy { it.id }
+    }
+
+    /** 这台设备 设置 → 微信 里选的回答成员（没选就是成员列表第一位，和 WeixinBridge.membersFor 一样）。 */
+    private fun weixinAnswerers(): List<Member> =
+        state.settings.weixin.memberIds.mapNotNull(state::member).ifEmpty { state.members.take(1) }
+
+    /**
+     * 微信对话谁来答，跟着正在接微信的这台设备自己的 设置 → 微信 走（2026-11-04 用户：「电脑手机之间切换，又不是 AI 之间抢，你怎么搞」）。
+     * 以前对话的成员两边同步：电脑上是阿苗，手机那份也成了阿苗，电脑一关手机答不了，又要人代答，越绕越乱（还冒出了阿麦）。
+     * 现在每次答之前对齐成本机选的（电脑是阿苗、手机是大肥鱼），同步时微信对话的成员也不互相覆盖。不记 editedAt（这是本机的事，不往对面传）。
+     */
+    fun alignChannelMembers(convId: String, memberIds: List<String>) {
+        val ids = memberIds.filter { state.member(it) != null }
+        if (ids.isEmpty()) return
+        updateState { s -> s.copy(conversations = s.conversations.map { c -> if (c.id == convId && c.memberIds != ids) c.copy(memberIds = ids) else c }) }
     }
 
     // ———————————————— 会审模式（1.5.0） ————————————————
@@ -3604,15 +3624,19 @@ class Engine(
             } else {
                 val gone = s.convDeleted.firstOrNull { it.id == b.channel }?.deletedAt ?: 0
                 if (b.messages.none { it.createdAt > gone }) return 0
-                convId = newChannelConversation(b.channel, b.title.ifBlank { "微信" },
-                    b.members.keys.map(::mapMember).filter { s.member(it) != null }.distinct(), webSearch = true)
+                // 微信对话谁来答跟着这台设备自己的 设置 → 微信（2026-11-04，见 alignChannelMembers），不照搬对面的成员
+                val who = if (b.channel.startsWith("weixin:")) weixinAnswerers().map { it.id }
+                    else b.members.keys.map(::mapMember).filter { s.member(it) != null }.distinct()
+                convId = newChannelConversation(b.channel, b.title.ifBlank { "微信" }, who, webSearch = true)
             }
         } else if (meta != null && meta.editedAt > (state.conversation(convId)?.editedAt ?: 0)) {
-            // 对方改过标题、置顶、归档、成员这些：照对方的
+            // 对方改过标题、置顶、归档、成员这些：照对方的（微信对话的成员除外：各台设备按自己 设置 → 微信 选的答）
             val id = convId
+            val weixin = b.channel.startsWith("weixin:")
             updateState { st -> st.copy(conversations = st.conversations.map { c -> if (c.id != id) c else c.copy(
                 title = meta.title, pinned = meta.pinned, archived = meta.archived, replyMode = meta.replyMode, webSearch = meta.webSearch,
-                council = meta.council, memberIds = meta.memberIds.map(::mapMember).filter { st.member(it) != null }.distinct().ifEmpty { c.memberIds },
+                council = meta.council,
+                memberIds = if (weixin) c.memberIds else meta.memberIds.map(::mapMember).filter { st.member(it) != null }.distinct().ifEmpty { c.memberIds },
                 editedAt = meta.editedAt) }) }
         }
         val id = convId
@@ -3762,7 +3786,10 @@ class Engine(
      */
     suspend fun channelTurn(convId: String, inputs: List<ChannelInput>, onBusy: (suspend (String) -> Unit)? = null): List<Message> {
         var conv = state.conversation(convId) ?: return emptyList()
+        // 手机接班时用户喊代答的那位（2026-11-04「大肥鱼」）不算拉人进群：拉进来以后对话成了两位，答不了的那位又要人顶，阿麦就冒出来了
+        val standingIn = conv.memberIds.mapNotNull(state::member).any { cannotAnswerHere(it) != null }
         val invited = outsidersCalled(inputs.joinToString("\n") { it.text }, conv)
+            .filterNot { m -> standingIn && weixinAnswerers().any { it.id == m.id } }
         if (invited.isNotEmpty()) {
             updateState { s -> s.copy(conversations = s.conversations.map { if (it.id == conv.id) it.copy(memberIds = it.memberIds + invited.map { m -> m.id }) else it }) }
             conv = state.conversation(convId) ?: return emptyList()

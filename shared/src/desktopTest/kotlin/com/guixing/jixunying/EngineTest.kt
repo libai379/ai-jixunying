@@ -1585,6 +1585,14 @@ class EngineTest {
         assertEquals(listOf("fish"), r2.map { it.senderId })
         assertEquals(1, notices.size, "同一个对话两小时内只说一次")
         assertEquals(listOf("miao"), phone.state.conversation(conv)!!.memberIds, "对话的成员不改")
+        // 2026-11-04 用户：「阿麦怎么出现了，我只选了一个大肥鱼」：喊代答那位的名字不算拉人进群
+        val r3 = phone.channelTurn(conv, listOf(Engine.ChannelInput("大肥鱼", emptyList()))) { notices += it }
+        assertEquals(listOf("fish"), r3.map { it.senderId })
+        assertEquals(listOf("miao"), phone.state.conversation(conv)!!.memberIds, "喊代答的名字不拉进群")
+        // 1.16.0 / 1.17.0 已经拉成两位的对话：选的那位在答，不再按成员列表另找一位（以前冒出来的是排在前面的阿麦，这里是阿德）
+        phone.call(Command.UpdateConversation(phone.state.conversation(conv)!!.copy(memberIds = listOf("miao", "fish"))))
+        val r4 = phone.channelTurn(conv, listOf(Engine.ChannelInput("[旺柴]", emptyList()))) { notices += it }
+        assertEquals(listOf("fish"), r4.map { it.senderId }, "只有选的大肥鱼答")
         phone.close()
     }
 
