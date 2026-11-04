@@ -184,7 +184,11 @@ class PlatformLinksTest {
                 val f = File(out, "post-${i + 1}.jpg").also { it.writeBytes(bytes) }
                 println("图 ${i + 1}：${img.width}×${img.height}，${bytes.size / 1024} KB → $f")
             }
-        } finally { browser.close(); profile.deleteRecursively() }
+        } finally {
+            browser.close()
+            // Edge 关了还占着文件一会儿，一次删不干净（11-04 留下 9 MB）：多试几次
+            for (i in 0 until 10) { if (profile.deleteRecursively()) break; Thread.sleep(500) }
+        }
     }
 
     /**

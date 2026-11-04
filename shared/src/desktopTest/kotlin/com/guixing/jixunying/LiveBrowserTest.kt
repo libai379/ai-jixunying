@@ -63,6 +63,10 @@ class LiveBrowserTest {
                 }
             }
             SocialLinks.all.forEach { println("${it.name} cookies: " + b.cookieNames(it.cookieDomain).take(30)) }
-        } finally { b.close() }
+        } finally {
+            b.close()
+            // 临时资料夹在 C 盘，每跑一次留几十 MB（11-04 留了两个）：删掉；Edge 关了还占着文件一会儿，删不掉多试几次
+            if (System.getenv("JXY_BROWSER_PROFILE") == null) for (i in 0 until 10) { if (profile.deleteRecursively()) break; Thread.sleep(500) }
+        }
     }
 }
