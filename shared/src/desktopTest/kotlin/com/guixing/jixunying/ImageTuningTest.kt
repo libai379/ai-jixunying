@@ -27,12 +27,15 @@ class ImageTuningTest {
     fun userVerdictsDecideWhoIsKept() {
         // 「可灵放弃，太抽搐了，硬性条件没有」「还是毛病 审美挺好 模型太抽搐」（cogview-4）、「有两个脚抽搐的」是 GLM-Image；
         // MiniMax：同一段描述测三张，两张手脚出毛病（用户：「第一张手抽搐了」），照「调不过来就不要调了」放弃
-        for (m in listOf("kling/kling-v3-image-generation", "kling/kling-v3-omni-image-generation", "cogview-4", "cogview-4-250304", "glm-image", "image-01", "image-01-live"))
+        // Vidu：用户交给我定（「好用就留 不好用就删」），人像常被审核拦、能出图的脸普通又贵，放弃
+        for (m in listOf("kling/kling-v3-image-generation", "kling/kling-v3-omni-image-generation", "cogview-4", "cogview-4-250304", "glm-image", "image-01", "image-01-live",
+                "vidu/vidu-image-lite_reference2image", "vidu/viduq3-fast_reference2image"))
             assertEquals(ImageTuning.Verdict.DROP, ImageTuning.profile(m).verdict, m)
         // 千问「不会抽搐……审美可以调」；万相 2.7「细节做的都挺好 就是审美不太行 可以调」「能用，行」
-        for (m in listOf("qwen-image-3.0-pro", "qwen-image-3.0", "qwen-image-2.0-pro", "wan2.7-image-pro", "wan2.7-image"))
+        // z-image-turbo：11-04 晚选模型三张都好（用户：「选出几个能用的模型来就行」）
+        for (m in listOf("qwen-image-3.0-pro", "qwen-image-3.0", "qwen-image-2.0-pro", "wan2.7-image-pro", "wan2.7-image", "z-image-turbo"))
             assertEquals(ImageTuning.Verdict.KEEP, ImageTuning.profile(m).verdict, m)
-        for (m in listOf("z-image-turbo", "vidu/viduq2-pro_reference2image", "cogview-3-flash", "wanx2.1-t2i-turbo"))
+        for (m in listOf("cogview-3-flash", "wanx2.1-t2i-turbo", "gpt-image-2.5-sunburst"))
             assertEquals(ImageTuning.Verdict.UNTESTED, ImageTuning.profile(m).verdict, m)
     }
 
@@ -75,6 +78,20 @@ class ImageTuningTest {
         val long = userTest + "细节".repeat(560)
         assertEquals(long, ImageTuning.plan("qwen-image-2.0", long).prompt)
         assertTrue(ImageTuning.plan("qwen-image-3.0", long).added.isNotEmpty(), "3.0 上限 4500，照补")
+    }
+
+    /** 参考图：只有官方写明收图的模型才收（千问 3.0 三张、2.1 十张、万相 2.7 九张）；带了参考图不补审美、不加「显老」那些反向提示词。 */
+    @Test
+    fun referencesOnlyWhereTheDocsSaySo() {
+        assertEquals(3, ImageTuning.maxReferences("qwen-image-3.0-pro"))
+        assertEquals(10, ImageTuning.maxReferences("qwen-image-2.1-turbo"))
+        assertEquals(9, ImageTuning.maxReferences("wan2.7-image"))
+        for (m in listOf("z-image-turbo", "image-01", "vidu/vidu-image-lite_reference2image", "kling/kling-v3-omni-image-generation", "gpt-image-2.5-flare", "wan2.6-t2i"))
+            assertEquals(0, ImageTuning.maxReferences(m), m)
+        val withRef = ImageTuning.plan("qwen-image-3.0", userTest, refs = 1)
+        assertEquals(userTest, withRef.prompt)
+        assertFalse("显老" in withRef.negative!!)
+        assertTrue(ImageTuning.plan("qwen-image-3.0", userTest).added.isNotEmpty())
     }
 
     /** MiniMax 有一次回了张灰底带零星彩点的图、状态码照样成功（11-04 实测）：认出来当没画成；正常的暗调图、黑底图不误伤。 */

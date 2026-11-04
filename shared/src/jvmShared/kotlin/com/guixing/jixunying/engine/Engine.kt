@@ -1687,6 +1687,13 @@ class Engine(
         is Command.WeixinUnbind -> weixin?.logout(c.botId) ?: CommandResult(false, "这台设备没有接微信助理")
         is Command.UpdateCheck -> checkUpdate()
         is Command.UpdateDownload -> startUpdateDownload()
+        is Command.UpdateDownloadVia -> startUpdateDownload(c.route)
+        is Command.UpdateStop -> {
+            val job = updateJob
+            if (job?.isActive == true) { job.cancel(); storage.log("JxyUpdate", "用户点了停下"); CommandResult(message = "停下了") } else CommandResult(message = "没在下")
+        }
+        is Command.ReadLog -> readLog()
+        is Command.SaveDeviceLog -> saveDeviceLog(c)
         is Command.HostFetchUpdate -> hostFetchUpdate(c)
         is Command.WeixinSetReadFiles -> weixin?.setReadFiles(c.botId, c.on) ?: CommandResult(false, "这台设备没有接微信助理")
         is Command.WeixinRename -> weixin?.rename(c.botId, c.name) ?: CommandResult(false, "这台设备没有接微信助理")
@@ -3369,8 +3376,12 @@ class Engine(
         }
     }
 
-    /** 后台下载（界面看 state.update.progress）；已经在下就不再开一个。 */
-    private suspend fun startUpdateDownload(): CommandResult {
+    /**
+     * 后台下载（界面看 state.update.progress）；已经在下就不再开一个。
+     * route（2026-11-04 用户：「在设置功能手动选更新路径」）：""= 自动（手机先直连、慢了请电脑代下；电脑先代理后直连），
+     * "direct" 只直连 GitHub，"proxy" 只走代理，"host" 直接请电脑代下（手机）。卡住了用 UpdateStop 停下换一条。
+     */
+    private suspend fun startUpdateDownload(route: String = ""): CommandResult {
         if (updateJob?.isActive == true) return CommandResult(message = "正在下载")
         val info = state.update.latest?.takeIf { state.update.newer } ?: run {
             val r = checkUpdate()
@@ -3378,10 +3389,34 @@ class Engine(
             state.update.latest?.takeIf { state.update.newer } ?: return CommandResult(false, "已经是最新版")
         }
         if (info.kind.isEmpty()) return CommandResult(false, "这一版没有这台设备能自动装的文件，去发行版网页下载")
-        setUpdate { it.copy(progress = 0f, downloaded = "", status = "正在下载 ${info.assetName}…", error = false) }
+        val fb = updateFallback
+        if (route == "host" && fb == null) return CommandResult(false, "这台设备不能请电脑代下（只有配对了电脑的手机能）")
+        storage.log("JxyUpdate", "开始下 ${info.version}（${info.assetName}），线路：" + when (route) { "direct" -> "只直连"; "proxy" -> "只走代理"; "host" -> "请电脑代下"; else -> "自动" })
+        setUpdate { it.copy(progress = 0f, downloaded = "", error = false, status = when (route) {
+            "host" -> "请电脑代下：电脑先下好（进度到一半），再传到手机"
+            "direct" -> "只直连 GitHub 下 ${info.assetName}…"
+            "proxy" -> "只走代理下 ${info.assetName}…"
+            else -> "正在下载 ${info.assetName}…"
+        }) }
+        if (route.isNotEmpty()) {
+            updateJob = scope.launch {
+                try {
+                    val f = if (route == "host") updater.adoptBytes(fb!!(info) { p -> setUpdate { it.copy(progress = p) } }, info)
+                        else updater.download(info, only = route) { p -> setUpdate { it.copy(progress = p) } }
+                    storage.log("JxyUpdate", "下好了：${f.name}")
+                    setUpdate { it.copy(progress = -1f, downloaded = f.path, status = "新版 ${info.version} 下好了，核对过没问题", error = false) }
+                } catch (e: CancellationException) {
+                    setUpdate { it.copy(progress = -1f, status = "下载停了", error = false) }
+                    throw e
+                } catch (e: Throwable) {
+                    storage.log("JxyUpdate", "下载 ${info.assetName} 没成功（线路 $route）：$e")
+                    setUpdate { it.copy(progress = -1f, status = e.message ?: e.toString(), error = true) }
+                }
+            }
+            return CommandResult(message = "开始下载")
+        }
         updateJob = scope.launch {
             try {
-                val fb = updateFallback
                 val f = try {
                     // 手机还能请电脑代下：直连太慢就别死等（10-31 真机：直连 GitHub 每秒七十来 KB）
                     updater.download(info, abortIfSlow = fb != null) { p -> setUpdate { it.copy(progress = p) } }
@@ -3416,6 +3451,33 @@ class Engine(
         return CommandResult(message = "开始下载")
     }
 
+    /** 这台设备的日志全文（ReadLog）。 */
+    private fun readLog(): CommandResult {
+        val f = java.io.File(storage.root, "logs/jxy.log")
+        if (!f.isFile) return CommandResult(false, "还没有日志")
+        val name = "AI集训营日志-" + (if (isPhone) "手机" else "电脑") + "-" + java.time.LocalDateTime.now().toString().take(16).replace(":", "").replace("T", "-") + ".log"
+        return CommandResult(message = name, data = runCatching { f.readText(Charsets.UTF_8) }.getOrDefault(""))
+    }
+
+    /**
+     * 手机发来的日志存在电脑的 logs 文件夹（SaveDeviceLog，2026-11-04）：手机-<设备名>-<时间>.log，最多留 20 份。
+     * 设备名用配对时记的那个（发来的名字只在不是经配对线路来的时候用）。
+     */
+    private suspend fun saveDeviceLog(c: Command.SaveDeviceLog): CommandResult {
+        if (c.text.isBlank()) return CommandResult(false, "日志是空的")
+        if (c.text.length > 8_000_000) return CommandResult(false, "日志太大")
+        val from = currentCoroutineContext()[RemoteDevice]?.id?.let { id -> state.devices.firstOrNull { it.id == id }?.name } ?: c.device
+        val safe = from.replace(Regex("""[\\/:*?"<>|\s]+"""), "_").take(30).ifBlank { "手机" }
+        val dir = java.io.File(storage.root, "logs").apply { mkdirs() }
+        val f = java.io.File(dir, "手机-$safe-" + java.time.LocalDateTime.now().toString().take(19).replace(":", "").replace("T", "-") + ".log")
+        withContext(Dispatchers.IO) {
+            f.writeText(c.text, Charsets.UTF_8)
+            dir.listFiles()?.filter { it.name.startsWith("手机-") }?.sortedByDescending { it.lastModified() }?.drop(20)?.forEach { it.delete() }
+        }
+        storage.log("JxyLog", "收到 $from 发来的日志：${f.name}（${c.text.length} 字）")
+        return CommandResult(message = f.path)
+    }
+
     /**
      * 手机直连 GitHub 下不动，请电脑代下（电脑走自己的代理）。只认本项目发行版的地址、必须带校验值；
      * 下好核对过放进文件区（编号 update-<校验值前 16 位>），手机用 GetFilePart 分段取。以前代下的删掉，只留这一个。
@@ -3427,7 +3489,21 @@ class Engine(
         if (c.size > Updater.MAX_SIZE) return CommandResult(false, "文件太大，不像是安装包")
         val id = "update-" + sha.take(16)
         val dest = storage.fileOf(id)
-        if (dest.isFile && Updater.sha256(dest) == sha) return CommandResult(message = dest.length().toString(), data = id)
+        if (dest.isFile && Updater.sha256(dest) == sha) {
+            storage.log("JxyUpdate", "替手机下：${c.url.substringAfterLast('/')} 早就下好了，直接回文件编号")
+            return CommandResult(message = dest.length().toString(), data = id)
+        }
+        // 同一个文件正在下：再来的请求等这一个（2026-11-04：手机等不到回话会再问；两份一起写同一个 .part 会下坏）
+        val d = hostFetches.computeIfAbsent(sha) { scope.async(start = kotlinx.coroutines.CoroutineStart.LAZY) { hostFetchNow(c, sha, id, dest) } }
+        return try { d.await() } finally { if (d.isCompleted) hostFetches.remove(sha, d) }
+    }
+
+    private val hostFetches = ConcurrentHashMap<String, kotlinx.coroutines.Deferred<CommandResult>>()
+
+    /** 外面（安卓的 UpdateViaHost）往 jxy.log 里记一行。 */
+    fun log(tag: String, text: String) = storage.log(tag, text)
+
+    private suspend fun hostFetchNow(c: Command.HostFetchUpdate, sha: String, id: String, dest: java.io.File): CommandResult {
         val name = c.url.substringAfterLast('/')
         val tmp = Updater(java.io.File(storage.root, "hostupdates"), proxy = { proxyFor(true) }, isPhone = true, log = { storage.log("JxyUpdate", "替手机下：$it") })
         val f = try {
@@ -3444,6 +3520,7 @@ class Engine(
         }
         storage.fileDir.listFiles()?.filter { it.name.startsWith("update-") }?.forEach { it.delete() }
         if (!f.renameTo(dest)) { f.copyTo(dest, overwrite = true); f.delete() }
+        storage.log("JxyUpdate", "替手机下：放好了 $id，回给手机")
         return CommandResult(message = dest.length().toString(), data = id)
     }
 
@@ -3922,9 +3999,9 @@ class Engine(
      * 2026-11-04 各家画图模型补全以后一家有好几个（千问AI平台 25 个、智谱 4 个）：换的时候先换一家（每家先只试排最前的那个），
      * 一家有模型半小时内失败过，这家整体排到后面——不然三次机会全耗在同一家（同一家的别的模型多半一样失败）。
      */
-    private suspend fun paintAuto(prompt: String, size: String? = null, only: ImageChoice? = null): Painted {
-        val all = only?.let { listOf(it) } ?: ImagePick.resolve(media)
-        if (all.isEmpty()) throw IllegalStateException(NO_IMAGE_MODEL)
+    private suspend fun paintAuto(prompt: String, size: String? = null, only: ImageChoice? = null, refs: List<ByteArray> = emptyList()): Painted {
+        val all = only?.let { listOf(it) } ?: refPickable(refs.isNotEmpty())
+        if (all.isEmpty()) throw IllegalStateException(if (refs.isEmpty()) NO_IMAGE_MODEL else NO_REF_MODEL)
         fun key(c: ImageChoice) = c.providerId + "|" + c.modelId
         fun failedRecently(c: ImageChoice) = (imageFailures[key(c)] ?: 0L) > now() - 30 * 60_000
         val badProviders = all.filter(::failedRecently).map { it.providerId }.toSet()
@@ -3940,7 +4017,7 @@ class Engine(
             val p = state.provider(c.providerId) ?: continue
             tried += c
             try {
-                val d = paint(p to c.modelId, prompt, size)
+                val d = paint(p to c.modelId, prompt, size, refs)
                 imageFailures.remove(key(c))
                 return Painted(d.att, d.revisedPrompt, "${c.modelId}（${c.providerName}）", d.added)
             } catch (e: CancellationException) {
@@ -4301,12 +4378,26 @@ class Engine(
 
     private class Drawn(val att: Attachment, val revisedPrompt: String?, val added: String)
 
-    private suspend fun paint(target: Pair<ProviderConfig, String>, prompt: String, size: String? = null): Drawn {
+    /** 能带参考图的画图模型都没有时的话。 */
+    private val NO_REF_MODEL = "没有能带参考图的画图模型：千问图像（qwen-image）、万相 2.7 才收参考图，要在 设置 → 模型服务 配上千问AI平台的 Key。"
+
+    /**
+     * 自动挑画图模型（ImagePick.resolve）；带参考图时只留收参考图的（ImageTuning.maxReferences）：
+     * 设置里选的收就用它，不收就从各家能用的（没放弃的）里挑收参考图的。
+     */
+    private fun refPickable(withRefs: Boolean): List<ImageChoice> {
+        val auto = ImagePick.resolve(media)
+        if (!withRefs) return auto
+        return (auto + ImagePick.candidates(media.providers).filterNot { ImageTuning.dropped(it.modelId) })
+            .filter { ImageTuning.maxReferences(it.modelId) > 0 }.distinctBy { it.providerId + "|" + it.modelId }
+    }
+
+    private suspend fun paint(target: Pair<ProviderConfig, String>, prompt: String, size: String? = null, refs: List<ByteArray> = emptyList()): Drawn {
         // 画成一张记一张（成员在聊天里画的记在成员账上；测试画的算测试）。画好了只是下载失败的也已经扣钱，照样记
         val tag = currentCoroutineContext()[UsageTag]
         fun bill() = recordUsage(target.first, target.second, Usage(), if (tag?.kind == UsageKinds.TEST) UsageKinds.TEST else UsageKinds.IMAGE, tag, images = 1)
         val r = try {
-            images.generate(target.first, target.second, prompt, size ?: state.settings.imageGen.size)
+            images.generate(target.first, target.second, prompt, size ?: state.settings.imageGen.size, refs)
         } catch (e: ImageDownloadFailed) {
             bill(); throw e
         }
@@ -4515,6 +4606,20 @@ class Engine(
         if (name.isBlank()) return all.firstOrNull()
         val short = name.substringAfterLast('/').substringAfterLast('\\')
         return all.firstOrNull { it.name.equals(name, true) || it.name.equals(short, true) }
+    }
+
+    /** generate_image 的参考图文件名：数组，或者一串用逗号、顿号隔开的（模型写法不一）。 */
+    private fun referenceNames(args: JsonObject): List<String> {
+        val raw = args["reference"] ?: args["references"] ?: args["reference_images"] ?: return emptyList()
+        val list = (raw as? JsonArray)?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull }
+            ?: (raw as? JsonPrimitive)?.contentOrNull?.split(Regex("[,，、;；\\n]+")).orEmpty()
+        return list.map { it.trim().removePrefix("《").removeSuffix("》") }.filter { it.isNotEmpty() }
+    }
+
+    /** 这个对话里有哪些图（最近 12 张的文件名），找不到图时告诉 AI。 */
+    private fun imagesHere(convId: String): String {
+        val names = snapshot(convId).flatMap { it.attachments + it.quoted }.filter { it.kind != AttachmentKind.DOCUMENT }.map { it.name }.distinct().takeLast(12)
+        return if (names.isEmpty()) "这个对话里还没有图片。" else "这个对话里有：${names.joinToString("、")}。"
     }
 
     /** P 图（2026-11-02，engine/PhotoEdit.kt）：程序直接改原图，改完自己比对，结果给 AI 看一眼。回给模型的话都在这里。 */
@@ -5118,7 +5223,10 @@ class Engine(
                 buildJsonObject { put("url", prop("作品链接或视频地址")) }, listOf("url"))
         }
         if (draw) {
-            fn("generate_image", "根据文字描述画一张全新的图，画好后和你的回答一起给用户。它只认文字，看不到任何现有的图，所以改不了图：用户要改一张已有的图时不能用它，画出来会是另一张图。" +
+            fn("generate_image", "根据文字描述画一张全新的图，画好后和你的回答一起给用户。不带参考图时它只认文字，看不到任何现有的图；" +
+                "带 reference（对话里图片的文件名）时，模型照着参考图里的人、东西、风格重画一张，用来「这个人换个姿势 / 换个场景」「照这张的风格画」——但仍是重画，长相衣服会有出入，" +
+                "不是在原图上改" + (if (photo) "：要原图别的地方一个像素不动的改图用 P 图工具" else "") +
+                "。带参考图时描述里写清哪些照参考图（脸、发型、衣服），哪些要变（姿势、场景、光线），多张时用「图1」「图2」指（按 reference 的顺序）。" +
                 "画出来不满意（字是乱的、画错了东西）可以换一个模型再画（model），写 replaces 换掉上一张，用户只收到最好的那张。" +
                     imageTips(ImagePick.candidates(media.providers)),
                 buildJsonObject {
@@ -5126,6 +5234,11 @@ class Engine(
                     put("size", prop("可选，图片尺寸，如 1024x1024、1024x1792"))
                     put("model", prop("可选，用哪个模型画，不填就用设置里的。能用的：" + modelsLine(ImagePick.candidates(media.providers))))
                     put("replaces", prop("可选，这次回答里之前画的哪一张不要了（文件名），重画时写上，旧的就不发给用户"))
+                    put("reference", buildJsonObject {
+                        put("type", "array"); putJsonObject("items") { put("type", "string") }
+                        put("description", "可选，参考图：对话里图片旁边写的文件名（用户发的照片、引用的图、之前画的图），按顺序是图1、图2。" +
+                            "能带参考图的模型：千问图像 qwen-image（3.0 最多 3 张、2.1 系列 10 张）、万相 wan2.7（9 张）；不写 model 程序挑能带的")
+                    })
                 }, listOf("prompt"))
         }
         // 配音（2026-11-03）：用户要一段语音（读一段话、配个旁白）时用，做成音频文件发给用户
@@ -6055,17 +6168,31 @@ class Engine(
                 val wanted = MediaPick.clean(args.str("model"))
                 val only = if (wanted.isEmpty()) null else MediaPick.image(media, wanted)
                     ?: return "没有「$wanted」这个画图模型（或者没配它的 Key）。能用的：${modelsLine(ImagePick.candidates(media.providers))}。不写 model 就用设置里的。"
-                val planned = only ?: ImagePick.resolve(media).firstOrNull()
+                // 参考图（2026-11-04 用户转来阿德的话：「要是能把通道打开，让我能传参考图……出来的才可能是同一个人换了个姿势」）：
+                // 对话里图片的文件名，按顺序是「图1」「图2」；交给模型前缩成长边 1600 的 JPEG
+                val refAtts = referenceNames(args).map { n ->
+                    convImage(convId, n) ?: return "找不到参考图「$n」。" + imagesHere(convId) + "reference 写对话里图片旁边的文件名。"
+                }.distinctBy { it.id }
+                val refs = refAtts.mapNotNull { a -> withContext(Dispatchers.IO) { storage.fileBytes(a.id) }?.let { viewJpeg(it) } }
+                if (refs.size < refAtts.size) return "参考图的文件不在这台设备上（或者读不了），带不了参考图。可以不带参考图画，或者告诉用户。"
+                if (only != null && refs.isNotEmpty() && ImageTuning.maxReferences(only.modelId) == 0)
+                    return "「${only.modelId}」不收参考图。能带参考图的：千问图像（qwen-image，3.0 最多 3 张、2.1 系列 10 张）、万相 2.7（9 张）。不写 model 程序会挑能带的。"
+                val planned = only ?: refPickable(refs.isNotEmpty()).firstOrNull()
+                    ?: if (refs.isNotEmpty()) return NO_REF_MODEL else null
                 val cost = planned?.let { MediaPick.imageCost(state, it.providerId, it.modelId) } ?: 0.0
                 spendGate(msgId, cost, "画一张")?.let { return it }
                 try {
-                    val r = paintAuto(prompt, args.str("size"), only)
+                    val r = paintAuto(prompt, args.str("size"), only, refs)
                     spent(msgId, cost)
-                    updateMessage(convId, msgId) { it.copy(attachments = it.attachments + r.att, tools = it.tools + ToolStep("image", prompt, note = "用的是 ${r.label}")) }
+                    val refNote = if (refAtts.isEmpty()) "" else "，参考了" + refAtts.joinToString("") { "《${it.name}》" }
+                    updateMessage(convId, msgId) { it.copy(attachments = it.attachments + r.att, tools = it.tools + ToolStep("image", prompt, note = "用的是 ${r.label}$refNote")) }
                     val swapped = replaceOld(convId, msgId, args.str("replaces"), r.att.id)
                     // 画完给它看一眼（2026-11-02：以前它从来看不到自己画了什么，画错了也说「做好了」）
                     val look = seen != null && imageDataUrl(r.att)?.also { seen += "你刚画好的《${r.att.name}》" to it } != null
+                    val maxRefs = ImageTuning.maxReferences(r.label.substringBefore('（'))
                     "图片已生成：《${r.att.name}》（用的是 ${r.label}，约 ${MediaPick.yuan(cost)} 元），会和你的回答一起给用户。$swapped" +
+                        (if (refAtts.isEmpty()) "" else "照着参考图" + refAtts.take(maxRefs).joinToString("") { "《${it.name}》" } + "重画的一张（不是在原图上改，长相、衣服可能有出入，照实说）。" +
+                            if (refAtts.size > maxRefs) "这个模型最多收 $maxRefs 张，后面的没带上。" else "") +
                         (if (r.added.isNotEmpty()) "程序按这个模型的脾气在描述后面补了一句：「${r.added}」。" else "") +
                         if (look) "结果图附在下一条消息里，对照用户要的看一眼：对了简单说一句；画错了东西、字是乱的就照实说，别说画好了，也可以换个模型重画（model + replaces）。" else "你看不到结果，简单说画好了，请用户看看对不对。"
                 } catch (e: CancellationException) {

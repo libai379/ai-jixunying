@@ -221,7 +221,10 @@ object Prices {
         "openai" -> when {
             m == "gpt-5" -> usd(1.25, 0.125, 10.0)
             m == "gpt-5-mini" -> usd(0.25, 0.025, 2.0)
-            m == "gpt-image-1" -> img(0.042, "USD", "按中等质量 1024×1024 算")
+            m == "gpt-image-1" -> img(0.042, "USD", "按中等质量 1024×1024 算（2026-10-23 已停用）")
+            // 2026-11-04 价格页：gpt-image-2.5-sunburst / -flare、gpt-image-2 都是图片输出 30 美元 / 百万 token，按 token 计、官方不给每张价；
+            // 官方计算器给 GPT Image 2 中等质量 1024×1024 0.053 美元、竖图 1024×1536 0.041 美元。程序发中等质量（ImageGen.openAi），按 0.05 估
+            m.startsWith("gpt-image-2") -> img(0.05, "USD", "按中等质量估；按 token 计费，实际以账单为准")
             else -> null
         }
         "anthropic" -> when {

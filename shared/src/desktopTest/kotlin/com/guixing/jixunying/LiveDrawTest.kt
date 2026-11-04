@@ -29,6 +29,12 @@ class LiveDrawTest {
         val prompt = System.getenv("JXY_DRAW_PROMPT_FILE")?.let { File(it).readText().trim() }
             ?: "一只橘猫趴在木头窗台上晒太阳，窗外是蓝天和几朵白云，写实摄影风格，柔和的自然光"
         val tag = System.getenv("JXY_DRAW_TAG")?.let { "-$it" }.orEmpty()
+        // JXY_DRAW_REFS：参考图文件（逗号隔开），和程序里一样缩成长边 1600 的 JPEG 再发（2026-11-04 参考图画图）
+        val refs = System.getenv("JXY_DRAW_REFS")?.split(',')?.filter { it.isNotBlank() }?.map { path ->
+            val px = com.guixing.jixunying.engine.decodePixels(File(path.trim()).readBytes())!!
+            val (vw, vh) = com.guixing.jixunying.engine.PhotoEdit.viewSize(px.w, px.h)
+            com.guixing.jixunying.engine.encodePixels(if (vw == px.w && vh == px.h) px else com.guixing.jixunying.engine.PhotoEdit.resize(px, vw, vh), 88)
+        }.orEmpty()
         for (w in wanted) {
             // 模型@尺寸!开关：「!raw」= 不细调（照旧发：不补、不放大、没有反向提示词）；「!rewrite」「!norewrite」= 只改平台改写开关；「!seed=123」固定种子
             val model = w.substringBefore('@').substringBefore('!')
@@ -36,7 +42,7 @@ class LiveDrawTest {
             val flags = w.split('!').drop(1)
             val c = cands.firstOrNull { it.modelId.equals(model, ignoreCase = true) } ?: run { println("$model：没有能调它的服务商"); continue }
             val p = state.provider(c.providerId)!!
-            var plan = com.guixing.jixunying.model.ImageTuning.plan(model, prompt)
+            var plan = com.guixing.jixunying.model.ImageTuning.plan(model, prompt, refs.size)
             for (f in flags) plan = when {
                 f == "raw" -> plan.copy(prompt = prompt, added = "", negative = null, pixels = null)
                 f == "rewrite" -> plan.copy(rewrite = true)
@@ -45,7 +51,7 @@ class LiveDrawTest {
                 else -> plan
             }
             val t0 = System.currentTimeMillis()
-            runCatching { gen.generate(p, model, prompt, size, plan) }
+            runCatching { gen.generate(p, model, prompt, size, refs.take(maxOf(1, com.guixing.jixunying.model.ImageTuning.maxReferences(model))).takeIf { refs.isNotEmpty() }.orEmpty(), plan = plan) }
                 .onSuccess { r ->
                     val (iw, ih) = com.guixing.jixunying.engine.PhotoEdit.sizeOf(r.bytes) ?: (0 to 0)
                     val f = File(out, model.replace('/', '_') + flags.joinToString("") { "-" + it.replace('=', '_') } + tag + "." + r.mime.substringAfter('/').replace("jpeg", "jpg"))

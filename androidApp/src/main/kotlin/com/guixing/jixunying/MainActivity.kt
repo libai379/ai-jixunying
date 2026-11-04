@@ -144,7 +144,8 @@ class JxyApp : Application() {
         com.guixing.jixunying.engine.GitHubViaHost(hub, engine).start()
         com.guixing.jixunying.engine.HostModels(hub, engine).start()
         // 检查更新：手机直连 GitHub 下不动时请电脑代下（2026-10-30）
-        engine.updateFallback = com.guixing.jixunying.engine.UpdateViaHost(hub)::fetch
+        // 每一步记进 jxy.log（2026-11-04 华为卡在一半，系统日志被屏蔽、看不出卡在哪：关于页「发给电脑」能把这些拿回来）
+        engine.updateFallback = com.guixing.jixunying.engine.UpdateViaHost(hub) { engine.log("JxyUpdate", it) }::fetch
         weixin.start()
         watchLifecycle()
     }

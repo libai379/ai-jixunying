@@ -558,10 +558,11 @@ class PhotoEditTest {
         assertEquals(1, a.attachments.size)
         assertEquals(1, imagesIn(msgs(requests[1]).last()), "画完的图给模型看")
         val sys = contentText(msgs(requests[0]).first()["content"])
-        assertTrue("edit_image" in sys && "看不到任何现有的图" in sys, "设定里分清楚 P 图和画图")
+        // 2026-11-04 起 generate_image 能带参考图重画，但设定和说明照样写明「是重画、不是在原图上改」
+        assertTrue("edit_image" in sys && "不能当成在原图上改" in sys, "设定里分清楚 P 图和画图")
         assertFalse("要改图时调用 generate_image" in sys)
         val toolDefs = requests[0]["tools"].toString()
-        assertTrue("改不了图" in toolDefs)
+        assertTrue("不是在原图上改" in toolDefs)
     }
 
     /** 看不了图的模型：不给 P 图工具，设定里写明。 */

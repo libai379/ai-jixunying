@@ -157,10 +157,14 @@ object Presets {
             note = "Key 填 API Key；老账号也可以填「AccessKey:SecretKey」"),
 
         // —— 海外 ——
+        // 2026-11-04 用户：「我还想加入 OpenAI 的生图，不走订阅了，直接用官方 key，他们只有生图能用，其他的都不行又贵又拉」——只带画图模型。
+        // 模型名照官方 developers.openai.com/api/docs/guides/image-generation（「using gpt-image-2.5-sunburst and gpt-image-2.5-flare」）
+        // 和价格页（gpt-image-2 还在）；gpt-image-1「was shut down on October 23, 2026」
         ProviderPreset("openai", "OpenAI", GROUP_GLOBAL, "https://api.openai.com/v1",
             "https://platform.openai.com/api-keys",
-            listOf(m("gpt-5", vision = true), m("gpt-5-mini", vision = true), img("gpt-image-1")),
-            "AI", 0xFF10A37F, useProxy = true),
+            listOf(img("gpt-image-2.5-sunburst"), img("gpt-image-2.5-flare"), img("gpt-image-2")),
+            "AI", 0xFF10A37F, useProxy = true,
+            note = "只拿来画图（gpt-image）。按 token 计费，中等质量一张约三四毛钱；要走代理。"),
         // 2026-10-23 用户：「GPT 订阅能不能加进聊天里」——OpenAI 官方「用 ChatGPT 登录」，开源和本机运行的程序可以用订阅额度（docs/ChatGPT订阅设计说明.md）。
         // 不要 Key：登录后拉模型列表（GET /v1/models 的 slug）
         ProviderPreset(CHATGPT, "ChatGPT 订阅（用 ChatGPT 登录）", GROUP_GLOBAL, "https://api.openai.com/v1",

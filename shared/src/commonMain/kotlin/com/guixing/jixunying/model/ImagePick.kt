@@ -29,7 +29,8 @@ object ImagePick {
      */
     fun retired(model: String): Boolean {
         val id = model.lowercase()
-        return id.startsWith("step-1x") || id.startsWith("step-2x") || id.startsWith("step-image")
+        // OpenAI gpt-image-1「was shut down on October 23, 2026」（官方画图指南原文）；gpt-image-1-mini 价格页上还有，不算
+        return id.startsWith("step-1x") || id.startsWith("step-2x") || id.startsWith("step-image") || id == "gpt-image-1"
     }
 
     // 可灵 2026-11-04 拿掉：用户实测手脚畸形，放弃（ImageTuning）

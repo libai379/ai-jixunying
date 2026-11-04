@@ -299,6 +299,21 @@ sealed interface Command {
     /** 检查更新：在后台下载这台设备该下的那个文件并核对 SHA-256，进度和结果写进 AppState.update。 */
     @Serializable data object UpdateDownload : Command
     /**
+     * 检查更新：手动选走哪条路下（2026-11-04 用户：「在设置功能手动选更新路径」——华为更新卡在「电脑传到手机」那步，
+     * 只能干等）。route：""= 自动（和 UpdateDownload 一样）、"direct" = 只直连 GitHub、"proxy" = 只走代理（电脑）、
+     * "host" = 直接请电脑代下（手机，不先试直连）。
+     */
+    @Serializable data class UpdateDownloadVia(val route: String) : Command
+    /** 检查更新：停下正在下的（卡住了换条路再下）。 */
+    @Serializable data object UpdateStop : Command
+    /** 这台设备的日志 jxy.log（2026-11-04 用户要「日志导出功能」）：结果 data 是日志全文，message 是文件名。 */
+    @Serializable data object ReadLog : Command
+    /**
+     * 手机把自己的日志发给电脑存起来（2026-11-04：华为把第三方程序的系统日志屏蔽了、私有目录也读不出来，查手机上的问题只能靠它自己发回来）。
+     * 电脑存到 <数据目录>\logs\手机-<设备名>-<时间>.log，结果 message 是存的位置。
+     */
+    @Serializable data class SaveDeviceLog(val device: String, val text: String) : Command
+    /**
      * 手机直连 GitHub 下不动时，请电脑代下（电脑走它的代理）：只认本项目发行版的地址。
      * 电脑下好、核对过放进自己的文件区，结果 data 是文件编号，手机再用 GetFilePart 分段取。
      */

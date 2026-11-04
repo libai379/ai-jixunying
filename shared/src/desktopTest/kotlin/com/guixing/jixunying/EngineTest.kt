@@ -1036,7 +1036,8 @@ class EngineTest {
             val att = m.attachments.single()
             assertContentEquals(png, e.fileBytes(att.id), preset)
         }
-        assertTrue(imageRequests.any { it.startsWith("dashscope:null:") && "1024*1024" in it }, "千问图像按官方文档走同步")
+        // 2026-11-04 起 qwen-image-3.0 按 2K 画（1K、2K 同价，ImageTuning.targetPixels）
+        assertTrue(imageRequests.any { it.startsWith("dashscope:null:") && "2048*2048" in it }, "千问图像按官方文档走同步，按 2K 画：$imageRequests")
         assertTrue(imageRequests.none { it.startsWith("dashscope:enable:") }, "不先试异步（千问AI平台会回 403）")
         assertTrue(imageRequests.any { it.startsWith("minimax:") && "\"aspect_ratio\":\"1:1\"" in it })
         assertTrue(imageRequests.any { it.startsWith("kling:Bearer ey") }, "AK:SK 要签成 JWT")
@@ -1162,13 +1163,14 @@ class EngineTest {
         val st = com.guixing.jixunying.model.AppState(providers = listOf(step, zhipu),
             settings = com.guixing.jixunying.model.Settings(imageGen = ImageGenSettings("ps", "step-2x-large", "1024x1024")))
         assertTrue(com.guixing.jixunying.model.ImagePick.isAuto(st))
-        assertEquals(picked, com.guixing.jixunying.model.ImagePick.resolve(st).map { it.modelId })
+        // 自动挑时用户实测放弃的（智谱 cogview-4 / glm-image，2026-11-04）也不用
+        assertEquals(picked.filterNot { com.guixing.jixunying.model.ImageTuning.dropped(it) }, com.guixing.jixunying.model.ImagePick.resolve(st).map { it.modelId })
     }
 
     /**
      * 没在 设置→画图 指定模型时自动挑，画质优先：千问图像排第一（用户定的默认），免费的 cogview-3-flash 垫底
-     * （服务商模型列表里没有的也按预设推断）。千问欠费：千问家别的模型不再试，直接换下一家；
-     * 智谱画不出来就换 MiniMax 的 image-01；刚失败过的排到后面，下次直接用能用的。
+     * （服务商模型列表里没有的也按预设推断）。千问欠费：千问家别的模型不再试，直接换下一家；刚失败过的排到后面，下次直接用能用的。
+     * 2026-11-04 起用户实测放弃的（可灵、智谱 cogview-4 / glm-image、MiniMax）自动挑时不用，换下一家换的是魔搭。
      */
     @Test
     fun imageAutoPickAndFallback() = runBlocking {
@@ -1177,10 +1179,14 @@ class EngineTest {
             listOf(ModelInfo("qwen-image-3.0", imageGen = true, tools = false)))))
         e.call(Command.SaveProvider(ProviderConfig("pz", "zhipu", "智谱", "${base()}/bad/v1", "k", listOf(ModelInfo("glm-fake")))))
         e.call(Command.SaveProvider(ProviderConfig("pm", "minimax", "MiniMax", "${base()}/mm/v1", "k", listOf(ModelInfo("MiniMax-M3")))))
+        e.call(Command.SaveProvider(ProviderConfig("pms", "modelscope", "魔搭", "${base()}/ms/v1", "k",
+            listOf(ModelInfo("Qwen/Qwen-Image", imageGen = true, tools = false)))))
         val picks = com.guixing.jixunying.model.ImagePick.resolve(e.state)
-        // 2026-11-04 起各家官方的画图模型都算进来（千问AI平台 25 个、智谱 4 个、MiniMax 2 个），只看排法：千问图像打头、免费的垫底
+        val ids = picks.map { it.modelId }
+        // 各家官方的画图模型都算进来（千问AI平台 25 个、智谱 4 个、MiniMax 2 个），只看排法：千问图像打头、免费的垫底、放弃的不在
         assertEquals("qwen-image-3.0", picks.first().modelId)
-        assertTrue(picks.map { it.modelId }.containsAll(listOf("wan2.7-image", "glm-image", "cogview-4-250304", "image-01", "image-01-live")), picks.map { it.modelId }.toString())
+        assertTrue("wan2.7-image" in ids, ids.toString())
+        assertTrue(listOf("glm-image", "cogview-4-250304", "image-01", "image-01-live", "kling/kling-v3-image-generation").none { it in ids }, ids.toString())
         assertEquals("cogview-3-flash", picks.last().modelId)
         assertTrue(picks.last().free)
 
@@ -1189,14 +1195,14 @@ class EngineTest {
         waitIdle(e, conv, 1)
         val m = e.store.messages.value[conv]!!.last()
         assertEquals(MsgStatus.DONE, m.status, m.error)
-        assertEquals("image-01（MiniMax）", m.modelLabel)
-        assertEquals(listOf("dashscope", "bad", "minimax"), imageRequests.map { it.substringBefore(':') },
-            "千问欠费就跳过万相（同一个 Key），智谱失败后换 MiniMax")
+        assertEquals("Qwen/Qwen-Image（魔搭）", m.modelLabel)
+        assertEquals(listOf("dashscope", "modelscope"), imageRequests.map { it.substringBefore(':') },
+            "千问欠费就跳过万相（同一个 Key），换下一家")
 
         imageRequests.clear()
         val r = e.call(Command.TestImage())
         assertTrue(r.ok, r.message)
-        assertEquals(listOf("minimax"), imageRequests.map { it.substringBefore(':') }, "刚失败过的排到后面")
+        assertEquals(listOf("modelscope"), imageRequests.map { it.substringBefore(':') }, "刚失败过的排到后面")
 
         // 指定了模型就只用它，失败了直接报错，不偷偷换
         e.call(Command.SaveSettings(e.state.settings.copy(imageGen = ImageGenSettings("pz", "cogview-3-flash", "1024x1024"))))

@@ -1213,11 +1213,53 @@ private fun AppearancePage(ctl: AppController, state: AppState) {
     }
 }
 
+/**
+ * 日志（2026-11-04 用户：「日志导出功能」）：这台设备自己的 jxy.log 存成文件；手机配了电脑还能「发给电脑」——
+ * 华为把第三方程序的系统日志屏蔽了、程序私有目录也读不出来，查手机上的毛病只能让它自己把日志发回来（存在电脑的 logs 文件夹）。
+ * 日志里不写 Key、不写聊天和文件内容（Storage.log）。
+ */
+@Composable
+private fun LogCard(ctl: AppController) {
+    val platform = LocalPlatform.current
+    val remote by ctl.hub.remote.collectAsState()
+    var busy by remember { mutableStateOf(false) }
+    SectionCard {
+        Text("日志", style = MaterialTheme.typography.titleSmall)
+        Text("出了毛病（比如更新卡住）查原因用。日志里没有 Key，也没有聊天内容。", style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
+        Row(Modifier.padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+            OutlinedButton(enabled = !busy, onClick = {
+                busy = true
+                ctl.scope.launch {
+                    val r = ctl.hub.local.call(Command.ReadLog)
+                    if (!r.ok) ctl.toast(r.message)
+                    else if (platform.saveFile(r.message, r.data.encodeToByteArray())) ctl.toast("已保存《${r.message}》")
+                    busy = false
+                }
+            }) { Text("导出日志") }
+            if (!platform.isDesktop && remote != null) {
+                Spacer(Modifier.width(8.dp))
+                Button(enabled = !busy, onClick = {
+                    busy = true
+                    ctl.scope.launch {
+                        val log = ctl.hub.local.call(Command.ReadLog)
+                        val r = if (!log.ok) log else ctl.hub.remote.value?.call(Command.SaveDeviceLog(platform.deviceName, log.data))
+                            ?: com.guixing.jixunying.model.CommandResult(false, "电脑没连上")
+                        ctl.toast(if (r.ok) "发给电脑了：${r.message}" else "没发成：${r.message}")
+                        busy = false
+                    }
+                }) { Text("发给电脑") }
+            }
+        }
+    }
+}
+
 @Composable
 private fun AboutPage(ctl: AppController) {
     val platform = LocalPlatform.current
     PageHeader("关于", "AI集训营 ${com.guixing.jixunying.model.APP_VERSION}")
     UpdateCard(ctl)
+    Spacer(Modifier.height(12.dp))
+    LogCard(ctl)
     Spacer(Modifier.height(12.dp))
     SectionCard {
         Row(verticalAlignment = Alignment.CenterVertically) {

@@ -176,7 +176,10 @@ class Updater(
      * 走代理没成（不是慢）先换个新连接再试一次代理，再退回直连（10-31 电脑替手机下用了六分半，像是代理那一下没连上就改走了慢的直连）。
      * 太慢的路：后面还有路就换下一条；最后一条只在 abortIfSlow（调用方还有别的办法，比如手机请电脑代下）时才放弃，抛 SlowDownload。
      */
-    suspend fun download(info: UpdateInfo, abortIfSlow: Boolean = false, onProgress: (Float) -> Unit): File = withContext(Dispatchers.IO) {
+    /**
+     * only：手动选的路（2026-11-04 用户：「在设置功能手动选更新路径」）——"direct" 只直连，"proxy" 只走代理，null 先代理后直连。
+     */
+    suspend fun download(info: UpdateInfo, abortIfSlow: Boolean = false, only: String? = null, onProgress: (Float) -> Unit): File = withContext(Dispatchers.IO) {
         require(info.assetUrl.isNotEmpty()) { "这一版没有这台设备能用的文件" }
         if (info.sha256.isEmpty()) throw IllegalStateException("发行版没给这个文件的校验值，不敢装；去发行版网页手动下载吧")
         if (info.assetSize > MAX_SIZE) throw IllegalStateException("文件太大（${info.assetSize / 1024 / 1024} MB），不像是安装包")
@@ -185,7 +188,13 @@ class Updater(
         val target = File(dir, info.assetName)
         val part = File(dir, info.assetName + ".part")
         var last: Throwable? = null
-        val rs = routes(info.assetUrl)
+        val rs: List<String?> = routes(info.assetUrl).let { all ->
+            when (only) {
+                "direct" -> listOf(null)
+                "proxy" -> all.filterNotNull().ifEmpty { throw IllegalStateException("这台设备没设代理，走不了代理这条路") }
+                else -> all
+            }
+        }
         // 代理那条试两次（第二次只在第一次不是因为慢才试）
         val attempts = if (rs.size > 1) listOf(rs[0], rs[0]) + rs.drop(1) else rs
         for ((i, route) in attempts.withIndex()) {

@@ -32,12 +32,16 @@ object ImageTuning {
             m.startsWith("kling") -> Profile("可灵", Verdict.DROP, "手脚画畸形，用户实测后放弃")
             m.startsWith("cogview-4") -> Profile("智谱 CogView-4", Verdict.DROP, "脸好看但手脚畸形，用户实测后放弃")
             m.startsWith("glm-image") -> Profile("智谱 GLM-Image", Verdict.DROP, "脚画畸形，用户实测后放弃")
-            m.startsWith("qwen-image") -> Profile("千问", Verdict.KEEP, "结构最稳，手脚基本画对；人像容易画老、脸偏平常（程序自动补审美）")
-            m.startsWith("wan2.7") -> Profile("万相 2.7", Verdict.KEEP, "皮肤和细节好；人像偏老、偏男相（程序自动补审美）")
+            m.startsWith("qwen-image") -> Profile("千问", Verdict.KEEP, "结构最稳；人像本来容易画老，程序补了审美以后脸好看（3.0、3.0-pro、2.1-turbo 各画三张手脚都对）；qwen-image-3.0 一毛八、2K 大图，最划算")
+            m.startsWith("wan2.7") -> Profile("万相 2.7", Verdict.KEEP, "手脚稳、皮肤细节好；补了审美脸还是偏普通（程序自动补）")
             // 用户 16:25 说过「MiniMax 和千问他们的模型不会抽搐」；我 11-04 同一段描述测三张，一张手乱了（用户：「第一张手抽搐了」）、一张多画一只脚
             isMiniMax(m) -> Profile("MiniMax", Verdict.DROP, "便宜、脸年轻，但手脚时常画畸形，用户实测后放弃")
-            m.startsWith("z-image") -> Profile("Z-Image", Verdict.UNTESTED, "测过一张：皮肤偏滑、姿势跑偏，用户没表态")
-            m.startsWith("vidu") -> Profile("Vidu", Verdict.UNTESTED, "本来是参考图生图，只给文字也能画；测过，用户没表态")
+            // 11-04 晚选模型（用户：「选出几个能用的模型来就行」）：同一段描述画三张，脸都好看、手脚都对，4 秒一张、一毛钱
+            m.startsWith("z-image") -> Profile("Z-Image", Verdict.KEEP, "一毛钱、几秒一张，脸好看，手脚三张都对（皮肤略亮）")
+            // 用户：「这个你自己决定 好用就留 不好用就删」。11-04 测：vidu-image、vidu-image-lite 人像描述被平台内容审核拦（lite 两次都没出图）；
+            // viduq3-fast 三张手脚都对但脸普通、四毛七一张，不如千问 3.0；viduq2-fast 背景、衣服都画错；pro 档贵
+            m.startsWith("vidu") -> Profile("Vidu", Verdict.DROP, "人像常被平台审核拦，能出图的脸普通又贵，实测后放弃")
+            m.startsWith("gpt-image") -> Profile("OpenAI", Verdict.UNTESTED, "官方 Key 直连、要走代理；按 token 计费，中等质量一张约三四毛钱；还没测")
             else -> Profile("", Verdict.UNTESTED, "")
         }
     }
@@ -196,11 +200,34 @@ object ImageTuning {
      */
     data class Plan(val prompt: String, val added: String, val negative: String?, val rewrite: Boolean?, val pixels: Long?, val seed: Long? = null)
 
-    fun plan(model: String, prompt: String): Plan {
-        val t = tail(model, prompt)?.takeIf { prompt.length + it.length + 1 <= maxChars(model) }
+    /**
+     * refs：带了几张参考图（2026-11-04 参考图画图）。带了参考图，长相照参考图来：不补审美那句、不加「显老、男性化」那些反向提示词，
+     * 免得把参考图里的人改成另一张脸。
+     */
+    fun plan(model: String, prompt: String, refs: Int = 0): Plan {
+        val t = if (refs > 0) null else tail(model, prompt)?.takeIf { prompt.length + it.length + 1 <= maxChars(model) }
         val full = if (t == null) prompt else prompt.trimEnd() + "\n" + t
         val negative = if (!takesNegative(model)) null
-            else (NEGATIVE + if (youngWomanPhoto(prompt)) "、$NEGATIVE_FACE" else "").take(500)
+            else (NEGATIVE + if (refs == 0 && youngWomanPhoto(prompt)) "、$NEGATIVE_FACE" else "").take(500)
         return Plan(full, t.orEmpty(), negative, rewrite(model, prompt), targetPixels(model))
+    }
+
+    /**
+     * 能收几张参考图（0 = 不收）。2026-11-04 用户转来阿德的话：「要是能把通道打开，让我能传参考图……出来的才可能是同一个人换了个姿势。
+     * 就差这一步，卡在传图这里」。出处（千问AI平台，原文下载核对）：
+     * - 千问图像编辑 API 参考：qwen-image-3.0「每次请求可提供 1 到 3 张输入图像」；图像编辑指南「Qwen 图片编辑模型支持一至三张输入图片，
+     *   qwen-image-2.1-pro 和 qwen-image-2.1-turbo 支持一至十张」；图片可以是「公网 URL 或 Base64」
+     * - 万相图像编辑指南：wan2.7-image-pro、wan2.7-image「输入图像数量 0～9 张」，图片「公开 URL 或 Base64 编码」
+     * Vidu 的参考图生图 API 参考只写了「参考图像的 URL。支持 HTTP 或 HTTPS 协议」，传图片数据行不行没核实，先不接；可灵放弃了；
+     * OpenAI 的参考图走 /v1/images/edits（上传文件），还没接。
+     */
+    fun maxReferences(model: String): Int {
+        val m = bare(model)
+        return when {
+            m.startsWith("qwen-image-2.1") -> 10
+            m.startsWith("qwen-image") -> 3
+            m.startsWith("wan2.7") -> 9
+            else -> 0
+        }
     }
 }

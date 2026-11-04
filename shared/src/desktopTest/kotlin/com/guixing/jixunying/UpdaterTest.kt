@@ -8,6 +8,7 @@ import com.guixing.jixunying.engine.UpdateViaHost
 import com.guixing.jixunying.model.Command
 import com.guixing.jixunying.model.PairingCode
 import com.guixing.jixunying.model.RelaySettings
+import com.guixing.jixunying.model.WireFrame
 import com.guixing.jixunying.relay.RelayHost
 import com.guixing.jixunying.relay.RelayLink
 import com.guixing.jixunying.relay.pairWithHost
@@ -22,7 +23,12 @@ import io.ktor.server.response.respondRedirect
 import io.ktor.server.response.respondText
 import io.ktor.server.routing.get
 import io.ktor.server.routing.routing
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.shareIn
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
@@ -345,6 +351,122 @@ class UpdaterTest {
         } finally {
             relay.stop(); broker.stopServer()
         }
+    }
+
+    /**
+     * 2026-11-04 华为卡在 50%：电脑下完了，回话没到手机，手机原来要干等 10 分钟。现在电脑那边下完 30 秒（测试里 1 秒）没回话就再问；
+     * 电脑早就下好的马上回。模拟：经真中转，第一次 HostFetchUpdate 的回话在线路上丢掉。
+     */
+    @Test
+    fun phoneAsksAgainWhenTheAnswerIsLost() = runBlocking {
+        val mqttPort = freePort()
+        val broker = io.moquette.broker.Server()
+        broker.startServer(io.moquette.broker.config.MemoryConfig(Properties().apply {
+            setProperty("port", mqttPort.toString()); setProperty("host", "127.0.0.1"); setProperty("websocket_port", "disabled")
+            setProperty("allow_anonymous", "true"); setProperty("persistence_enabled", "false"); setProperty("data_path", File(dir, "mqtt2").absolutePath)
+        }))
+        val pc = Engine(Storage(File(dir, "pc2")))
+        pc.call(Command.SaveSettings(pc.state.settings.copy(proxy = "", relay = RelaySettings(true, listOf("tcp://127.0.0.1:$mqttPort"), "测试电脑"))))
+        val relay = RelayHost(pc)
+        relay.restart()
+        val oldGrace = UpdateViaHost.hostDoneGraceMs
+        UpdateViaHost.hostDoneGraceMs = 1_000
+        slowAssets = true   // 电脑下得慢一点，手机看得到「电脑在下」再「下完了」
+        try {
+            withTimeout(15_000) { while (!pc.state.relayStatus.startsWith("已连上")) delay(100) }
+            val phone = Engine(Storage(File(dir, "phone2")), isPhone = true)
+            // 线路上丢掉第一次 HostFetchUpdate 的回话
+            var dropped = 0
+            val hub = Hub(phone, linkFactory = { host ->
+                val inner = RelayLink(host)
+                var askId = -1L
+                object : com.guixing.jixunying.client.FrameLink by inner {
+                    override val incoming = inner.incoming.filter { f ->
+                        val drop = f is WireFrame.Res && f.reqId == askId && dropped == 0
+                        if (drop) dropped++
+                        !drop
+                    }.shareIn(CoroutineScope(Dispatchers.IO), SharingStarted.Eagerly)
+                    override suspend fun send(frame: WireFrame) {
+                        if (frame is WireFrame.Req && frame.command is Command.HostFetchUpdate && askId < 0) askId = frame.reqId
+                        inner.send(frame)
+                    }
+                }
+            }, pairer = { c, n -> pairWithHost(c, n) }, deviceName = "测试手机")
+            assertTrue(hub.pair(PairingCode(pc.state.hostId, pc.state.pairingSecret, "测试电脑", pc.state.settings.relay.brokers)).isSuccess)
+            val remote = hub.remote.value!!
+            withTimeout(15_000) { while (remote.conn.value !is com.guixing.jixunying.client.ConnState.Connected || remote.store.state.value.appVersion.isEmpty()) delay(50) }
+            val info = Updater.parse(Json.parseToJsonElement(release()).jsonObject, isPhone = true, canSwap = false)
+            val lines = java.util.Collections.synchronizedList(mutableListOf<String>())
+            val t0 = System.currentTimeMillis()
+            val bytes = withTimeout(60_000) { UpdateViaHost(hub) { lines += it }.fetch(info) {} }
+            assertContentEquals(apk, bytes)
+            assertEquals(1, dropped, "第一次的回话丢了")
+            assertTrue(System.currentTimeMillis() - t0 < 30_000, "没干等 10 分钟")
+            assertTrue(lines.any { "再问一次" in it } && lines.any { "从电脑取完" in it }, lines.toString())
+        } finally {
+            UpdateViaHost.hostDoneGraceMs = oldGrace
+            relay.stop(); broker.stopServer()
+        }
+    }
+
+    /**
+     * 手动选路（2026-11-04 用户：「在设置功能手动选更新路径」）：「请电脑代下」不先试直连；「只直连」下不动就报错、不请电脑；
+     * 卡住了能停下，停下以后能换条路重下。
+     */
+    @Test
+    fun phoneChoosesTheRouteAndCanStop() = runBlocking {
+        System.setProperty("jxy.version", "1.0.0")
+        val e = Engine(Storage(File(dir, "route")), isPhone = true)
+        var asked = 0
+        e.updateFallback = { _, _ -> asked++; apk }
+        e.call(Command.UpdateCheck)
+        val before = downloads.get()
+        assertTrue(e.call(Command.UpdateDownloadVia("host")).ok)
+        withTimeout(10_000) { while (e.state.update.downloaded.isEmpty() && !e.state.update.error) delay(30) }
+        assertEquals(1, asked, "直接请电脑")
+        assertEquals(before, downloads.get(), "没先试直连")
+        assertContentEquals(apk, File(e.state.update.downloaded).readBytes())
+
+        val e2 = Engine(Storage(File(dir, "route2")), isPhone = true)
+        var asked2 = 0
+        e2.updateFallback = { _, _ -> asked2++; apk }
+        e2.call(Command.UpdateCheck)
+        blockDownloads = true
+        e2.call(Command.UpdateDownloadVia("direct"))
+        withTimeout(10_000) { while (!e2.state.update.error && e2.state.update.downloaded.isEmpty()) delay(30) }
+        assertTrue(e2.state.update.error, "只直连：下不动就报错")
+        assertEquals(0, asked2, "不请电脑")
+        blockDownloads = false
+
+        // 停下：慢慢下的时候点停下，进度回到 -1、写「下载停了」；再点能重新开始
+        slowAssets = true
+        val e3 = Engine(Storage(File(dir, "route3")), isPhone = true)
+        e3.call(Command.UpdateCheck)
+        e3.call(Command.UpdateDownloadVia("direct"))
+        withTimeout(5_000) { while (e3.state.update.progress <= 0f) delay(10) }
+        assertTrue(e3.call(Command.UpdateStop).ok)
+        withTimeout(5_000) { while (e3.state.update.progress >= 0f) delay(10) }
+        assertEquals("下载停了", e3.state.update.status)
+        slowAssets = false
+        assertEquals("开始下载", e3.call(Command.UpdateDownloadVia("direct")).message, "停下以后能重下")
+        withTimeout(10_000) { while (e3.state.update.downloaded.isEmpty() && !e3.state.update.error) delay(30) }
+        assertContentEquals(apk, File(e3.state.update.downloaded).readBytes())
+    }
+
+    /** 日志（2026-11-04 用户要「日志导出功能」）：读得出本机的 jxy.log；手机发给电脑的存在电脑 logs 文件夹。 */
+    @Test
+    fun logsAreExportedAndSentToTheComputer() = runBlocking {
+        val phone = Engine(Storage(File(dir, "logphone")), isPhone = true)
+        phone.log("JxyUpdate", "从电脑取：50%（12 秒）")
+        val r = phone.call(Command.ReadLog)
+        assertTrue(r.ok && "从电脑取：50%" in r.data && r.message.endsWith(".log") && "手机" in r.message, r.message)
+        val pc = Engine(Storage(File(dir, "logpc")))
+        val saved = pc.call(Command.SaveDeviceLog("HUAWEI ALN-AL80", r.data))
+        assertTrue(saved.ok, saved.message)
+        val f = File(saved.message)
+        assertTrue(f.isFile && f.parentFile.name == "logs" && f.name.startsWith("手机-HUAWEI_ALN-AL80-"), f.path)
+        assertTrue("从电脑取：50%" in f.readText())
+        assertFalse(pc.call(Command.SaveDeviceLog("x", " ")).ok)
     }
 
     /** 电脑整包：解开到程序文件夹旁边、找出新程序文件夹；路径跑出去的整包不解。 */

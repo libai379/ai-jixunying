@@ -135,6 +135,23 @@ class ImageGen(private val proxyOf: (ProviderConfig) -> String?) {
             return fw to fh
         }
 
+        /**
+         * OpenAI gpt-image 的尺寸（官方画图指南原文：「width and height must be multiples of 16」「aspect ratio must fall between 1:3 and 3:1」
+         * 「neither edge may exceed 3840 pixels」「total pixel count must be between 655,360 and 8,294,400」）。
+         * 按 token 计费、越大越贵，上限压在官方推荐的最大一档 1536x1024 的面积。
+         */
+        fun openAiSize(w0: Int, h0: Int): String {
+            var w = w0.coerceAtLeast(1)
+            var h = h0.coerceAtLeast(1)
+            if (w > h * 3) w = h * 3
+            if (h > w * 3) h = w * 3
+            var (fw, fh) = fitSize(w, h, 655_360L, 1536L * 1024, 256, 3840, 16)
+            // 取整以后可能刚好过 3:1（1500x500 取整成 1504x496）：长边再收一格
+            while (fw > fh * 3) fw -= 16
+            while (fh > fw * 3) fh -= 16
+            return "${fw}x$fh"
+        }
+
         /** 保持宽高比，把尺寸放大或缩小到总像素约等于 target（再交给各家的范围去取整）。 */
         fun scaleToPixels(w: Int, h: Int, target: Long): Pair<Int, Int> {
             val s = kotlin.math.sqrt(target.toDouble() / (w.toLong() * h).coerceAtLeast(1))
@@ -154,11 +171,16 @@ class ImageGen(private val proxyOf: (ProviderConfig) -> String?) {
      * 对比测试时可以传自己的（固定 seed、改开关）。
      */
     suspend fun generate(provider: ProviderConfig, model: String, prompt: String, size: String,
-                         plan: com.guixing.jixunying.model.ImageTuning.Plan = com.guixing.jixunying.model.ImageTuning.plan(model, prompt)): Result {
+                         refs: List<ByteArray> = emptyList(),
+                         plan: com.guixing.jixunying.model.ImageTuning.Plan = com.guixing.jixunying.model.ImageTuning.plan(model, prompt, refs.size)): Result {
         val client = Http.client(proxyOf(provider))
+        // 参考图（2026-11-04）：只有收参考图的模型才走到这里（Engine 先挑好）；别家带了参考图直接说清楚，不偷偷当纯文字画
+        val maxRefs = com.guixing.jixunying.model.ImageTuning.maxReferences(model)
+        if (refs.isNotEmpty() && (maxRefs == 0 || protocolOf(provider) != Protocol.DASHSCOPE))
+            throw IllegalStateException("$model 不收参考图。能带参考图的：千问图像（qwen-image，3.0 最多 3 张、2.1 系列 10 张）、万相 2.7（9 张）")
         val r = when (protocolOf(provider)) {
             Protocol.OPENAI, Protocol.SILICONFLOW -> openAi(client, provider, model, plan.prompt, size)
-            Protocol.DASHSCOPE -> dashScope(client, provider, model, plan, size)
+            Protocol.DASHSCOPE -> dashScope(client, provider, model, plan, size, refs.take(maxRefs))
             Protocol.MINIMAX -> miniMax(client, provider, model, plan, size)
             Protocol.KLING -> kling(client, provider, model, plan.prompt, size)
             Protocol.MODELSCOPE -> modelScope(client, provider, model, plan.prompt, size)
@@ -202,19 +224,28 @@ class ImageGen(private val proxyOf: (ProviderConfig) -> String?) {
     private suspend fun openAi(client: HttpClient, p: ProviderConfig, model: String, prompt: String, size: String): Result {
         val silicon = protocolOf(p) == Protocol.SILICONFLOW
         val zhipu = p.presetId == "zhipu" || p.baseUrl.contains("bigmodel.cn")
+        // OpenAI gpt-image（2026-11-04 用户：「我还想加入 OpenAI 的生图……直接用官方 key」）
+        val gptImage = model.lowercase().let { it.startsWith("gpt-image") || it.startsWith("chatgpt-image") }
         // 智谱的尺寸（2026-11-04 故意传 1x1 探出来的报错原文）：glm-image「长宽均需满足512px-2880px之间,且为32整数倍,并保证最大像素数不超过2^22px」，
         // cogview「…且为16整数倍,并保证最大像素数不超过2^21px」。1080x1920 这种直接发会被拒，缩放取整
-        val sendSize = if (!zhipu) size else parseSize(size)?.let { (w, h) ->
-            val glm = model.lowercase().startsWith("glm-image")
-            val (fw, fh) = fitSize(w, h, 512L * 512, if (glm) 1L shl 22 else 1L shl 21, 512, 2048, if (glm) 32 else 16)
-            "${fw}x$fh"
-        } ?: size
+        val sendSize = when {
+            zhipu -> parseSize(size)?.let { (w, h) ->
+                val glm = model.lowercase().startsWith("glm-image")
+                val (fw, fh) = fitSize(w, h, 512L * 512, if (glm) 1L shl 22 else 1L shl 21, 512, 2048, if (glm) 32 else 16)
+                "${fw}x$fh"
+            } ?: size
+            gptImage -> parseSize(size)?.let { (w, h) -> openAiSize(w, h) } ?: "1024x1024"
+            else -> size
+        }
         fun body(noMark: Boolean) = buildJsonObject {
             put("model", model)
             put("prompt", prompt)
             if (silicon) put("image_size", size) else put("size", sendSize)
             if (!silicon) put("n", 1)
             if (p.baseUrl.contains("volces.com")) { put("response_format", "url"); put("watermark", false) }
+            // gpt-image：质量默认 auto（模型自己挑，贵的时候一张一块多）；发 medium 控住钱。出 JPEG（默认 PNG，大）。
+            // 官方原文：quality「low, medium, high, xhigh, max, auto」；output_format「png, jpeg, webp」，output_compression 0～100
+            if (gptImage) { put("quality", "medium"); put("output_format", "jpeg"); put("output_compression", 90) }
             // 智谱（2026-10-28 用户：「生图都带 AI 生成，改」）：watermark_enabled = false 关掉显式和隐式水印。官方文档
             // （docs.bigmodel.cn 图像生成）：「仅允许已签署免责声明的客户使用，签署路径：个人中心-安全管理-去水印管理」
             if (zhipu && noMark) put("watermark_enabled", false)
@@ -306,7 +337,8 @@ class ImageGen(private val proxyOf: (ProviderConfig) -> String?) {
      * 按模型细调的参数（2026-11-04，ImageTuning）：分辨率按「同样的钱画到最大」放大；反向提示词新接口放 parameters、老万相放 input
      * （API 参考 wan-text-to-image-v2 原文：input.negative_prompt）；prompt_extend 照 ImageTuning.rewrite（z-image 关、万相 2.7 不发改发 thinking_mode）。
      */
-    private suspend fun dashScope(client: HttpClient, p: ProviderConfig, model: String, plan: com.guixing.jixunying.model.ImageTuning.Plan, size: String): Result {
+    private suspend fun dashScope(client: HttpClient, p: ProviderConfig, model: String, plan: com.guixing.jixunying.model.ImageTuning.Plan, size: String,
+                                  refs: List<ByteArray> = emptyList()): Result {
         val m = model.lowercase()
         val kling = m.startsWith("kling/")
         val vidu = m.startsWith("vidu/")
@@ -324,7 +356,11 @@ class ImageGen(private val proxyOf: (ProviderConfig) -> String?) {
                 if (sync || kling || vidu) putJsonArray("messages") {
                     add(buildJsonObject {
                         put("role", "user")
-                        putJsonArray("content") { add(buildJsonObject { put("text", plan.prompt) }) }
+                        putJsonArray("content") {
+                            // 参考图排在文字前面，顺序就是「图1」「图2」（万相图像编辑指南：「按照数组中的顺序定义图像顺序」）
+                            refs.forEach { add(buildJsonObject { put("image", "data:image/jpeg;base64," + Base64.getEncoder().encodeToString(it)) }) }
+                            add(buildJsonObject { put("text", plan.prompt) })
+                        }
                     })
                 } else {
                     put("prompt", plan.prompt)
@@ -337,7 +373,10 @@ class ImageGen(private val proxyOf: (ProviderConfig) -> String?) {
                     kling -> { put("aspect_ratio", klingAspect(w, h)); put("resolution", if (maxOf(w, h) >= 1536) "2k" else "1k") }
                     vidu -> put("size", viduSize(m, w, h))
                     else -> {
-                        val (fw, fh) = dashScopeSize(m, w, h)
+                        // 带参考图是「编辑」那一路：千问编辑「宽高各 512–2048 像素」（千问图像编辑 API 参考），单边不能过 2048
+                        val (fw, fh) = if (refs.isNotEmpty() && m.startsWith("qwen-image"))
+                            fitSize(w, h, 512L * 512, minOf(2048L * 2048, plan.pixels ?: (2048L * 2048)), 512, 2048)
+                        else dashScopeSize(m, w, h)
                         put("size", "$fw*$fh")
                         if (sync) plan.negative?.let { put("negative_prompt", it) }
                         if (m.startsWith("wan2.7")) put("thinking_mode", true) else plan.rewrite?.let { put("prompt_extend", it) }

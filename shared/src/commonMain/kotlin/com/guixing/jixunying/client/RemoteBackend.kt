@@ -244,8 +244,12 @@ class RemoteBackend(
     }
 
     private suspend fun fileInParts(id: String): PartsResult {
-        // 第一段 20 秒没回音：多半是旧版电脑不认这条（它会直接丢掉认不出的请求，不回话）
-        val first = withTimeoutOrNull(20.seconds) { part(id, 0, tries = 1) } ?: return PartsResult.NotSupported
+        // 第一段 20 秒没回音：多半是旧版电脑不认这条（它会直接丢掉认不出的请求，不回话）。
+        // 电脑报了版本号的（1.13 起；分段 1.12.1 就有了）都认分段：照常重试，不退回整个取——2026-11-04 华为卡在一半，
+        // 整个 26MB 一次经公共中转传，丢一片就拼不起来，等于根本传不过来
+        val knowsParts = store.state.value.appVersion.isNotEmpty()
+        val first = if (knowsParts) part(id, 0) ?: return PartsResult.Failed
+            else withTimeoutOrNull(20.seconds) { part(id, 0, tries = 1) } ?: return PartsResult.NotSupported
         val total = first.first
         if (total > Int.MAX_VALUE || total < 0) return PartsResult.Failed
         val out = ByteArray(total.toInt())

@@ -43,6 +43,8 @@ fun UpdateCard(ctl: AppController) {
     val info = up.latest
     var busy by remember { mutableStateOf(false) }
     var showNotes by remember { mutableStateOf(false) }
+    // 走哪条路下：""= 自动，"direct"、"proxy"、"host"（Command.UpdateDownloadVia）
+    var route by remember { mutableStateOf("") }
     // 手机遥控电脑时顺便看看电脑上是哪一版（老版本电脑没有这一项）
     val remote by ctl.hub.remote.collectAsState()
     val hostVersion = remote?.store?.state?.collectAsState()?.value?.appVersion.orEmpty()
@@ -93,6 +95,25 @@ fun UpdateCard(ctl: AppController) {
                 Text("已下 ${(up.progress * 100).toInt()}%" + (if (info.assetSize > 0) "（共 ${info.assetSize / 1024 / 1024} MB）" else ""),
                     style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
             }
+            // 走哪条路（2026-11-04 用户：「在设置功能手动选更新路径」——华为卡在「电脑传到手机」只能干等）：没在下的时候能选，卡住了点「停下」换一条
+            if (up.progress < 0f && up.downloaded.isBlank() && info.kind.isNotEmpty()) {
+                Spacer(Modifier.height(6.dp))
+                Text("走哪条路下", style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
+                Row(Modifier.padding(top = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                    val routes = if (platform.isDesktop) listOf("" to "自动", "proxy" to "走代理", "direct" to "直连 GitHub")
+                        else listOfNotNull("" to "自动", "direct" to "直连 GitHub", ("host" to "请电脑代下").takeIf { remote != null })
+                    routes.forEach { (key, label) ->
+                        Pill(label, if (route == key) MaterialTheme.colorScheme.primary else Ext.c.subtle) { route = key }
+                        Spacer(Modifier.width(6.dp))
+                    }
+                }
+                Text(when (route) {
+                    "proxy" -> "只走设置里的代理，不行就报错。"
+                    "direct" -> "不走代理、不请电脑，手机或电脑自己直连 GitHub（国内常常很慢）。"
+                    "host" -> "不先试直连，直接请配对的电脑下好再传过来（电脑要开着）。"
+                    else -> if (platform.isDesktop) "先走代理，不通再直连。" else "先直连 GitHub，慢了或者没下下来，再请电脑代下。"
+                }, style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, modifier = Modifier.padding(top = 2.dp))
+            }
             Spacer(Modifier.height(6.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
                 when {
@@ -107,8 +128,16 @@ fun UpdateCard(ctl: AppController) {
                         }
                     }) { Text(when (info.kind) { "zip" -> "更新并重开"; "exe" -> "打开安装程序"; else -> "安装" }) }
                     else -> Button(enabled = up.progress < 0f, onClick = {
-                        ctl.scope.launch { local.call(Command.UpdateDownload).let { r -> if (!r.ok) ctl.toast(r.message) } }
+                        ctl.scope.launch {
+                            val cmd = if (route.isEmpty()) Command.UpdateDownload else Command.UpdateDownloadVia(route)
+                            local.call(cmd).let { r -> if (!r.ok) ctl.toast(r.message) }
+                        }
                     }) { Text(if (up.progress >= 0f) "正在下载…" else "下载新版" + (if (info.assetSize > 0) "（${info.assetSize / 1024 / 1024} MB）" else "")) }
+                }
+                // 卡住了能停下换条路（以前只能干等，华为在「电脑传到手机」那步停了十几分钟）
+                if (up.progress >= 0f && up.downloaded.isBlank()) {
+                    Spacer(Modifier.width(8.dp))
+                    OutlinedButton(onClick = { ctl.scope.launch { local.call(Command.UpdateStop) } }) { Text("停下") }
                 }
                 if (info.pageUrl.isNotBlank() && info.kind.isNotEmpty()) {
                     Spacer(Modifier.width(8.dp))

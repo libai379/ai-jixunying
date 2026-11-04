@@ -79,6 +79,7 @@ class RepaintTest {
     /** 假千问收到的改图请求（原文）。 */
     private val edits = Collections.synchronizedList(mutableListOf<Pair<String, JsonObject>>())
     private val painted = Collections.synchronizedList(mutableListOf<String>())
+    private val paintedBodies = Collections.synchronizedList(mutableListOf<JsonObject>())
     private val spoken = Collections.synchronizedList(mutableListOf<String>())
     private val videoAsks = Collections.synchronizedList(mutableListOf<String>())
     private val served = ConcurrentHashMap<String, ByteArray>()
@@ -190,6 +191,7 @@ class RepaintTest {
                 post("/v1/images/generations") {
                     val body = Json.parseToJsonElement(call.receiveText()).jsonObject
                     painted += body["model"]!!.jsonPrimitive.content
+                    paintedBodies += body
                     val b = encodePixels(flat(64, 64, if (painted.size == 1) 0x3366CC else 0xCC6633))
                     call.respondText("""{"data":[{"b64_json":"${Base64.getEncoder().encodeToString(b)}"}]}""", ContentType.Application.Json)
                 }
@@ -670,10 +672,80 @@ class RepaintTest {
         e.answer(conv)
         val draw = requests.last()["tools"]!!.jsonArray.map { it.jsonObject["function"]!!.jsonObject }.first { it["name"]!!.jsonPrimitive.content == "generate_image" }
         val desc = draw["parameters"]!!.jsonObject["properties"]!!.jsonObject["model"]!!.jsonObject["description"]!!.jsonPrimitive.content
-        for (m in listOf("image-01（约 0.0", "image-01-live", "glm-image", "cogview-3-flash（免费）", "qwen-image-3.0（约 0.18 元一张）", "wanx2.0-t2i-turbo（约 0.04 元一张）",
-                "kling/kling-v3-image-generation", "vidu/viduq2-pro_reference2image", "fake-a（价钱没查到，设置里选的）", "假MiniMax：", "假智谱："))
+        // 2026-11-04 起带上用户实测的去留（ImageTuning）：留下的「用户实测能用」，放弃的「点名才用」，放弃的照样列出来
+        for (m in listOf("image-01（约 0.0", "image-01-live", "glm-image", "cogview-3-flash（免费）", "qwen-image-3.0（约 0.18 元一张，用户实测能用）", "wanx2.0-t2i-turbo（约 0.04 元一张）",
+                "kling/kling-v3-image-generation（约 0.2 元一张，用户实测后放弃（手脚畸形），点名才用）", "vidu/viduq2-pro_reference2image", "fake-a（价钱没查到，设置里选的）", "假MiniMax：", "假智谱："))
             assertTrue(m in desc, "说明里没有「$m」：$desc")
         assertTrue("要先在千问AI平台控制台开通" in desc)
+        // 工具说明里写了各家脾气和用户的规矩
+        val tool = draw["description"]!!.jsonPrimitive.content
+        assertTrue("各家画图的脾气" in tool && "不要为了它浪费额度" in tool, tool)
+    }
+
+    /**
+     * OpenAI 官方画图（2026-11-04 用户：「我还想加入 OpenAI 的生图，不走订阅了，直接用官方 key，他们只有生图能用」）：
+     * 预设只带画图模型；尺寸照官方的规矩取整（16 的倍数、1:3～3:1、总像素 655,360 起），发中等质量、出 JPEG；停用的 gpt-image-1 不挑。
+     */
+    @Test
+    fun openAiImageAsTheOfficialDocsSay() = runBlocking {
+        val preset = com.guixing.jixunying.model.Presets.byId("openai").models
+        assertTrue(preset.isNotEmpty() && preset.all { it.imageGen }, "OpenAI 只拿来画图：$preset")
+        assertTrue(preset.any { it.id == "gpt-image-2.5-sunburst" } && preset.none { it.id == "gpt-image-1" })
+        val p = ProviderConfig("po", "openai", "假OpenAI", "http://127.0.0.1:$port/v1", "k")
+        val gen = com.guixing.jixunying.engine.ImageGen { null }
+        gen.generate(p, "gpt-image-2.5-flare", "一只猫", "1080x1920")
+        val body = paintedBodies.last()
+        val (w, h) = body["size"]!!.jsonPrimitive.content.split('x').map { it.toInt() }
+        assertTrue(w % 16 == 0 && h % 16 == 0 && w.toLong() * h in 655_360..1_572_864 && h > w, "${w}x$h")
+        assertEquals("medium", body["quality"]!!.jsonPrimitive.content)
+        assertEquals("jpeg", body["output_format"]!!.jsonPrimitive.content)
+        assertEquals("1024x1024", com.guixing.jixunying.engine.ImageGen.openAiSize(1024, 1024))
+        val (lw, lh) = com.guixing.jixunying.engine.ImageGen.openAiSize(3000, 500).split('x').map { it.toInt() }
+        assertTrue(lw <= lh * 3 && lw % 16 == 0 && lh % 16 == 0 && lw.toLong() * lh >= 655_360, "太扁的收到 3:1 以内：${lw}x$lh")
+        assertTrue(com.guixing.jixunying.model.ImagePick.retired("gpt-image-1") && !com.guixing.jixunying.model.ImagePick.retired("gpt-image-1-mini"))
+        // 智谱、别家不带这几个参数
+        gen.generate(ProviderConfig("pz2", "zhipu", "假智谱", "http://127.0.0.1:$port/v1", "k"), "cogview-3-flash", "一只猫", "1024x1024")
+        assertTrue(paintedBodies.last()["quality"] == null)
+    }
+
+    /**
+     * 参考图画图（2026-11-04 用户转来阿德的话：「要是能把通道打开，让我能传参考图……出来的才可能是同一个人换了个姿势」）：
+     * generate_image 带 reference，程序把对话里那张图（缩成 JPEG）排在文字前面交给千问图像；设置里选的模型不收参考图时换收的；
+     * 带了参考图不补审美那句（长相照参考图）；找不到图、点名的模型不收参考图都说清楚、不画。
+     */
+    @Test
+    fun drawWithAReferencePhoto() = runBlocking {
+        val e = world()   // 设置里选的是 fake-a，不收参考图
+        val conv = e.newChat()
+        val id = upload("微信图片_1.png", encodePixels(photo()))
+        script += "generate_image" to """{"prompt":"写实人像照片，原创成年东亚女性，保持图1里人物的长相和发型，改成站在海边","reference":["微信图片_1.png"]}"""
+        script += "" to "画好了。"
+        e.call(Command.SendMessage(conv, "让她换个姿势", listOf(id)))
+        val a = e.answer(conv)
+        assertEquals(MsgStatus.DONE, a.status, a.error)
+        val step = a.tools.single { it.kind == "image" }
+        assertTrue(step.ok && "参考了《微信图片_1.png》" in step.note, step.note)
+        val (_, body) = edits.last()
+        assertEquals("qwen-image-3.0", body["model"]!!.jsonPrimitive.content, "fake-a 不收参考图，换收的千问")
+        val content = body["input"]!!.jsonObject["messages"]!!.jsonArray[0].jsonObject["content"]!!.jsonArray.map { it.jsonObject }
+        assertTrue(content[0]["image"]!!.jsonPrimitive.content.startsWith("data:image/jpeg;base64,"), "参考图排在文字前面")
+        val text = content[1]["text"]!!.jsonPrimitive.content
+        assertFalse("时尚人像摄影" in text, "带参考图不补审美，长相照参考图：$text")
+        val size = body["parameters"]!!.jsonObject["size"]!!.jsonPrimitive.content.split('*').map { it.toInt() }
+        assertTrue(size.all { it in 512..2048 }, "千问编辑宽高各 512～2048：$size")
+        assertTrue(toolResults(requests[1]).any { "照着参考图《微信图片_1.png》" in it }, toolResults(requests[1]).toString())
+
+        // 找不到图、点名的模型不收参考图：说清楚，不画
+        val drawn = edits.size
+        script += "generate_image" to """{"prompt":"一只猫","reference":["没有这张.png"]}"""
+        script += "generate_image" to """{"prompt":"一只猫","reference":"微信图片_1.png","model":"fake-a"}"""
+        script += "" to "画不了。"
+        e.call(Command.SendMessage(conv, "再来"))
+        e.answer(conv)
+        val res = toolResults(requests.last())
+        assertTrue(res.any { "找不到参考图「没有这张.png」" in it && "微信图片_1.png" in it }, res.toString())
+        assertTrue(res.any { "「fake-a」不收参考图" in it }, res.toString())
+        assertEquals(drawn, edits.size, "没画")
     }
 
     /**
