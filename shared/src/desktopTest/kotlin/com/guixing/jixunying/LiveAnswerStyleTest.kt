@@ -24,7 +24,8 @@ import kotlin.test.Test
  * JXY_LIVE_STYLE_ONLY=阿德,阿米 只测这几位（默认阿德）；JXY_LIVE_STYLE_BARE=0 不跑裸调。
  */
 class LiveAnswerStyleTest {
-    private class Case(val name: String, val turns: List<String>, val search: Boolean)
+    /** all = 每一轮的回答都打出来（被骂这几道要看它每句怎么接）。 */
+    private class Case(val name: String, val turns: List<String>, val search: Boolean, val all: Boolean = false)
 
     private val cases = listOf(
         Case("直播话术（截图那道，开联网）", listOf("我在抖音直播卖一款西马花珠沉香，6mm 108颗，帮我写一段开场介绍的话术", "达拉干沉香地位和历史底蕴"), search = true),
@@ -32,6 +33,13 @@ class LiveAnswerStyleTest {
         Case("知识", listOf("沉香和檀香有什么区别？"), search = false),
         Case("排查", listOf("RTSS 里「在OSD上显示」那一栏是灰的，勾不上，怎么回事？"), search = false),
         Case("拿主意", listOf("我想把直播从抖音搬到视频号，你觉得行不行？"), search = false),
+        // 被骂（2026-11-04 用户在微信里拿阿苗测：「对方骂你，你话太多就输了」「学会狗一点」「还是太 AI 了」，
+        // 认可的回法是「嫌我蠢还找我，咱俩谁的问题？[旺柴]」「你就说了个圆啊[旺柴]」「那你画，我瞅瞅[旺柴]」）
+        Case("被骂（空骂）", listOf("蠢货玩意", "干啥啥不行"), search = false, all = true),
+        Case("被骂（嫌写得差，抖音截图那段）", listOf("帮我写一句直播卖沉香手串的开场白，一句就行", "写的真垃圾，还不如我自己写", "我自己写我还要你有什么用"), search = false, all = true),
+        Case("被骂（骂里有具体毛病）", listOf("帮我写一句直播卖沉香手串的开场白，一句就行", "蠢货，太长了，直播哪有工夫念这么多"), search = false, all = true),
+        Case("被骂（叫它滚）", listOf("你这水平别干了，滚吧"), search = false, all = true),
+        Case("被骂（拿主意时被怼）", listOf("我想把直播从抖音搬到视频号，你觉得行不行？", "你懂个屁，就是要搬"), search = false, all = true),
     )
 
     @Test
@@ -48,7 +56,9 @@ class LiveAnswerStyleTest {
             File(src, "state.json").copyTo(File(tmp, "state.json"))
             val e = Engine(Storage(tmp))
             val s = e.state.settings
-            e.call(Command.SaveSettings(s.copy(memory = s.memory.copy(autoExtract = false, stances = false, aiVerify = false))))
+            // JXY_LIVE_STYLE_NOMEM=1：不带长期记忆（看设定本身管不管用；用户的记忆里可能已经写着要怎么答）
+            val noMem = System.getenv("JXY_LIVE_STYLE_NOMEM") == "1"
+            e.call(Command.SaveSettings(s.copy(memory = s.memory.copy(enabled = !noMem && s.memory.enabled, autoExtract = false, stances = false, aiVerify = false))))
             val llm = LlmClient { p -> if (p.useProxy) e.state.settings.proxy.trim().ifEmpty { null } else null }
 
             suspend fun ask(conv: String, text: String): String {
@@ -80,14 +90,22 @@ class LiveAnswerStyleTest {
             for (m in e.state.members.filter { it.name in only }) {
                 val p = e.state.provider(m.providerId) ?: continue
                 say("\n==================== ${m.name}（${m.modelId}）· $label ====================")
-                for (c in cases) {
+                // JXY_LIVE_STYLE_CASES=被骂：只跑名字里带这几个字的题
+                val pick = System.getenv("JXY_LIVE_STYLE_CASES")?.split(',')?.map { it.trim() }?.filter { it.isNotEmpty() }
+                for (c in cases.filter { c -> pick == null || pick.any { it in c.name } }) {
                     // 本应用：单聊，按题开关联网
                     val conv = e.call(Command.CreateConversation(listOf(m.id), c.name)).data
                     e.call(Command.UpdateConversation(e.state.conversation(conv)!!.copy(webSearch = c.search)))
                     var app = ""
-                    for (t in c.turns) app = ask(conv, t)
-                    say("\n—— ${c.name} · 本应用：${shape(app.substringAfter("〕\n"))}")
-                    say(app)
+                    if (c.all) say("\n—— ${c.name} · 本应用")
+                    for (t in c.turns) {
+                        app = ask(conv, t)
+                        if (c.all) say("用户：$t\n${m.name}（${app.length} 字）：$app")
+                    }
+                    if (!c.all) {
+                        say("\n—— ${c.name} · 本应用：${shape(app.substringAfter("〕\n"))}")
+                        say(app)
+                    }
                     if (!bare) continue
                     // 裸调：不带任何设定，只发聊天记录（多轮的前几轮用它自己的回答）
                     val msgs = mutableListOf<JsonObject>()
