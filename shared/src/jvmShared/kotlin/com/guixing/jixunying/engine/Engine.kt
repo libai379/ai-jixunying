@@ -103,9 +103,13 @@ import com.guixing.jixunying.model.AppJson
 import com.guixing.jixunying.model.ConfigBundle
 import com.guixing.jixunying.model.MemoryBundle
 import com.guixing.jixunying.model.MemoryTombstone
+import io.ktor.client.plugins.timeout
 import io.ktor.client.request.get
 import io.ktor.client.request.header
+import io.ktor.client.request.prepareGet
 import io.ktor.client.statement.bodyAsBytes
+import io.ktor.client.statement.bodyAsChannel
+import io.ktor.utils.io.jvm.javaio.toInputStream
 import java.io.File
 import java.util.Base64
 import java.util.UUID
@@ -6227,6 +6231,12 @@ class Engine(
         const val MADE_VIDEO_WINDOW = 20
         /** 平台图文作品一次最多给模型看几张图（2026-11-04；一张长边 1600 约一千多 token）。 */
         const val POST_IMAGES_SHOWN = 9
+        /**
+         * 平台视频作品取画面时最多下多大、多久（2026-11-05）。网页版抖音给的码率低（实测那条 673 kbps，一分钟五 MB 上下），
+         * 100 MB 够二十来分钟；手机上用流量，不让它下太大的。
+         */
+        const val POST_VIDEO_MAX_MB = 100
+        const val POST_VIDEO_MAX_SEC = 120
 
         /** 补全文件名时不进去翻的文件夹。 */
         val SKIP_DIRS = setOf(".git", "node_modules", "build", ".gradle", ".idea", "dist", "out", "target", ".venv", "venv", "__pycache__", ".next", ".kotlin")
@@ -6331,11 +6341,13 @@ class Engine(
                                 "B站拦截一般是因为电脑上网出口在国外。页面上的字：\n" + page.str("text").orEmpty().take(600)) to
                                 ToolStep("fetch", url, listOf(SearchSource(platform.name, url)), ok = false, note = "${platform.name}要登录或被拦")
                         } else {
-                            SocialLinks.videoOf(page)?.let { pageVideos[url] = it }
+                            val video = SocialLinks.videoOf(page)?.also { pageVideos[url] = it }
                             val pics = SocialLinks.postImages(page)
                             val picNote = if (pics.isEmpty()) "" else showPostImages(platform, page, pics, seen)
-                            (SocialLinks.format(platform, page) + picNote) to ToolStep("fetch", url, listOf(SearchSource(platform.name + " · " + url.take(60), url)), ok = true,
-                                note = if (pics.isEmpty()) "" else "图文 ${SocialLinks.imageCount(page)?.coerceAtLeast(pics.size) ?: pics.size} 张")
+                            // 视频作品：下载下来均匀取几张画面给能看图的模型看（2026-11-05 用户：「抖音链接还是打不开」——只读到字、听到一声「啊」）
+                            val (vidNote, vidStep) = if (pics.isEmpty() && video != null) showPostVideo(platform, page, video, seen) else "" to ""
+                            (SocialLinks.format(platform, page) + picNote + vidNote) to ToolStep("fetch", url, listOf(SearchSource(platform.name + " · " + url.take(60), url)), ok = true,
+                                note = if (pics.isEmpty()) vidStep else "图文 ${SocialLinks.imageCount(page)?.coerceAtLeast(pics.size) ?: pics.size} 张")
                         }
                     } catch (e: CancellationException) {
                         throw e
@@ -6922,6 +6934,84 @@ class Engine(
             ok.size < total -> "\n\n这是图文作品，一共 $total 张图，内容主要在图里。其中 ${ok.size} 张已经附在后面给你看（按顺序），" +
                 "另外 ${total - ok.size} 张没拿到${if (pics.size > want.size) "（一次最多看 $POST_IMAGES_SHOWN 张）" else ""}。回答时说清楚你看的是哪几张，没看到的别猜。"
             else -> "\n\n这是图文作品，$total 张图都附在后面给你看（按顺序），内容主要在图里，照图里的内容回答。"
+        }
+    }
+
+    /**
+     * 平台视频作品的画面（2026-11-05）：视频下载下来，从头到尾均匀取 VIDEO_FRAMES 张，给能看图的模型看。
+     * 起因：用户在微信发抖音「原来网页设计还能这么玩！」（v.douyin.com/IdL9tMQZBqU），AI 只读到页面文字、听到一声「啊」，
+     * 答「没拿到视频画面」；用户：「抖音链接还是打不开」。读平台链接以前只有读字、图文给图、听声音，视频的画面从来没给过（docs/平台链接设计说明.md 3.6 节）。
+     * 实测（电脑）：页面上的视频地址不带 Referer 也下得动，那条 21.8 秒的 1.9 MB、1 秒下完，程序带的 FFmpeg 3 秒取完 6 张。
+     * 手机上读页面交给电脑，视频由手机自己下（国内直连）、用系统解码器取画面。
+     * 画面只在这一轮给 AI 看（seen），不存成附件（存了会跟着回答发回微信）。返回（接在工具结果后面的说明，界面上那一步的短说明）。
+     */
+    private suspend fun showPostVideo(platform: SocialLinks.Platform, page: JsonObject, video: String, seen: MutableList<Pair<String, String>>?): Pair<String, String> {
+        if (seen == null) return ("\n\n这是视频作品。你这个模型看不了画面，画面里是什么不知道；里面说了什么可以调 listen_video 听。" +
+            "画面内容别猜，照实告诉用户（换一位能看图的成员就能看画面）。") to ""
+        val referer = page.str("url")?.let { runCatching { java.net.URI(it) }.getOrNull() }?.let { "${it.scheme}://${it.host}/" } ?: platform.loginUrl
+        val file = withContext(Dispatchers.IO) { java.io.File.createTempFile("jxy-video-", ".mp4") }
+        val t0 = now()
+        return try {
+            if (!video.startsWith("http")) throw IllegalStateException("页面上的视频地址不能下载")
+            downloadPostVideo(video, referer, file)
+            val (frames, sec) = withContext(Dispatchers.IO) { localVideoFrames(file, VIDEO_FRAMES, VIDEO_FRAME_SIDE) }
+                ?: pageBrowser?.let { b -> pageSlots.withPermit { b.fileFrames(file, VIDEO_FRAMES, VIDEO_FRAME_SIDE) } }
+                ?: throw IllegalStateException("这台设备解不开这个视频")
+            if (frames.isEmpty()) throw IllegalStateException("视频里没取到画面")
+            val s = kotlin.math.round(sec).toInt()
+            // 取画面的时间点（电脑、手机都是第 (2i+1)/(2n) 处）；半分钟以内的写到小数点后一位。少取了几张就不写时间点，免得对不上
+            fun clock(x: Double) = if (sec < 30) String.format(java.util.Locale.ROOT, "%.1f", x) else kotlin.math.round(x).toInt().toString()
+            val at = if (frames.size == VIDEO_FRAMES && sec > 0)
+                "，大约在第 " + (0 until VIDEO_FRAMES).joinToString("、") { i -> clock(sec * (2 * i + 1) / (2 * VIDEO_FRAMES)) } + " 秒"
+            else ""
+            frames.forEachIndexed { i, jpg ->
+                seen += (if (i == 0) "${platform.name}视频的画面（视频 $s 秒，从头到尾均匀取了 ${frames.size} 张$at，按时间先后）" else "") to
+                    ("data:image/jpeg;base64," + Base64.getEncoder().encodeToString(jpg))
+            }
+            storage.log("JxyPage", "${platform.name}视频：$s 秒，${file.length() / 1024} KB，取了 ${frames.size} 张画面，用了 ${(now() - t0) / 1000} 秒")
+            ("\n\n这是视频作品（$s 秒），从头到尾均匀取了 ${frames.size} 张画面附在后面给你看（按时间先后）。照画面说；画面之间发生了什么看不到，别编；" +
+                "里面说了什么要听就调 listen_video。") to "视频 $s 秒 · 看了 ${frames.size} 张画面"
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            // 网络库的报错带着一长串签过名的视频地址，不往界面和 AI 那里写；自己写的原因照写
+            val why = when {
+                e is IllegalStateException -> e.message ?: "没下载成"
+                e is io.ktor.client.plugins.HttpRequestTimeoutException || e is java.net.SocketTimeoutException -> "下载视频超时"
+                else -> "下载或解开视频时出错（${e.javaClass.simpleName}）"
+            }
+            storage.log("JxyPage", "${platform.name}视频画面没取到：$why；${e.message?.substringBefore('?')?.take(200)}")
+            ("\n\n这是视频作品，但画面没取到（$why），你看不到画面。只按上面的文字说，画面内容别猜，照实告诉用户画面没打开；" +
+                "里面说了什么可以调 listen_video 听。") to "视频画面没取到"
+        } finally {
+            file.delete()
+        }
+    }
+
+    /** 下载平台视频到 file：带页面的 Referer、桌面 UA；最多 POST_VIDEO_MAX_MB、POST_VIDEO_MAX_SEC 秒，30 秒没数据算断。下不来抛异常，消息写原因。 */
+    private suspend fun downloadPostVideo(url: String, referer: String, file: java.io.File) {
+        val max = POST_VIDEO_MAX_MB * 1024L * 1024L
+        Http.client(null).prepareGet(url) {
+            timeout { requestTimeoutMillis = POST_VIDEO_MAX_SEC * 1000L; socketTimeoutMillis = 30_000 }
+            header("Referer", referer)
+            header("User-Agent", Http.UA)
+        }.execute { resp ->
+            if (resp.status.value !in 200..299) throw IllegalStateException("下载视频 HTTP ${resp.status.value}")
+            val len = resp.headers["Content-Length"]?.toLongOrNull()
+            if (len != null && len > max) throw IllegalStateException("视频太大（${len / 1024 / 1024} MB，最多下 $POST_VIDEO_MAX_MB MB）")
+            withContext(Dispatchers.IO) {
+                resp.bodyAsChannel().toInputStream().use { input -> file.outputStream().use { os ->
+                    val buf = ByteArray(1 shl 16)
+                    var got = 0L
+                    while (true) {
+                        val n = input.read(buf)
+                        if (n < 0) break
+                        got += n
+                        if (got > max) throw IllegalStateException("视频太大（超过 $POST_VIDEO_MAX_MB MB）")
+                        os.write(buf, 0, n)
+                    }
+                } }
+            }
         }
     }
 

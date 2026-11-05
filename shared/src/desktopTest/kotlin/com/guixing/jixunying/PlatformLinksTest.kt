@@ -42,6 +42,9 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import java.io.File
 import java.net.ServerSocket
+import org.bytedeco.ffmpeg.global.avcodec
+import org.bytedeco.javacv.FFmpegFrameRecorder
+import org.bytedeco.javacv.Java2DFrameConverter
 import java.util.Collections
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
@@ -62,6 +65,25 @@ class PlatformLinksTest {
     @Volatile private var asrCalls = 0
     /** 假抖音图床收到的下载（Referer）。 */
     private val imgFetches = Collections.synchronizedList(mutableListOf<String>())
+    /** 假抖音视频地址收到的下载（Referer）。 */
+    private val vidFetches = Collections.synchronizedList(mutableListOf<String>())
+    /** 3 秒的小视频（每秒 10 帧）：前一半红、后一半蓝，看取出来的画面是不是按时间先后。 */
+    private val clip: ByteArray by lazy {
+        val f = File.createTempFile("jxy-clip", ".mp4")
+        try {
+            val r = FFmpegFrameRecorder(f, 320, 240)
+            r.format = "mp4"; r.videoCodec = avcodec.AV_CODEC_ID_MPEG4; r.frameRate = 10.0; r.videoBitrate = 400_000
+            r.start()
+            val conv = Java2DFrameConverter()
+            repeat(30) { i ->
+                val img = java.awt.image.BufferedImage(320, 240, java.awt.image.BufferedImage.TYPE_3BYTE_BGR)
+                val g = img.createGraphics(); g.color = if (i < 15) java.awt.Color(220, 30, 30) else java.awt.Color(30, 30, 220); g.fillRect(0, 0, 320, 240); g.dispose()
+                r.record(conv.convert(img))
+            }
+            r.stop(); r.release()
+            f.readBytes()
+        } finally { f.delete() }
+    }
     private lateinit var dir: File
 
     /** 假浏览器：按网址回事先存好的页面（照 10-23 真读到的样子删减）。 */
@@ -74,6 +96,9 @@ class PlatformLinksTest {
                 // 11-04 真读到的抖音图文（删减）：两张图都在页面上，地址带 biz_tag=aweme_images；顶上「1/2」
                 "/note/" in url -> """{"url":"$url","title":"","desc":"","text":"精选\n推荐\n登录\n1499\n434\n1/2\n个人观点，仅供参考\nAllenの朋友圈\n与 Claude Code 的神级对话。#ai吐槽大会 #Claude 神级对话\n发布时间：2026-11-02 23:28:38\n评论(434)","videos":[],"images":[],
                     "postImages":["$imgBase/img/1.webp?biz_tag=aweme_images&x-signature=a","$imgBase/img/2.webp?biz_tag=aweme_images&x-signature=b"]}"""
+                // 11-05 用户在微信发的那条（删减）：视频地址指到假服务器；/video/404 那条的视频地址下不动
+                "douyin.com/video/7704346864333753610" in url || "douyin.com/video/404" in url ->
+                    """{"url":"$url","title":"","desc":"","text":"精选\n推荐\n原来网页设计还能这么玩！ #世界渲染大赛 #3D\nAOV视觉科学\n发布时间：2026-11-05 12:01","videos":["https://lf-douyin-pc-web.douyinstatic.com/obj/douyin-pc-web/uuu_265.mp4","$imgBase/${if ("404" in url) "gone" else "vid"}/1.mp4?__vid=1"],"images":[]}"""
                 "douyin.com" in url -> """{"url":"$url","title":"","desc":"","text":"精选\n推荐\n第83集 | 医者医人，亦可被人间治愈。#小城良方\n3095\n162\n发布时间：2026-10-16 07:22\n全部评论\n这个是真想看，21号我们一起追","videos":["https://lf-douyin-pc-web.douyinstatic.com/obj/douyin-pc-web/uuu_265.mp4","https://v5-dy-ov.zjcdn.com/video/abc.mp4"],"images":[]}"""
                 "xiaohongshu.com" in url -> """{"url":"$url","title":"小红书","text":"登录后推荐更懂你的笔记\n扫码","videos":[],"images":[],
                     "note":{"title":"","desc":"#阿凡达3讨论团[话题]#","type":"video","user":"电梯爱看","images":["http://sns-webpic-qc.xhscdn.com/a.webp"],"likes":"700","tags":["阿凡达3讨论团","电影阿凡达3"],"video":"http://sns-video-zl.xhscdn.com/stream/1.mp4"}}"""
@@ -131,6 +156,11 @@ class PlatformLinksTest {
                 get("/img/{n}") {
                     imgFetches += call.request.headers["Referer"].orEmpty()
                     call.respondBytes(webp(2000, 1200), ContentType("image", "webp"))
+                }
+                // 假抖音视频地址：回那段 3 秒的小视频
+                get("/vid/{n}") {
+                    vidFetches += call.request.headers["Referer"].orEmpty()
+                    call.respondBytes(clip, ContentType("video", "mp4"))
                 }
                 // 假的智谱听写：每段回一句
                 post("/v1/audio/transcriptions") {
@@ -234,6 +264,99 @@ class PlatformLinksTest {
         val (blindText, _) = ask("a2")
         assertTrue("看不了图" in blindText && "一共 2 张图" in blindText, blindText)
         assertTrue(imgFetches.isEmpty())
+    }
+
+    /**
+     * 抖音视频作品的画面（2026-11-05 用户在微信发「原来网页设计还能这么玩！」，AI 只读到字、听到一声「啊」，答「没拿到视频画面」；
+     * 用户：「抖音链接还是打不开」）。现在：视频下载下来（带 Referer），从头到尾均匀取 6 张画面附在后面给能看图的模型看；
+     * 看不了图的不下载、照实说；视频下不动的照实说画面没打开。
+     */
+    @Test
+    fun douyinVideoFramesShownToModel() = runBlocking<Unit> {
+        val browser = FakeBrowser("http://127.0.0.1:$port")
+        val e = Engine(Storage(File(dir, "data")), browserFactory = { browser })
+        e.call(Command.SaveProvider(ProviderConfig("p1", "custom", "假服务商", "http://127.0.0.1:$port/v1", "sk-test", listOf(ModelInfo("m", vision = true), ModelInfo("t", vision = false)))))
+        e.call(Command.SaveMember(Member("a1", "阿看", providerId = "p1", modelId = "m")))
+        e.call(Command.SaveMember(Member("a2", "阿盲", providerId = "p1", modelId = "t")))
+        suspend fun ask(member: String, link: String): Pair<String, JsonObject> {
+            val conv = e.call(Command.CreateConversation(listOf(member))).data
+            e.call(Command.UpdateConversation(e.state.conversation(conv)!!.copy(webSearch = false)))
+            requests.clear()
+            e.call(Command.SendMessage(conv, "8.99 复制打开抖音，看看【AOV视觉科学的作品】原来网页设计还能这么玩！ $link"))
+            withTimeout(30_000) { while (e.store.messages.value[conv].orEmpty().lastOrNull { it.role == Role.AI }?.status != MsgStatus.DONE) delay(30) }
+            val last = requests.last()
+            val tool = last["messages"]!!.jsonArray.last { it.jsonObject["role"]?.jsonPrimitive?.content == "tool" }.jsonObject["content"]!!.jsonPrimitive.content
+            return tool to last
+        }
+        fun step(member: String) = e.store.messages.value.values.flatten().last { it.role == Role.AI && it.senderId == member }.tools.last { it.kind == "fetch" }
+        val link = "https://www.douyin.com/video/7704346864333753610"
+
+        val (seenText, req) = ask("a1", link)
+        assertTrue("原来网页设计还能这么玩" in seenText && "这是视频作品（3 秒），从头到尾均匀取了 6 张画面附在后面" in seenText, seenText)
+        val parts = req["messages"]!!.jsonArray.map { it.jsonObject }.filter { it["role"]?.jsonPrimitive?.content == "user" && it["content"] is JsonArray }
+            .flatMap { it["content"]!!.jsonArray.map { p -> p.jsonObject } }
+        val label = parts.filter { it["type"]?.jsonPrimitive?.content == "text" }.map { it["text"]!!.jsonPrimitive.content }.firstOrNull { "视频的画面" in it }
+        // 3 秒的视频取在第 0.25、0.75……2.75 秒附近（时长 FFmpeg 量出来可能差一点，小数只看个大概）
+        // （程序给 AI 看的图前面都带「工具给你看的图，不是用户发的：」）
+        assertTrue(label != null && "抖音视频的画面（视频 3 秒，从头到尾均匀取了 6 张，大约在第 0." in label && " 秒，按时间先后）" in label &&
+            label.substringAfter("大约在第 ").substringBefore(" 秒").split("、").size == 6, label)
+        val frames = parts.filter { it["type"]?.jsonPrimitive?.content == "image_url" }.map {
+            javax.imageio.ImageIO.read(java.util.Base64.getDecoder().decode(it["image_url"]!!.jsonObject["url"]!!.jsonPrimitive.content.substringAfter(",")).inputStream())
+        }
+        assertEquals(6, frames.size, "6 张画面都给模型看")
+        fun red(i: java.awt.image.BufferedImage) = java.awt.Color(i.getRGB(i.width / 2, i.height / 2)).let { it.red > it.blue + 80 }
+        assertEquals(listOf(true, true, true, false, false, false), frames.map(::red), "按时间先后：前三张红、后三张蓝")
+        assertEquals(listOf("https://www.douyin.com/"), vidFetches.toList(), "下载带 Referer、只下一次")
+        assertEquals("视频 3 秒 · 看了 6 张画面", step("a1").note)
+
+        // 看不了图的模型：不下载，照实说看不了画面
+        vidFetches.clear()
+        val (blindText, _) = ask("a2", link)
+        assertTrue("看不了画面" in blindText && "listen_video" in blindText, blindText)
+        assertTrue(vidFetches.isEmpty())
+
+        // 视频下不动：照实说画面没打开，不把签过名的长地址写给 AI
+        val (goneText, _) = ask("a1", "https://www.douyin.com/video/404")
+        assertTrue("画面没取到（下载视频 HTTP 404）" in goneText, goneText)
+        assertEquals("视频画面没取到", step("a1").note)
+    }
+
+    /**
+     * 真开 Edge 读真的抖音视频作品、真下载视频取画面，假模型只负责调 fetch_url（不花钱）：看 AI 实际收到的画面。
+     * JXY_LIVE_POSTVIDEO=作品链接，JXY_POSTVIDEO_OUT=把发给模型的画面存到哪个文件夹。
+     */
+    @Test
+    fun livePostVideo() = runBlocking<Unit> {
+        val link = System.getenv("JXY_LIVE_POSTVIDEO") ?: return@runBlocking
+        val out = File(System.getenv("JXY_POSTVIDEO_OUT") ?: error("要设 JXY_POSTVIDEO_OUT")).also { it.mkdirs() }
+        val profile = kotlin.io.path.createTempDirectory("jxy-browser").toFile()
+        val browser = com.guixing.jixunying.engine.EdgeBrowser(com.guixing.jixunying.engine.EdgeBrowser.findBrowser() ?: error("找不到 Edge"), profile)
+        try {
+            val e = Engine(Storage(File(dir, "live")), browserFactory = { browser })
+            e.call(Command.SaveProvider(ProviderConfig("p1", "custom", "假服务商", "http://127.0.0.1:$port/v1", "sk-test", listOf(ModelInfo("m", vision = true)))))
+            e.call(Command.SaveMember(Member("a1", "阿看", providerId = "p1", modelId = "m")))
+            val conv = e.call(Command.CreateConversation(listOf("a1"))).data
+            e.call(Command.UpdateConversation(e.state.conversation(conv)!!.copy(webSearch = false)))
+            val t0 = System.currentTimeMillis()
+            e.call(Command.SendMessage(conv, "看看这个抖音链接 $link"))
+            withTimeout(240_000) { while (e.store.messages.value[conv].orEmpty().lastOrNull { it.role == Role.AI }?.status != MsgStatus.DONE) delay(100) }
+            val last = requests.last()
+            val tool = last["messages"]!!.jsonArray.last { it.jsonObject["role"]?.jsonPrimitive?.content == "tool" }.jsonObject["content"]!!.jsonPrimitive.content
+            println("用了 ${System.currentTimeMillis() - t0} ms\n工具结果：\n" + tool.take(1500))
+            println("界面上那一步：" + e.store.messages.value[conv].orEmpty().last { it.role == Role.AI }.tools.last { it.kind == "fetch" }.note)
+            val parts = last["messages"]!!.jsonArray.map { it.jsonObject }.filter { it["role"]?.jsonPrimitive?.content == "user" && it["content"] is JsonArray }
+                .flatMap { it["content"]!!.jsonArray.map { p -> p.jsonObject } }
+            parts.filter { it["type"]?.jsonPrimitive?.content == "text" }.forEach { println("附图说明：" + it["text"]!!.jsonPrimitive.content) }
+            parts.filter { it["type"]?.jsonPrimitive?.content == "image_url" }.forEachIndexed { i, p ->
+                val bytes = java.util.Base64.getDecoder().decode(p["image_url"]!!.jsonObject["url"]!!.jsonPrimitive.content.substringAfter(","))
+                val img = javax.imageio.ImageIO.read(bytes.inputStream())
+                val f = File(out, "frame-${i + 1}.jpg").also { it.writeBytes(bytes) }
+                println("画面 ${i + 1}：${img.width}×${img.height}，${bytes.size / 1024} KB → $f")
+            }
+        } finally {
+            browser.close()
+            for (i in 0 until 10) { if (profile.deleteRecursively()) break; Thread.sleep(500) }
+        }
     }
 
     @Test
