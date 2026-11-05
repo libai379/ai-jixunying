@@ -28,7 +28,9 @@ class LiveVideoTest {
         val p = VideoPick.candidates(state.providers).firstOrNull { VideoPick.vendorOf(it) == vendor } ?: run { println("没有能做 $model 的服务商"); return@runBlocking }
         val res = System.getenv("JXY_VIDEO_RES") ?: "480P"
         val secs = System.getenv("JXY_VIDEO_SECS")?.toIntOrNull() ?: 2
-        val prompt = System.getenv("JXY_VIDEO_PROMPT") ?: "一只橘猫在窗台上伸懒腰，午后阳光，镜头缓慢推近，轻柔的环境声"
+        // JXY_VIDEO_PROMPT_FILE：长描述放文件里（2026-11-05 照用户发的镜子视频做对比；中文长句放环境变量容易乱码）
+        val prompt = System.getenv("JXY_VIDEO_PROMPT_FILE")?.let { File(it).readText().trim() }
+            ?: System.getenv("JXY_VIDEO_PROMPT") ?: "一只橘猫在窗台上伸懒腰，午后阳光，镜头缓慢推近，轻柔的环境声"
         val inputs = System.getenv("JXY_VIDEO_MEDIA").orEmpty().split(';').filter { '=' in it }.map { item ->
             val use = item.substringBefore('=').trim()
             val src = item.substringAfter('=').trim()
