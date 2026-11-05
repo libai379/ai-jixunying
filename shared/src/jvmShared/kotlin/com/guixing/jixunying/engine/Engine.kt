@@ -2249,6 +2249,56 @@ class Engine(
         else "找到 ${found.size} 个：\n" + list.joinToString("\n") { it.absolutePath } + if (found.size > 200) "\n（只列了最新的 200 个）" else ""
     }
 
+    /**
+     * 把电脑上的一个文件原样发给用户（send_file，2026-11-05 用户截图：微信里让 AI 把桌面上的《科学上网手册_重排版.docx》发过来，
+     * AI 答「现有工具没有发送本地原文件的接口」，教他复制命令到 PowerShell 打开文件夹、自己拖进微信；用户：「让微信做到这个功能，我需要」）。
+     * 复制一份挂在回答下面（和 AI 做的 Word 一样）：软件里点开就打开原文件，微信里当文件发过去，视频按视频发。
+     * 能发哪些和能读哪些一样：电脑上发起的哪儿都能发；微信、手机发起的只能发收录范围和放行过的文件夹里的。
+     * 私钥、证书、密码库、.env、本程序的数据文件夹（存着各家的 Key）一律不发；最大 SEND_FILE_MAX_MB。
+     */
+    private suspend fun sendLocalFile(convId: String, msgId: String, args: JsonObject): String {
+        val raw = args.str("path").orEmpty().trim().removeSurrounding("\"").ifBlank { return "参数错误：缺少 path（文件的完整路径）" }
+        val f = File(raw)
+        fun refuse(why: String, tell: String = "没发：$why。如实告诉用户。"): String {
+            updateMessage(convId, msgId, persist = false) { it.copy(tools = it.tools + ToolStep("send", f.name.ifBlank { raw }, ok = false, note = why)) }
+            return tell
+        }
+        if (f.path.startsWith("\\\\") || f.path.startsWith("//")) return refuse("网络路径上的文件不发")
+        if (!f.exists()) return refuse("没有这个文件：${f.path}")
+        if (f.isDirectory) return refuse("这是文件夹，一次只能发一个文件；要整个文件夹就先打包成 zip")
+        if (!readable(convId, f)) remoteRefusal(convId, "发", f)?.let { return refuse("收录范围外的文件", it) }
+        secretFile(f)?.let { return refuse(it) }
+        val size = f.length()
+        if (size == 0L) return refuse("文件是空的")
+        if (size > SEND_FILE_MAX_MB * 1024L * 1024L) return refuse("${size / 1024 / 1024} MB，超过 $SEND_FILE_MAX_MB MB，发不了，请用户在电脑上自己发")
+        val bytes = withContext(Dispatchers.IO) { f.readBytes() }
+        val mime = VideoMedia.mimeOf(f.name)
+        val draft = Attachment(newId(), f.name, mime, bytes.size.toLong(), AttachmentKind.DOCUMENT, note = "电脑上的 ${f.absolutePath}",
+            generated = true, savedPath = f.absolutePath)
+        // 视频带上时长：AI 自己做的视频没读过的，下一轮会取画面、听写（听写要花钱）；用户要的原文件不用
+        val att = if (draft.isVideo) draft.copy(seconds = maxOf(1, kotlin.math.ceil(VideoMedia.durationOf(f.name, mime, bytes) ?: 1.0).toInt())) else draft
+        storage.putFile(att, bytes, null)
+        val label = if (bytes.size < 1024 * 1024) "${maxOf(1, bytes.size / 1024)} KB" else String.format(java.util.Locale.ROOT, "%.1f MB", bytes.size / 1048576.0)
+        updateMessage(convId, msgId) { it.copy(attachments = it.attachments + att, tools = it.tools + ToolStep("send", f.name, note = label)) }
+        val wx = state.conversation(convId)?.channel?.startsWith("weixin:") == true
+        return "已把《${f.name}》（$label）挂在你的回答下面，" + (if (wx) "会跟着回答直接发到微信里。" else "用户点开就能用。") +
+            "回答里说一句发的是哪个文件就行，别再教用户自己去文件夹里找、自己拖。"
+    }
+
+    /** 不往外发的文件（send_file）：私钥、证书、密码库、.env、本程序的数据文件夹。返回原因，能发返回 null。 */
+    private fun secretFile(f: File): String? {
+        val path = runCatching { f.canonicalPath }.getOrDefault(f.absolutePath).lowercase().replace('\\', '/')
+        val name = f.name.lowercase()
+        val data = runCatching { storage.root.canonicalPath }.getOrDefault(storage.root.absolutePath).lowercase().replace('\\', '/').trimEnd('/')
+        return when {
+            path == data || path.startsWith("$data/") -> "这是 AI集训营 自己的数据（里面存着各家的 Key），不往外发"
+            "/.ssh/" in path || listOf("id_rsa", "id_ed25519", "id_ecdsa", "id_dsa").any { name.startsWith(it) } -> "这是 SSH 私钥，不往外发"
+            name.substringAfterLast('.', "") in setOf("pem", "key", "p12", "pfx", "kdbx", "keystore", "jks") -> "这是私钥、证书或密码库，不往外发"
+            name == ".env" || name.startsWith(".env.") -> "这是存密码和 Key 的配置文件，不往外发"
+            else -> null
+        }
+    }
+
     /** 按内容找（和 Code 栏的 grep 同一套：跳过二进制和超过 1MB 的文件）。 */
     private suspend fun chatGrep(convId: String, msgId: String, args: JsonObject): String {
         val pattern = args.str("pattern").orEmpty().ifBlank { return "参数错误：缺少 pattern" }
@@ -5590,6 +5640,11 @@ class Engine(
                     put("pattern", prop("文件名的通配写法：* 匹配一段名字，** 匹配任意几层目录"))
                     put("path", prop("在哪个文件夹底下找（完整路径）"))
                 }, listOf("pattern", "path"))
+            // 2026-11-05 用户截图：微信里让 AI 把桌面上的《科学上网手册_重排版.docx》发过来，AI 只会教他复制命令到 PowerShell 打开文件夹、自己拖进微信
+            fn("send_file", "把电脑上的一个文件原样发给用户：文件挂在你的回答下面，用户点开就能用；在微信里会直接发一个文件过去（视频按视频发）。" +
+                "用户说「把…发给我」「传过来」「发我一份」时用，先用 find_files / list_folder 找到完整路径。一次发一个，要几个就调几次；最大 $SEND_FILE_MAX_MB MB。" +
+                "文件名里带「保密」「机密」的，用户没点名要这一份就别发。发了就别再教用户自己去文件夹里找、自己拖。",
+                buildJsonObject { put("path", prop("文件的完整路径")) }, listOf("path"))
             fn("search_in_files", "在一个文件夹底下按内容找：哪些文本文件里有这段文字，返回文件、行号和那一行。",
                 buildJsonObject {
                     put("pattern", prop("要找的文字或正则表达式"))
@@ -6237,6 +6292,8 @@ class Engine(
          */
         const val POST_VIDEO_MAX_MB = 100
         const val POST_VIDEO_MAX_SEC = 120
+        /** 发文件（send_file）最大多少 MB：微信收文件程序也是 50MB 封顶（WeixinBridge.download）。 */
+        const val SEND_FILE_MAX_MB = 50
 
         /** 补全文件名时不进去翻的文件夹。 */
         val SKIP_DIRS = setOf(".git", "node_modules", "build", ".gradle", ".idea", "dist", "out", "target", ".venv", "venv", "__pycache__", ".next", ".kotlin")
@@ -6482,6 +6539,7 @@ class Engine(
                 }
             }
             "find_files" -> chatFind(convId, msgId, args)
+            "send_file" -> sendLocalFile(convId, msgId, args)
             "search_in_files" -> chatGrep(convId, msgId, args)
             "run_command" -> chatRun(convId, msgId, args)
             "update_todos" -> {

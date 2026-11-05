@@ -232,6 +232,10 @@ class EngineTest {
                             hasTool("create_ppt") && latest.contains("做成 PPT") && !sawTool -> callTool("create_ppt",
                                 mapOf("filename" to "汇报", "content" to "# 季度汇报\n产品部\n\n## 亮点\n- 登录页改版\n- 数据看板\n\n备注：先讲转化率\n\n## 谢谢", "theme" to "科技深色"))
                             toolTexts.any { "已做好《" in it } -> say("做好了，文件在下面。")
+                            // 发电脑上的文件（2026-11-05）
+                            hasTool("send_file") && "发文件：" in latest && !sawTool -> callTool("send_file", mapOf("path" to latest.substringAfter("发文件：").trim()))
+                            toolTexts.any { "挂在你的回答下面" in it } -> say("发过去了。")
+                            toolTexts.any { "没发：" in it || "不能发" in it } -> say("发不了。")
                             // 问自己的文档：先搜，再按搜到的路径读，读完再答
                             hasTool("search_documents") && latest.contains("合同") && !sawTool -> callTool("search_documents", mapOf("query" to "付款日期"))
                             toolTexts.any { "字，下面是" in it } -> say("合同里写的付款日期是 " + Regex("付款日期：(\\S+)").find(toolTexts.last())!!.groupValues[1])
@@ -1385,6 +1389,45 @@ class EngineTest {
         assertEquals("要求", e.state.memories.last().kind)
     }
 
+    /**
+     * 电脑上让 AI 发文件（send_file，2026-11-05 用户：「让微信做到这个功能」）：电脑上发起的哪儿的都能发，挂在回答下面、点开就是原文件；
+     * 程序自己的数据（state.json 里存着各家的 Key）、.env 这类不发。
+     */
+    @Test
+    fun sendFileFromComputer() = runBlocking {
+        val (e, ms) = engineWithMembers("小智")
+        val home = File(dir.parentFile, dir.name + "-用户文件").apply { mkdirs() }
+        try {
+            val report = File(home, "季度报告.pdf").apply { writeBytes(ByteArray(2048) { it.toByte() }) }
+            val env = File(home, ".env").apply { writeText("KEY=sk-123", Charsets.UTF_8) }
+            val conv = e.call(Command.CreateConversation(listOf(ms[0].id))).data
+            suspend fun ask(text: String): com.guixing.jixunying.model.Message {
+                val before = e.store.messages.value[conv].orEmpty().size
+                e.call(Command.SendMessage(conv, text))
+                withTimeout(20_000) {
+                    while (!(e.store.messages.value[conv].orEmpty().size > before + 1 && e.store.messages.value[conv]!!.last().status == MsgStatus.DONE)) delay(30)
+                }
+                return e.store.messages.value[conv]!!.last()
+            }
+            val ok = ask("发文件：${report.path.replace('\\', '/')}")
+            assertEquals("发过去了。", ok.content)
+            val att = ok.attachments.single()
+            assertTrue(att.generated && att.name == "季度报告.pdf" && att.mime == "application/pdf", att.toString())
+            assertContentEquals(report.readBytes(), e.fileBytes(att.id), "挂在回答下面的就是原文件")
+            assertEquals(report.absolutePath, att.savedPath, "电脑上点开就是原文件")
+            assertTrue(ok.tools.any { it.kind == "send" && it.ok && it.note == "2 KB" }, ok.tools.toString())
+            assertTrue(File(dir, "state.json").isFile)
+            for ((bad, why) in listOf(File(dir, "state.json") to "自己的数据", env to "配置文件")) {
+                val no = ask("发文件：${bad.path.replace('\\', '/')}")
+                assertEquals("发不了。", no.content, bad.name)
+                assertTrue(no.attachments.isEmpty())
+                assertTrue(no.tools.any { it.kind == "send" && !it.ok && why in it.note }, no.tools.toString())
+            }
+        } finally {
+            home.deleteRecursively()
+        }
+    }
+
     /** 本机文档：收录指定文件夹（跳过 node_modules 这类），能按内容搜；AI 先搜再读再答；文档库以外的文件读不了。 */
     @Test
     fun localDocumentsSearchAndRead() = runBlocking {
@@ -1505,6 +1548,38 @@ class EngineTest {
         assertEquals("dl1", vid["video_item"]!!.jsonObject["media"]!!.jsonObject["encrypt_query_param"]!!.jsonPrimitive.content)
         assertTrue(vid["video_item"]!!.jsonObject["video_size"]!!.jsonPrimitive.content.toInt() % 16 == 0, "video_size 是密文长度（16 的倍数）")
         assertTrue(wxSent.none { "file_item" in it && ".mp4" in it }, "视频不再当普通文件发")
+
+        // 2026-11-05 用户截图：微信里让 AI 把桌面上的《科学上网手册_重排版.docx》发过来，AI 只会教他复制命令到 PowerShell、自己拖进微信。
+        // 现在 send_file：收录范围里的原样当文件发过去；收录范围外的、私钥这类不发，照实说。
+        // （文件放在程序数据文件夹以外：dir 是这个引擎的数据文件夹，里面的一律不往外发）
+        val home = File(dir.parentFile, dir.name + "-用户文件").apply { mkdirs() }
+        val shelf = File(home, "收录的资料").apply { mkdirs() }
+        val manual = File(shelf, "科学上网手册_重排版.docx").apply { writeBytes(ByteArray(3000) { (it % 251).toByte() }) }
+        val outside = File(home, "没收录/私人.txt").apply { parentFile.mkdirs(); writeText("别发", Charsets.UTF_8) }
+        val key = File(shelf, "server.pem").apply { writeText("-----BEGIN PRIVATE KEY-----", Charsets.UTF_8) }
+        e.call(Command.SaveSettings(e.state.settings.copy(docs = com.guixing.jixunying.model.DocSettings(folders = listOf(shelf.path)))))
+        withTimeout(10_000) { while (e.state.docs.roots.none { File(it) == shelf }) delay(50) }
+        wxSent.clear()
+        wxInbox += msg(9, """{"type":1,"text_item":{"text":"发文件：${manual.path.replace('\\', '/')}"}}""")
+        val sentOk = kotlinx.coroutines.withTimeoutOrNull(20_000) { while (wxSent.none { "发过去了" in it }) delay(50); true } == true
+        assertTrue(sentOk, "微信收到的：" + wxSent.joinToString(" | ") { it.take(200) } + "；最后一条 AI：" +
+            e.state.conversations.first { it.channel == "weixin:me@im.wechat" }.let { c -> e.call(Command.LoadMessages(c.id)); e.store.messages.value[c.id].orEmpty().lastOrNull()?.let { m -> m.content + " / " + m.tools } })
+        assertTrue(wxSent.any { it.startsWith("upload:") && "\"media_type\":3" in it }, "按文件上传")
+        val sentFile = wxSent.first { "file_item" in it }.let { Json.parseToJsonElement(it).jsonObject["msg"]!!.jsonObject["item_list"]!!.jsonArray[0].jsonObject }
+        assertEquals("科学上网手册_重排版.docx", sentFile["file_item"]!!.jsonObject["file_name"]!!.jsonPrimitive.content)
+        assertEquals("3000", sentFile["file_item"]!!.jsonObject["len"]!!.jsonPrimitive.content, "原样发：明文长度一样")
+        val wxConv = e.state.conversations.first { it.channel == "weixin:me@im.wechat" }
+        e.call(Command.LoadMessages(wxConv.id))
+        val sentAtt = e.store.messages.value[wxConv.id]!!.last { it.role == Role.AI }.attachments.single()
+        assertContentEquals(manual.readBytes(), e.fileBytes(sentAtt.id), "挂在回答下面的就是原文件")
+        assertEquals(manual.absolutePath, sentAtt.savedPath, "电脑上点开就是原文件")
+        for ((i, f) in listOf(outside, key).withIndex()) {
+            wxSent.clear()
+            wxInbox += msg(10L + i, """{"type":1,"text_item":{"text":"发文件：${f.path.replace('\\', '/')}"}}""")
+            withTimeout(20_000) { while (wxSent.none { "发不了" in it }) delay(50) }
+            assertTrue(wxSent.none { "file_item" in it }, "${f.name} 不发")
+        }
+        home.deleteRecursively()
 
         e.call(Command.WeixinLogout)
         assertFalse(e.state.weixin.bound)

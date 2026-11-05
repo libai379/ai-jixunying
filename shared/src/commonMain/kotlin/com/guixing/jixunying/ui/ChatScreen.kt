@@ -664,6 +664,8 @@ private fun ToolStepView(t: ToolStep) {
         "history" -> Icons.Rounded.History to (if (t.ok) "翻了以前的聊天「${t.input.take(24)}」" else "以前的聊天里没找到「${t.input.take(24)}」")
         "doc" -> Icons.Rounded.FolderOpen to (if (t.ok) t.input.take(60) else "${t.input.take(50)}（没找到）")
         "file" -> Icons.Rounded.Description to (if (t.ok) "做了文件《${t.input.take(50)}》" else "文件没做成：${t.input.take(40)}")
+        // 发电脑上的文件（2026-11-05）
+        "send" -> Icons.Rounded.Description to ((if (t.ok) "发了文件《${t.input.take(50)}》" else "文件没发：${t.input.take(40)}") + if (t.note.isNotBlank()) " · ${t.note.take(40)}" else "")
         "run" -> Icons.Rounded.Edit to ("跑了「${t.input.take(50)}」" + if (t.note.isNotBlank()) " · ${t.note.take(30)}" else "")
         // 听平台视频里说的话（2026-10-23）
         "listen" -> Icons.Rounded.Mic to ((if (t.ok) "听了视频" else "视频没听成") + if (t.note.isNotBlank()) " · ${t.note.take(40)}" else "")

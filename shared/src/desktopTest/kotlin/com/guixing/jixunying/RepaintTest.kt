@@ -670,7 +670,12 @@ class RepaintTest {
         val conv = e.newChat()
         e.call(Command.SendMessage(conv, "生图的还有哪个"))
         e.answer(conv)
-        val draw = requests.last()["tools"]!!.jsonArray.map { it.jsonObject["function"]!!.jsonObject }.first { it["name"]!!.jsonPrimitive.content == "generate_image" }
+        // 按这一问找请求，不拿「最后一个」（2026-11-05 全量 474 个时偶发一次说明里没有 fake-a，单独跑 19 个全过；
+        // 疑心是别的测试留下的引擎在重试、打到了端口相同的新假服务器上，没抓到现场——再出现时下面的报错会带上取到的是哪一问）
+        val asked = requests.lastOrNull { "生图的还有哪个" in it.toString() && it["tools"] != null }
+        val draw = assertNotNull(asked, "没找到这一问的请求，收到 ${requests.size} 个").let { r ->
+            r["tools"]!!.jsonArray.map { it.jsonObject["function"]!!.jsonObject }.first { it["name"]!!.jsonPrimitive.content == "generate_image" }
+        }
         val desc = draw["parameters"]!!.jsonObject["properties"]!!.jsonObject["model"]!!.jsonObject["description"]!!.jsonPrimitive.content
         // 2026-11-04 起带上用户实测的去留（ImageTuning）：留下的「用户实测能用」，放弃的「点名才用」，放弃的照样列出来
         for (m in listOf("image-01（约 0.0", "image-01-live", "glm-image", "cogview-3-flash（免费）", "qwen-image-3.0（约 0.18 元一张，用户实测能用）", "wanx2.0-t2i-turbo（约 0.04 元一张）",
