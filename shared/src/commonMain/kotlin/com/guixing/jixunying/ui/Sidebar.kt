@@ -1,6 +1,7 @@
 package com.guixing.jixunying.ui
 
 import androidx.compose.material.icons.rounded.Check
+import androidx.compose.material.icons.rounded.Computer
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.Archive
 import com.guixing.jixunying.ui.glass.glass
@@ -617,6 +618,10 @@ private fun ConversationRow(ctl: AppController, state: AppState, c: Conversation
                     onClick = { menu = false; onPickMode() })
                 DropdownMenuItem({ Text("导出成 Markdown") }, leadingIcon = { Icon(Icons.Rounded.Download, null, Modifier.size(18.dp)) },
                     onClick = { menu = false; exportConversationMarkdown(ctl, state, c) })
+                // 手机本机的对话发给配对的电脑（2026-11-05）：电脑那边能直接看（普通聊天两边不同步）
+                if (!LocalPlatform.current.isDesktop && !ctl.remoteMode && ctl.hub.remote.value != null)
+                    DropdownMenuItem({ Text("发给电脑") }, leadingIcon = { Icon(Icons.Rounded.Computer, null, Modifier.size(18.dp)) },
+                        onClick = { menu = false; sendConversationToComputer(ctl, state, c) })
                 DropdownMenuItem({ Text(if (c.archived) "取消归档" else "归档") }, leadingIcon = { Icon(Icons.Rounded.Archive, null, Modifier.size(18.dp)) },
                     onClick = { menu = false; ctl.run(Command.UpdateConversation(c.copy(archived = !c.archived, pinned = false)), if (c.archived) "已放回列表" else "已归档：侧栏最底下「已归档」里能找到") })
                 DropdownMenuItem({ Text("删除", color = MaterialTheme.colorScheme.error) }, leadingIcon = { Icon(Icons.Rounded.Delete, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.error) },

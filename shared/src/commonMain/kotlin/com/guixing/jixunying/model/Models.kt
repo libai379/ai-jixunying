@@ -676,6 +676,11 @@ data class AppState(
     val hostFetchProgress: Float = -1f,
     /** 这台设备装的 AI集训营 版本（2026-10-30）：手机看电脑的这一项，知道电脑会不会新命令（老版本电脑没有这一项，是空的）。 */
     val appVersion: String = "",
+    /**
+     * 这台设备会的新本事（2026-11-05）：手机看电脑的这一项，电脑没报的就不发那种新指令（老电脑不认新指令，只能干等两分钟才超时）。
+     * 取值见 HostFeatures。
+     */
+    val features: List<String> = emptyList(),
     /** 检查更新的情况（2026-10-30）：只给这台设备自己的界面看，不存盘、不发给手机。 */
     @kotlinx.serialization.Transient
     val update: UpdateState = UpdateState(),

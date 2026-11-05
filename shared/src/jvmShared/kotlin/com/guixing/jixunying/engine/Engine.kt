@@ -431,7 +431,7 @@ class Engine(
         // ChatGPT 登录状态以本机凭据为准（上次停在「正在登录」的也清掉）
         s = s.copy(chatgpt = chatgptInfo())
         s = s.copy(account = account.identity.let { i -> AccountInfo(Account.idOf(i.publicKey), i.createdAt, i.githubLogin, i.githubName, i.githubAvatar) })
-        s = s.copy(appVersion = com.guixing.jixunying.model.APP_VERSION, hostFetchProgress = -1f)
+        s = s.copy(appVersion = com.guixing.jixunying.model.APP_VERSION, hostFetchProgress = -1f, features = com.guixing.jixunying.model.HostFeatures.ALL)
         // 以前重复导入留下的同一个服务商 / 同一位成员，启动时合并掉
         val (deduped, memberMap, removed) = ConfigMerge.dedupe(s)
         if (removed > 0) s = deduped
@@ -1696,6 +1696,7 @@ class Engine(
         }
         is Command.ReadLog -> readLog()
         is Command.SaveDeviceLog -> saveDeviceLog(c)
+        is Command.SaveDeviceExportPart -> saveDeviceExportPart(c)
         is Command.HostFetchUpdate -> hostFetchUpdate(c)
         is Command.WeixinSetReadFiles -> weixin?.setReadFiles(c.botId, c.on) ?: CommandResult(false, "这台设备没有接微信助理")
         is Command.WeixinRename -> weixin?.rename(c.botId, c.name) ?: CommandResult(false, "这台设备没有接微信助理")
@@ -3501,6 +3502,45 @@ class Engine(
         }
         storage.log("JxyLog", "收到 $from 发来的日志：${f.name}（${c.text.length} 字）")
         return CommandResult(message = f.path)
+    }
+
+    /**
+     * 手机发来的对话（SaveDeviceExportPart，2026-11-05）：存到 <数据目录>\对话导出\手机-<设备名>-<exportId>\<name>。
+     * 设备名用配对时记的那个；名字里的路径符号一律换掉，只能写进这个文件夹；单个文件不超过 200MB，最多留 30 份导出。
+     * 先写成「名字.part」，最后一段到了再改成正式名字；同一段重发（回话丢了手机再发）照原位置覆盖，不会写坏。
+     */
+    private suspend fun saveDeviceExportPart(c: Command.SaveDeviceExportPart): CommandResult {
+        val from = currentCoroutineContext()[RemoteDevice]?.id?.let { id -> state.devices.firstOrNull { it.id == id }?.name } ?: "手机"
+        fun safe(s: String, max: Int) = s.replace(Regex("""[\\/:*?"<>|\u0000-\u001f]+"""), "_").trim().trim('.').take(max)
+        val id = safe(c.exportId, 60)
+        val name = safe(c.name, 120)
+        if (id.isEmpty() || name.isEmpty()) return CommandResult(false, "名字不对")
+        val bytes = runCatching { java.util.Base64.getDecoder().decode(c.base64) }.getOrElse { return CommandResult(false, "数据不对") }
+        if (bytes.size > 2 * 1024 * 1024) return CommandResult(false, "一段太大")
+        if (c.offset < 0 || c.offset + bytes.size > 200L * 1024 * 1024) return CommandResult(false, "文件太大（超过 200MB）")
+        val root = java.io.File(storage.root, "对话导出")
+        val dir = java.io.File(root, "手机-" + safe(from, 24).ifEmpty { "手机" } + "-" + id)
+        val part = java.io.File(dir, "$name.part")
+        val err = withContext(Dispatchers.IO) {
+            val fresh = !dir.exists()
+            dir.mkdirs()
+            if (c.offset == 0L && part.length() > bytes.size) part.delete()
+            if (c.offset > part.length()) return@withContext "中间缺了一段，从头再发"
+            java.io.RandomAccessFile(part, "rw").use { it.seek(c.offset); it.write(bytes) }
+            if (c.last) {
+                val f = java.io.File(dir, name)
+                f.delete()
+                if (!part.renameTo(f)) return@withContext "存不下来"
+            }
+            if (fresh) root.listFiles()?.filter { it.isDirectory }?.sortedByDescending { it.lastModified() }?.drop(30)?.forEach { it.deleteRecursively() }
+            null
+        }
+        if (err != null) return CommandResult(false, err)
+        if (c.endOfExport) {
+            storage.log("JxyExport", "收到 $from 发来的对话：${dir.name}（${dir.listFiles()?.size ?: 0} 个文件）")
+            emit(Event.Notice("收到 $from 发来的对话，存在 ${dir.path}"))
+        }
+        return CommandResult(message = dir.path)
     }
 
     /**

@@ -314,6 +314,20 @@ sealed interface Command {
      */
     @Serializable data class SaveDeviceLog(val device: String, val text: String) : Command
     /**
+     * 手机把一个对话发给电脑存起来（2026-11-05 用户：「三星的，你加一个吧」——想让电脑这边看手机里和阿雯的聊天记录，普通聊天两边不同步）。
+     * 一个文件分段发，每段不超过 FILE_PART（和电脑传文件给手机一样大）：offset 是这段在文件里的位置，last 表示这个文件发完了，
+     * endOfExport 表示整个对话都发完了（电脑弹一句提示）。电脑存到 <数据目录>\对话导出\手机-<设备名>-<exportId>\<name>，
+     * 结果 message 是那个文件夹。同一段重发（回话丢了）不会写坏。电脑状态里 features 有 HostFeatures.CONV_EXPORT 才发。
+     */
+    @Serializable data class SaveDeviceExportPart(
+        val exportId: String,
+        val name: String,
+        val offset: Long,
+        val base64: String,
+        val last: Boolean,
+        val endOfExport: Boolean = false,
+    ) : Command
+    /**
      * 手机直连 GitHub 下不动时，请电脑代下（电脑走它的代理）：只认本项目发行版的地址。
      * 电脑下好、核对过放进自己的文件区，结果 data 是文件编号，手机再用 GetFilePart 分段取。
      */
@@ -513,6 +527,13 @@ data class PairRequest(val deviceId: String, val deviceName: String, val deviceK
 
 @Serializable
 data class PairReply(val ok: Boolean, val hostName: String = "", val message: String = "")
+
+/** 设备在状态里报的新本事（AppState.features）。 */
+object HostFeatures {
+    /** 收手机发来的对话（Command.SaveDeviceExportPart，2026-11-05）。 */
+    const val CONV_EXPORT = "convExport"
+    val ALL = listOf(CONV_EXPORT)
+}
 
 val AppJson = Json {
     ignoreUnknownKeys = true

@@ -58,6 +58,26 @@ class RemotePauseTest {
         r.stop()
     }
 
+    /**
+     * 切出去又马上切回来（不到一次心跳 2 秒）、新连接一下就连上：以前心跳没看见「断过」，又被 resume 清了上线时间，
+     * 不再打招呼，状态永远卡在「正在连」（2026-11-05 在 phoneLinksThroughRelay 里偶发查出来）。
+     */
+    @Test
+    fun quickPauseResumeReconnects() = runBlocking {
+        repeat(3) { round ->
+            val link = FakeLink()
+            val r = RemoteBackend(PairedHost("h", "电脑", "d", "k", emptyList()), link, "手机")
+            r.start()
+            withTimeout(5_000) { while (r.conn.value !is ConnState.Connected) delay(50) }
+            delay(300L * round)
+            r.pause()
+            delay(100)
+            r.resume()
+            withTimeout(6_000) { while (r.conn.value !is ConnState.Connected) delay(50) }
+            r.stop()
+        }
+    }
+
     /** 电脑一直不回音的线路（中转连着，电脑关机）；answer() 以后电脑开始回。 */
     private class SilentHostLink : FrameLink {
         override val online = MutableStateFlow(true)

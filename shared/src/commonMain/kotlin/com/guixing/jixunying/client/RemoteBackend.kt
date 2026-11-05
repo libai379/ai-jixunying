@@ -84,12 +84,16 @@ class RemoteBackend(
 
     fun resume() {
         if (!paused) return
-        paused = false
         onlineSince = null
         lastHostFrame = null
         graceFrom = clock.markNow()
+        resumed = true
+        paused = false
         link.resume()
     }
+
+    /** resume 了，心跳那边还没重新从头判断（见心跳循环）。 */
+    @kotlin.concurrent.Volatile private var resumed = false
 
     /**
      * 刚启动、刚从后台回来时中转要一两秒才连上：这段时间连不上只算「正在连」，不报「连不上」
@@ -123,6 +127,10 @@ class RemoteBackend(
             var wasOnline = false
             while (isActive) {
                 if (paused) { wasOnline = false; delay(2_000); continue }
+                // 刚回前台：当成刚上线重新打招呼。切出去又切回来不到一次心跳（2 秒）、新连接又连得快时，
+                // 这里一直没看见「断过」，onlineSince 被 resume 清空后再没人填、也不打招呼，状态永远卡在「正在连」
+                // （2026-11-05 测试里查出来；加了「电脑没连上不让切过去」以后这会让人切不过去）
+                if (resumed) { resumed = false; wasOnline = false; lastHello = null }
                 val online = link.online.value
                 if (online && !wasOnline) {
                     onlineSince = clock.markNow()
@@ -186,7 +194,7 @@ class RemoteBackend(
     suspend fun callStreaming(command: Command, onPart: ((String, String) -> Unit)?): CommandResult {
         if (revoked.value) return CommandResult(false, "已取消配对")
         // 电脑明确不在线：马上说，别干等两分钟（11-04 用户电脑关着在手机上改设置，等不到回话界面又跳回旧值）
-        (_conn.value as? ConnState.Failed)?.let { return CommandResult(false, "电脑不在线，没改成：${it.reason}") }
+        (_conn.value as? ConnState.Failed)?.let { return CommandResult(false, "没连上电脑：${it.reason}") }
         val deferred = CompletableDeferred<CommandResult>()
         var lastPart = clock.markNow()
         val sink: ((String, String) -> Unit)? = onPart?.let { f -> { c, r -> lastPart = clock.markNow(); f(c, r) } }

@@ -2235,6 +2235,26 @@ class EngineTest {
             assertNotNull(bigAtt)
             assertContentEquals(big, remote.fileBytes(bigAtt.id))
 
+            // 2026-11-05 手机把自己的对话发给电脑：经加密中转分段传，电脑按配对时记的名字放（手机-测试手机-…）。
+            // 对话在另一台「手机引擎」上造（不往上面这台里加成员，后面还要核对它只有电脑导入的那几位）
+            val other = Engine(Storage(File(dir, "phone-export2")), isPhone = true)
+            other.call(Command.SaveProvider(ProviderConfig("pp", "custom", "手机上的", "${base()}/v1", "sk-phone", listOf(ModelInfo("fake-chat")))))
+            other.call(Command.SaveMember(Member("pm", "阿雯", providerId = "pp", modelId = "fake-chat")))
+            val pconv = other.call(Command.CreateConversation(listOf("pm"))).data
+            other.call(Command.UpdateConversation(other.state.conversation(pconv)!!.copy(webSearch = false)))
+            val pvoice = ByteArray(700_000) { (it * 3 % 249).toByte() }
+            val patt = assertNotNull(other.upload("语音.wav", "audio/wav", pvoice))
+            other.call(Command.SendMessage(pconv, "手机上的话", listOf(patt.id)))
+            waitIdle(other, pconv, 1)
+            val sent = com.guixing.jixunying.ui.sendConversationFiles(other, remote, other.state, other.state.conversation(pconv)!!, "测试手机")
+            assertNull(sent.error, sent.error)
+            val pf = File(sent.folder)
+            assertTrue(pf.name.startsWith("手机-测试手机-"), pf.name)
+            assertContentEquals(pvoice, File(pf, "附件-01-语音.wav").readBytes(), "经中转分两段传，一字不差")
+            assertTrue("手机上的话" in File(pf, "对话.md").readText())
+            assertTrue(remote.call(Command.LoadMessages(conv)).ok, "发完以后线路照常能用")
+
+
             // 2026-10-30 用户：手机上 MiniMax 做的视频「打不开，也下载不了」——电脑上的大文件手机一段 512KB 地取（三段一起），看得到取了几成
             val video = ByteArray(5_300_000) { (it * 7 % 253).toByte() }
             val vAtt = AppJson.decodeFromString(com.guixing.jixunying.model.Attachment.serializer(),
@@ -2370,6 +2390,56 @@ class EngineTest {
         val usage = com.guixing.jixunying.engine.Ledger(File(dir, "usage")).since().filter { it.kind == "stances" && it.convId == conv }
         assertTrue(usage.isNotEmpty(), "应该有立场档案花费记录")
         assertTrue(usage.any { it.model == "deepseek-flash" }, "应该用了 deepseek-flash：" + usage.map { it.model })
+    }
+
+    /**
+     * 手机把对话发给电脑（2026-11-05 用户：「三星的，你加一个吧」）：附件原文件、对话.json（全部原始记录）、对话.md 分段传过去，
+     * 电脑存到 对话导出\手机-…\；1.2MB 的附件要分三段，一字不差；同一段重发不会写坏；文件名里的路径符号出不了那个文件夹；电脑状态里报了会收。
+     */
+    @Test
+    fun phoneConversationToComputer() = runBlocking {
+        val pcDir = File(dir, "pc-export").also { it.mkdirs() }
+        val (pc, _) = engineWithMembers("小智", root = pcDir)
+        assertTrue(com.guixing.jixunying.model.HostFeatures.CONV_EXPORT in pc.state.features, "电脑在状态里报了会收对话")
+        val (phone, pms) = engineWithMembers("阿雯", root = File(dir, "phone-export").also { it.mkdirs() })
+        val conv = phone.call(Command.CreateConversation(listOf(pms[0].id))).data
+        phone.call(Command.UpdateConversation(phone.state.conversation(conv)!!.copy(webSearch = false)))
+        val voice = ByteArray(1_200_000) { (it * 13 % 251).toByte() }
+        val att = assertNotNull(phone.upload("语音.wav", "audio/wav", voice))
+        phone.call(Command.SendMessage(conv, "听听这段", listOf(att.id)))
+        waitIdle(phone, conv, 1)
+
+        val r = com.guixing.jixunying.ui.sendConversationFiles(phone, pc, phone.state, phone.state.conversation(conv)!!, "测试手机")
+        assertNull(r.error, r.error)
+        assertEquals(2, r.messages)
+        assertEquals(1, r.files)
+        val folder = File(r.folder)
+        assertEquals(File(pcDir, "对话导出").canonicalPath, folder.parentFile.canonicalPath, "存在电脑数据目录的 对话导出 下")
+        assertTrue(folder.name.startsWith("手机-"), folder.name)
+        val names = folder.list()!!.sorted()
+        assertTrue(names.none { it.endsWith(".part") }, "没有半截文件：$names")
+        assertContentEquals(voice, File(folder, "附件-01-语音.wav").readBytes(), "1.2MB 分三段传，一字不差")
+        val md = File(folder, "对话.md").readText()
+        assertTrue("听听这段" in md && "我是阿雯" in md, md)
+        val json = Json.parseToJsonElement(File(folder, "对话.json").readText()).jsonObject
+        assertEquals(2, json["messages"]!!.jsonArray.size)
+        assertEquals("阿雯", json["members"]!!.jsonArray[0].jsonObject["name"]!!.jsonPrimitive.content)
+        assertEquals("附件-01-语音.wav", json["attachmentFiles"]!!.jsonObject[att.id]!!.jsonPrimitive.content)
+        assertFalse("sk-test" in File(folder, "对话.json").readText(), "不带 Key")
+
+        // 同一段重发（回话丢了手机再发）：不写坏
+        val exportId = folder.name.removePrefix("手机-手机-")
+        val first = java.util.Base64.getEncoder().encodeToString(voice.copyOfRange(0, 512 * 1024))
+        assertTrue(pc.call(Command.SaveDeviceExportPart(exportId, "附件-01-语音.wav", 0, first, last = false)).ok)
+        val second = java.util.Base64.getEncoder().encodeToString(voice.copyOfRange(512 * 1024, voice.size))
+        assertTrue(pc.call(Command.SaveDeviceExportPart(exportId, "附件-01-语音.wav", 512L * 1024, second, last = true)).ok)
+        assertContentEquals(voice, File(folder, "附件-01-语音.wav").readBytes())
+        // 缺了中间一段：报错，不乱写
+        assertFalse(pc.call(Command.SaveDeviceExportPart(exportId, "缺段.bin", 1000, first, last = true)).ok)
+        // 名字里的路径符号出不了那个文件夹
+        assertTrue(pc.call(Command.SaveDeviceExportPart("../../越界", "../../../evil.txt", 0, java.util.Base64.getEncoder().encodeToString("x".toByteArray()), last = true)).ok)
+        assertFalse(File(pcDir, "evil.txt").exists() || File(dir, "evil.txt").exists() || File(pcDir.parentFile, "越界").exists())
+        assertTrue(File(pcDir, "对话导出").walkTopDown().any { it.name.endsWith("evil.txt") }, "换掉路径符号以后存在 对话导出 里面")
     }
 
     /**
