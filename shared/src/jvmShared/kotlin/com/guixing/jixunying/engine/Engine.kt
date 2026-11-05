@@ -4204,6 +4204,13 @@ class Engine(
      * 起因：用户在微信里连发「同类型最牛的那个拿出来做比较」、一张照片、「就生成这张图」，AI 没等后面两条就先动手了——画图几毛钱无所谓，做视频一段要好几块到十几块。
      * 用户这次的话（上一条 AI 回答以后的几句）明确要视频就放行；不然退回去让 AI 先问一句；问过以后用户答应了也放行。
      */
+    /** 这条回答之前用户连着说的话（点没点模型的名看它）。 */
+    private fun userSaid(convId: String, msgId: String): String {
+        val all = snapshot(convId)
+        val idx = all.indexOfFirst { it.id == msgId }.let { if (it < 0) all.size else it }
+        return all.subList(0, idx).takeLastWhile { it.role == Role.USER }.joinToString("\n") { Quotes.spoken(it.content) }
+    }
+
     private fun videoGate(convId: String, msgId: String, estimate: String): String? {
         val all = snapshot(convId)
         val idx = all.indexOfFirst { it.id == msgId }.let { if (it < 0) all.size else it }
@@ -4212,7 +4219,8 @@ class Engine(
         val asked = videoAsked[convId]
         if (asked != null && now() - asked < 30 * 60_000L && Prompts.saysYes(said)) { videoAsked.remove(convId); return null }
         videoAsked[convId] = now()
-        return "没做：用户这次没有明确说要做视频，做视频贵（$estimate），不能自己先做。先用一句话问用户：做不做、用哪个模型、多长、大概多少钱；用户明确说做了再调 generate_video。"
+        return "没做：用户这次没有明确说要做视频，做视频贵（$estimate），不能自己先做。先用一句话问用户：做不做、用哪个模型、多长、多少钱；用户明确说做了再调 generate_video。" +
+            "价钱照上面程序算的数报（2026-11-05 阿雯自己上网搜价、按 720P 报了 3 元，实际按设置出 1080P 扣了 6 元），别自己估、别上网搜。"
     }
 
     private suspend fun makeVideo(convId: String, msgId: String, args: JsonObject, seen: MutableList<Pair<String, String>>? = null,
@@ -4224,7 +4232,8 @@ class Engine(
             val (c, _) = MediaPick.video(media, args.str("model"), emptySet())
             val est = c?.let { ch ->
                 val secs = VideoPick.durationFor(ch.model, args.str("duration")?.filter { it.isDigit() }?.toIntOrNull() ?: v.duration)
-                "这段 ${ch.model.id} ${secs} 秒大约 ${MediaPick.yuan(MediaPick.videoCost(state, ch.providerId, VideoPick.billingModel(ch.model.id, VideoPick.resolutionFor(ch.model, v.resolution)), secs))} 元"
+                val res = VideoPick.resolutionFor(ch.model, v.resolution)
+                "这段 ${ch.model.id}（按设置出 $res）${secs} 秒，程序算的价钱约 ${MediaPick.yuan(MediaPick.videoCost(state, ch.providerId, VideoPick.billingModel(ch.model.id, res), secs))} 元"
             } ?: "一段要好几块钱"
             videoGate(convId, msgId, est)?.let { return it }
         }
@@ -5389,7 +5398,13 @@ class Engine(
                 "提示词决定好坏，别只写一句话：" + VideoPrompting.guides(VideoPick.candidates(media.providers).mapNotNull { VideoPick.vendorOf(it) }.toSet(), v.promptGuide),
                 buildJsonObject {
                     put("prompt", prop("视频内容描述：主体、动作、场景、镜头运动、光线、风格、声音，越具体越好；编辑、延长时写清要怎么改、往哪边延长"))
-                    put("model", prop("可选，用哪个模型做，不填就用设置里的（素材收不了时自动换）。能用的：" + VideoPick.modelsFor(media.providers).joinToString("；") { it.id + "（" + it.label + "）" }))
+                    // 每个模型按用户设置会出多大、一秒多少钱，程序直接写上（2026-11-05 阿雯上网搜价，报的和实际扣的差一倍）
+                    put("model", prop("可选，用哪个模型做，不填就用设置里的（素材收不了时自动换）。能用的（括号里是按用户设置会出的分辨率和每秒价钱，报价照这个算，别上网搜）：" +
+                        VideoPick.modelsFor(media.providers).joinToString("；") { vm ->
+                            val res = VideoPick.resolutionFor(vm, v.resolution)
+                            val per = MediaPick.video(media, vm.id, emptySet()).first?.let { c -> MediaPick.videoCost(state, c.providerId, VideoPick.billingModel(vm.id, res), 1) }
+                            vm.id + "（" + vm.label + "；按设置出 " + res + (if (per != null && per > 0) "，约 ${MediaPick.yuan(per)} 元/秒" else "") + "）"
+                        }))
                     put("replaces", prop("可选，这次回答里之前做的哪一段视频不要了（文件名），重做时写上"))
                     put("duration", prop("可选，要做的秒数。用户没说就不填（默认 ${v.duration} 秒；带视频素材时默认智能时长，自动配合原视频）"))
                     put("ratio", prop("可选，画面比例：16:9、9:16、1:1、4:3、3:4、21:9，带素材时还可以 adaptive（跟素材一样）。用户没说就不填"))
@@ -6234,6 +6249,10 @@ class Engine(
                 val wanted = MediaPick.clean(args.str("model"))
                 val only = if (wanted.isEmpty()) null else MediaPick.image(media, wanted)
                     ?: return "没有「$wanted」这个画图模型（或者没配它的 Key）。能用的：${modelsLine(ImagePick.candidates(media.providers))}。不写 model 就用设置里的。"
+                // 用户实测后放弃的（可灵、智谱、MiniMax、Vidu）：用户这次没点名就不许用（2026-11-05 阿雯没被点名自己挑了可灵，脸上冒疙瘩，白花两毛）
+                if (only != null && ImageTuning.dropped(only.modelId) && !ImageTuning.namedIn(only.modelId, userSaid(convId, msgId)))
+                    return "没画：「${only.modelId}」是用户实测后放弃的（${ImageTuning.profile(only.modelId).note}），用户这次没点名，不能用。" +
+                        "换用户实测能用的（千问图像 qwen-image、万相 2.7、z-image），或者不写 model 用设置里的；用户明确说要用它才用。"
                 // 参考图（2026-11-04 用户转来阿德的话：「要是能把通道打开，让我能传参考图……出来的才可能是同一个人换了个姿势」）：
                 // 对话里图片的文件名，按顺序是「图1」「图2」；交给模型前缩成长边 1600 的 JPEG
                 val refAtts = referenceNames(args).map { n ->
@@ -6253,10 +6272,15 @@ class Engine(
                     val refNote = if (refAtts.isEmpty()) "" else "，参考了" + refAtts.joinToString("") { "《${it.name}》" }
                     updateMessage(convId, msgId) { it.copy(attachments = it.attachments + r.att, tools = it.tools + ToolStep("image", prompt, note = "用的是 ${r.label}$refNote")) }
                     val swapped = replaceOld(convId, msgId, args.str("replaces"), r.att.id)
+                    // 这次回答里 P 出来、只拿来当参考的图（比如把横着的参考图转正）是中间图，不当成品发给用户
+                    // （2026-11-05 阿雯把「转方向」的结果和新画的一起发了，用户：「其实第一张横屏就跟原图一样了」）
+                    val middle = refAtts.filter { a -> a.name.startsWith("P图") && snapshot(convId).firstOrNull { it.id == msgId }?.attachments?.any { it.id == a.id } == true }
+                    if (middle.isNotEmpty()) updateMessage(convId, msgId) { m -> m.copy(attachments = m.attachments.filter { at -> middle.none { it.id == at.id } }) }
+                    val middleNote = if (middle.isEmpty()) "" else middle.joinToString("") { "《${it.name}》" } + "只是拿来当参考的中间图，不发给用户了，回答里别把它当成品说。"
                     // 画完给它看一眼（2026-11-02：以前它从来看不到自己画了什么，画错了也说「做好了」）
                     val look = seen != null && imageDataUrl(r.att)?.also { seen += "你刚画好的《${r.att.name}》" to it } != null
                     val maxRefs = ImageTuning.maxReferences(r.label.substringBefore('（'))
-                    "图片已生成：《${r.att.name}》（用的是 ${r.label}，约 ${MediaPick.yuan(cost)} 元），会和你的回答一起给用户。$swapped" +
+                    "图片已生成：《${r.att.name}》（用的是 ${r.label}，约 ${MediaPick.yuan(cost)} 元），会和你的回答一起给用户。$swapped$middleNote" +
                         (if (refAtts.isEmpty()) "" else "照着参考图" + refAtts.take(maxRefs).joinToString("") { "《${it.name}》" } + "重画的一张（不是在原图上改，长相、衣服可能有出入，照实说）。" +
                             if (refAtts.size > maxRefs) "这个模型最多收 $maxRefs 张，后面的没带上。" else "") +
                         (if (r.added.isNotEmpty()) "程序按这个模型的脾气在描述后面补了一句：「${r.added}」。" else "") +

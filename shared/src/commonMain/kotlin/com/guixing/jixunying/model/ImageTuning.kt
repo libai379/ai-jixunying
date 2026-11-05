@@ -106,12 +106,49 @@ object ImageTuning {
         val m = bare(model)
         val a = age(prompt)
         val young = if (a != null && a >= 25) "看起来比实际年龄年轻几岁" else "看起来二十出头"
+        // 要真实质感时（见 wantsRealSkin）只管脸年轻好看，不补「理想化、商业摄影、妆容精致、透亮有光泽」——那几样把皮肤往塑料、瓷面上推
+        if (wantsRealSkin(prompt)) {
+            val face = "人物$young，面容年轻好看：五官精致、轮廓清晰，眼睛明亮有神；皮肤照描述保留真实纹理，不磨皮"
+            return when {
+                m.startsWith("qwen-image") -> "画面审美：$face。"
+                m.startsWith("wan2.7") -> "画面审美：$face；五官柔美秀气，鼻子小巧，下颌线柔和。"
+                else -> null
+            }
+        }
         val face = "人物$young，面容年轻好看：五官精致、轮廓清晰，眼睛明亮有神，妆容干净精致，皮肤透亮有光泽"
         return when {
             m.startsWith("qwen-image") -> "画面审美：时尚人像摄影、商业摄影的理想化审美；$face。"
             m.startsWith("wan2.7") -> "画面审美：时尚人像摄影的理想化审美；$face；五官柔美秀气，鼻子小巧，下颌线柔和，头发蓬松有层次、不贴在脸上。"
             else -> null
         }
+    }
+
+    /**
+     * 要的是真实质感（2026-11-05 用户看阿雯一轮做图做视频：「最大的毛病 皮肤带塑料感」「其实你是张像油画」，
+     * 要做的是抖音实拍那种）：描述里写了毛孔、绒毛、不磨皮、实拍、手机拍、胶片、素颜、肤色不均、不美颜这些。
+     * 这时补的审美不带「理想化、商业摄影、妆容精致、透亮有光泽」，反向提示词也不加「皮肤粗糙、皱纹」。
+     * 看整段（不只看要画的部分）：「不磨皮」「不要美颜」本身就是要真实。
+     */
+    fun wantsRealSkin(prompt: String): Boolean = REAL_SKIN.containsMatchIn(prompt)
+
+    private val REAL_SKIN = Regex("毛孔|绒毛|磨皮|美颜|实拍|随手拍|手机拍|手机前置|生活照|抓拍|胶片|颗粒感|素颜|肤色不均|皮肤纹理|皮肤质感|真实皮肤|塑料感|蜡感|瑕疵")
+
+    /**
+     * 用户这次的话里点没点这个模型的名（放弃的模型点名才用，2026-11-05：阿雯没被点名，自己挑了可灵 kling-v3-omni，
+     * 脸上冒了一片疙瘩，白花两毛）。认模型编号、去掉服务商前缀的编号，和各家的叫法。
+     */
+    fun namedIn(model: String, said: String): Boolean {
+        val s = said.lowercase()
+        val m = model.lowercase()
+        if (m in s || bare(m) in s) return true
+        val aliases = when {
+            bare(m).startsWith("kling") -> listOf("可灵", "kling")
+            bare(m).startsWith("cogview") || bare(m).startsWith("glm-image") -> listOf("智谱", "cogview", "glm-image", "glm image")
+            isMiniMax(bare(m)) -> listOf("minimax", "海螺", "image-01")
+            bare(m).startsWith("vidu") -> listOf("vidu", "生数")
+            else -> emptyList()
+        }
+        return aliases.any { it in s }
     }
 
     // —— 接口参数 ——
@@ -121,6 +158,9 @@ object ImageTuning {
 
     /** 年轻女性人像再加的（对着千问、万相把人画老、画平常的毛病）。 */
     const val NEGATIVE_FACE = "显老、皱纹、法令纹、眼袋、皮肤暗沉粗糙、五官平淡、男性化的五官"
+
+    /** 要真实质感时用的（去掉「皱纹、皮肤暗沉粗糙」：真实皮肤本来就有细纹和不均匀，写进反向提示词会被磨成瓷面）。 */
+    const val NEGATIVE_FACE_REAL = "显老、法令纹、眼袋、五官平淡、男性化的五官"
 
     /**
      * 能收反向提示词的。千问AI平台文生图指南原文：「qwen-image-2.1 系列、wan2.7-image-pro 和 wan2.7-image 不支持此参数，其余模型均支持」；
@@ -208,7 +248,7 @@ object ImageTuning {
         val t = if (refs > 0) null else tail(model, prompt)?.takeIf { prompt.length + it.length + 1 <= maxChars(model) }
         val full = if (t == null) prompt else prompt.trimEnd() + "\n" + t
         val negative = if (!takesNegative(model)) null
-            else (NEGATIVE + if (refs == 0 && youngWomanPhoto(prompt)) "、$NEGATIVE_FACE" else "").take(500)
+            else (NEGATIVE + if (refs == 0 && youngWomanPhoto(prompt)) "、" + (if (wantsRealSkin(prompt)) NEGATIVE_FACE_REAL else NEGATIVE_FACE) else "").take(500)
         return Plan(full, t.orEmpty(), negative, rewrite(model, prompt), targetPixels(model))
     }
 

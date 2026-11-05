@@ -174,4 +174,43 @@ class ImageTuningTest {
         val onlyKling = ImagePick.resolve(AppState(providers = listOf(prov("q", "custom", "kling/kling-v3-image-generation")))).map { it.modelId }
         assertTrue("kling/kling-v3-image-generation" in onlyKling, onlyKling.toString())
     }
+
+    /**
+     * 2026-11-05 用户看阿雯一轮：「皮肤带塑料感」「像油画」，要做的是抖音实拍那种。描述里要真实质感时，
+     * 补的审美只管脸年轻好看，不带「理想化、商业摄影、妆容精致、透亮有光泽」；反向提示词不加「皱纹、皮肤粗糙」。没写的照旧（防显老还在）。
+     */
+    @Test
+    fun realSkinIsNotPolishedAway() {
+        val real = "实拍感人像，一位二十出头的年轻女性站在落地镜前，皮肤保留毛孔和细小绒毛，不磨皮、不美颜，手机随手拍的质感"
+        assertTrue(ImageTuning.wantsRealSkin(real))
+        val t = assertNotNull(ImageTuning.tail("qwen-image-3.0-pro", real))
+        assertTrue("年轻好看" in t, t)
+        assertFalse("理想化" in t || "透亮有光泽" in t || "商业摄影" in t || "妆容干净精致" in t, t)
+        val plan = ImageTuning.plan("qwen-image-3.0-pro", real)
+        val neg = assertNotNull(plan.negative)
+        assertTrue("显老" in neg && "皮肤过度光滑" in neg, neg)
+        assertFalse("皮肤暗沉粗糙" in neg || "皱纹" in neg, neg)
+        val w = assertNotNull(ImageTuning.tail("wan2.7-image-pro", real))
+        assertFalse("理想化" in w || "透亮" in w, w)
+
+        // 没要真实质感的照旧补理想化审美（11-04 治「画老、素人脸」那一套）
+        val plain = "时尚人像，一位二十五岁的年轻女性，白色连衣裙，站在花园里，微笑看镜头"
+        assertFalse(ImageTuning.wantsRealSkin(plain))
+        assertTrue("理想化" in assertNotNull(ImageTuning.tail("qwen-image-3.0-pro", plain)))
+        assertTrue("皮肤暗沉粗糙" in assertNotNull(ImageTuning.plan("qwen-image-3.0-pro", plain).negative))
+    }
+
+    /** 放弃的模型点名才用（2026-11-05 阿雯没被点名自己挑了可灵）：认编号、去掉前缀的编号和各家叫法。 */
+    @Test
+    fun droppedModelOnlyWhenNamed() {
+        val kling = "kling/kling-v3-omni-image-generation"
+        assertTrue(ImageTuning.dropped(kling))
+        assertFalse(ImageTuning.namedIn(kling, "很丑，再画一张"))
+        assertTrue(ImageTuning.namedIn(kling, "用可灵画一张试试"))
+        assertTrue(ImageTuning.namedIn(kling, "试试 Kling 那个模型"))
+        assertTrue(ImageTuning.namedIn("cogview-4", "智谱的画一张"))
+        assertTrue(ImageTuning.namedIn("image-01", "海螺画图试一下"))
+        assertFalse(ImageTuning.namedIn("vidu/viduq2-fast_reference2image", "换个模型"))
+        assertFalse(ImageTuning.dropped("qwen-image-3.0-pro"))
+    }
 }
