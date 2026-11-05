@@ -2784,18 +2784,39 @@ class Engine(
         val items = state.memories.filterNot { it.pinned }
         if (items.size < 2) return CommandResult(message = "记忆不多，不用整理")
         val (p, model) = Recorder.pick(state) ?: return CommandResult(false, "没有能用的模型来整理（先在 模型服务 里配一个）")
-        val r = withContext(Dispatchers.IO + UsageTag("memory")) { llm.chat(p, model, listOf(userMsg(Recorder.tidyPrompt(items))), null, null) { _, _ -> } }
-        val out = Recorder.parseItems(r.content) ?: return CommandResult(false, "记录员的输出看不懂，没有改动")
-        if (out.isEmpty()) return CommandResult(false, "记录员一条都没留，不像话，没有改动")
-        val next = out.map { e ->
-            val src = e.from.mapNotNull { items.getOrNull(it - 1) }
-            val first = src.firstOrNull { it.convId.isNotBlank() } ?: src.firstOrNull()
-            MemoryItem(newId(), e.text, e.kind, first?.source ?: "整理", src.minOfOrNull { it.createdAt } ?: now(), now(),
-                topic = e.topic.ifBlank { if (src.isNotEmpty() && src.all { it.topic == src.first().topic }) src.first().topic else "" },
-                convId = first?.convId.orEmpty(), messageId = first?.messageId.orEmpty(), quote = first?.quote.orEmpty())
+        // 整理用不着深想：关掉思考（2026-11-05 小米 mimo-v2.6-flash 默认先想，168 条一次十分钟写不完）
+        val fast = if (llm.thinkingDropped(p, model)) null else Thinking.params(Thinking.rule(p, model), com.guixing.jixunying.model.ThinkingMode.FAST)
+        val r = withContext(Dispatchers.IO + UsageTag("memory")) {
+            llm.chat(p, model, listOf(userMsg(Recorder.tidyPrompt(items))), null, null, thinking = fast) { _, _ -> }
         }
-        updateState { it.copy(memories = pinned + next, memoryDeleted = tombstoned(it, items.map { m -> m.id })) }
-        return CommandResult(message = "整理好了：${items.size} 条变成 ${next.size} 条（置顶的没动）")
+        val plan = Recorder.parseTidy(r.content) ?: return CommandResult(false, "记录员的输出看不懂，没有改动")
+        // 只动它说要改的：合并的换成新的一条（放在原来第一条的位置），删的拿掉，其余原样留着（出处、时间都不动）
+        val removed = LinkedHashSet<Int>()
+        val mergedAt = HashMap<Int, MemoryItem>()
+        for (e in plan.merges) {
+            val idx = e.from.filter { it in 1..items.size && it !in removed }.distinct()
+            if (idx.isEmpty()) continue
+            val src = idx.map { items[it - 1] }
+            val topic = e.topic.ifBlank { if (src.all { it.topic == src.first().topic }) src.first().topic else "" }
+            if (src.size == 1 && src[0].text == e.text && src[0].kind == e.kind && src[0].topic == topic) continue
+            val first = src.firstOrNull { it.convId.isNotBlank() } ?: src.first()
+            mergedAt[idx.min()] = MemoryItem(newId(), e.text, e.kind, first.source.ifBlank { "整理" }, src.minOf { it.createdAt }, now(),
+                topic = topic, convId = first.convId, messageId = first.messageId, quote = first.quote)
+            removed += idx
+        }
+        val dropped = plan.drops.filter { it in 1..items.size && it !in removed }
+        removed += dropped
+        if (removed.isEmpty()) return CommandResult(message = "看过了，${items.size} 条没有要合并或删的")
+        val next = items.flatMapIndexed { i, m -> listOfNotNull(mergedAt[i + 1]) + (if ((i + 1) in removed) emptyList() else listOf(m)) }
+        if (next.size * 3 < items.size) return CommandResult(false, "记录员要把 ${items.size} 条删到只剩 ${next.size} 条，删得太狠，没有改动")
+        val gone = removed.map { items[it - 1].id }
+        val itemIds = items.map { it.id }.toSet()
+        // 整理这一两分钟里新记下的（不在 items 里）照样留着
+        updateState { s ->
+            val others = s.memories.filter { it.id !in itemIds }
+            s.copy(memories = others.filter { it.pinned } + next + others.filterNot { it.pinned }, memoryDeleted = tombstoned(s, gone))
+        }
+        return CommandResult(message = "整理好了：${items.size} 条变成 ${next.size} 条（合并 ${mergedAt.size} 处、删 ${dropped.size} 条，置顶的没动）")
     }
 
     /** 搜所有对话的聊天内容，按命中多少、时间新旧排序。 */
@@ -6870,6 +6891,12 @@ class Engine(
             return "$hint（HTTP ${e.status}）" + if (detail.isBlank()) "" else "：$detail"
         }
         val msg = e.message ?: e::class.simpleName ?: "未知错误"
+        // 整个请求等到点了（不是连不上）：2026-11-05 整理 168 条记忆一次要写十分钟，次次报「网络连不上」，其实网是好的
+        if ("Request timeout has expired" in msg) {
+            val ms = Regex("request_timeout=(\\d+)").find(msg)?.groupValues?.get(1)?.toLongOrNull()
+            val wait = ms?.let { if (it >= 60_000) "${it / 60_000} 分钟" else "${it / 1000} 秒" } ?: "很久"
+            return "等了 $wait 还没等到${providerShortName(p)}回完（不是网断了：模型回得慢，或者这次的活太大）"
+        }
         return if (isNetError(e)) "网络连不上：$msg${proxyHint(p)}" else msg
     }
 

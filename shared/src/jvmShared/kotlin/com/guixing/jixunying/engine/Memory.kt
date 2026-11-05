@@ -105,7 +105,35 @@ object Recorder {
                 (if (m.updatedAt > 0) "（${Prompts.clock(m.updatedAt).substringBefore(' ')}记）" else ""))
         }
         appendLine()
-        append("输出 JSON 数组，不要别的文字：[{\"text\": \"…\", \"kind\": \"关于我|偏好|要求|事实\", \"topic\": \"\", \"from\": [原来的编号…]}]")
+        // 只写要改的（2026-11-05 用户截图「这个整理不出来，手机也是连不上，电脑也是连不上」）：以前要它把整理后的全部重写一遍，
+        // 168 条、正文一万一千多字，要写一万八千 token 左右，小米 mimo-v2.6-flash 每秒 30 个上下，光写就十分钟，次次撞上 10 分钟的超时
+        appendLine("只写要改的，没写到的编号程序原样保留（不要把不改的抄一遍）：")
+        appendLine("- 几条合并成一条、或者一条改写：{\"text\": \"…\", \"kind\": \"关于我|偏好|要求|事实\", \"topic\": \"\", \"from\": [原来的编号…]}")
+        appendLine("- 删掉的（过时、没用、被更新的那条推翻了）：{\"drop\": [编号…]}")
+        append("输出一个 JSON 数组，不要别的文字；没什么要改的输出 []。")
+    }
+
+    /** 整理的结果：merges 是合并 / 改写（from 是原来的编号，从 1 起），drops 是删掉的编号。 */
+    class TidyPlan(val merges: List<Extracted>, val drops: Set<Int>)
+
+    /** 读整理的输出（只写要改的那种）。看不懂返回 null。 */
+    fun parseTidy(raw: String): TidyPlan? {
+        val t = raw.substringAfter("</think>", raw)
+        val start = t.indexOf('[')
+        val end = t.lastIndexOf(']')
+        if (start < 0 || end <= start) return null
+        val arr = runCatching { Json.parse(t.substring(start, end + 1)) as? JsonArray }.getOrNull() ?: return null
+        val drops = LinkedHashSet<Int>()
+        val merges = mutableListOf<Extracted>()
+        for (el in arr) {
+            val o = el as? JsonObject ?: continue
+            (o["drop"] as? JsonArray)?.mapNotNullTo(drops) { (it as? JsonPrimitive)?.intOrNull }
+            val text = o.str("text")?.trim().orEmpty()
+            val from = (o["from"] as? JsonArray)?.mapNotNull { (it as? JsonPrimitive)?.intOrNull }.orEmpty()
+            if (text.isNotBlank() && from.isNotEmpty())
+                merges += Extracted(text.take(200), o.str("kind")?.trim()?.takeIf { it in kinds } ?: "关于我", null, from, o.str("topic")?.let(::cleanTopic).orEmpty())
+        }
+        return TidyPlan(merges, drops)
     }
 
     class Extracted(val text: String, val kind: String, val replaces: Int?, val from: List<Int>, val topic: String = "", val quote: String = "")

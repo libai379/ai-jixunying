@@ -189,7 +189,9 @@ class EngineTest {
                             "你是聊天记录员" in firstText -> say("## 话题\n测试话题\n## 已经定下的结论\n摘要里的结论")
                             "找出值得长期记住的" in firstText -> say("""好的：{"conversationTopic":"找房","items":[{"text":"在北京做产品经理","kind":"关于我","topic":"","quote":"第3句","replaces":null},""" +
                                 """{"text":"预算每月五千","kind":"事实","topic":"找房","quote":"记录员编的一句话","replaces":null}]}""")
-                            "下面是关于一位用户的长期记忆" in firstText -> say("""[{"text":"喜欢简短的回答","kind":"偏好","from":[1,2]}]""")
+                            "下面是关于一位用户的长期记忆" in firstText -> say(
+                                if ("上个月出差去上海" in firstText) """[{"text":"喜欢简短的回答","kind":"偏好","from":[1,2]},{"drop":[3]}]"""
+                                else """[{"text":"喜欢简短的回答","kind":"偏好","from":[1,2]}]""")
                             // 点名：只有「让丙……」是在叫人，其他算对大家说
                             "判断这句话是想让哪几位成员来回答" in firstText -> say(if ("让丙" in firstText) """好的：{"to":["丙"]}""" else """{"to":[]}""")
                             // 立场档案：第二轮乙看到大家都说 A 就改了（跟风），甲没变；第一轮开新议题
@@ -1300,6 +1302,32 @@ class EngineTest {
         val tidy = e.call(Command.TidyMemories)
         assertTrue(tidy.ok, tidy.message)
         assertEquals(listOf("喜欢简短的回答"), e.state.memories.map { it.text })
+    }
+
+    /**
+     * 整理记忆只写要改的（2026-11-05 用户：「这个整理不出来，手机也是连不上，电脑也是连不上」——168 条要整份重写一万八千 token，
+     * 次次撞 10 分钟超时）：合并的换成一条、删的拿掉，没提到的原样留着（编号、出处都不变）；提示词里要的是只写改动。
+     */
+    @Test
+    fun tidyOnlyTouchesWhatChanged() = runBlocking {
+        val (e, _) = engineWithMembers("小智")
+        listOf("m1" to "喜欢简洁", "m2" to "喜欢简短的回答", "m3" to "上个月出差去上海", "m4" to "住在北京").forEach { (id, t) ->
+            e.call(Command.SaveMemory(com.guixing.jixunying.model.MemoryItem(id, t, if (id == "m4") "关于我" else "偏好")))
+        }
+        val r = e.call(Command.TidyMemories)
+        assertTrue(r.ok, r.message)
+        assertTrue("合并 1 处" in r.message && "删 1 条" in r.message, r.message)
+        assertEquals(listOf("喜欢简短的回答", "住在北京"), e.state.memories.map { it.text })
+        assertEquals("m4", e.state.memories.last().id, "没提到的原样留着，编号不变")
+        assertTrue(e.state.memoryDeleted.map { it.id }.containsAll(listOf("m1", "m2", "m3")), "合并、删掉的记进删除记录（手机同步跟着删）")
+        assertFalse(e.state.memoryDeleted.any { it.id == "m4" })
+        val ask = requests.last { "下面是关于一位用户的长期记忆" in it.toString() }.toString()
+        assertTrue("只写要改的" in ask && "drop" in ask, "提示词要的是只写改动")
+
+        val plan = assertNotNull(com.guixing.jixunying.engine.Recorder.parseTidy("""好的：[{"drop":[2,5]},{"text":"住北京","kind":"关于我","from":[4]},{"text":"没有编号的不算"}]"""))
+        assertEquals(setOf(2, 5), plan.drops)
+        assertEquals(listOf("住北京"), plan.merges.map { it.text })
+        assertNull(com.guixing.jixunying.engine.Recorder.parseTidy("看不懂的话"))
     }
 
     /** 本机文档：收录指定文件夹（跳过 node_modules 这类），能按内容搜；AI 先搜再读再答；文档库以外的文件读不了。 */
