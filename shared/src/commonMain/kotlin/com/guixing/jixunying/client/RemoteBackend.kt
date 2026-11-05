@@ -139,7 +139,7 @@ class RemoteBackend(
                 wasOnline = online
                 if (online && (lastHello == null || lastHello.elapsedNow() > 25.seconds)) {
                     val needState = _conn.value !is ConnState.Connected
-                    runCatching { link.send(WireFrame.Hello(deviceName, wantState = needState)) }
+                    runCatching { link.send(WireFrame.Hello(deviceName, wantState = needState, caps = com.guixing.jixunying.model.PHONE_CAPS)) }
                     lastHello = clock.markNow()
                 }
                 refreshState()

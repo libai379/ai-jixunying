@@ -634,7 +634,7 @@ class ShotsTest {
         val hub = Hub(seed(File(tmp, "data"), File(tmp, "文档").apply { mkdirs() }))
         val phone = PhonePlatform()
         val pages = listOf("settingshome", "conv:c1#drawer") + com.guixing.jixunying.ui.SettingsTab.entries.map { "settings:${it.name}" } +
-            listOf("settings:APPEARANCE#tune")
+            listOf("settings:APPEARANCE#tune", "settings:MEMORY#tidy", "settings:MEMORY#tidystrip")
         val problems = mutableListOf<String>()
         var cases = 0
         for (wDp in listOf(220, 320, 360)) for (font in listOf(1f, 2f)) for (start in pages) {
@@ -642,6 +642,43 @@ class ShotsTest {
         }
         kotlin.test.assertEquals(3 * 2 * pages.size, cases)
         kotlin.test.assertTrue(problems.isEmpty(), "量了 $cases 种，${problems.size} 处不对：\n" + problems.distinct().take(80).joinToString("\n"))
+    }
+
+    /**
+     * 整理记忆的进度窗口真的画出来了（2026-11-05 用户：「你得做一个小窗口，显示它的进度……让我知道他在干活」）：
+     * 最窄 320dp + 字体 200%、360dp + 100% 下，「看完几条、还剩几条」「多久没动静」「停下」都在、都在窗口里。设了 JXY_SHOTS 时画成 tidy-*.png。
+     */
+    @Test
+    fun memoryTidyWindow() {
+        val tmp = tempDir("jxy-tidy-window")
+        val hub = Hub(seed(File(tmp, "data"), File(tmp, "文档").apply { mkdirs() }))
+        val phone = PhonePlatform()
+        for ((wDp, font) in listOf(320 to 2f, 360 to 1f)) {
+            val d = 2f
+            val scene = ImageComposeScene((wDp * d).toInt(), (wDp * 20 / 9 * d).toInt(), Density(d, font)) { App(hub, phone, "settings:MEMORY#tidy") }
+            try {
+                var img = scene.render(0)
+                repeat(10) { i -> img = scene.render((i + 1) * 120_000_000L); Thread.sleep(15) }
+                val all = mutableListOf<androidx.compose.ui.semantics.SemanticsNode>()
+                fun walk(n: androidx.compose.ui.semantics.SemanticsNode) { all += n; n.children.forEach { walk(it) } }
+                scene.semanticsOwners.forEach { walk(it.rootSemanticsNode) }
+                fun find(prefix: String) = all.firstOrNull { n ->
+                    n.config.getOrNull(androidx.compose.ui.semantics.SemanticsProperties.Text).orEmpty().any { it.text.startsWith(prefix) }
+                }
+                for (want in listOf("看完 46 / 168 条，还剩 122 条", "分 5 批，正在做第 2 批", "记录员在写这一批要改的（已经写了 312 字）", "已经 2", "停下", "记录员：mimo-v2.6-flash · 用了 1 分")) {
+                    val n = kotlin.test.assertNotNull(find(want), "${wDp}dp、字体 ${(font * 100).toInt()}%：没找到「$want」")
+                    kotlin.test.assertTrue(n.positionInRoot.x + n.size.width <= wDp * d + 1f, "${wDp}dp：「$want」右边出了窗口")
+                }
+                // 装不下时能往下滑到最后一行（320dp + 字体 200% 时「用了多久」那几行在窗口下面）
+                val last = find("记录员：mimo-v2.6-flash")!!
+                kotlin.test.assertTrue(generateSequence(last.parent) { it.parent }.any { it.config.contains(androidx.compose.ui.semantics.SemanticsProperties.VerticalScrollAxisRange) },
+                    "${wDp}dp、字体 ${(font * 100).toInt()}%：进度窗口的内容不能上下滑")
+                if (out != null) {
+                    out.mkdirs()
+                    File(out, "tidy-${wDp}dp-${(font * 100).toInt()}.png").writeBytes(img.encodeToData(EncodedImageFormat.PNG)!!.bytes)
+                }
+            } finally { scene.close() }
+        }
     }
 
     private fun outCase(hub: Hub, platform: Platform, wDp: Int, hDp: Int, font: Float, start: String, problems: MutableList<String>): Boolean {

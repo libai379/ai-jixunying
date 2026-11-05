@@ -681,6 +681,8 @@ data class AppState(
      * 取值见 HostFeatures。
      */
     val features: List<String> = emptyList(),
+    /** 整理记忆的进度（2026-11-05）：只推给界面、不存盘；程序启动时清空。 */
+    val tidy: TidyProgress = TidyProgress(),
     /** 检查更新的情况（2026-10-30）：只给这台设备自己的界面看，不存盘、不发给手机。 */
     @kotlinx.serialization.Transient
     val update: UpdateState = UpdateState(),
@@ -710,6 +712,30 @@ data class UpdateInfo(
     /** GitHub 给的 SHA-256（小写十六进制），下完拿它核对。 */
     val sha256: String = "",
     val kind: String = "",
+)
+
+/**
+ * 整理记忆的进度（2026-11-05 用户：「单独整理这个模块儿就不要限制十分钟了……他愿意思考多长时间就多长时间」
+ * 「你得做一个小窗口，显示它的进度……做多少信息，还剩多少信息……让我知道他在干活，而不是干等」）。
+ * 分批做：total 条分 batches 批，done 是看完的条数；written 是正在做的这一批模型已经写了多少字（含思考）。
+ */
+@Serializable
+data class TidyProgress(
+    val running: Boolean = false,
+    val startedAt: Long = 0,
+    val finishedAt: Long = 0,
+    val total: Int = 0,
+    val done: Int = 0,
+    val batch: Int = 0,
+    val batches: Int = 0,
+    val merged: Int = 0,
+    val dropped: Int = 0,
+    val written: Int = 0,
+    val thinking: Boolean = false,
+    val lastActivityAt: Long = 0,
+    val model: String = "",
+    val note: String = "",
+    val error: Boolean = false,
 )
 
 /** 检查更新的情况（界面显示用）。 */

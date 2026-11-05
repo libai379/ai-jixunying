@@ -88,6 +88,7 @@ class ClientStore {
                 else wolfTyping.update { m -> m.filterKeys { it in event.live.thinking } }
             }
             is Event.WolfTyping -> wolfTyping.update { if (event.text.isEmpty()) it - event.seat else it + (event.seat to event.text) }
+            is Event.Tidy -> _state.update { it.copy(tidy = event.tidy) }
         }
     }
 

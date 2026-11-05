@@ -154,7 +154,9 @@ internal class ResponsesApi(private val proxyOf: () -> String?, private val base
         var usage = Usage()
         var finish: String? = null
         var completed = false
+        val unlimited = kotlinx.coroutines.currentCoroutineContext()[NoTimeLimit] != null
         Http.client(proxyOf()).preparePost(baseUrl.trimEnd('/') + "/responses") {
+            noTimeLimit(unlimited)
             header("Authorization", "Bearer $token")
             header("Accept", "text/event-stream")
             contentType(ContentType.Application.Json)

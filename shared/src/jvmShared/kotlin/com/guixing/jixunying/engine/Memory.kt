@@ -97,6 +97,10 @@ object Recorder {
         appendLine("下面是关于一位用户的长期记忆，可能有重复、互相矛盾或过时的条目。请整理：合并重复的，矛盾的保留更新的（编号大的更新），删掉没用的。")
         appendLine("今天是 ${Today.describe(Today.date())} 每条后面写着哪天记的；已经过去的一次性安排（比如上个月的出差）算过时，生日、纪念日这种每年都有的留着。")
         appendLine("不要新增原来没有的信息，措辞尽量保留原样。")
+        // 2026-11-05 拿用户的真数据跑：记录员把挨骂回嘴、表情用法、「--」分隔符这些不同的事拼成一大段，还把「（11月3日记）」抄进正文
+        appendLine("只合并说的是同一件事的（重复的、换个说法的、新的推翻了旧的）；只是相关、不是同一件事的分开留着，别为了条数少拼成一大段。" +
+            "合并后的一条不超过 200 字（原来就有更长的，不要比它长）。拿不准该不该删、该不该合并的，留着不动。")
+        appendLine("每条后面括号里的「几月几日记」只是给你看新旧的，不要写进 text。")
         appendLine()
         appendLine("带「话题」的是只在聊那个话题时才用的记忆；只合并同一话题里的，话题名照抄（没有话题的 topic 留空）。")
         appendLine()
@@ -111,6 +115,38 @@ object Recorder {
         appendLine("- 几条合并成一条、或者一条改写：{\"text\": \"…\", \"kind\": \"关于我|偏好|要求|事实\", \"topic\": \"\", \"from\": [原来的编号…]}")
         appendLine("- 删掉的（过时、没用、被更新的那条推翻了）：{\"drop\": [编号…]}")
         append("输出一个 JSON 数组，不要别的文字；没什么要改的输出 []。")
+    }
+
+    /**
+     * 整理分批（2026-11-05：一次交 168 条又慢又看不出进度）：同一话题的放在同一批，没话题的按类别（关于我 / 偏好 / 要求 / 事实）放一起，
+     * 组里意思相近的（similar）挨着；装得下就整组放进当前这批，装不下另起一批，一组超过 max 条才拆开。
+     * 批里照原来的先后排（提示词里「编号大的更新」才成立）。一批最多 50 条：用户的真数据里「AI图片生成」一个话题 47 条，
+     * 按 40 拆成两批就有几条没法和同话题的比；只写改动以后，50 条一批也就半分钟上下。
+     */
+    fun tidyBatches(items: List<MemoryItem>, max: Int = 50): List<List<MemoryItem>> {
+        val order = items.withIndex().associate { it.value.id to it.index }
+        val batches = mutableListOf<MutableList<MemoryItem>>()
+        for ((_, group) in items.groupBy { it.topic.ifBlank { "#" + it.kind } }) {
+            val left = group.toMutableList()
+            val lined = mutableListOf<MemoryItem>()
+            while (left.isNotEmpty()) {
+                val c = mutableListOf(left.removeAt(0))
+                var grew = true
+                while (grew) {
+                    grew = false
+                    val iter = left.iterator()
+                    while (iter.hasNext()) {
+                        val m = iter.next()
+                        if (c.any { similar(it.text, m.text) }) { c += m; iter.remove(); grew = true }
+                    }
+                }
+                lined += c
+            }
+            val last = batches.lastOrNull()
+            if (last != null && last.size + lined.size <= max) last += lined
+            else lined.chunked(max).forEach { batches += it.toMutableList() }
+        }
+        return batches.map { bt -> bt.sortedBy { order.getValue(it.id) } }
     }
 
     /** 整理的结果：merges 是合并 / 改写（from 是原来的编号，从 1 起），drops 是删掉的编号。 */
@@ -128,13 +164,21 @@ object Recorder {
         for (el in arr) {
             val o = el as? JsonObject ?: continue
             (o["drop"] as? JsonArray)?.mapNotNullTo(drops) { (it as? JsonPrimitive)?.intOrNull }
-            val text = o.str("text")?.trim().orEmpty()
+            val text = o.str("text")?.replace(recordedTag, "")?.trim().orEmpty()
             val from = (o["from"] as? JsonArray)?.mapNotNull { (it as? JsonPrimitive)?.intOrNull }.orEmpty()
+            // 不截断：以前截在 200 字，拼成一大段的后半截就丢了（原来那几条已经删掉）。太长的在落地时整处不采用、原样留着。
+            // kind 不认得的留空，落地时用原来那条的
             if (text.isNotBlank() && from.isNotEmpty())
-                merges += Extracted(text.take(200), o.str("kind")?.trim()?.takeIf { it in kinds } ?: "关于我", null, from, o.str("topic")?.let(::cleanTopic).orEmpty())
+                merges += Extracted(text, o.str("kind")?.trim()?.takeIf { it in kinds }.orEmpty(), null, from, o.str("topic")?.let(::cleanTopic).orEmpty())
         }
         return TidyPlan(merges, drops)
     }
+
+    /**
+     * 提示词里每条后面标的「（11月3日记）」：记录员有时照抄进正文（2026-11-05 真跑看到的，还有「（11月3日记，11月5日更新）」这种），
+     * 读的时候把带「几月几日记」的整个括号去掉。
+     */
+    private val recordedTag = Regex("""[（(][^（）()]{0,30}?(\d{4}年)?\d{1,2}月\d{1,2}日记(?![录本事])[^（）()]{0,30}[）)]""")
 
     class Extracted(val text: String, val kind: String, val replaces: Int?, val from: List<Int>, val topic: String = "", val quote: String = "")
 

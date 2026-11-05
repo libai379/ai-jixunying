@@ -219,7 +219,9 @@ sealed interface Command {
     /** 对话属于哪个记忆话题（对话设置里改）：topic = null 交回记录员自动认，"" = 不属于任何话题。 */
     @Serializable data class SetConvTopic(val convId: String, val topic: String?) : Command
     /** 让记录员合并重复、矛盾的记忆。 */
+    /** 整理记忆（2026-11-05 起在后台一批批做，马上返回；进度看 AppState.tidy，TidyStop 停下）。 */
     @Serializable data object TidyMemories : Command
+    @Serializable data object TidyStop : Command
     /** 手机和电脑互相同步记忆（2026-10-24）：发来对方的记忆和删除记录，合进本机，data 回合好的 MemoryBundle JSON。 */
     @Serializable data class SyncMemories(val bundle: MemoryBundle) : Command
     /**
@@ -505,6 +507,11 @@ sealed interface Event {
     @Serializable data class Wolf(val live: WolfLive) : Event
     /** 集训场：某个 AI 正在说的话（边出边推，说完由 Wolf 里的记录接上）。text 空 = 说完了。 */
     @Serializable data class WolfTyping(val seat: Int, val text: String) : Event
+    /**
+     * 整理记忆的进度（2026-11-05）：做的时候一秒一条。整份状态压缩后也有几十 KB、经中转三条线各发一份，不能每秒推；
+     * 开始、结束时照样推整份状态。电脑只发给 Hello 里说认得 "tidy" 的手机。
+     */
+    @Serializable data class Tidy(val tidy: TidyProgress) : Event
 }
 
 /** 手机和电脑之间的一帧（加密前的明文）。 */
@@ -515,11 +522,17 @@ sealed interface WireFrame {
     /** 一次请求还没答完时先回的一截（借电脑本机模型 HostChat 一个字一个字出，10-25）。只发给发请求的那台手机，旧版手机不会收到。 */
     @Serializable data class Part(val reqId: Long, val content: String = "", val reasoning: String = "") : WireFrame
     @Serializable data class Evt(val event: Event) : WireFrame
-    /** 手机上线 / 心跳。电脑收到后把最新状态推给它。 */
-    @Serializable data class Hello(val deviceName: String, val wantState: Boolean = true) : WireFrame
+    /**
+     * 手机上线 / 心跳。电脑收到后把最新状态推给它。caps：这台手机认得的新事件（2026-11-05 起）——
+     * 老版本手机收到认不得的事件，会把同一包里的别的帧也一起丢掉，所以新事件只发给说了认得的手机。
+     */
+    @Serializable data class Hello(val deviceName: String, val wantState: Boolean = true, val caps: List<String> = emptyList()) : WireFrame
     /** 电脑告诉手机：你已被取消配对。 */
     @Serializable data object Revoked : WireFrame
 }
+
+/** 这一版手机认得的新事件，心跳 Hello 里告诉电脑（"tidy" = Event.Tidy）。 */
+val PHONE_CAPS = listOf("tidy")
 
 /** 配对请求：手机扫码后，用二维码里的一次性密钥加密发给电脑。 */
 @Serializable

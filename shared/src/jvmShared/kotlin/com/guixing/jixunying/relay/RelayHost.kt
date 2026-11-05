@@ -31,6 +31,8 @@ class RelayHost(private val engine: Engine) {
     private var unsubscribe: (() -> Unit)? = null
     private val assemblers = ConcurrentHashMap<String, Envelope.Assembler>()
     private val lastSeen = ConcurrentHashMap<String, Long>()
+    /** 每台手机认得的新事件（心跳 Hello 里说的，WireFrame.Hello.caps）。 */
+    private val caps = ConcurrentHashMap<String, Set<String>>()
     private val touched = ConcurrentHashMap<String, Long>()
     private val queues = ConcurrentHashMap<String, Channel<WireFrame>>()
     /** 设备编号 → 密钥的快照，用来在取消配对时还能给它发最后一句「已取消」。 */
@@ -72,6 +74,7 @@ class RelayHost(private val engine: Engine) {
         queues.values.forEach { it.close() }
         queues.clear()
         lastSeen.clear()
+        caps.clear()
     }
 
     fun isOnline(deviceId: String) = (lastSeen[deviceId] ?: 0) > System.currentTimeMillis() - 90_000
@@ -102,6 +105,7 @@ class RelayHost(private val engine: Engine) {
         for (f in frames) {
             when (f) {
                 is WireFrame.Hello -> {
+                    caps[deviceId] = f.caps.toSet()
                     enqueue(deviceId, WireFrame.Hello(engine.hostName()))
                     if (f.wantState || first) enqueue(deviceId, WireFrame.Evt(Event.State(engine.remoteView(engine.state))))
                 }
@@ -154,6 +158,11 @@ class RelayHost(private val engine: Engine) {
         knownKeys.keys.filter { id -> state.devices.none { it.id == id } }.forEach { id ->
             if (isOnline(id)) enqueue(id, WireFrame.Revoked, keyOverride = knownKeys[id])
             lastSeen.remove(id)
+        }
+        // 整理记忆的进度一秒一条：只发给认得 Event.Tidy 的手机（老版本认不得，会把同一包里别的也丢掉；它们开始、结束时收整份状态）
+        if (e is Event.Tidy) {
+            state.devices.forEach { d -> if (isOnline(d.id) && caps[d.id]?.contains("tidy") == true) enqueue(d.id, WireFrame.Evt(e)) }
+            return
         }
         val frame = WireFrame.Evt(if (e is Event.State) Event.State(engine.remoteView(e.state)) else e)
         state.devices.forEach { d -> if (isOnline(d.id)) enqueue(d.id, frame) }

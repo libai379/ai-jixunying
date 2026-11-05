@@ -124,6 +124,8 @@ class EngineTest {
                 post("/v1/chat/completions") {
                     val req = Json.parseToJsonElement(call.receiveText()).jsonObject
                     requests += req
+                    // 整理记忆慢慢回（测「停下」，2026-11-05）
+                    if ("慢慢整理的一条" in req.toString()) delay(30_000)
                     // 不认切换思考参数的服务（用 Key 区分）
                     if (call.request.headers["Authorization"] == "Bearer refuse-thinking" && req.containsKey("thinking")) {
                         call.respondText("""{"error":{"message":"Unrecognized request argument supplied: thinking"}}""", ContentType.Application.Json, HttpStatusCode.BadRequest)
@@ -189,9 +191,13 @@ class EngineTest {
                             "你是聊天记录员" in firstText -> say("## 话题\n测试话题\n## 已经定下的结论\n摘要里的结论")
                             "找出值得长期记住的" in firstText -> say("""好的：{"conversationTopic":"找房","items":[{"text":"在北京做产品经理","kind":"关于我","topic":"","quote":"第3句","replaces":null},""" +
                                 """{"text":"预算每月五千","kind":"事实","topic":"找房","quote":"记录员编的一句话","replaces":null}]}""")
-                            "下面是关于一位用户的长期记忆" in firstText -> say(
-                                if ("上个月出差去上海" in firstText) """[{"text":"喜欢简短的回答","kind":"偏好","from":[1,2]},{"drop":[3]}]"""
-                                else """[{"text":"喜欢简短的回答","kind":"偏好","from":[1,2]}]""")
+                            "下面是关于一位用户的长期记忆" in firstText -> say(when {
+                                "上个月出差去上海" in firstText -> """[{"text":"喜欢简短的回答","kind":"偏好","from":[1,2]},{"drop":[3]}]"""
+                                // 把两件事拼成一大段（比原来的都长、超过 200 字）；另一处照抄了「（11月3日记）」、类别写错
+                                "拼成一大段的测试" in firstText ->
+                                    """[{"text":"${"长".repeat(250)}","kind":"要求","from":[1,2]},{"text":"表情要换着用（11月3日记）","kind":"随便","from":[3]}]"""
+                                else -> """[{"text":"喜欢简短的回答","kind":"偏好","from":[1,2]}]"""
+                            })
                             // 点名：只有「让丙……」是在叫人，其他算对大家说
                             "判断这句话是想让哪几位成员来回答" in firstText -> say(if ("让丙" in firstText) """好的：{"to":["丙"]}""" else """{"to":[]}""")
                             // 立场档案：第二轮乙看到大家都说 A 就改了（跟风），甲没变；第一轮开新议题
@@ -1299,8 +1305,8 @@ class EngineTest {
 
         // 整理：两条变一条
         e.call(Command.SaveMemory(com.guixing.jixunying.model.MemoryItem("m-a", "喜欢简洁", "偏好")))
-        val tidy = e.call(Command.TidyMemories)
-        assertTrue(tidy.ok, tidy.message)
+        val tidy = tidyAndWait(e)
+        assertFalse(tidy.error, tidy.note)
         assertEquals(listOf("喜欢简短的回答"), e.state.memories.map { it.text })
     }
 
@@ -1314,9 +1320,9 @@ class EngineTest {
         listOf("m1" to "喜欢简洁", "m2" to "喜欢简短的回答", "m3" to "上个月出差去上海", "m4" to "住在北京").forEach { (id, t) ->
             e.call(Command.SaveMemory(com.guixing.jixunying.model.MemoryItem(id, t, if (id == "m4") "关于我" else "偏好")))
         }
-        val r = e.call(Command.TidyMemories)
-        assertTrue(r.ok, r.message)
-        assertTrue("合并 1 处" in r.message && "删 1 条" in r.message, r.message)
+        val t = tidyAndWait(e)
+        assertTrue("合并 1 处" in t.note && "删 1 条" in t.note && "4 条变成 2 条" in t.note, t.note)
+        assertEquals(listOf(4, 4, 1, 1, 1, 1), listOf(t.total, t.done, t.batches, t.batch, t.merged, t.dropped), "进度窗口的数")
         assertEquals(listOf("喜欢简短的回答", "住在北京"), e.state.memories.map { it.text })
         assertEquals("m4", e.state.memories.last().id, "没提到的原样留着，编号不变")
         assertTrue(e.state.memoryDeleted.map { it.id }.containsAll(listOf("m1", "m2", "m3")), "合并、删掉的记进删除记录（手机同步跟着删）")
@@ -1328,6 +1334,55 @@ class EngineTest {
         assertEquals(setOf(2, 5), plan.drops)
         assertEquals(listOf("住北京"), plan.merges.map { it.text })
         assertNull(com.guixing.jixunying.engine.Recorder.parseTidy("看不懂的话"))
+    }
+
+    /** 整理在后台做（2026-11-05 起）：开始了马上回 started，等它做完，返回进度窗口最后看到的样子。 */
+    private suspend fun tidyAndWait(e: Engine): com.guixing.jixunying.model.TidyProgress {
+        val r = e.call(Command.TidyMemories)
+        assertTrue(r.ok && r.data == "started", r.message)
+        assertTrue(e.state.tidy.running || e.state.tidy.finishedAt > 0, "一开始就在进度里")
+        withTimeout(20_000) { while (e.state.tidy.running) delay(20) }
+        return e.state.tidy
+    }
+
+    /**
+     * 整理不限时以后要能自己停（2026-11-05 用户：「他愿意思考多长时间就多长时间」「让我知道他在干活，而不是干等」）：
+     * 记录员一直不回话时，进度里看得见在等；点停下，这一批不改，窗口说「停下了」；再点整理能重新开始。
+     */
+    @Test
+    fun tidyCanBeStopped() = runBlocking {
+        val (e, _) = engineWithMembers("小智")
+        listOf("s1" to "慢慢整理的一条", "s2" to "另一条记忆").forEach { (id, t) ->
+            e.call(Command.SaveMemory(com.guixing.jixunying.model.MemoryItem(id, t, "事实")))
+        }
+        val r = e.call(Command.TidyMemories)
+        assertEquals("started", r.data, r.message)
+        assertEquals("已经在整理了", e.call(Command.TidyMemories).message, "正在整理时再点不会开第二份")
+        withTimeout(10_000) { while (requests.none { "慢慢整理的一条" in it.toString() }) delay(20) }
+        val mid = e.state.tidy
+        assertTrue(mid.running && mid.batch == 1 && mid.done == 0 && mid.total == 2, mid.toString())
+        assertTrue(e.call(Command.TidyStop).ok)
+        withTimeout(10_000) { while (e.state.tidy.running) delay(20) }
+        assertEquals("停下了，没有改动", e.state.tidy.note)
+        assertEquals(setOf("慢慢整理的一条", "另一条记忆"), e.state.memories.map { it.text }.toSet())
+        assertEquals("没有在整理", e.call(Command.TidyStop).message)
+    }
+
+    /**
+     * 记录员把几件事拼成一大段时不采用（2026-11-05 拿用户的真数据跑：挨骂回嘴、表情用法、「--」分隔符五件事拼成一条，
+     * 以前还截在 200 字，后半截连同原来那几条一起没了）：那几条原样留着、结果里说一声；抄进正文的「（11月3日记）」去掉，类别写错的用原来的。
+     */
+    @Test
+    fun tidyRefusesBlobMerges() = runBlocking {
+        val (e, _) = engineWithMembers("小智")
+        listOf("b1" to "拼成一大段的测试：喜欢简短", "b2" to "挨骂回嘴要短", "b3" to "表情别老是同一个").forEach { (id, t) ->
+            e.call(Command.SaveMemory(com.guixing.jixunying.model.MemoryItem(id, t, "要求")))
+        }
+        val t = tidyAndWait(e)
+        assertTrue("合并 1 处" in t.note && "1 处想把几件事拼成一大段，没采用" in t.note, t.note)
+        assertEquals(listOf("拼成一大段的测试：喜欢简短", "挨骂回嘴要短", "表情要换着用"), e.state.memories.map { it.text })
+        assertEquals(listOf("b1", "b2"), e.state.memories.take(2).map { it.id }, "没采用的原样留着")
+        assertEquals("要求", e.state.memories.last().kind)
     }
 
     /** 本机文档：收录指定文件夹（跳过 node_modules 这类），能按内容搜；AI 先搜再读再答；文档库以外的文件读不了。 */

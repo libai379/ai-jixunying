@@ -4,6 +4,9 @@ import com.guixing.jixunying.model.ProviderConfig
 import com.guixing.jixunying.model.Presets
 import com.guixing.jixunying.model.SearchSource
 import com.guixing.jixunying.model.Usage
+import io.ktor.client.plugins.HttpTimeoutConfig
+import io.ktor.client.plugins.timeout
+import io.ktor.client.request.HttpRequestBuilder
 import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.request.preparePost
@@ -100,7 +103,8 @@ class LlmClient(private val proxyOf: (ProviderConfig) -> String?) {
             // 电脑那边已经记了账（本机模型 0 元），手机这边不再记；电脑边问边发增量，答完发整段
             val got = StringBuilder()
             val gotReasoning = StringBuilder()
-            val r = h(provider, model, HostChatCodec.request(messages, temperature, tools, extra, thinking)) { d, rs ->
+            val r = h(provider, model, HostChatCodec.request(messages, temperature, tools, extra, thinking,
+                noTimeLimit = currentCoroutineContext()[NoTimeLimit] != null)) { d, rs ->
                 got.append(d); gotReasoning.append(rs); onDelta(d, rs)
             }
             // 增量丢了一截（或者电脑是不发增量的旧版）：把没出来的补上
@@ -228,7 +232,9 @@ class LlmClient(private val proxyOf: (ProviderConfig) -> String?) {
             if (!found.isNullOrEmpty()) { sourcesSent = true; onSources(found) }
         }
 
+        val unlimited = currentCoroutineContext()[NoTimeLimit] != null
         Http.client(proxyOf(provider)).preparePost(url(provider, "/chat/completions")) {
+            noTimeLimit(unlimited)
             header("Authorization", "Bearer ${provider.apiKey.trim()}")
             header("Accept", "text/event-stream")
             contentType(ContentType.Application.Json)
@@ -374,3 +380,20 @@ object Json {
 }
 
 fun JsonObject.str(key: String): String? = (this[key] as? JsonPrimitive)?.takeIf { it !is JsonNull }?.contentOrNull
+
+/**
+ * 这次调模型不限时（2026-11-05 用户：整理记忆「不要限制十分钟了……他愿意思考多长时间就多长时间」）：
+ * 整个请求、多久没数据都不限，在进度窗口里看着、自己点停下。放进协程上下文：withContext(NoTimeLimit())。
+ */
+class NoTimeLimit : kotlin.coroutines.AbstractCoroutineContextElement(NoTimeLimit) {
+    companion object Key : kotlin.coroutines.CoroutineContext.Key<NoTimeLimit>
+}
+
+/** on = 去掉这一个请求的超时（全局默认在 Http.kt：整个请求 10 分钟、3 分钟没数据算断；连不上 15 秒照旧）。 */
+internal fun HttpRequestBuilder.noTimeLimit(on: Boolean) {
+    if (!on) return
+    timeout {
+        requestTimeoutMillis = HttpTimeoutConfig.INFINITE_TIMEOUT_MS
+        socketTimeoutMillis = HttpTimeoutConfig.INFINITE_TIMEOUT_MS
+    }
+}

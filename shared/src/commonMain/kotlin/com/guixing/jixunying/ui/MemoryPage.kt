@@ -12,6 +12,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Delete
@@ -22,6 +24,7 @@ import androidx.compose.material.icons.rounded.PushPin
 import androidx.compose.material.icons.rounded.Psychology
 import androidx.compose.material3.Button
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -29,6 +32,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -44,8 +48,13 @@ import com.guixing.jixunying.model.JudgePick
 import com.guixing.jixunying.model.MemoryItem
 import com.guixing.jixunying.model.MemorySettings
 import com.guixing.jixunying.model.RecorderPick
+import com.guixing.jixunying.model.TidyProgress
+import kotlinx.coroutines.delay
 
 private val memoryKinds = listOf("关于我", "偏好", "要求", "事实")
+
+/** 看过结果的那次整理（结束时间）：看过就不再在记忆页上提示。放在页面外面，切到别的页再回来也记得。 */
+private var tidySeenAt by mutableStateOf(0L)
 
 /** 设置 → 记忆：开关、记录员、压缩时机，以及记住的每一条（能加、能改、能删、能置顶）。 */
 @Composable
@@ -56,7 +65,17 @@ fun MemoryPage(ctl: AppController, state: AppState) {
     var newKind by remember { mutableStateOf(memoryKinds.first()) }
     var newTopic by remember { mutableStateOf("") }
     var editing by remember { mutableStateOf<MemoryItem?>(null) }
-    var tidying by remember { mutableStateOf(false) }
+    var tidyStarting by remember { mutableStateOf(false) }
+    // 截图、尺寸测试用（ShotsTest）：settings:MEMORY#tidy 开着进度窗口（正在做第 2 批、25 秒没动静），#tidystrip 是窗口关了以后页上那一行
+    val sample = remember {
+        if (!ctl.debug("tidy") && !ctl.debug("tidystrip")) null
+        else nowMillis().let { t ->
+            TidyProgress(running = true, startedAt = t - 95_000, total = 168, done = 46, batch = 2, batches = 5, merged = 6, dropped = 1,
+                written = 312, lastActivityAt = t - 25_000, model = "mimo-v2.6-flash")
+        }
+    }
+    val tidy = sample ?: state.tidy
+    var tidyOpen by remember { mutableStateOf(ctl.debug("tidy")) }
     var result by remember { mutableStateOf<Pair<Boolean, String>?>(null) }
 
     PageHeader("记忆", "AI 会记得关于你的事，所有对话、所有成员都能用。对话聊得太长时，记录员会把前面的部分压缩成摘要（大家共用一份）；AI 也能翻以前的聊天记录。")
@@ -112,15 +131,23 @@ fun MemoryPage(ctl: AppController, state: AppState) {
     SectionCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("记住的事（${state.memories.size} 条）", style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
-            OutlinedButton(enabled = !tidying && state.memories.size >= 2, onClick = {
-                tidying = true; result = null
-                ctl.run(Command.TidyMemories, quiet = true) { r -> tidying = false; result = r.ok to r.message }
-            }) { Text(if (tidying) "正在整理…" else "整理") }
+            OutlinedButton(enabled = !tidy.running && !tidyStarting && state.memories.size >= 2, onClick = {
+                tidyStarting = true; result = null
+                ctl.run(Command.TidyMemories, quiet = true) { r ->
+                    tidyStarting = false
+                    // 在后台一批批做（2026-11-05）：开始了就开进度窗口；不用整理、没有模型这些直接说
+                    if (r.ok && r.data == "started") tidyOpen = true else result = r.ok to r.message
+                }
+            }) { Text(when { tidy.running -> "正在整理…"; tidyStarting -> "正在开始…"; else -> "整理" }) }
         }
         Text("「关于你」的每个对话都带上；带话题的只在属于那个话题的对话里带上（对话设置里能改话题），别的对话里 AI 要用时自己查。" +
             "置顶的优先，其余按新旧（总长约 2500 字）。点「来自」能跳回记下这条的那句话。「整理」让记录员合并重复和矛盾的条目，置顶的不动。",
             style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, modifier = Modifier.padding(top = 2.dp, bottom = 8.dp))
         result?.let { (ok, text) -> TestResultBox(ok, text) { result = null } }
+        // 整理在后台做，窗口关了也接着做：这里留一行进度，点开看详情；做完了还没看过的，说一声结果
+        if (tidy.running && !tidyOpen) TidyStrip(tidy) { tidyOpen = true }
+        else if (!tidy.running && tidy.finishedAt > tidySeenAt && !tidyOpen) TestResultBox(!tidy.error, tidy.note) { tidySeenAt = tidy.finishedAt }
+        if (tidyOpen) TidyDialog(ctl, tidy) { tidyOpen = false; if (!tidy.running) tidySeenAt = tidy.finishedAt }
         Spacer(Modifier.height(4.dp))
         AppTextField(newText, { newText = it }, placeholder = "手动添加一条，例如：我在北京做产品经理，回答请先给结论", singleLine = false, minLines = 1)
         Spacer(Modifier.height(6.dp))
@@ -307,4 +334,86 @@ private fun JudgeSection(ctl: AppController, state: AppState, ms: MemorySettings
         SwitchRow("统计时按 AI 核实算", "你没标对错的题，用 AI 核实的结论算「首答准确率」。关掉就只算你亲手标的题",
             ms.stances && ms.aiVerify && ms.countAiVerdict) { v -> saveMs { it.copy(countAiVerdict = v) } }
     }
+}
+
+/**
+ * 整理记忆的进度窗口（2026-11-05 用户：「你得做一个小窗口，显示它的进度。说显示他做多少信息，还剩多少信息等等，
+ * 让我知道他在干活，而不是干等」）。整理不限时，所以要看得见它还活着：这一批在等 / 在想 / 在写、写了多少字、多久没动静。
+ */
+@Composable
+private fun TidyDialog(ctl: AppController, t: TidyProgress, onClose: () -> Unit) {
+    var now by remember { mutableStateOf(nowMillis()) }
+    LaunchedEffect(t.running) { while (t.running) { now = nowMillis(); delay(1_000) } }
+    // 「多久没动静」「用了多久」：本机整理的直接用它记的时间；手机看电脑上的整理时两台机器的钟可能差几十秒，
+    // 改成每有动静（lastActivityAt 变了）就记下手机这时的钟，从这儿往后数
+    val remote = ctl.remoteMode
+    var seenAt by remember { mutableStateOf(if (remote) nowMillis() else t.lastActivityAt) }
+    var seenActivity by remember { mutableStateOf(t.lastActivityAt) }
+    LaunchedEffect(t.lastActivityAt) {
+        if (t.lastActivityAt != seenActivity) {
+            seenActivity = t.lastActivityAt
+            seenAt = if (remote) nowMillis() else t.lastActivityAt
+            now = nowMillis()
+        }
+    }
+    var stopping by remember { mutableStateOf(false) }
+    val small = MaterialTheme.typography.bodySmall
+    AppDialog("整理记忆", onClose, width = 460.dp, actions = {
+        if (t.running) OutlinedButton(enabled = !stopping, onClick = { stopping = true; ctl.run(Command.TidyStop, quiet = true) }) {
+            Text(if (stopping) "正在停…" else "停下")
+        }
+        else Button(onClick = onClose) { Text("好") }
+    }) {
+        // 窄屏、大字体下装不下时能往下滑（2026-11-05 量 320dp + 字体 200% 时，底下「用了多久」那几行被裁掉、也划不到）
+        Column(Modifier.verticalScroll(rememberScrollState())) {
+            Text("看完 ${t.done} / ${t.total} 条，还剩 ${(t.total - t.done).coerceAtLeast(0)} 条", style = MaterialTheme.typography.bodyLarge)
+            LinearProgressIndicator(progress = { t.fraction() }, modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp))
+            Text("分 ${t.batches} 批${if (t.running && t.batch > 0) "，正在做第 ${t.batch} 批" else ""} · 合并了 ${t.merged} 处 · 删了 ${t.dropped} 条",
+                style = small, color = Ext.c.subtle)
+            Spacer(Modifier.height(12.dp))
+            if (t.running) {
+                Text(when {
+                    stopping -> "正在停下…"
+                    t.written == 0 -> "这一批交给记录员了，在等它回话"
+                    t.thinking -> "记录员在想（已经想了 ${t.written} 字）"
+                    else -> "记录员在写这一批要改的（已经写了 ${t.written} 字）"
+                }, style = MaterialTheme.typography.bodyMedium)
+                // 一直在动的条：程序没卡住
+                LinearProgressIndicator(modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp))
+                val quiet = ((now - seenAt) / 1000).coerceAtLeast(0)
+                if (quiet >= 20) Text("已经 $quiet 秒没有新动静了。整理不限时，会一直等；不想等就点「停下」，做完的那几批已经改好。", style = small, color = Ext.c.subtle)
+                Text("关掉这个窗口也会接着整理，记忆页上能再点开。", style = small, color = Ext.c.subtle)
+            } else {
+                Text(t.note, style = MaterialTheme.typography.bodyMedium,
+                    color = if (t.error) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface)
+            }
+            Spacer(Modifier.height(8.dp))
+            val used = if (t.running) (t.lastActivityAt - t.startedAt) + (now - seenAt) else t.finishedAt - t.startedAt
+            Text("记录员：${t.model} · 用了 ${tidyDuration(used)}",
+                style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
+        }
+    }
+}
+
+/** 记忆页上的一行：整理正在后台做（窗口关了），进度条 + 「看进度」。 */
+@Composable
+private fun TidyStrip(t: TidyProgress, onOpen: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().padding(top = 8.dp).clip(RoundedCornerShape(10.dp)).border(1.dp, Ext.c.border, RoundedCornerShape(10.dp))
+            .clickable(onClick = onOpen).padding(start = 12.dp, top = 6.dp, bottom = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text("正在整理：看完 ${t.done} / ${t.total} 条（第 ${t.batch} / ${t.batches} 批）", style = MaterialTheme.typography.bodySmall)
+            LinearProgressIndicator(progress = { t.fraction() }, modifier = Modifier.fillMaxWidth().padding(top = 6.dp))
+        }
+        TextButton(onClick = onOpen) { Text("看进度") }
+    }
+}
+
+private fun TidyProgress.fraction() = if (total <= 0) 0f else (done.toFloat() / total).coerceIn(0f, 1f)
+
+private fun tidyDuration(ms: Long): String {
+    val sec = (ms / 1000).coerceAtLeast(0)
+    return if (sec < 60) "$sec 秒" else "${sec / 60} 分 ${sec % 60} 秒"
 }

@@ -31,6 +31,7 @@ import com.guixing.jixunying.model.VideoPick
 import com.guixing.jixunying.model.JudgePick
 import com.guixing.jixunying.model.Member
 import com.guixing.jixunying.model.MemoryItem
+import com.guixing.jixunying.model.TidyProgress
 import com.guixing.jixunying.model.Message
 import com.guixing.jixunying.model.ModelInfo
 import com.guixing.jixunying.model.MsgStatus
@@ -431,7 +432,9 @@ class Engine(
         // ChatGPT 登录状态以本机凭据为准（上次停在「正在登录」的也清掉）
         s = s.copy(chatgpt = chatgptInfo())
         s = s.copy(account = account.identity.let { i -> AccountInfo(Account.idOf(i.publicKey), i.createdAt, i.githubLogin, i.githubName, i.githubAvatar) })
-        s = s.copy(appVersion = com.guixing.jixunying.model.APP_VERSION, hostFetchProgress = -1f, features = com.guixing.jixunying.model.HostFeatures.ALL)
+        // 整理记忆的进度不留到下次（上次关程序时正在整理的，那一批没做完，不算）
+        s = s.copy(appVersion = com.guixing.jixunying.model.APP_VERSION, hostFetchProgress = -1f, features = com.guixing.jixunying.model.HostFeatures.ALL,
+            tidy = TidyProgress())
         // 以前重复导入留下的同一个服务商 / 同一位成员，启动时合并掉
         val (deduped, memberMap, removed) = ConfigMerge.dedupe(s)
         if (removed > 0) s = deduped
@@ -1010,7 +1013,8 @@ class Engine(
             else {
                 val q = HostChatCodec.parseRequest(c.request)
                 val parts = currentCoroutineContext()[HostChatParts]
-                val r = withContext(UsageTag("chat")) {
+                // 手机上不限时的（整理记忆），电脑这边也不限
+                val r = withContext(UsageTag("chat") + (if (q.noTimeLimit) NoTimeLimit() else kotlin.coroutines.EmptyCoroutineContext)) {
                     llm.chat(p, c.model, q.messages, q.temperature, q.tools, q.extra, thinking = q.thinking) { d, rs -> parts?.onPart?.invoke(d, rs) }
                 }
                 CommandResult(data = HostChatCodec.result(r))
@@ -1657,7 +1661,8 @@ class Engine(
             }) }
             CommandResult()
         }
-        is Command.TidyMemories -> tidyMemories()
+        is Command.TidyMemories -> startTidy()
+        is Command.TidyStop -> stopTidy()
         is Command.SyncMemories -> {
             var out = MemoryBundle()
             updateState { s ->
@@ -2779,44 +2784,150 @@ class Engine(
         return (byTopic + byQuery).distinctBy { it.id }.take(20)
     }
 
-    private suspend fun tidyMemories(): CommandResult {
-        val pinned = state.memories.filter { it.pinned }
+    // ———————————————— 整理记忆（2026-11-05 改成后台一批批做、不限时、有进度窗口） ————————————————
+    // 用户：「单独整理这个模块儿就不要限制十分钟了……他愿意思考多长时间就多长时间」
+    //       「你得做一个小窗口，显示它的进度……做多少信息，还剩多少信息……让我知道他在干活，而不是干等」
+
+    @Volatile private var tidyJob: Job? = null
+
+    /**
+     * 改整理进度，不存盘（启动时清空）。full = 推整份状态（开始、结束时）；平时只推小事件 Event.Tidy：
+     * 做的时候一秒一条，整份状态压缩后也有几十 KB，经中转三条线各发一份，太费手机流量。
+     */
+    private fun setTidy(full: Boolean = false, f: (TidyProgress) -> TidyProgress) {
+        val s = synchronized(stateLock) { state = state.copy(tidy = f(state.tidy)); state }
+        emit(if (full) Event.State(s) else Event.Tidy(s.tidy))
+    }
+
+    /** 开始整理：马上返回（data = "started"），后台一批批做；进度在 AppState.tidy，Command.TidyStop 停下。 */
+    private fun startTidy(): CommandResult {
         val items = state.memories.filterNot { it.pinned }
         if (items.size < 2) return CommandResult(message = "记忆不多，不用整理")
         val (p, model) = Recorder.pick(state) ?: return CommandResult(false, "没有能用的模型来整理（先在 模型服务 里配一个）")
-        // 整理用不着深想：关掉思考（2026-11-05 小米 mimo-v2.6-flash 默认先想，168 条一次十分钟写不完）
-        val fast = if (llm.thinkingDropped(p, model)) null else Thinking.params(Thinking.rule(p, model), com.guixing.jixunying.model.ThinkingMode.FAST)
-        val r = withContext(Dispatchers.IO + UsageTag("memory")) {
-            llm.chat(p, model, listOf(userMsg(Recorder.tidyPrompt(items))), null, null, thinking = fast) { _, _ -> }
+        val batches = Recorder.tidyBatches(items)
+        val t0 = now()
+        val s = synchronized(stateLock) {
+            if (state.tidy.running) return CommandResult(message = "已经在整理了", data = "started")
+            state = state.copy(tidy = TidyProgress(running = true, startedAt = t0, total = items.size, batches = batches.size,
+                model = model, lastActivityAt = t0, note = "${items.size} 条分 ${batches.size} 批整理"))
+            state
         }
-        val plan = Recorder.parseTidy(r.content) ?: return CommandResult(false, "记录员的输出看不懂，没有改动")
-        // 只动它说要改的：合并的换成新的一条（放在原来第一条的位置），删的拿掉，其余原样留着（出处、时间都不动）
-        val removed = LinkedHashSet<Int>()
-        val mergedAt = HashMap<Int, MemoryItem>()
+        emit(Event.State(s))
+        tidyJob = scope.launch { runTidy(p, model, batches) }
+        return CommandResult(message = "开始整理：${items.size} 条分 ${batches.size} 批", data = "started")
+    }
+
+    private fun stopTidy(): CommandResult {
+        if (!state.tidy.running) return CommandResult(message = "没有在整理")
+        tidyJob?.cancel()
+        return CommandResult(message = "停下了，做完的那几批已经改好")
+    }
+
+    private class TidyApplied(val merged: Int, val dropped: Int, val gone: Int, val tooLong: Int = 0)
+
+    private suspend fun runTidy(p: ProviderConfig, model: String, batches: List<List<MemoryItem>>) {
+        // 整理用不着深想：关掉思考（小米 mimo-v2.6-flash 默认先想）；不限时（NoTimeLimit），窗口里看得见进度、随时能停
+        val fast = if (llm.thinkingDropped(p, model)) null else Thinking.params(Thinking.rule(p, model), com.guixing.jixunying.model.ThinkingMode.FAST)
+        val total = batches.sumOf { it.size }
+        var done = 0
+        var merged = 0
+        var dropped = 0
+        var gone = 0
+        var finished = 0
+        var tooLong = 0
+        val skipped = mutableListOf<String>()
+        fun summary() = "$total 条变成 ${total - gone + merged} 条（合并 $merged 处、删 $dropped 条，置顶的没动）"
+        try {
+            for ((i, batch) in batches.withIndex()) {
+                // 用这一批现在的样子：整理的时候用户可能删了、改了、置顶了几条
+                val cur = state.memories.associateBy { it.id }
+                val live = batch.mapNotNull { cur[it.id]?.takeIf { m -> !m.pinned } }
+                setTidy { it.copy(batch = i + 1, written = 0, thinking = false, lastActivityAt = now(), note = "第 ${i + 1}/${batches.size} 批：${live.size} 条") }
+                if (live.size >= 2) {
+                    var chars = 0
+                    var answering = false
+                    var pushed = 0L
+                    val r = withContext(Dispatchers.IO + UsageTag("memory") + NoTimeLimit()) {
+                        llm.chat(p, model, listOf(userMsg(Recorder.tidyPrompt(live))), null, null, thinking = fast) { c, rs ->
+                            chars += c.length + rs.length
+                            if (c.isNotEmpty()) answering = true
+                            val t = now()
+                            // 一秒最多推一次
+                            if (t - pushed >= 1_000) {
+                                pushed = t
+                                setTidy { it.copy(written = chars, thinking = !answering, lastActivityAt = t) }
+                            }
+                        }
+                    }
+                    val plan = Recorder.parseTidy(r.content)
+                    val a = plan?.let { applyTidy(live, it) }
+                    when {
+                        plan == null -> skipped += "第 ${i + 1} 批记录员的输出看不懂"
+                        a == null -> skipped += "第 ${i + 1} 批记录员要删得太狠"
+                        else -> { merged += a.merged; dropped += a.dropped; gone += a.gone; tooLong += a.tooLong }
+                    }
+                }
+                done += batch.size
+                finished = i + 1
+                setTidy { it.copy(done = done, merged = merged, dropped = dropped, written = 0, thinking = false, lastActivityAt = now()) }
+            }
+            val skip = if (skipped.isEmpty()) "" else "；${skipped.joinToString("、")}，那几批没动"
+            val long = if (tooLong == 0) "" else "；记录员有 $tooLong 处想把几件事拼成一大段，没采用，那几条原样留着"
+            setTidy(full = true) { it.copy(running = false, finishedAt = now(), note = "整理好了：${summary()}$skip$long") }
+        } catch (e: CancellationException) {
+            val note = if (gone == 0) "停下了，没有改动" else "停下了：做完的 $finished 批已经改好（${summary()}）"
+            setTidy(full = true) { it.copy(running = false, finishedAt = now(), note = note) }
+            throw e
+        } catch (e: Throwable) {
+            val note = friendlyError(e, p) + if (gone == 0) "（没有改动）" else "（前面做完的 $finished 批已经改好：${summary()}）"
+            setTidy(full = true) { it.copy(running = false, finishedAt = now(), error = true, note = note) }
+        }
+    }
+
+    /**
+     * 把一批的整理结果落到记忆上（只写改动的那种）：合并的换成新的一条，放在原来第一条的位置；删的拿掉；别的原样留着
+     * （出处、时间都不动），整理期间新记的也留着。交给记录员以后又被改过、置顶、删掉的，牵扯到它的合并和删除都不做。
+     * 这一批删到不足三分之一就整批不改，返回 null。
+     */
+    private fun applyTidy(items: List<MemoryItem>, plan: Recorder.TidyPlan): TidyApplied? {
+        val used = HashSet<Int>()
+        val merges = mutableListOf<Pair<List<Int>, MemoryItem>>()
+        var tooLong = 0
         for (e in plan.merges) {
-            val idx = e.from.filter { it in 1..items.size && it !in removed }.distinct()
+            val idx = e.from.filter { it in 1..items.size && it !in used }.distinct().sorted()
             if (idx.isEmpty()) continue
             val src = idx.map { items[it - 1] }
+            // 合并后比原来最长的那条还长（至少放宽到 200 字）：多半是把不同的事拼成了一大段，这几条原样留着
+            // （2026-11-05 拿真数据跑：五件事拼成一条，以前还截在 200 字，后半截连同原来那几条一起没了）
+            if (e.text.length > maxOf(200, src.maxOf { it.text.length } + 20)) { tooLong++; continue }
+            val kind = e.kind.ifBlank { src.first().kind }
             val topic = e.topic.ifBlank { if (src.all { it.topic == src.first().topic }) src.first().topic else "" }
-            if (src.size == 1 && src[0].text == e.text && src[0].kind == e.kind && src[0].topic == topic) continue
+            if (src.size == 1 && src[0].text == e.text && src[0].kind == kind && src[0].topic == topic) continue
             val first = src.firstOrNull { it.convId.isNotBlank() } ?: src.first()
-            mergedAt[idx.min()] = MemoryItem(newId(), e.text, e.kind, first.source.ifBlank { "整理" }, src.minOf { it.createdAt }, now(),
+            merges += idx to MemoryItem(newId(), e.text, kind, first.source.ifBlank { "整理" }, src.minOf { it.createdAt }, now(),
                 topic = topic, convId = first.convId, messageId = first.messageId, quote = first.quote)
-            removed += idx
+            used += idx
         }
-        val dropped = plan.drops.filter { it in 1..items.size && it !in removed }
-        removed += dropped
-        if (removed.isEmpty()) return CommandResult(message = "看过了，${items.size} 条没有要合并或删的")
-        val next = items.flatMapIndexed { i, m -> listOfNotNull(mergedAt[i + 1]) + (if ((i + 1) in removed) emptyList() else listOf(m)) }
-        if (next.size * 3 < items.size) return CommandResult(false, "记录员要把 ${items.size} 条删到只剩 ${next.size} 条，删得太狠，没有改动")
-        val gone = removed.map { items[it - 1].id }
-        val itemIds = items.map { it.id }.toSet()
-        // 整理这一两分钟里新记下的（不在 items 里）照样留着
+        val drops = plan.drops.filter { it in 1..items.size && it !in used }.distinct()
+        val removing = used.size + drops.size
+        if (removing == 0) return TidyApplied(0, 0, 0, tooLong)
+        if ((items.size - removing + merges.size) * 3 < items.size) return null
+        var out = TidyApplied(0, 0, 0)
         updateState { s ->
-            val others = s.memories.filter { it.id !in itemIds }
-            s.copy(memories = others.filter { it.pinned } + next + others.filterNot { it.pinned }, memoryDeleted = tombstoned(s, gone))
+            val cur = s.memories.associateBy { it.id }
+            fun intact(i: Int) = items[i - 1].let { m -> cur[m.id]?.let { !it.pinned && it.text == m.text } == true }
+            val okMerges = merges.filter { (idx, _) -> idx.all(::intact) }
+            val okDrops = drops.filter(::intact)
+            val goneIds = (okMerges.flatMap { it.first } + okDrops).map { items[it - 1].id }.toSet()
+            out = TidyApplied(okMerges.size, okDrops.size, goneIds.size, tooLong)
+            if (goneIds.isEmpty()) s
+            else {
+                val insertAt = okMerges.associate { (idx, m) -> items[idx.first() - 1].id to m }
+                s.copy(memories = s.memories.flatMap { m -> listOfNotNull(insertAt[m.id]) + (if (m.id in goneIds) emptyList() else listOf(m)) },
+                    memoryDeleted = tombstoned(s, goneIds.toList()))
+            }
         }
-        return CommandResult(message = "整理好了：${items.size} 条变成 ${next.size} 条（合并 ${mergedAt.size} 处、删 ${dropped.size} 条，置顶的没动）")
+        return out
     }
 
     /** 搜所有对话的聊天内容，按命中多少、时间新旧排序。 */

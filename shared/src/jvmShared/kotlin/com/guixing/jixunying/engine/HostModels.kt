@@ -48,16 +48,19 @@ object HostChatCodec {
         return host == "127.0.0.1" || host == "localhost" || host == "::1" || Regex("""127(\.\d{1,3}){3}""").matches(host)
     }
 
-    fun request(messages: List<JsonObject>, temperature: Double?, tools: JsonArray?, extra: JsonObject?, thinking: JsonObject?): String =
+    /** noTimeLimit：手机上这次不限时（整理记忆，2026-11-05），电脑问本机模型时也不限。 */
+    fun request(messages: List<JsonObject>, temperature: Double?, tools: JsonArray?, extra: JsonObject?, thinking: JsonObject?, noTimeLimit: Boolean = false): String =
         buildJsonObject {
             put("messages", JsonArray(messages))
             if (temperature != null) put("temperature", temperature)
             if (tools != null) put("tools", tools)
             if (extra != null) put("extra", extra)
             if (thinking != null) put("thinking", thinking)
+            if (noTimeLimit) put("noTimeLimit", true)
         }.toString()
 
-    class Request(val messages: List<JsonObject>, val temperature: Double?, val tools: JsonArray?, val extra: JsonObject?, val thinking: JsonObject?)
+    class Request(val messages: List<JsonObject>, val temperature: Double?, val tools: JsonArray?, val extra: JsonObject?, val thinking: JsonObject?,
+        val noTimeLimit: Boolean = false)
 
     fun parseRequest(s: String): Request {
         val o = AppJson.parseToJsonElement(s).jsonObject
@@ -67,6 +70,7 @@ object HostChatCodec {
             o["tools"] as? JsonArray,
             o["extra"] as? JsonObject,
             o["thinking"] as? JsonObject,
+            (o["noTimeLimit"] as? JsonPrimitive)?.contentOrNull == "true",
         )
     }
 
