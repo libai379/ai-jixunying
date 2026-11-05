@@ -1848,6 +1848,23 @@ class Engine(
         }
     }
 
+    /**
+     * 微信语音解好的音频存成附件（2026-11-05）。微信已经转好字的：记上时长当「读过了」，不再花钱听写一遍（字在消息里）；
+     * 没转出字的 seconds 留 0，发出去时和别的音频一样听写。能听的模型（千问全模态）两种都直接听原声。
+     */
+    fun saveVoice(name: String, bytes: ByteArray, seconds: Int, transcribedByWeixin: Boolean): Attachment {
+        val mime = when (name.substringAfterLast('.', "").lowercase()) {
+            "mp3" -> "audio/mpeg"
+            "amr" -> "audio/amr"
+            else -> "audio/wav"
+        }
+        val att = Attachment(newId(), name, mime, bytes.size.toLong(), AttachmentKind.DOCUMENT,
+            seconds = if (transcribedByWeixin) seconds.coerceAtLeast(1) else 0,
+            note = if (transcribedByWeixin) "微信语音，微信转好的字在消息里" else "微信语音")
+        storage.putFile(att, bytes, null)
+        return att
+    }
+
     override suspend fun fileBytes(id: String): ByteArray? = withContext(Dispatchers.IO) { storage.fileBytes(id) }
 
     fun fileMeta(id: String) = storage.fileMeta(id)

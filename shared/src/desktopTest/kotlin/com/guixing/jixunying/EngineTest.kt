@@ -104,6 +104,8 @@ class EngineTest {
     private lateinit var dir: File
 
     /** 1×1 的 PNG。 */
+    /** 微信语音样本（SILK，3 秒合成的「元音」，来历见 silk/README.md）。 */
+    private val silkFixture: ByteArray by lazy { javaClass.getResource("/weixin-voice.silk")!!.readBytes() }
     private val png = Base64.getDecoder().decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")
     private val pngB64 = Base64.getEncoder().encodeToString(png)
 
@@ -354,7 +356,9 @@ class EngineTest {
                 post("/ilink/bot/getuploadurl") { wxSent += "upload:" + call.receiveText(); call.respondText("""{"ret":0,"upload_param":"up1"}""", ContentType.Application.Json) }
                 get("/c2c/download") {
                     // 微信 CDN 上的东西都是 AES-128-ECB 加密的
-                    call.respondBytes(com.guixing.jixunying.engine.WeixinBridge.aesEcb(png, wxKey, encrypt = true), ContentType.Application.OctetStream)
+                    // voice1 = 微信语音样本（SILK，src/desktopTest/resources/weixin-voice.silk，来历见 silk/README.md）
+                    val plain = if (call.request.queryParameters["encrypted_query_param"] == "voice1") silkFixture else png
+                    call.respondBytes(com.guixing.jixunying.engine.WeixinBridge.aesEcb(plain, wxKey, encrypt = true), ContentType.Application.OctetStream)
                 }
                 post("/c2c/upload") {
                     val body = call.receiveText().length
@@ -2366,6 +2370,63 @@ class EngineTest {
         val usage = com.guixing.jixunying.engine.Ledger(File(dir, "usage")).since().filter { it.kind == "stances" && it.convId == conv }
         assertTrue(usage.isNotEmpty(), "应该有立场档案花费记录")
         assertTrue(usage.any { it.model == "deepseek-flash" }, "应该用了 deepseek-flash：" + usage.map { it.model })
+    }
+
+    /**
+     * 微信语音（2026-11-05）：语音消息带的原声（SILK）下载解密、解成 24 kHz wav 存成音频附件；
+     * 微信转好的字照旧进消息、不再花钱听写；千问全模态成员拿到原声（input_audio）。没转出字的那条留给听写（seconds = 0）。
+     */
+    @Test
+    fun weixinVoiceToOmni() = runBlocking {
+        val (e, _) = engineWithMembers("小智")
+        e.call(Command.SaveProvider(ProviderConfig("pq", "qianwen", "千问", "${base()}/v1", "k", listOf(ModelInfo("qwen3.8-omni-flash")))))
+        e.call(Command.SaveMember(Member("mo", "听听", providerId = "pq", modelId = "qwen3.8-omni-flash")))
+        e.call(Command.SaveSettings(e.state.settings.copy(weixin = e.state.settings.weixin.copy(memberIds = listOf("mo")))))
+        val bridge = com.guixing.jixunying.engine.WeixinBridge(e, File(dir, "weixin"), loginBase = base(), cdnBase = "${base()}/c2c")
+        e.weixin = bridge
+        bridge.start()
+        assertTrue(e.call(Command.WeixinLogin).ok)
+        withTimeout(10_000) { while (!e.state.weixin.status.startsWith("已连接")) delay(50) }
+
+        val keyB64 = Base64.getEncoder().encodeToString(wxKey)
+        fun voice(id: Long, text: String) = """{"message_id":$id,"from_user_id":"me@im.wechat","to_user_id":"bot1@im.bot","message_type":1,"context_token":"ctx$id","item_list":[""" +
+            """{"type":3,"voice_item":{"media":{"encrypt_query_param":"voice1","aes_key":"$keyB64","encrypt_type":1},"encode_type":6,"bits_per_sample":16,"sample_rate":24000,"playtime":3000,"text":"$text"}}]}"""
+        requests.clear()
+        wxInbox += voice(11, "今天下午三点见")
+        withTimeout(20_000) { while (requests.none { it["model"]?.jsonPrimitive?.content == "qwen3.8-omni-flash" }) delay(50) }
+        withTimeout(20_000) { while (wxSent.none { "\"to_user_id\":\"me@im.wechat\"" in it }) delay(50) }
+
+        val conv = e.state.conversations.first { it.channel == "weixin:me@im.wechat" }
+        e.call(Command.LoadMessages(conv.id))
+        val m = e.store.messages.value[conv.id]!!.first { it.role == Role.USER }
+        assertEquals("[语音] 今天下午三点见", m.content, "微信转好的字照旧进消息")
+        val att = m.attachments.single()
+        assertTrue(att.isAudio && att.name.endsWith(".wav"), att.name)
+        assertEquals(3, att.seconds, "按 playtime 记时长，算读过了，不再听写")
+        val wav = e.fileBytes(att.id)!!
+        assertEquals("RIFF", String(wav, 0, 4))
+        assertEquals(44 + 3 * 24000 * 2, wav.size, "SILK 解成 3 秒 24 kHz 16 位单声道")
+
+        val req = requests.last { it["model"]!!.jsonPrimitive.content == "qwen3.8-omni-flash" }
+        val lastUser = req["messages"]!!.jsonArray.map { it.jsonObject }.last { it["role"]!!.jsonPrimitive.content == "user" }
+        val audio = lastUser["content"]!!.jsonArray.map { it.jsonObject }.single { it["type"]!!.jsonPrimitive.content == "input_audio" }["input_audio"]!!.jsonObject
+        assertEquals("wav", audio["format"]!!.jsonPrimitive.content)
+        assertTrue(audio["data"]!!.jsonPrimitive.content.startsWith("data:audio/wav;base64,UklGR"), "给的是解好的 wav，不是 SILK")
+        assertTrue("今天下午三点见" in lastUser.toString())
+
+        // 微信没转出字的：原声照样存下来，留给听写（seconds = 0）
+        wxInbox += voice(12, "")
+        withTimeout(20_000) {
+            while (true) {
+                e.call(Command.LoadMessages(conv.id))
+                if (e.store.messages.value[conv.id]!!.any { it.content == "[一段语音，微信没转出文字]" }) break
+                delay(100)
+            }
+        }
+        val silent = e.store.messages.value[conv.id]!!.first { it.content == "[一段语音，微信没转出文字]" }.attachments.single()
+        assertTrue(silent.isAudio)
+        assertTrue(silent.note.startsWith("微信语音"), silent.note)
+        bridge.stop()
     }
 
     /**

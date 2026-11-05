@@ -27,6 +27,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -899,7 +900,46 @@ class WeixinBridge(
             }
         }
 
-        /** 拆一条微信消息：文字、引用、语音转的字；图片、文件、视频下载下来存成附件。 */
+        /**
+         * 微信语音（2026-11-05 用户问微信语音是什么格式，「那你要不要试一下」）：下载原声，SILK 解成 24 kHz 的 wav 存成音频附件。
+         * 能听的模型（千问全模态）直接听原声（语气、情绪都在）；别的模型照旧看微信转好的字。微信已经转了字的不再花钱听写。
+         * 腾讯官方插件同样做法：src/media/media-download.ts 下载解密，src/media/silk-transcode.ts 用 silk-wasm 解成 24000 Hz wav；
+         * 我们用 libjitsi 的纯 Java 解码（silk 模块）。实测：直接把 SILK 发给千问不报错但听成「蜂鸣声」，必须先解码。
+         * 没下载成、解不开就算了：消息里还有微信转的字，原因记日志。
+         */
+        private suspend fun saveVoice(item: JsonObject, transcribedByWeixin: Boolean): Attachment? {
+            val v = item.obj("voice_item") ?: return null
+            val media = v.obj("media") ?: return null
+            return try {
+                val raw = download(media, null) ?: return null
+                val stamp = System.currentTimeMillis() % 100000
+                // playtime 是毫秒（官方插件 src/api/types.ts「语音长度 (毫秒)」）
+                val said = v.long("playtime")?.takeIf { it > 0 }?.let { ((it + 999) / 1000).toInt() }
+                val encodeType = v.int("encode_type")
+                val (name, bytes, seconds) = when {
+                    WeixinVoice.isSilk(raw) -> {
+                        val wav = withContext(Dispatchers.Default) { WeixinVoice.silkToWav(raw) }
+                        if (wav == null) { engine.logLine("JxyWeixin", "语音 ${raw.size} 字节是 SILK，没解出声音"); return null }
+                        Triple("微信语音_$stamp.wav", wav, said ?: WeixinVoice.seconds(wav))
+                    }
+                    // 官方插件 types.ts：「语音编码类型：1=pcm 2=adpcm 3=feature 4=speex 5=amr 6=silk 7=mp3 8=ogg-speex」
+                    encodeType == 7 -> Triple("微信语音_$stamp.mp3", raw, said ?: 1)
+                    encodeType == 5 -> Triple("微信语音_$stamp.amr", raw, said ?: 1)
+                    else -> {
+                        engine.logLine("JxyWeixin", "语音编码 $encodeType 不认识（${raw.size} 字节，开头 ${raw.take(4).joinToString(" ") { "%02x".format(it) }}），只用微信转的字")
+                        return null
+                    }
+                }
+                engine.saveVoice(name, bytes, seconds, transcribedByWeixin)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                engine.logLine("JxyWeixin", "语音下载 / 解码失败：${e.message?.take(200)}")
+                null
+            }
+        }
+
+        /** 拆一条微信消息：文字、引用、语音（微信转的字 + 原声）；图片、文件、视频下载下来存成附件。 */
         private suspend fun parse(from: String, m: JsonObject): Incoming {
             // 回复要带「这一条」消息的 context_token（连发几条时，存下来的可能已经是后面那条的了）
             val ctx = m.str("context_token") ?: cursor.contextTokens[from]
@@ -915,7 +955,11 @@ class WeixinBridge(
                 if (quote == null) item.obj("ref_msg")?.let { quote = resolveQuote(from, it) }
                 when (item.int("type")) {
                     1 -> item.obj("text_item")?.str("text")?.let { parts += it }
-                    3 -> parts += item.obj("voice_item")?.str("text")?.takeIf { it.isNotBlank() }?.let { "[语音] $it" } ?: "[一段语音，微信没转出文字]"
+                    3 -> {
+                        val said = item.obj("voice_item")?.str("text")?.takeIf { it.isNotBlank() }
+                        parts += said?.let { "[语音] $it" } ?: "[一段语音，微信没转出文字]"
+                        saveVoice(item, said != null)?.let { attIds += it.id }
+                    }
                     2 -> saveMedia(item, "收到")?.let { attIds += it.id } ?: run { parts += "[一张图片，没下载下来]" }
                     4 -> saveMedia(item, "收到")?.let { attIds += it.id } ?: run { parts += "[文件「${item.obj("file_item")?.str("file_name") ?: "微信文件"}」没下载下来]" }
                     5 -> saveMedia(item, "收到")?.let { attIds += it.id } ?: run { parts += "[一段视频，没下载下来（可能太大，超过 50MB 的存不下）]" }

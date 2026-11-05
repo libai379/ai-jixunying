@@ -16,9 +16,11 @@ import java.io.File
  */
 class VideoCheckRunner : Instrumentation() {
     private var videos: List<String> = emptyList()
+    private var silk: String? = null
 
     override fun onCreate(arguments: Bundle?) {
         videos = arguments?.getString("video").orEmpty().split(',').filter { it.isNotBlank() }
+        silk = arguments?.getString("silk")?.takeIf { it.isNotBlank() }
         super.onCreate(arguments)
         start()
     }
@@ -56,6 +58,18 @@ class VideoCheckRunner : Instrumentation() {
             File(dir, "photo-steps.png").writeBytes(com.guixing.jixunying.engine.encodePixels(r.out))
             File(dir, "photo-erased.png").writeBytes(com.guixing.jixunying.engine.encodePixels(erased.out))
         }.onFailure { out.append("P 图出错：").append(it).append('\n') }
+        // 微信语音（SILK）在安卓上也解一下（2026-11-05，silk 模块）：-e silk files/x.silk；解出来的 wav 存在 cache/frames/silk.wav
+        silk?.let { name ->
+            runCatching {
+                val raw = File(dataDir, name).readBytes()
+                val t0 = System.nanoTime()
+                val wav = com.guixing.jixunying.engine.WeixinVoice.silkToWav(raw)
+                val ms = (System.nanoTime() - t0) / 1_000_000
+                out.append("SILK ").append(raw.size).append(" 字节，是 SILK：").append(com.guixing.jixunying.engine.WeixinVoice.isSilk(raw))
+                    .append("，解成 wav ").append(wav?.size).append(" 字节（").append(wav?.let { com.guixing.jixunying.engine.WeixinVoice.seconds(it) }).append(" 秒），用了 ").append(ms).append(" 毫秒\n")
+                wav?.let { File(File(targetContext.cacheDir, "frames").apply { mkdirs() }, "silk.wav").writeBytes(it) }
+            }.onFailure { out.append("SILK 出错：").append(it).append('\n') }
+        }
         for (name in videos) {
             val f = File(dataDir, name)
             out.append("==== ").append(f.name).append("（").append(f.length()).append(" 字节）\n")

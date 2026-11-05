@@ -54,6 +54,8 @@ kotlin {
                 implementation(libs.ktor.client.okhttp)
                 implementation(libs.paho.mqtt)
                 implementation(libs.lunar)
+                // 微信语音是 SILK，模型不认，先解成 wav（2026-11-05，silk/README.md）
+                implementation(project(":silk"))
             }
         }
         val desktopMain by getting {
