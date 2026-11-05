@@ -22,7 +22,8 @@ import kotlin.test.Test
 
 /**
  * 经真的公共中转从「电脑」取一个大文件，看要多久、会不会卡（2026-11-04 用户：「连华为手机更新，电脑传输环节卡住了怎么回事」）。
- * 只在设了 JXY_LIVE_RELAY=工作文件夹 时跑（不放 C 盘）；JXY_RELAY_MB 是文件多大（默认 26，和 1.17.1 安卓安装包差不多）。
+ * 只在设了 JXY_LIVE_RELAY=工作文件夹 时跑（不放 C 盘）；JXY_RELAY_MB 是文件多大（默认 26，和 1.17.1 安卓安装包差不多）；
+ * JXY_RELAY_BROKERS=中转1,中转2 只用这几家（默认和程序一样三家；2026-11-05 查「为什么慢」时加的，好比较各家）。
  * 电脑和手机两头都是这台电脑上新建的（新的 hostId，和用户的电脑、手机不相干），只用公共中转，不花钱。
  */
 class LiveRelayTransferTest {
@@ -32,7 +33,7 @@ class LiveRelayTransferTest {
         val mb = System.getenv("JXY_RELAY_MB")?.toIntOrNull() ?: 26
         val pcDir = File(root, "pc-" + System.currentTimeMillis())
         val pc = Engine(Storage(pcDir), isPhone = false)
-        pc.call(Command.SaveSettings(pc.state.settings.copy(relay = RelaySettings(true, RelaySettings.DEFAULT_BROKERS, "测试电脑"))))
+        pc.call(Command.SaveSettings(pc.state.settings.copy(relay = RelaySettings(true, System.getenv("JXY_RELAY_BROKERS")?.split(',')?.map { it.trim() } ?: RelaySettings.DEFAULT_BROKERS, "测试电脑"))))
         val relay = RelayHost(pc)
         relay.restart()
         val t00 = System.currentTimeMillis()
