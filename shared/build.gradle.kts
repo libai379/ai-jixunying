@@ -41,6 +41,7 @@ kotlin {
             implementation(libs.cmp.icons)
             // 液态玻璃（2026-10-22，docs/界面换装说明.md）：和癸星科技同一个库、同一版
             implementation(libs.backdrop)
+            implementation(libs.composemediaplayer)
             api(libs.coroutines.core)
             api(libs.serialization.json)
         }

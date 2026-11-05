@@ -31,6 +31,19 @@ class Hub(
     /** 点「现在同步」。手机上由 DeviceSyncer 设置；null = 这台设备不同步（电脑）。 */
     var syncNow: (() -> Unit)? = null
 
+    /**
+     * 切到电脑（2026-11-04 用户：「电脑没有开机，手机的 APP 是不能直接切过去的」「要提示一下电脑未开机或者未连接」）：
+     * 电脑在线才切。返回 null = 切过去了；否则是没切的原因，给界面提示。
+     */
+    fun switchToRemote(): String? {
+        val r = _remote.value ?: return "还没配对电脑：到 设置 → 连接电脑 扫码配对"
+        return when (val c = r.conn.value) {
+            is ConnState.Connected -> { useRemote.value = true; null }
+            is ConnState.Failed -> "没切过去：" + c.reason
+            else -> "没切过去：正在找电脑，还没连上（电脑可能没开机，或者 AI集训营 没打开），等几秒再试"
+        }
+    }
+
     fun attach(host: PairedHost) {
         val factory = linkFactory ?: return
         _remote.value?.stop()

@@ -2368,6 +2368,47 @@ class EngineTest {
         assertTrue(usage.any { it.model == "deepseek-flash" }, "应该用了 deepseek-flash：" + usage.map { it.model })
     }
 
+    /**
+     * 音频附件（2026-11-04 用户：「音频文件，我上传不了」，要适配千问 qwen3.8-omni-flash）：
+     * 传上去认成音频、不报「读不出文字」；电脑用 FFmpeg 解出声音算出秒数；千问平台上的全模态成员，最新一句带的音频原样放进 input_audio；
+     * 别的成员只看到「[音频：…]」那一段文字，不带原声。
+     */
+    @Test
+    fun audioAttachmentGoesToOmni() = runBlocking {
+        val (e, _) = engineWithMembers("小智")
+        e.call(Command.SaveProvider(ProviderConfig("pq", "qianwen", "千问", "${base()}/v1", "k", listOf(ModelInfo("qwen3.8-omni-flash")))))
+        e.call(Command.SaveMember(Member("mo", "听听", providerId = "pq", modelId = "qwen3.8-omni-flash")))
+        // 2 秒 16k 单声道 440Hz 正弦波
+        val pcm = java.nio.ByteBuffer.allocate(16000 * 2 * 2).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+        repeat(32000) { i -> pcm.putShort((8000 * kotlin.math.sin(2 * Math.PI * 440 * i / 16000)).toInt().toShort()) }
+        val wav = com.guixing.jixunying.engine.SpeechText.wavOf(16000, 1, 16, pcm.array())
+        val att = assertNotNull(e.upload("录音.wav", "audio/wav", wav))
+        assertTrue(att.isAudio && !att.isVideo, "认成音频")
+        assertEquals("", att.note, "不当文档抽字，不报读不出文字")
+        val heard = com.guixing.jixunying.engine.localVideoAudio(File(dir, "x.wav").apply { writeBytes(wav) }, 60)
+        assertNotNull(heard, "电脑上 FFmpeg 解得开")
+        assertTrue(heard.second in 1.5..2.5, "约 2 秒：${heard.second}")
+
+        suspend fun ask(memberId: String, model: String): kotlinx.serialization.json.JsonObject {
+            val conv = e.call(Command.CreateConversation(listOf(memberId))).data
+            requests.clear()
+            e.call(Command.SendMessage(conv, "听听这是什么声音", listOf(att.id)))
+            waitIdle(e, conv, 1)
+            return requests.last { it["model"]!!.jsonPrimitive.content == model }
+        }
+        val omni = ask("mo", "qwen3.8-omni-flash")
+        val lastUser = omni["messages"]!!.jsonArray.map { it.jsonObject }.last { it["role"]!!.jsonPrimitive.content == "user" }
+        val part = lastUser["content"]!!.jsonArray.map { it.jsonObject }.single { it["type"]!!.jsonPrimitive.content == "input_audio" }
+        val audio = part["input_audio"]!!.jsonObject
+        assertEquals("wav", audio["format"]!!.jsonPrimitive.content)
+        assertTrue(audio["data"]!!.jsonPrimitive.content.startsWith("data:audio/wav;base64,"))
+        assertTrue("[音频：录音.wav" in lastUser.toString())
+
+        val plain = ask(e.state.members.first { it.name == "小智" }.id, e.state.members.first { it.name == "小智" }.modelId)
+        assertFalse("input_audio" in plain.toString(), "不会听的模型不带原声")
+        assertTrue("[音频：录音.wav" in plain.toString(), "但知道发了一段音频")
+    }
+
     @Suppress("unused")
     private fun json(o: Any) = AppJson
 }

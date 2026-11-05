@@ -174,6 +174,10 @@ private object Rules {
         "qwen" -> when {
             "thinking" in m || m.startsWith("qwq") || "-r1" in m -> ALWAYS
             m.startsWith("kimi-k3") || m.startsWith("glm-5.3") -> ALWAYS
+            // 全模态（2026-11-04 用户的 Key 实测）：qwen3.5-omni 不会思考，传 enable_thinking=true 回空话，什么都别传；
+            // qwen3-omni-flash 混合思考、默认关；qwen3.8-omni-flash 默认开，enable_thinking=false 能关（走下面 qwen3.[5-9] 那条）
+            m.startsWith("qwen3.5-omni") -> NEVER
+            m.startsWith("qwen3-omni") -> flagSwitch(false)
             // Qwen3.5 及以后默认开思考；qwen3-max、qwen-plus、qwen-flash、qwen-turbo 默认关
             Regex("^qwen3\\.[5-9]").containsMatchIn(m) -> flagSwitch(true)
             m.startsWith("qwen3-max") || m.startsWith("qwen-plus") || m.startsWith("qwen-flash") || m.startsWith("qwen-turbo") -> flagSwitch(false)

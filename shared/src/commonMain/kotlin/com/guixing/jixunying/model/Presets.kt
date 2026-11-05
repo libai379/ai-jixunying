@@ -85,7 +85,8 @@ object Presets {
             // 画图：千问AI平台「图像生成模型」页的全部文生图模型（2026-11-04 原文 developer-guides/getting-started/image-models.md，
             // 用户的 Key 逐个探过接口认不认，见 docs/参考资料.md「千问AI平台全部画图模型」）。不收的：wan2.6-image（文生图要流式）、
             // 只能改图的 wan2.5-i2i-preview / wanx2.1-imageedit、涂鸦海报虚拟模特这些专用工具。kling/、vidu/ 是平台上的第三方，要先在控制台开通
-            listOf(m("qwen3.8-max"),
+            // qwen3.8-omni-flash（2026-11-04 用户要适配）：能听音频、看图看视频，只出文字；用户的 Key 在 /models 里查到、真调过一次
+            listOf(m("qwen3.8-max"), m("qwen3.8-omni-flash", vision = true),
                 img("qwen-image-3.0-pro"), img("qwen-image-3.0"), img("qwen-image-2.1-pro"), img("qwen-image-2.1-turbo"),
                 img("qwen-image-2.0-pro"), img("qwen-image-2.0"),
                 img("wan2.7-image-pro"), img("wan2.7-image"), img("wan2.6-t2i"), img("wan2.5-t2i-preview"),
@@ -95,7 +96,7 @@ object Presets {
                 img("vidu/vidu-image_reference2image"), img("vidu/vidu-image-pro_reference2image"), img("vidu/vidu-image-lite_reference2image"),
                 img("vidu/viduq3-fast_reference2image"), img("vidu/viduq2-pro_reference2image"), img("vidu/viduq2-fast_reference2image")),
             "千", 0xFF6236FF,
-            note = "qwen3.8-max 即测评里的 Qwen3-Max；带官方联网搜索；画图千问图像 / 万相",
+            note = "qwen3.8-max 即测评里的 Qwen3-Max；qwen3.8-omni-flash 能直接听音频；带官方联网搜索；画图千问图像 / 万相",
             balanceUrl = "https://platform.qianwenai.com/home"),
         ProviderPreset("moonshot", "Kimi 中国版", GROUP_CN, "https://api.moonshot.cn/v1",
             "https://platform.kimi.com/console/api-keys",
@@ -103,7 +104,7 @@ object Presets {
             note = "带官方联网搜索；kimi-k3 只接受 temperature=1，成员里温度留空即可"),
         ProviderPreset("dashscope", "阿里云百炼（通义千问 · 万相）", GROUP_CN, "https://dashscope.aliyuncs.com/compatible-mode/v1",
             "https://bailian.console.aliyun.com/?tab=model#/api-key",
-            listOf(m("qwen3-max"), m("qwen-plus"), m("qwen3-vl-plus", vision = true),
+            listOf(m("qwen3-max"), m("qwen-plus"), m("qwen3-vl-plus", vision = true), m("qwen3.8-omni-flash", vision = true),
                 img("qwen-image-3.0"), img("qwen-image-plus"), img("wan2.7-image"), img("wan2.6-t2i")),
             "通", 0xFF6236FF, note = "带官方联网搜索；画图有千问图像和通义万相"),
         ProviderPreset("ark", "火山方舟（豆包 · Seedream）", GROUP_CN, "https://ark.cn-beijing.volces.com/api/v3",

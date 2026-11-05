@@ -865,18 +865,18 @@ object ImageCache {
 
 @Composable
 internal fun AttachmentStrip(ctl: AppController, atts: List<Attachment>, alignEnd: Boolean, large: Boolean = false) {
-    var preview by remember { mutableStateOf<Attachment?>(null) }
+    var preview by remember { mutableStateOf<Int?>(null) }
     Column(horizontalAlignment = if (alignEnd) Alignment.End else Alignment.Start, verticalArrangement = Arrangement.spacedBy(6.dp)) {
         val images = atts.filter { it.kind != AttachmentKind.DOCUMENT }
         val docs = atts.filter { it.kind == AttachmentKind.DOCUMENT }
         // 一排横着放，左右能滑（2026-11-04 用户：一次画了五张，手机上只看得到第一张和第二张一条边）
         if (images.isNotEmpty()) Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            images.forEach { a ->
+            images.forEachIndexed { i, a ->
                 val img = rememberImage(ctl, a.id)
                 val side = if (large) 300.dp else 120.dp
                 Box(
                     Modifier.size(side).clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.surfaceVariant)
-                        .border(1.dp, Ext.c.border, RoundedCornerShape(12.dp)).clickable { preview = a },
+                        .border(1.dp, Ext.c.border, RoundedCornerShape(12.dp)).clickable { preview = i },
                     contentAlignment = Alignment.Center,
                 ) {
                     if (img != null) androidx.compose.foundation.Image(img, a.name, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
@@ -885,9 +885,10 @@ internal fun AttachmentStrip(ctl: AppController, atts: List<Attachment>, alignEn
             }
         }
         // 视频（微信发来的）也能点开放：和 AI 做的视频一样
-        docs.forEach { a -> if (a.generated || a.isVideo) MadeFileChip(ctl, a) else DocChip(a) }
+        // 视频在软件里直接放（2026-11-04）：封面 + 播放键
+        docs.forEach { a -> if (a.isVideo) VideoCard(ctl, a, large) else if (a.isAudio) AudioChip(ctl, a) else if (a.generated) MadeFileChip(ctl, a) else DocChip(a) }
     }
-    preview?.let { ImagePreview(ctl, it) { preview = null } }
+    preview?.let { i -> ImageGallery(ctl, atts.filter { it.kind != AttachmentKind.DOCUMENT }, i) { preview = null } }
 }
 
 /** AI 做的 Word / Excel：点一下用 Word / WPS 打开，右边「另存为」。 */
@@ -973,35 +974,9 @@ fun docColor(ext: String) = when (ext) {
     else -> Color(0xFF7C3AED)
 }
 
+/** 只看一张（Code 栏截图等）：和聊天里点开大图同一个查看器，能放大。 */
 @Composable
-internal fun ImagePreview(ctl: AppController, a: Attachment, onClose: () -> Unit) {
-    val platform = LocalPlatform.current
-    val scope = rememberCoroutineScope()
-    val img = rememberImage(ctl, a.id)
-    Dialog(onDismissRequest = onClose, properties = DialogProperties(usePlatformDefaultWidth = false)) {
-        Column(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.88f)).clickable(onClick = onClose).padding(20.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Text(a.name, color = Color.White, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
-                TextButton(onClick = {
-                    scope.launch {
-                        val bytes = ctl.backend.fileBytes(a.id) ?: return@launch
-                        if (platform.saveFile(a.name, bytes)) ctl.toast("已保存")
-                    }
-                }) {
-                    Icon(Icons.Rounded.Download, null, tint = Color.White)
-                    Spacer(Modifier.width(4.dp))
-                    Text("保存", color = Color.White)
-                }
-                IconButton(onClick = onClose) { Icon(Icons.Rounded.Close, "关闭", tint = Color.White) }
-            }
-            Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-                if (img != null) androidx.compose.foundation.Image(img, a.name, Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
-                else CircularProgressIndicator(color = Color.White)
-            }
-            if (a.note.isNotBlank()) Text(a.note, color = Color.White.copy(alpha = 0.7f), style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 8.dp))
-        }
-    }
-}
+internal fun ImagePreview(ctl: AppController, a: Attachment, onClose: () -> Unit) = ImageGallery(ctl, listOf(a), 0, onClose)
 
 // ———————————————— 输入框 ————————————————
 

@@ -87,14 +87,22 @@ class RemoteBackend(
         paused = false
         onlineSince = null
         lastHostFrame = null
+        graceFrom = clock.markNow()
         link.resume()
     }
+
+    /**
+     * 刚启动、刚从后台回来时中转要一两秒才连上：这段时间连不上只算「正在连」，不报「连不上」
+     * （2026-11-04 加了「电脑掉线自动切回本机」，不能一回前台就把人踢回本机）。
+     */
+    private var graceFrom: TimeSource.Monotonic.ValueTimeMark? = null
 
     /** 最后一次收到电脑消息的时间（毫秒时间戳）。手机接微信时拿它划界：这以后发来的电脑可能没答。 */
     @kotlin.concurrent.Volatile var lastHeardAt: Long = 0L
         private set
 
     fun start() {
+        graceFrom = clock.markNow()
         jobs += scope.launch {
             link.incoming.collect { f ->
                 lastHostFrame = clock.markNow()
@@ -149,6 +157,7 @@ class RemoteBackend(
         val last = lastHostFrame
         _conn.value = when {
             revoked.value -> ConnState.Failed("电脑上已取消这台手机的配对，请重新扫码")
+            !online && graceFrom?.let { it.elapsedNow() < 15.seconds } == true -> ConnState.Connecting
             !online -> ConnState.Failed("连不上中转服务器，检查手机网络")
             last != null && since != null && last > since && last.elapsedNow() < 70.seconds -> ConnState.Connected(host.hostName.ifBlank { "电脑" })
             since != null && since.elapsedNow() > 12.seconds -> ConnState.Failed("电脑不在线（没开机，或者 AI集训营 没打开）")
@@ -176,6 +185,8 @@ class RemoteBackend(
      */
     suspend fun callStreaming(command: Command, onPart: ((String, String) -> Unit)?): CommandResult {
         if (revoked.value) return CommandResult(false, "已取消配对")
+        // 电脑明确不在线：马上说，别干等两分钟（11-04 用户电脑关着在手机上改设置，等不到回话界面又跳回旧值）
+        (_conn.value as? ConnState.Failed)?.let { return CommandResult(false, "电脑不在线，没改成：${it.reason}") }
         val deferred = CompletableDeferred<CommandResult>()
         var lastPart = clock.markNow()
         val sink: ((String, String) -> Unit)? = onPart?.let { f -> { c, r -> lastPart = clock.markNow(); f(c, r) } }

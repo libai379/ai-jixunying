@@ -361,6 +361,22 @@ class MainActivity : ComponentActivity() {
             }.getOrNull()
         }?.let { withContext(Dispatchers.Main) { openFile(it) } } == true
 
+        override suspend fun cacheFile(name: String, bytes: ByteArray): String? = withContext(Dispatchers.IO) {
+            runCatching {
+                val dir = File(cacheDir, "video").apply { mkdirs() }
+                val f = File(dir, name.replace(Regex("""[\\/:*?"<>|]"""), "_"))
+                if (!f.exists() || f.length() != bytes.size.toLong()) f.writeBytes(bytes)
+                // 放过的视频不留着占地方：三天前的缓存清掉
+                val old = System.currentTimeMillis() - 3L * 24 * 3600 * 1000
+                dir.listFiles()?.filter { it.isFile && it != f && it.lastModified() < old }?.forEach { it.delete() }
+                f.absolutePath
+            }.getOrNull()
+        }
+
+        override suspend fun videoThumb(path: String): androidx.compose.ui.graphics.ImageBitmap? = withContext(Dispatchers.IO) {
+            com.guixing.jixunying.engine.localVideoFrames(File(path), 1, 640)?.first?.firstOrNull()?.let { decodeImage(it) }
+        }
+
         override val canOpenAppSettings = true
         override fun openAppSettings() {
             runCatching { startActivity(Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName"))) }

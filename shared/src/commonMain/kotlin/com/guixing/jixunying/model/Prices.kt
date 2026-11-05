@@ -142,6 +142,12 @@ object Prices {
             "dashscope-intl" in url || "alibabacloud" in url -> null
             // 读出来 qwen3-tts-flash：官方价格页是动态加载的，没读到数字（未确认），所以不给价（花费页会说没算进去）
             m.startsWith("qwen3.8-max") -> cny(12.0, 1.5, 36.0)
+            // 全模态（2026-11-04 百炼价格页 help.aliyun.com/zh/model-studio/model-pricing「千问Omni」华北2 原文）：qwen3.8-omni-flash
+            // 「0.8元」「0.1元」「2.7元」（输入 / 缓存命中 / 输出，不分文字和音频）；qwen3.5 系列音频输入另算，这里按文字价算（会算少）
+            m.startsWith("qwen3.8-omni-flash") -> cny(0.8, 0.1, 2.7)
+            m.startsWith("qwen3.5-omni-plus") -> cny(7.0, null, 40.0, note = "音频输入 53 元 / 百万 token，没单独算")
+            m.startsWith("qwen3.5-omni-flash") -> cny(2.2, null, 13.3, note = "音频输入 18 元 / 百万 token，没单独算")
+            m.startsWith("qwen3-omni-flash") -> cny(1.8, null, 12.7, note = "音频输入 15.8 元 / 百万 token，没单独算")
             // qwen3-max、qwen-plus 按整次请求的输入长度分档
             m.startsWith("qwen3-max") -> ModelPrice("CNY", listOf(t(2.5, 0.5, 10.0, 32_000), t(4.0, 0.8, 16.0, 128_000), t(7.0, 1.4, 28.0)))
             m.startsWith("qwen-plus") -> ModelPrice("CNY", listOf(t(0.8, 0.16, 2.0, 128_000), t(2.4, 0.48, 20.0, 256_000), t(4.8, 0.96, 48.0)),

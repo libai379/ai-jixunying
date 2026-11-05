@@ -419,6 +419,29 @@ class DesktopPlatform(private val fileLog: Boolean = true, private val window: (
         }.getOrDefault(false)
     }
 
+    override suspend fun cacheFile(name: String, bytes: ByteArray): String? = withContext(Dispatchers.IO) {
+        runCatching {
+            val dir = File(System.getProperty("java.io.tmpdir"), "AI集训营").apply { mkdirs() }
+            val f = File(dir, name.replace(Regex("""[\\/:*?"<>|]"""), "_"))
+            if (!f.exists() || f.length() != bytes.size.toLong()) f.writeBytes(bytes)
+            // 放过的视频不留着占地方：三天前的缓存（含转出来的 .play.mp4）清掉
+            val old = System.currentTimeMillis() - 3L * 24 * 3600 * 1000
+            dir.listFiles()?.filter { it.isFile && it != f && it.lastModified() < old }?.forEach { it.delete() }
+            f.absolutePath
+        }.getOrNull()
+    }
+
+    override suspend fun videoThumb(path: String): ImageBitmap? = withContext(Dispatchers.IO) {
+        com.guixing.jixunying.engine.localVideoFrames(File(path), 1, 640)?.first?.firstOrNull()?.let { decodeImage(it) }
+    }
+
+    override suspend fun playableCopy(path: String): String? = withContext(Dispatchers.IO) {
+        val src = File(path)
+        val dst = File(File(System.getProperty("java.io.tmpdir"), "AI集训营").apply { mkdirs() }, src.nameWithoutExtension + ".play.mp4")
+        if (dst.isFile && dst.length() > 0) return@withContext dst.absolutePath
+        if (com.guixing.jixunying.engine.transcodePlayable(src, dst)) dst.absolutePath else null
+    }
+
     override suspend fun pickFolder(title: String): String? = withContext(Dispatchers.Swing) {
         // 文件夹选择框用 Windows 自己的样式，别用 Java 默认那套
         runCatching { javax.swing.UIManager.setLookAndFeel(javax.swing.UIManager.getSystemLookAndFeelClassName()) }

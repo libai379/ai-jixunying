@@ -54,6 +54,12 @@ interface Platform {
     fun fileExists(path: String): Boolean = false
     /** 把收到的文件（比如手机遥控电脑时电脑做的 Word）存成临时文件，再用默认程序打开。 */
     suspend fun openBytes(name: String, bytes: ByteArray): Boolean = false
+    /** 把文件存进这台设备的临时文件夹，返回路径（软件里放视频用，2026-11-04）；存不了返回 null。 */
+    suspend fun cacheFile(name: String, bytes: ByteArray): String? = null
+    /** 视频的一帧当封面（聊天里显示）；取不出返回 null。 */
+    suspend fun videoThumb(path: String): ImageBitmap? = null
+    /** 这台设备放不了的视频（电脑上微信发来的 HEVC）转一份能放的，返回新路径；转不了或不需要返回 null。 */
+    suspend fun playableCopy(path: String): String? = null
     /** 选一个文件夹，返回路径；取消返回 null。 */
     suspend fun pickFolder(title: String = "选择文件夹"): String? = null
     /**

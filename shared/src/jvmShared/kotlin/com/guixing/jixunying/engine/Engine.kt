@@ -386,6 +386,8 @@ class Engine(
                         // 和对话页一样：听到的话 + 画面（读过以后存在附件的说明里，任务那条消息可能还是读之前的样子）
                         val meta = storage.fileMeta(a.id) ?: a
                         appendVideo(meta, text, limit, vision && latest && meta.frames.isNotEmpty(), vision, sb, imgs)
+                    } else if (a.isAudio) {
+                        appendAudio(storage.fileMeta(a.id) ?: a, text, limit, false, sb, imgs)
                     } else {
                         sb.append("\n\n[附件：").append(a.name).append("]")
                         if (text == null) sb.append("（读不出文字：").append(a.note).append("）")
@@ -1409,7 +1411,7 @@ class Engine(
             touchConversation(conv.id, c.text.ifBlank { atts.firstOrNull()?.name ?: paths.firstOrNull()?.let { File(it).name }.orEmpty() })
             // 循环本身在 CodeAgent 里；同一个会话已经在跑就排队，前一个跑完接着跑
             // 带视频的先读一遍（和对话页一样，2026-11-01）；不让界面等着
-            if (atts.any { it.isVideo }) scope.launch { digestVideosIn(userMsg); codeAgent.submit(conv.id, userMsg, c.fromPhone) }
+            if (atts.any { it.isMedia }) scope.launch { digestVideosIn(userMsg); codeAgent.submit(conv.id, userMsg, c.fromPhone) }
             else codeAgent.submit(conv.id, userMsg, c.fromPhone)
             CommandResult()
         }
@@ -1823,6 +1825,12 @@ class Engine(
         val videoExt = name.substringAfterLast('.', "").lowercase()
         if (DocExtract.isImage(name, mime)) {
             val att = Attachment(id, name, DocExtract.imageMime(name, mime), bytes.size.toLong(), AttachmentKind.IMAGE)
+            storage.putFile(att, bytes, null)
+            att
+        } else if (!mime.startsWith("video/") && videoExt !in Attachment.VIDEO_EXTS && (mime.startsWith("audio/") || videoExt in Attachment.AUDIO_EXTS)) {
+            // 音频（2026-11-04 用户：「音频文件，我上传不了」）：以前当文档抽文字，抽不出就报错。现在不抽，发出去时听写（digestVideo 同一套）
+            val att = Attachment(id, name, if (mime.startsWith("audio/")) mime else VideoMedia.mimeOf(name).takeIf { it.startsWith("audio/") } ?: "audio/$videoExt",
+                bytes.size.toLong(), AttachmentKind.DOCUMENT)
             storage.putFile(att, bytes, null)
             att
         } else if (mime.startsWith("video/") || videoExt in Attachment.VIDEO_EXTS) {
@@ -3563,6 +3571,7 @@ class Engine(
         return when {
             text.isNotEmpty() -> if (text.length > 18) text.take(18) + "…" else text
             m.attachments.any { it.isVideo } -> "（发了视频）"
+            m.attachments.any { it.isAudio } -> "（发了音频）"
             m.attachments.any { it.kind == AttachmentKind.IMAGE } -> "（发了图片）"
             m.attachments.isNotEmpty() -> "（发了文件）"
             else -> ""
@@ -5031,7 +5040,7 @@ class Engine(
      * 可这里只挑 seconds == 0 的，以前读过一回（记了 25 秒、画面解不开）的根本进不去，重读从来没发生过。
      */
     private fun needsDigest(a: Attachment): Boolean {
-        if (!a.isVideo) return false
+        if (!a.isMedia) return false
         val meta = storage.fileMeta(a.id) ?: a
         if (meta.frames.isNotEmpty()) return false
         return meta.seconds == 0 || ("画面解不开" in meta.note && "重读过" !in meta.note)
@@ -5073,7 +5082,7 @@ class Engine(
         if (!file.isFile) return meta
         val notes = mutableListOf<String>()
         val browser = pageBrowser
-        val (frames, framesSec) = try {
+        val (frames, framesSec) = if (a.isAudio) emptyList<ByteArray>() to 0.0 else try {
             withContext(Dispatchers.IO) { localVideoFrames(file, VIDEO_FRAMES, VIDEO_FRAME_SIDE) }
                 ?: browser?.let { b -> pageSlots.withPermit { b.fileFrames(file, VIDEO_FRAMES, VIDEO_FRAME_SIDE) } }
                 ?: (emptyList<ByteArray>() to 0.0).also { notes += "这台设备解不了视频（要电脑上的 Edge）" }
@@ -6384,6 +6393,7 @@ class Engine(
      * 记录员压缩过的部分换成摘要放在最前面，只发摘要之后的原文。
      */
     private fun buildHistory(convId: String, me: Member, cutoffId: String?, excludeId: String, vision: Boolean): List<JsonObject> {
+        val hears = hearsAudio(me)
         val all = snapshot(convId)
         val memo = storage.loadMemo(convId)
         val end = cutoffId?.let { id -> all.indexOfFirst { it.id == id } + 1 }?.takeIf { it > 0 } ?: all.size
@@ -6481,6 +6491,9 @@ class Engine(
                         } else if (a.isVideo) {
                             appendVideo(a, text, limit, slot in seeFrames || slot in seeMade, vision, sb, imgs,
                                 if (slot in seeMade) spread(a.frames, MADE_VIDEO_FRAMES) else a.frames)
+                        } else if (a.isAudio) {
+                            // 能听的模型（千问全模态）最新那句带的音频直接给原声，别的只看听写出来的字
+                            appendAudio(storage.fileMeta(a.id) ?: a, text, limit, hears && idx == lastUserIdx, sb, imgs)
                         } else {
                             sb.append("\n\n[附件：").append(a.name).append("]")
                             if (text == null) sb.append("（读不出文字：").append(a.note).append("）")
@@ -6544,10 +6557,63 @@ class Engine(
                 if (p.images.isEmpty()) put("content", p.text)
                 else putJsonArray("content") {
                     add(buildJsonObject { put("type", "text"); put("text", p.text) })
-                    p.images.forEach { url -> add(buildJsonObject { put("type", "image_url"); putJsonObject("image_url") { put("url", url) } }) }
+                    p.images.forEach { url -> add(mediaPart(url)) }
                 }
             }
         }
+    }
+
+    /**
+     * 能直接听音频的模型（2026-11-04 用户要适配千问 qwen3.8-omni-flash）：千问平台 / 百炼上名字带 omni 的（realtime 是 WebSocket，不算）。
+     * 官方文档 help.aliyun.com/zh/model-studio/qwen-omni：音频放在 input_audio，Base64 编码后要小于 10MB；用户的 Key 实测 data:;base64, 和 data:audio/wav;base64, 都认。
+     */
+    private fun hearsAudio(me: Member): Boolean {
+        val p = state.provider(me.providerId) ?: return false
+        val m = me.modelId.lowercase()
+        return "omni" in m && "realtime" !in m && Thinking.platformOf(p) == "qwen"
+    }
+
+    /** 消息里的一件：图片 → image_url；音频（data:audio/格式;base64,…）→ input_audio。 */
+    private fun mediaPart(url: String): JsonObject =
+        if (url.startsWith("data:audio/")) buildJsonObject {
+            put("type", "input_audio")
+            putJsonObject("input_audio") { put("data", url); put("format", url.removePrefix("data:audio/").substringBefore(';')) }
+        } else buildJsonObject { put("type", "image_url"); putJsonObject("image_url") { put("url", url) } }
+
+    /**
+     * 一段音频写给模型的样子：时长、听写出来的字、读不出来的原因；withSound 时把原声放进 imgs（mediaPart 换成 input_audio）。
+     * 千问认的格式（官方「AMR、WAV、3GP、3GPP、AAC、MP3等」）原样发；别的（m4a、ogg、flac……）解成 16k 单声道 wav 再发。太大发不了就只给字。
+     */
+    private fun appendAudio(a: Attachment, text: String?, limit: Int, withSound: Boolean, sb: StringBuilder, imgs: MutableList<String>) {
+        sb.append("\n\n[音频：").append(a.name)
+        if (a.seconds > 0) sb.append("，").append(a.seconds).append(" 秒")
+        sb.append("]")
+        val sound = if (withSound) audioDataUrl(a) else null
+        if (sound != null) {
+            imgs += sound
+            sb.append("\n（原声附在这条消息里，你能直接听：语气、情绪、音乐、背景声都听得到）")
+        }
+        if (!text.isNullOrBlank()) {
+            sb.append("\n里面说的话（语音转文字，可能有同音错字）：\n```\n").append(text.take(limit))
+            if (text.length > limit) sb.append("\n…（共 ${text.length} 字，后面省略）")
+            sb.append("\n```")
+        }
+        if (withSound && sound == null) sb.append("\n（原声太大或解不开，这次没带上，只有转写的字）")
+        if (a.note.isNotBlank()) sb.append("\n（").append(a.note).append("）")
+    }
+
+    private fun audioDataUrl(a: Attachment): String? {
+        val ext = a.name.substringAfterLast('.', "").lowercase()
+        val direct = setOf("wav", "mp3", "aac", "amr", "3gp", "3gpp")
+        val maxRaw = 7_300_000 // Base64 以后约 9.7MB，官方上限 10MB
+        val bytes = if (ext in direct) storage.fileBytes(a.id)?.takeIf { it.size <= maxRaw } else null
+        if (bytes != null) return "data:audio/$ext;base64," + Base64.getEncoder().encodeToString(bytes)
+        // 不认的格式或太大：解成 16k 单声道 wav，最多约 3 分 40 秒（7MB）
+        val file = storage.fileOf(a.id)
+        if (!file.isFile) return null
+        val pcm = runCatching { localVideoAudio(file, (maxRaw - 44) / 32000) }.getOrNull()?.first ?: return null
+        val wav = SpeechText.wavOf(16000, 1, 16, pcm)
+        return "data:audio/wav;base64," + Base64.getEncoder().encodeToString(wav)
     }
 
     /** 一段视频写给模型的样子（对话页和 Code 栏共用）：时长、听到的话、画面（showFrames 时把图放进 imgs）、读不出来的原因。 */

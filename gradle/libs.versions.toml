@@ -29,6 +29,8 @@ paho-mqtt = "org.eclipse.paho:org.eclipse.paho.client.mqttv3:1.2.5"
 moquette = "io.moquette:moquette-broker:0.17"
 # 农历、节气、节日、法定假日（2026-11-02；纯 Java、MIT，1950-2100 年和香港天文台对照表逐日核对过，见 docs/参考资料.md）
 lunar = "cn.6tail:lunar:1.7.7"
+# 软件里直接放视频（2026-11-04 用户：「生成的视频……咱能自己在软件里边直接看到画面」）：MIT，电脑用 Windows 自带的 Media Foundation，手机用 Media3，不另外装东西
+composemediaplayer = "io.github.kdroidfilter:composemediaplayer:0.11.4"
 zxing-core = "com.google.zxing:core:3.5.3"
 zxing-android-embedded = "com.journeyapps:zxing-android-embedded:4.3.0"
 androidx-activity-compose = "androidx.activity:activity-compose:1.13.0"

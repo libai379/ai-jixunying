@@ -66,6 +66,7 @@ import com.guixing.jixunying.model.MsgStatus
 import com.guixing.jixunying.model.Role
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 
 /** 全局提示条。弹窗打开时，弹窗里也放一个，免得提示被弹窗挡住。 */
@@ -283,6 +284,20 @@ fun App(hub: Hub, platform: Platform, debugStart: String? = null) {
         val snackbar = remember { SnackbarHostState() }
         CompositionLocalProvider(LocalPlatform provides platform, LocalSnackbar provides snackbar) {
             val scope = rememberCoroutineScope()
+            // 用着电脑时电脑掉线（关机、AI集训营 关了、网络断了）：自动切回本机，手机自己照常能用
+            // （2026-11-04 用户：「如果之前在电脑，那自动跳回手机」「手机 APP 是独立的」）
+            LaunchedEffect(remote, useRemote) {
+                val r = remote ?: return@LaunchedEffect
+                if (!useRemote) return@LaunchedEffect
+                // 连不上要持续 8 秒才切（网络抖一下、换 Wi-Fi 不算）；状态一变 collectLatest 就把等着的这次取消
+                r.conn.collectLatest { c ->
+                    if (c is com.guixing.jixunying.client.ConnState.Failed) {
+                        kotlinx.coroutines.delay(8_000)
+                        hub.useRemote.value = false
+                        snackbar.showSnackbar("电脑没连上，已切回本机（${c.reason}）", duration = SnackbarDuration.Long)
+                    }
+                }
+            }
             // 切换本机 / 电脑时整个界面换一套状态
             key(backend) {
                 val ctl = remember(backend) {
@@ -345,7 +360,7 @@ fun App(hub: Hub, platform: Platform, debugStart: String? = null) {
                         // 状态还没来（刚打开应用、刚连上电脑）：等它一下，别当没有
                     } else if (ctl.hub.remote.value != null && !ctl.remoteMode) {
                         // 本机没有这个会话：通知说的是电脑上的 Code 会话，切到电脑再看
-                        ctl.hub.useRemote.value = true
+                        ctl.hub.switchToRemote()?.let { why -> pendingConv = null; ctl.toast(why) }
                     } else {
                         pendingConv = null
                     }

@@ -129,6 +129,61 @@ actual fun localVideoFrames(file: java.io.File, count: Int, maxSide: Int): Pair<
     null
 }
 
+/**
+ * 软件里放不了的视频（2026-11-04 实测：微信发来的 HEVC，Windows 没装 HEVC 扩展，Media Foundation 打不开）转成能放的：
+ * 视频用 Windows 自带的 H.264 编码器（h264_mf，系统组件，不另外牵扯专利授权），不行退回 FFmpeg 自带的 mpeg4；声音 aac。
+ * 成功返回 true。只在电脑上用（手机的 Media3 用系统硬解，HEVC 放得了）。
+ */
+fun transcodePlayable(src: java.io.File, dst: java.io.File): Boolean {
+    for (codec in listOf("h264_mf", "mpeg4")) {
+        val ok = runCatching { transcodeWith(src, dst, codec) }.getOrElse { false }
+        if (ok) return true
+        dst.delete()
+    }
+    return false
+}
+
+private fun transcodeWith(src: java.io.File, dst: java.io.File, codec: String): Boolean {
+    org.bytedeco.ffmpeg.global.avutil.av_log_set_level(org.bytedeco.ffmpeg.global.avutil.AV_LOG_ERROR)
+    val g = org.bytedeco.javacv.FFmpegFrameGrabber(src)
+    g.start()
+    try {
+        val w = g.imageWidth.let { it - it % 2 }
+        val h = g.imageHeight.let { it - it % 2 }
+        if (w <= 0 || h <= 0) return false
+        val r = org.bytedeco.javacv.FFmpegFrameRecorder(dst, w, h, if (g.audioChannels > 0) g.audioChannels else 0)
+        r.format = "mp4"
+        r.videoCodecName = codec
+        r.frameRate = if (g.frameRate in 1.0..120.0) g.frameRate else 30.0
+        r.videoBitrate = maxOf(1_500_000, minOf(8_000_000, w * h * 4))
+        r.pixelFormat = org.bytedeco.ffmpeg.global.avutil.AV_PIX_FMT_NV12.takeIf { codec == "h264_mf" } ?: org.bytedeco.ffmpeg.global.avutil.AV_PIX_FMT_YUV420P
+        if (codec == "mpeg4") r.videoQuality = 3.0
+        if (g.audioChannels > 0) {
+            r.audioCodec = org.bytedeco.ffmpeg.global.avcodec.AV_CODEC_ID_AAC
+            r.sampleRate = if (g.sampleRate > 0) g.sampleRate else 44100
+            r.audioBitrate = 128_000
+        }
+        // 竖拍的手机视频带旋转标记：照原样带过去
+        g.getVideoMetadata("rotate")?.let { r.setVideoMetadata("rotate", it) }
+        r.start()
+        try {
+            var frames = 0
+            while (true) {
+                val f = g.grab() ?: break
+                if (f.image != null) frames++
+                r.record(f)
+            }
+            return frames > 0
+        } finally {
+            runCatching { r.stop() }
+            runCatching { r.release() }
+        }
+    } finally {
+        runCatching { g.stop() }
+        runCatching { g.release() }
+    }
+}
+
 /** 用 FFmpeg（bytedeco javacv）按时间均匀取 count 张画面，JPEG，长边不超过 maxSide。 */
 internal object VideoFrames {
     fun grab(file: java.io.File, count: Int, maxSide: Int): Pair<List<ByteArray>, Double>? {
@@ -165,7 +220,41 @@ internal object VideoFrames {
     }
 }
 
-actual fun localVideoAudio(file: java.io.File, maxSeconds: Int): Pair<ByteArray, Double>? = null
+/**
+ * 声音也用程序带的 FFmpeg 解（2026-11-04 加音频附件：mp3、m4a、amr、wav……都要听写）：重采样成 16k 单声道 16 位 PCM。
+ * 解不了返回 null，视频照旧退回 Edge 取声音。
+ */
+actual fun localVideoAudio(file: java.io.File, maxSeconds: Int): Pair<ByteArray, Double>? = try {
+    org.bytedeco.ffmpeg.global.avutil.av_log_set_level(org.bytedeco.ffmpeg.global.avutil.AV_LOG_ERROR)
+    val g = org.bytedeco.javacv.FFmpegFrameGrabber(file)
+    try {
+        g.sampleRate = 16000
+        g.audioChannels = 1
+        g.sampleFormat = org.bytedeco.ffmpeg.global.avutil.AV_SAMPLE_FMT_S16
+        g.start()
+        if (g.audioChannels <= 0) null else {
+            val seconds = g.lengthInTime / 1_000_000.0
+            val out = java.io.ByteArrayOutputStream()
+            val limit = maxSeconds.toLong() * 16000 * 2
+            while (out.size() < limit) {
+                val f = g.grabSamples() ?: break
+                val buf = f.samples?.firstOrNull() as? java.nio.ShortBuffer ?: continue
+                val n = buf.remaining()
+                val bb = java.nio.ByteBuffer.allocate(n * 2).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                for (i in 0 until n) bb.putShort(buf.get(buf.position() + i))
+                out.write(bb.array())
+            }
+            val pcm = out.toByteArray().let { if (it.size > limit) it.copyOf(limit.toInt()) else it }
+            if (pcm.isEmpty()) null else pcm to (if (seconds > 0) seconds else pcm.size / 32000.0)
+        }
+    } finally {
+        runCatching { g.stop() }
+        runCatching { g.release() }
+    }
+} catch (e: Throwable) {
+    if (e is VirtualMachineError && e !is OutOfMemoryError) throw e
+    null
+}
 
 private val home get() = java.io.File(System.getProperty("user.home"))
 

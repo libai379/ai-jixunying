@@ -513,8 +513,16 @@ data class Attachment(
     val isVideo: Boolean get() = kind == AttachmentKind.DOCUMENT &&
         (mime.startsWith("video/") || name.substringAfterLast('.', "").lowercase() in VIDEO_EXTS)
 
+    /** 音频（2026-11-04 用户：「音频文件，我上传不了」）：不抽文字，发出去时听写成字；能听的模型（千问全模态）再直接带上原声。 */
+    val isAudio: Boolean get() = kind == AttachmentKind.DOCUMENT && !isVideo &&
+        (mime.startsWith("audio/") || name.substringAfterLast('.', "").lowercase() in AUDIO_EXTS)
+
+    /** 要先「读」一遍的（视频取画面和声音，音频听写）。 */
+    val isMedia: Boolean get() = isVideo || isAudio
+
     companion object {
         val VIDEO_EXTS = setOf("mp4", "mov", "m4v", "webm", "mkv", "avi")
+        val AUDIO_EXTS = setOf("mp3", "wav", "m4a", "aac", "amr", "3gp", "3gpp", "ogg", "opus", "flac", "wma")
     }
 }
 

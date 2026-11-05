@@ -108,8 +108,10 @@ fun DeviceMenu(ctl: AppController, state: com.guixing.jixunying.model.AppState, 
             Modifier.size(34.dp).clip(CircleShape).background(MaterialTheme.colorScheme.surface)
                 .border(1.dp, Ext.c.border, CircleShape)
                 .combinedClickable(onLongClick = { open = true }) {
-                    if (canToggle) ctl.hub.useRemote.value = !onRemote
-                    else { ctl.openSettings(SettingsTab.DEVICES); onNavigate() }
+                    if (canToggle) {
+                        if (onRemote) ctl.hub.useRemote.value = false
+                        else ctl.hub.switchToRemote()?.let { ctl.toast(it) }
+                    } else { ctl.openSettings(SettingsTab.DEVICES); onNavigate() }
                 },
             contentAlignment = Alignment.Center,
         ) {
@@ -138,7 +140,7 @@ fun DeviceMenu(ctl: AppController, state: com.guixing.jixunying.model.AppState, 
                     },
                     leadingIcon = { Icon(Icons.Rounded.Computer, null, Modifier.size(18.dp)) },
                     trailingIcon = { if (onRemote) Icon(Icons.Rounded.Check, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary) },
-                    onClick = { open = false; ctl.hub.useRemote.value = true },
+                    onClick = { open = false; ctl.hub.switchToRemote()?.let { ctl.toast(it) } },
                 )
             }
             androidx.compose.material3.HorizontalDivider(color = Ext.c.border)
@@ -415,7 +417,7 @@ fun PhoneDevicesPage(ctl: AppController) {
             }
             Spacer(Modifier.height(12.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(onClick = { ctl.hub.useRemote.value = true }) { Text("切到电脑") }
+                OutlinedButton(onClick = { ctl.hub.switchToRemote()?.let { ctl.toast(it) } }) { Text("切到电脑") }
                 TextButton(onClick = { ctl.hub.unpair() }, colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)) { Text("取消配对") }
             }
         }

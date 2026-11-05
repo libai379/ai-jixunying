@@ -987,7 +987,7 @@ class WeixinBridge(
             }
             val body = Quotes.clip((partial?.let { Quotes.resolvePartial(full, it) } ?: full).trim())
             val labels = atts.joinToString("\n") { a ->
-                "[" + (if (a.kind != AttachmentKind.DOCUMENT) "图片" else if (a.isVideo) "视频" else "文件") + "：" + a.name + "]"
+                "[" + (if (a.kind != AttachmentKind.DOCUMENT) "图片" else if (a.isVideo) "视频" else if (a.isAudio) "音频" else "文件") + "：" + a.name + "]"
             }
             val line = listOf(body, labels).filter { it.isNotEmpty() }.joinToString("\n")
                 .ifEmpty { "（这条的附件在另一台设备上，这里看不到）" }
