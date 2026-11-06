@@ -1259,6 +1259,20 @@ private fun AboutPage(ctl: AppController) {
     PageHeader("关于", "AI集训营 ${com.guixing.jixunying.model.APP_VERSION}")
     UpdateCard(ctl)
     Spacer(Modifier.height(12.dp))
+    // 引导随时能再看（2026-11-06 用户：「万一哪个功能找不到了，可以有迹可循」）
+    SectionCard {
+        Text("功能介绍", style = MaterialTheme.typography.titleSmall)
+        Text("各个功能是做什么的、在哪儿找；更新以后新加了什么", style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
+        Spacer(Modifier.height(8.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            SpringButton("看功能介绍") { ctl.guide = "tour" }
+            if (Guide.whatsNew.containsKey(Guide.versionKey())) {
+                Spacer(Modifier.width(8.dp))
+                androidx.compose.material3.OutlinedButton(onClick = { ctl.guide = "new" }) { Text("这一版新加了什么") }
+            }
+        }
+    }
+    Spacer(Modifier.height(12.dp))
     LogCard(ctl)
     Spacer(Modifier.height(12.dp))
     SectionCard {

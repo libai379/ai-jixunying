@@ -186,6 +186,8 @@ sealed interface Command {
     @Serializable data class Stop(val convId: String) : Command
     @Serializable data class DeleteMessage(val convId: String, val messageId: String) : Command
     @Serializable data class Regenerate(val convId: String, val messageId: String, val fromPhone: Boolean = false) : Command
+    /** 换另一种记忆再答一次（2026-11-06）：原来那条留着，同一位成员用 memoryMode 这种记忆对同一个问题再答一条，放在一起比。 */
+    @Serializable data class AnswerAgain(val convId: String, val messageId: String, val memoryMode: String, val fromPhone: Boolean = false) : Command
     /**
      * 对话页：AI 要读收录范围外的文件，用户批准或拒绝（2026-10-17）。remember = "dir"：允许并且这个文件夹在这个对话里以后不再问。
      * 2026-10-28 起手机发来的 remember 也照办（电脑上打开「允许手机用 Code 栏」时，PhoneGate）。

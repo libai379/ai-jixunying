@@ -566,6 +566,24 @@ class ShotsTest {
         scene.close()
     }
 
+    /** 两种记忆的按钮、新手引导（2026-11-06）。只在设了 JXY_SHOTS 时跑：画成 memguide-*.png。 */
+    @Test
+    fun memoryAndGuideShots() {
+        if (out == null) return
+        out.mkdirs()
+        val tmp = tempDir("jxy-memguide")
+        val hub = Hub(seed(File(tmp, "data"), File(tmp, "文档").apply { mkdirs() }))
+        val phone = PhonePlatform()
+        val desktop = DesktopPlatform(fileLog = false) { null }
+        shoot("memguide-phone-composer", 720, 1600, 2f, hub, phone, "conv:c1")
+        shoot("memguide-desktop-composer", 1280, 820, 1f, hub, desktop, "conv:c1")
+        shoot("memguide-phone-tour", 720, 1600, 2f, hub, phone, "settings:ABOUT#guide")
+        shoot("memguide-phone-whatsnew", 720, 1600, 2f, hub, phone, "settings:ABOUT#whatsnew")
+        shoot("memguide-desktop-tour", 1280, 820, 1f, hub, desktop, "settings:ABOUT#guide")
+        shoot("memguide-phone-about", 720, 1600, 2f, hub, phone, "settings:ABOUT")
+        shoot("memguide-phone-memory", 720, 1600, 2f, hub, phone, "settings:MEMORY")
+    }
+
     /** 离屏点几下、滚几下再截图（不碰真屏幕）：每一步是 (位置, 滚轮量)，滚轮量为 0 就是点一下。 */
     @OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
     private fun shootSteps(name: String, hub: Hub, platform: Platform, start: String, steps: List<Pair<Offset, Float>>) {
@@ -634,7 +652,7 @@ class ShotsTest {
         val hub = Hub(seed(File(tmp, "data"), File(tmp, "文档").apply { mkdirs() }))
         val phone = PhonePlatform()
         val pages = listOf("settingshome", "conv:c1#drawer") + com.guixing.jixunying.ui.SettingsTab.entries.map { "settings:${it.name}" } +
-            listOf("settings:APPEARANCE#tune", "settings:MEMORY#tidy", "settings:MEMORY#tidystrip")
+            listOf("settings:APPEARANCE#tune", "settings:MEMORY#tidy", "settings:MEMORY#tidystrip", "settings:ABOUT#guide", "settings:ABOUT#whatsnew")
         val problems = mutableListOf<String>()
         var cases = 0
         for (wDp in listOf(220, 320, 360)) for (font in listOf(1f, 2f)) for (start in pages) {

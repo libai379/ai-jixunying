@@ -4,6 +4,7 @@ import com.guixing.jixunying.client.Backend
 import com.guixing.jixunying.client.ClientStore
 import com.guixing.jixunying.client.ConnState
 import com.guixing.jixunying.model.AppState
+import com.guixing.jixunying.model.MemoryUse
 import com.guixing.jixunying.model.AccountInfo
 import com.guixing.jixunying.model.Attachment
 import com.guixing.jixunying.model.AttachmentKind
@@ -1654,6 +1655,7 @@ class Engine(
             CommandResult()
         }
         is Command.Regenerate -> regenerate(c.convId, c.messageId, c.fromPhone)
+        is Command.AnswerAgain -> answerAgain(c.convId, c.messageId, c.memoryMode, c.fromPhone)
         is Command.ChatDecide -> {
             val w = chatWaitings[c.stepId] ?: return CommandResult(false, "这一步已经不在等你了")
             if (w.first != c.convId) return CommandResult(false, "这一步已经不在等你了")
@@ -2841,7 +2843,10 @@ class Engine(
         if (looksSensitive(clean)) return "这条看起来是密码、Key、证件号之类的敏感信息，没有记。请提醒用户敏感信息不要放进记忆。"
         var result = "已记住：$clean"
         updateState { s ->
+            // 联想记忆只带了挑出来的几条，AI 不知道别的话题里早记过，会换个话题名再记一遍（2026-11-06）：这时跨话题也查重
+            val recallConv = convId.isNotBlank() && memoryModeOf(s.conversation(convId)) == "recall"
             val i = s.memories.indexOfFirst { it.topic == topic && Recorder.similar(it.text, clean) }
+                .takeIf { it >= 0 || !recallConv } ?: s.memories.indexOfFirst { Recorder.similar(it.text, clean) }
             val item = MemoryItem(newId(), clean, kind, source, now(), now(), topic = topic, convId = convId,
                 messageId = ask?.id.orEmpty(), quote = ask?.content?.trim()?.take(200).orEmpty())
             if (i >= 0) {
@@ -4266,6 +4271,27 @@ class Engine(
         return CommandResult()
     }
 
+    /**
+     * 换另一种记忆再答一次（2026-11-06，用户：「AI 可能自己会觉得哪种好、哪种不好，我也会觉出来哪种好、哪种不好」）：
+     * 原来那条留着，同一位成员只看到那个问题为止（看不到第一次的回答），用另一种记忆再答一条，排在后面。
+     */
+    private suspend fun answerAgain(convId: String, messageId: String, memoryMode: String, fromPhone: Boolean = false): CommandResult {
+        if (!state.settings.memory.enabled) return CommandResult(false, "长期记忆关着：到 设置 → 记忆 打开才有两种记忆可比")
+        val all = snapshot(convId)
+        val idx = all.indexOfFirst { it.id == messageId }
+        if (idx < 0) return CommandResult(false, "消息不存在")
+        val old = all[idx]
+        if (old.role != Role.AI || old.senderId == PAINTER_ID || old.senderId == VIDEO_ID || old.stage.isNotEmpty() || old.senderId == CHAIR_ID)
+            return CommandResult(false, "只有成员的普通回答能换记忆再答")
+        val m = state.member(old.senderId) ?: return CommandResult(false, "这位成员已经不在了")
+        val prev = all.subList(0, idx).lastOrNull { it.role == Role.USER } ?: return CommandResult(false, "找不到这条回答的问题")
+        val mode = if (memoryMode == "recall") "recall" else "full"
+        launchFor(convId) { withContext(if (fromPhone) PhoneTurn() else kotlin.coroutines.EmptyCoroutineContext) {
+            reply(convId, m, cutoffId = prev.id, independent = false, calledBy = null, memoryMode = mode)
+        } }
+        return CommandResult(message = if (mode == "recall") "用联想记忆再答一次" else "用完整记忆再答一次")
+    }
+
     /** 自动模式下画图失败过的模型（比如这个 Key 没开通画图），半小时内排到后面。 */
     private val imageFailures = ConcurrentHashMap<String, Long>()
 
@@ -5010,7 +5036,7 @@ class Engine(
     }
 
     /** 让一位成员发言，返回它的消息（失败返回 null）。 */
-    private suspend fun reply(convId: String, member: Member, cutoffId: String?, independent: Boolean, calledBy: String?): Message? {
+    private suspend fun reply(convId: String, member: Member, cutoffId: String?, independent: Boolean, calledBy: String?, memoryMode: String? = null): Message? {
         val conv = state.conversation(convId) ?: return null
         val provider = state.provider(member.providerId)
         val msg = Message(newId(), convId, Role.AI, member.id, status = MsgStatus.STREAMING, createdAt = now(),
@@ -5046,6 +5072,9 @@ class Engine(
         val officialSearch = if (wantSearch) officialSearchFor(provider) else null
         val fnSearch = wantSearch && native == NativeSearch.NONE
         val memOn = state.settings.memory.enabled
+        // 两种记忆（2026-11-06）：完整记忆照旧；联想记忆按眼下这几句话挑相关的（Recorder.recall），答完记一笔谁被想起
+        val memMode = if (!memOn) "" else memoryMode ?: memoryModeOf(conv)
+        val recalled = if (memMode == "recall") Recorder.recall(state.memories, state.memoryUse, conv.memoryTopic, recentUserText(convId, cutoffId), now()) else null
         // 微信对话：别的手机绑的微信默认只聊天，不碰电脑上的文件（2026-10-30 多微信；设置 → 微信 每个微信一个开关）
         val wxChatOnly = conv.channel.startsWith("weixin:") && weixin?.readFilesFor(conv.channel.removePrefix("weixin:")) == false
         val docsOn = docsUsable() && !wxChatOnly
@@ -5063,12 +5092,13 @@ class Engine(
                 canSeeImages = model.vision, canEditImage = model.vision && useTools, independentRound = independent, calledBy = calledBy,
                 canRedraw = redrawOn, canSpeak = ttsOn && useTools, retryBudget = state.settings.imageGen.retryBudget,
                 nativeSearch = native != NativeSearch.NONE, hasImageModel = hasImageModel,
-                memories = if (memOn) Recorder.forPrompt(state.memories, conv.memoryTopic) else emptyList(), canRemember = memOn && useTools,
-                memoryTopic = if (memOn) conv.memoryTopic else "",
-                otherTopics = if (memOn) Recorder.topics(state.memories).filter { it != conv.memoryTopic } else emptyList(),
+                memories = if (!memOn) emptyList() else recalled?.items ?: Recorder.forPrompt(state.memories, conv.memoryTopic), canRemember = memOn && useTools,
+                memoryTopic = if (memOn) conv.memoryTopic else "", memoryRecall = recalled != null,
+                otherTopics = if (!memOn) emptyList() else if (recalled != null) Recorder.topics(state.memories) else Recorder.topics(state.memories).filter { it != conv.memoryTopic },
                 docCount = if (docsOn && useTools) docs.count else 0, deviceLabel = if (isPhone) "这台手机" else "这台电脑",
                 canMakeFiles = officeOn && useTools, canReadFiles = filesOn && useTools, canVideo = hasVideo && useTools, canCalendar = useTools)
             working += buildJsonObject { put("role", "system"); put("content", sys) }
+            if (memMode.isNotEmpty()) updateMessage(convId, msg.id, persist = false) { it.copy(memoryMode = memMode) }
             working += buildHistory(convId, member, cutoffId, excludeId = msg.id, vision = model.vision)
             remindInstructions(working)
             noteDates(working, convId, cutoffId, msg.id)
@@ -5195,9 +5225,10 @@ class Engine(
             if (thinkingRefused) emit(Event.Notice("「${member.name}」用的 ${model.id} 不认「${Thinking.label(member.thinking)}」的参数，这次按它默认的方式回答了"))
             val done = updateMessage(convId, msg.id) {
                 heldHeads.remove(msg.id)
-                it.copy(content = cleanReply(it.content, member), status = MsgStatus.DONE, usage = usage,
+                it.copy(content = cleanReply(it.content, member), status = MsgStatus.DONE, usage = usage, memoryMode = memMode,
                     modelLabel = if (thinkingRefused) Prompts.modelLabel(state, member) else it.modelLabel)
             }
+            recalled?.activated?.takeIf { it.isNotEmpty() }?.let { markRecalled(it) }
             return done
         } catch (e: BusySuperseded) {
             // 等服务商恢复时用户又说话了：这条撤掉，新的一轮把两句一起答
@@ -6545,6 +6576,7 @@ class Engine(
                 val topic = Recorder.cleanTopic(args.str("topic").orEmpty())
                 val q = args.str("query").orEmpty().trim()
                 val hits = recallMemory(topic, q)
+                if (hits.isNotEmpty() && memoryModeOf(state.conversation(convId)) == "recall") markRecalled(hits.map { it.id })
                 updateMessage(convId, msgId, persist = false) { it.copy(tools = it.tools + ToolStep("memory", "查记忆：" + topic.ifBlank { q }.take(60), ok = hits.isNotEmpty())) }
                 if (hits.isEmpty()) "长期记忆里没有" + (if (topic.isNotBlank()) "话题「$topic」的" else "和「$q」相关的") + "记忆。现有话题：" +
                     Recorder.topics(state.memories).joinToString("、").ifBlank { "（没有）" }
@@ -6659,6 +6691,29 @@ class Engine(
 
     private fun dayOf(millis: Long): String =
         java.time.Instant.ofEpochMilli(millis).atZone(java.time.ZoneId.of("Asia/Shanghai")).toLocalDate().let { "${it.year}年${it.monthValue}月${it.dayOfMonth}日" }
+
+    /** 这个对话用哪种记忆："recall" 联想记忆，别的都算完整记忆（"full"）。 */
+    private fun memoryModeOf(conv: Conversation?): String =
+        (conv?.memoryMode?.ifEmpty { null } ?: state.settings.memory.mode).takeIf { it == "recall" } ?: "full"
+
+    /** 联想记忆比对用：最近三句用户的话（引用的那段去掉），加上对话标题。 */
+    private fun recentUserText(convId: String, cutoffId: String?): String {
+        val all = snapshot(convId)
+        val end = cutoffId?.let { id -> all.indexOfFirst { it.id == id } + 1 }?.takeIf { it > 0 } ?: all.size
+        val users = all.subList(0, end).filter { it.role == Role.USER }.takeLast(3).map { Quotes.spoken(it.content).ifBlank { it.content }.take(600) }
+        return (listOfNotNull(state.conversation(convId)?.title) + users).joinToString("\n")
+    }
+
+    /** 联想记忆：这几条被想起了一次（只影响以后的排序）。删掉的记忆的记录顺手清掉。 */
+    private fun markRecalled(ids: List<String>) {
+        val t = now()
+        updateState { s ->
+            val alive = s.memories.map { it.id }.toSet()
+            val use = s.memoryUse.filterKeys { it in alive }.toMutableMap()
+            ids.filter { it in alive }.forEach { id -> val u = use[id]; use[id] = MemoryUse(t, (u?.count ?: 0) + 1) }
+            s.copy(memoryUse = use)
+        }
+    }
 
     private fun lastUserText(convId: String, cutoffId: String?): String {
         val all = snapshot(convId)

@@ -100,7 +100,17 @@ class LiveAnswerStyleTest {
                 for (c in cases.filter { c -> pick == null || pick.any { it in c.name } }) {
                     // 本应用：单聊，按题开关联网
                     val conv = e.call(Command.CreateConversation(listOf(m.id), c.name)).data
-                    e.call(Command.UpdateConversation(e.state.conversation(conv)!!.copy(webSearch = c.search)))
+                    // JXY_LIVE_STYLE_MEMORY=recall / full：这一轮用哪种记忆（2026-11-06 两种记忆）
+                    val memMode = System.getenv("JXY_LIVE_STYLE_MEMORY").orEmpty()
+                    e.call(Command.UpdateConversation(e.state.conversation(conv)!!.copy(webSearch = c.search, memoryMode = memMode)))
+                    if (memMode == "recall") {
+                        val r = com.guixing.jixunying.engine.Recorder.recall(e.state.memories, e.state.memoryUse, "", c.turns.last(), System.currentTimeMillis())
+                        say("〔联想记忆挑了 ${r.items.size} 条（其中按眼下挑的 ${r.activated.size} 条，${r.items.sumOf { it.text.length }} 字）：" +
+                            r.items.filter { it.id in r.activated }.joinToString("；") { it.text.take(40) } + "〕")
+                    } else if (memMode == "full") {
+                        val f = com.guixing.jixunying.engine.Recorder.forPrompt(e.state.memories, "")
+                        say("〔完整记忆带了 ${f.size} 条，${f.sumOf { it.text.length }} 字〕")
+                    }
                     var app = ""
                     if (c.all) say("\n—— ${c.name} · 本应用")
                     for (t in c.turns) {

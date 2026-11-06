@@ -70,6 +70,8 @@ object Prompts {
         canRemember: Boolean = false,
         /** 这个对话属于哪个记忆话题（memories 里已经带上了这个话题的）；空 = 不属于任何话题。 */
         memoryTopic: String = "",
+        /** 联想记忆（2026-11-06）：memories 是按眼下聊的挑出来的，不是全部（可能有别的话题的）。 */
+        memoryRecall: Boolean = false,
         /** 别的话题的名字：设定里不带内容，AI 用 recall_memory 查。 */
         otherTopics: List<String> = emptyList(),
         /** 本机文档库里有几个文档（0 = 不能查文档）。 */
@@ -135,7 +137,14 @@ object Prompts {
             appendLine("- 聊天记录里每句话前面都标着是北京时间几点说的（你自己说过的标在〔〕里），最新那句的时间就是现在；看得出隔了多久、哪句先哪句后。你回答时不用自己写时间。")
             val aboutMe = memories.filter { it.topic.isBlank() }
             val topicMems = memories.filter { it.topic.isNotBlank() }
-            if (memories.isNotEmpty() || otherTopics.isNotEmpty()) {
+            if (memoryRecall && (memories.isNotEmpty() || otherTopics.isNotEmpty())) {
+                appendLine()
+                appendLine("【这会儿想起来的长期记忆】（所有 AI 成员共用；按${profile.name}眼下聊的从记忆里挑出来的，不是全部；括号里是哪天记的）")
+                memories.forEach { appendLine("- [${it.kind}]" + (if (it.topic.isNotBlank()) "[${it.topic}]" else "") + " ${it.text}${recorded(it.updatedAt, today)}") }
+                if (canRemember) appendLine("没想起来的不等于没有：用户提到以前说过的事、这里又没有，用 recall_memory 查" +
+                    (if (otherTopics.isNotEmpty()) "（现有话题：${otherTopics.take(30).joinToString("、")}）" else "") + "。")
+                appendLine("用法：自然地用上，不用每次复述，也不要说「根据记忆」；和用户现在说的冲突时以现在为准" + if (canRemember) "，并用 remember 更新。" else "。")
+            } else if (memories.isNotEmpty() || otherTopics.isNotEmpty()) {
                 appendLine()
                 if (aboutMe.isNotEmpty()) {
                     appendLine("【关于${profile.name}的长期记忆】（以前的对话里记下的，所有 AI 成员共用；括号里是哪天记的）")

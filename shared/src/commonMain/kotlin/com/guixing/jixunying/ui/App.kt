@@ -133,6 +133,8 @@ class AppController(
     var focusMessageId by mutableStateOf<String?>(null)
     var settingsTab by mutableStateOf<SettingsTab?>(null)
     var showNewChat by mutableStateOf(false)
+    /** 开着的引导（2026-11-06）："tour" 功能介绍、"new" 这一版新加的；null 不开。 */
+    var guide by mutableStateOf<String?>(null)
     /** 电脑快捷键（2026-10-24）：Ctrl+K 每按一次加一，侧栏搜索框看到变了就打开、拿焦点。 */
     var searchTick by mutableStateOf(0)
     /** Ctrl+F：在当前对话里找（对话页顶上出一条查找栏）。 */
@@ -331,6 +333,20 @@ fun App(hub: Hub, platform: Platform, debugStart: String? = null) {
                 }
                 // 切「本机 / 电脑」时引擎换了：正在读的那条停下来，别再往下放
                 DisposableEffect(backend) { onDispose { ctl.speech.stop() } }
+                // 新手引导 / 新版介绍（2026-11-06）：等状态到了再判断是新装还是更新；开发截图（带 -Djxy.start）时不自己弹，#guide / #whatsnew 才弹
+                LaunchedEffect(Unit) {
+                    when (debugStart?.substringAfter('#', "")) {
+                        "guide" -> { ctl.guide = "tour"; return@LaunchedEffect }
+                        "whatsnew" -> { ctl.guide = "new"; return@LaunchedEffect }
+                    }
+                    if (debugStart != null) return@LaunchedEffect
+                    kotlinx.coroutines.delay(1_500)
+                    Guide.due(platform.getPref(Guide.PREF), backend.store.state.value)?.let { ctl.guide = it }
+                        ?: run { if (platform.getPref(Guide.PREF) == null) platform.setPref(Guide.PREF, Guide.versionKey()) }
+                }
+                ctl.guide?.let { mode ->
+                    GuideDialog(mode, onClose = { platform.setPref(Guide.PREF, Guide.versionKey()); ctl.guide = null }, onTour = { ctl.guide = "tour" })
+                }
                 // 开发截图用：conv:编号#speak = 打开会话后立刻读最后一条回答（看「停止」「合成中…」的样子）
                 LaunchedEffect(backend, ctl.debugDialog) {
                     if (ctl.debugDialog != "speak") return@LaunchedEffect

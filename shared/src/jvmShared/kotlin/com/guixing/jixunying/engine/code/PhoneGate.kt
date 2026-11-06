@@ -42,6 +42,7 @@ object PhoneGate {
         when (c) {
             is Command.SendMessage -> return Verdict(c.copy(paths = emptyList(), fromPhone = true))
             is Command.Regenerate -> return Verdict(c.copy(fromPhone = true))
+            is Command.AnswerAgain -> return Verdict(c.copy(fromPhone = true))
             // 2026-10-28 起手机和电脑一样（见上）：对话页批准时记住、改「不用再问」的文件夹，开关打开就放行
             is Command.ChatDecide -> return if (s.settings.code.allowPhone) Verdict(c) else Verdict(c.copy(remember = ""))
             is Command.ChatSetGranted -> return if (s.settings.code.allowPhone) Verdict(c) else refuse(c, "对话里不用再问的文件夹只能在电脑上改（或者在电脑上打开「允许手机用 Code 栏」）")

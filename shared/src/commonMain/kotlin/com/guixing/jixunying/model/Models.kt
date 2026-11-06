@@ -157,7 +157,17 @@ data class MemorySettings(
     val aiVerify: Boolean = true,
     /** 统计「准确率」时，用户没标的题按 AI 核实的结论算（用户标的永远优先）。 */
     val countAiVerdict: Boolean = true,
+    /**
+     * 新对话默认用哪种记忆（2026-11-06，用户看了抖音「小凌」的识海拆解后定的：两种并存、能随时切换比较）：
+     * "" / "full" = 完整记忆（原来的：关于你的整份带上，别的话题按需查）；"recall" = 联想记忆（按眼下聊的挑相关的带，久不用的往后排）。
+     * 两种用的是同一份记忆，联想记忆另外记「每条最近什么时候用上、用过几次」（AppState.memoryUse），不改记忆内容。
+     */
+    val mode: String = "",
 )
+
+/** 联想记忆用的：这条记忆最近一次被想起是什么时候、一共被想起几次（只影响排序，不改记忆内容）。 */
+@Serializable
+data class MemoryUse(val last: Long = 0, val count: Int = 0)
 
 @Serializable
 data class MemoryItem(
@@ -462,6 +472,8 @@ data class Conversation(
     /** 这个对话属于哪个记忆话题（记忆二期）：记录员自动认；用户在对话设置里改过就以用户的为准（memoryTopicByUser）。 */
     val memoryTopic: String = "",
     val memoryTopicByUser: Boolean = false,
+    /** 这个对话用哪种记忆（2026-11-06）：""= 跟设置里的默认；"full" 完整记忆；"recall" 联想记忆。输入框旁的按钮随时切。 */
+    val memoryMode: String = "",
     /** 对话本身（标题、成员、置顶、归档……）最后改的时间（两端同步用，2026-10-27）；updatedAt 是最后一条消息的时间。 */
     val editedAt: Long = 0,
 ) {
@@ -613,6 +625,8 @@ data class Message(
     val channelParts: List<ChannelPart> = emptyList(),
     /** 用户引用的那条消息带的附件（文件还是原来那条的，不另存一份）：模型看得到，界面上显示在这句话上面（2026-11-01）。 */
     val quoted: List<Attachment> = emptyList(),
+    /** 这条回答用的哪种记忆（2026-11-06）："full" 完整记忆、"recall" 联想记忆、"" 没带记忆。同一对话里两种都有时界面上标出来，方便比较。 */
+    val memoryMode: String = "",
 )
 
 /** 和这台电脑配对过的手机。key 是两边共享的加密密钥（Base64），只存在电脑和那台手机上。 */
@@ -647,6 +661,8 @@ data class AppState(
     val memories: List<MemoryItem> = emptyList(),
     /** 删掉的记忆（编号 + 删的时间），手机和电脑互相同步时让删除也跟过去（engine/MemorySync.kt）；留 90 天。 */
     val memoryDeleted: List<MemoryTombstone> = emptyList(),
+    /** 联想记忆的使用记录（记忆编号 → 最近想起、次数）。每台设备各记各的，不跟着记忆同步。 */
+    val memoryUse: Map<String, MemoryUse> = emptyMap(),
     /** 本机文档索引的情况（界面显示用）。 */
     val docs: DocIndexInfo = DocIndexInfo(),
     /** 微信助理的情况（界面显示用；手机上没有，一直是空的）。 */

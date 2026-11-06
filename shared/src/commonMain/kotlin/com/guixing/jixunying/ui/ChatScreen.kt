@@ -67,6 +67,7 @@ import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material.icons.rounded.TableChart
 import androidx.compose.material.icons.rounded.Tune
+import androidx.compose.material.icons.rounded.SwapHoriz
 import androidx.compose.material.icons.rounded.VolumeUp
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -292,6 +293,8 @@ private fun MessageList(ctl: AppController, state: AppState, conv: Conversation,
     // 每个对话各记各的位置（以前所有对话共用一份：在一个对话里往上翻过，之后打开别的对话都停在上面）
     val listState = remember(conv.id) { LazyListState() }
     val stanceOf = remember(topics) { topics.flatMap { t -> t.entries.map { e -> e.messageId to (t to e) } }.groupBy({ it.first }, { it.second }) }
+    // 两种记忆都答过的对话：每条回答标上用的哪种（2026-11-06，方便比较）
+    val bothMemories = remember(messages) { messages.map { it.memoryMode }.filter { it.isNotEmpty() }.distinct().size > 1 }
     val last = messages.lastOrNull()
     // 倒着排：0 是底部留白，1 是最新一条，最上面是开头那行提示
     val newestFirst = remember(messages) { messages.asReversed() }
@@ -335,7 +338,7 @@ private fun MessageList(ctl: AppController, state: AppState, conv: Conversation,
         items(newestFirst, key = { it.id }) { m ->
             Box(Modifier.widthIn(max = CHAT_MAX_WIDTH).fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)
                 .then(if (m.id == highlightId) Modifier.border(2.dp, MaterialTheme.colorScheme.primary, RoundedCornerShape(12.dp)).padding(6.dp) else Modifier)) {
-                if (m.role == Role.USER) UserMessage(ctl, state, m) else AiMessage(ctl, state, m, stanceOf[m.id].orEmpty(), onStance)
+                if (m.role == Role.USER) UserMessage(ctl, state, m) else AiMessage(ctl, state, m, stanceOf[m.id].orEmpty(), onStance, bothMemories)
             }
         }
         item(key = "top") {
@@ -407,7 +410,7 @@ private fun UserMessage(ctl: AppController, state: AppState, m: Message) {
 @Composable
 private fun AiMessage(ctl: AppController, state: AppState, m: Message,
                       stances: List<Pair<com.guixing.jixunying.model.StanceTopic, com.guixing.jixunying.model.StanceEntry>> = emptyList(),
-                      onStance: (String) -> Unit = {}) {
+                      onStance: (String) -> Unit = {}, bothMemories: Boolean = false) {
     val member = state.member(m.senderId)
     val painter = m.senderId == PAINTER
     val videoMaker = m.senderId == VIDEOMAKER
@@ -434,6 +437,10 @@ private fun AiMessage(ctl: AppController, state: AppState, m: Message,
                 if (review) { Pill(if (folded) "互评 · 点开看" else "互评", MaterialTheme.colorScheme.secondary) { folded = !folded }; Spacer(Modifier.width(6.dp)) }
                 if (chair) { Pill("会审汇总", Ext.c.success); Spacer(Modifier.width(6.dp)) }
                 if (m.modelLabel.isNotBlank()) Pill(m.modelLabel, Ext.c.subtle)
+                if (bothMemories && m.memoryMode.isNotEmpty()) {
+                    Spacer(Modifier.width(6.dp))
+                    Pill(MemoryModes.name(m.memoryMode), if (m.memoryMode == "recall") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondary)
+                }
             }
             // 立场档案：这条回答在哪个议题上是什么立场、是不是改口（点开看这道题大家怎么说）
             stances.forEach { (t, e) ->
@@ -465,6 +472,7 @@ private fun AiMessage(ctl: AppController, state: AppState, m: Message,
             if (m.status == MsgStatus.STOPPED) Text("（已停止）", style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle, modifier = Modifier.padding(top = 4.dp))
             if (sources.isNotEmpty() && m.status != MsgStatus.STREAMING) SourcesRow(sources)
             if (m.status != MsgStatus.STREAMING && !folded) MessageActions(ctl, m, alignEnd = false, canRegenerate = !review && !chair,
+                answerAgain = state.settings.memory.enabled && !review && !chair && !painter && !videoMaker && member != null && m.status == MsgStatus.DONE,
                 export = state.settings.office.exportButtons && !painter && !videoMaker && body.isNotBlank() && m.status == MsgStatus.DONE, body = body)
         }
     }
@@ -778,7 +786,8 @@ private fun ErrorBox(error: String, ctl: AppController) {
 }
 
 @Composable
-private fun MessageActions(ctl: AppController, m: Message, alignEnd: Boolean, canRegenerate: Boolean, export: Boolean = false, body: String = "") {
+private fun MessageActions(ctl: AppController, m: Message, alignEnd: Boolean, canRegenerate: Boolean, export: Boolean = false, body: String = "",
+                           answerAgain: Boolean = false) {
     val clipboard = LocalClipboardManager.current
     val platform = LocalPlatform.current
     // 像豆包的导出：这条回答存成 Word；里面有表格的话，表格存成 Excel
@@ -815,6 +824,13 @@ private fun MessageActions(ctl: AppController, m: Message, alignEnd: Boolean, ca
             ctl.composerDraft = m.convId to (if (who != null) "@$who " else "") + "\n" + head + "\n\n"
         }
         if (canRegenerate) SmallAction(Icons.Rounded.Refresh, "重新回答") { ctl.run(Command.Regenerate(m.convId, m.id)) }
+        // 换另一种记忆再答一次：原来这条留着，新的排在后面，两条放一起比（2026-11-06）
+        if (answerAgain) {
+            val st = ctl.backend.store.state.value
+            val used = m.memoryMode.ifEmpty { MemoryModes.of(st.conversation(m.convId)?.memoryMode.orEmpty(), st.settings.memory.mode) }
+            val other = MemoryModes.other(used)
+            SmallAction(Icons.Rounded.SwapHoriz, "换${MemoryModes.name(other)}再答一次") { ctl.run(Command.AnswerAgain(m.convId, m.id, other)) }
+        }
         SmallAction(Icons.Rounded.Delete, "删除") { ctl.run(Command.DeleteMessage(m.convId, m.id)) }
         m.usage?.let { u ->
             if (u.prompt + u.completion > 0 || u.millis > 0) {
@@ -1267,6 +1283,14 @@ private fun Composer(ctl: AppController, state: AppState, conv: Conversation, ru
                                     ctl.run(Command.UpdateConversation(conv.copy(webSearch = !conv.webSearch)))
                                 }
                                 Spacer(Modifier.width(4.dp))
+                                if (state.settings.memory.enabled) {
+                                    val mm = MemoryModes.of(conv.memoryMode, state.settings.memory.mode)
+                                    MemoryModeToggle(mm, compact = false) {
+                                        val next = MemoryModes.other(mm)
+                                        ctl.run(Command.UpdateConversation(conv.copy(memoryMode = next)), okText = "换成${MemoryModes.name(next)}：${MemoryModes.desc(next)}")
+                                    }
+                                    Spacer(Modifier.width(4.dp))
+                                }
                             } else {
                                 // 手机上三个圆按钮都有底色了，挨着不留缝会粘成一条
                                 Spacer(Modifier.width(6.dp))
@@ -1274,6 +1298,14 @@ private fun Composer(ctl: AppController, state: AppState, conv: Conversation, ru
                                     ctl.run(Command.UpdateConversation(conv.copy(webSearch = !conv.webSearch)), okText = if (conv.webSearch) "联网关了" else "联网开了")
                                 }
                                 Spacer(Modifier.width(6.dp))
+                                if (state.settings.memory.enabled) {
+                                    val mm = MemoryModes.of(conv.memoryMode, state.settings.memory.mode)
+                                    MemoryModeToggle(mm, compact = true) {
+                                        val next = MemoryModes.other(mm)
+                                        ctl.run(Command.UpdateConversation(conv.copy(memoryMode = next)), okText = "换成${MemoryModes.name(next)}")
+                                    }
+                                    Spacer(Modifier.width(6.dp))
+                                }
                             }
                             // 听写：点一下开始录，再点一下停下，认出来的字填进输入框（不直接发）
                             if (platform.canRecord) DictationButton(dictation, "说一段话，变成文字填进输入框（最多 5 分钟，再点一下停下）")
@@ -1370,12 +1402,12 @@ internal fun ComposerIcon(icon: androidx.compose.ui.graphics.vector.ImageVector,
     }
 }
 
-private val PhoneButton = 40.dp
-private val PhoneGlyph = 24.dp
+internal val PhoneButton = 40.dp
+internal val PhoneGlyph = 24.dp
 
 /** 手机上输入框圆按钮底下那层淡底（深色、浅色、开不开玻璃都看得出是个按钮，又不抢发送键）。 */
 @Composable
-private fun composerFill(): Color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.07f)
+internal fun composerFill(): Color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.07f)
 
 /** 横着能滑、右边还有东西没露出来时，右边缘淡出一截，看得出后面还有（2026-10-22，输入框那一排放不下时）。 */
 private fun Modifier.fadeEnd(scroll: androidx.compose.foundation.ScrollState): Modifier = this

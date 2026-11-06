@@ -2,6 +2,7 @@ package com.guixing.jixunying.engine
 
 import com.guixing.jixunying.model.AppState
 import com.guixing.jixunying.model.MemoryItem
+import com.guixing.jixunying.model.MemoryUse
 import com.guixing.jixunying.model.ProviderConfig
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonArray
@@ -247,6 +248,64 @@ object Recorder {
             out += m
         }
         return out
+    }
+
+    /** 联想记忆比对用的字组：中文按相邻两字，英文数字按词（两个字母以上）。 */
+    fun recallGrams(s: String): Set<String> {
+        val out = HashSet<String>()
+        Regex("""[A-Za-z0-9][A-Za-z0-9.+#-]*""").findAll(s).forEach { if (it.value.length >= 2) out += it.value.lowercase() }
+        Regex("""[一-鿿]+""").findAll(s).forEach { m -> val t = m.value; if (t.length >= 2) for (i in 0 until t.length - 1) out += t.substring(i, i + 2) }
+        return out
+    }
+
+    /** 联想记忆挑出来的：要带进设定的几条，和其中算「被想起」的（答完记一笔使用记录）。 */
+    class Recalled(val items: List<MemoryItem>, val activated: List<String>)
+
+    /**
+     * 联想记忆（2026-11-06，借抖音「小凌」识海拆解的两点：几段记忆比谁跟这一刻更相关；久不用的沉下去，聊到了再浮上来）。
+     * 不借的：情绪加权、回忆时改写内容、信念循环——这是干活用的助手，记忆要准；沉下去只影响排序，一个字不改。
+     * - 常驻：钉住的、「关于我」「要求」（身份和回答要求每次都该照着做），按新旧最多 baseChars 字。
+     * - 其余（「偏好」「事实」和所有话题的记忆，不只这个对话的话题）：和眼下这几句话对得上的才有资格，
+     *   分数 = 相关度 × (1 + 用得多又用得近的加成) + 属于这个对话话题的加一点；从高到低挑到 recallChars 字。
+     * 相关度：和搜索结果同一种算法（中文按相邻两字），不调模型、不花钱。
+     */
+    fun recall(items: List<MemoryItem>, use: Map<String, MemoryUse>, topic: String, query: String, now: Long,
+               baseChars: Int = 1500, recallChars: Int = 1500): Recalled {
+        fun fits(budget: Int, list: List<MemoryItem>): List<MemoryItem> {
+            val out = mutableListOf<MemoryItem>()
+            var used = 0
+            for (m in list) {
+                if (used + m.text.length > budget) continue
+                used += m.text.length + 10
+                out += m
+            }
+            return out
+        }
+        val base = fits(baseChars, items.filter { it.topic.isBlank() && (it.pinned || it.kind == "关于我" || it.kind == "要求") }
+            .sortedWith(compareByDescending<MemoryItem> { it.pinned }.thenByDescending { it.updatedAt }))
+        val baseIds = base.map { it.id }.toSet()
+        val dayMs = 86_400_000.0
+        // 词的稀罕程度：好多条记忆里都有的字组（「用户」「一个」）不算数
+        val gramsOf = items.associate { it.id to recallGrams(it.topic + " " + it.text) }
+        val df = HashMap<String, Int>()
+        gramsOf.values.forEach { g -> g.forEach { df[it] = (df[it] ?: 0) + 1 } }
+        val n = items.size.coerceAtLeast(1).toDouble()
+        fun idf(g: String) = kotlin.math.ln(1.0 + n / (df[g] ?: 1))
+        val q = recallGrams(query)
+        val scored = items.filter { it.id !in baseIds }.mapNotNull { m ->
+            val g = gramsOf[m.id].orEmpty()
+            if (g.isEmpty()) return@mapNotNull null
+            // 这条记忆里有分量的字组，眼下的话里提到了几成
+            val rel = g.filter { it in q }.sumOf { idf(it) } / g.sumOf { idf(it) }
+            if (rel <= 0.0) return@mapNotNull null
+            val u = use[m.id]
+            // 用得多、用得近的往前：想起过 n 次加 log(1+n)，按距上次想起的天数衰减（30 天减到 1/e 左右）
+            val boost = if (u == null || u.count == 0) 0.0 else kotlin.math.ln(1.0 + u.count) * kotlin.math.exp(-((now - u.last).coerceAtLeast(0) / dayMs) / 30.0)
+            val sameTopic = if (topic.isNotBlank() && m.topic == topic) 0.15 else 0.0
+            m to (rel * (1.0 + 0.5 * boost) + sameTopic)
+        }.filter { it.second >= 0.12 }.sortedByDescending { it.second }.map { it.first }
+        val picked = fits(recallChars, scored)
+        return Recalled(base + picked, picked.map { it.id })
     }
 
     /** 所有话题名，最近用过的在前。 */
