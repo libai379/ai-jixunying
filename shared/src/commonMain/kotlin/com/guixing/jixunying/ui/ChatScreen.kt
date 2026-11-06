@@ -271,7 +271,7 @@ private fun ChatTopBar(state: AppState, conv: Conversation, wide: Boolean, openD
         IconButton(onClick = onFind, modifier = Modifier.size(36.dp)) { Icon(Icons.Rounded.Search, "在对话里找", Modifier.size(19.dp), tint = Ext.c.subtle) }
         Spacer(Modifier.width(4.dp))
         Row(
-            Modifier.clip(RoundedCornerShape(50)).chipOutline(RoundedCornerShape(50)).clickable(onClick = onSettings)
+            Modifier.guideTarget("convset").clip(RoundedCornerShape(50)).chipOutline(RoundedCornerShape(50)).clickable(onClick = onSettings)
                 .padding(start = 6.dp, end = 10.dp, top = 4.dp, bottom = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -1254,7 +1254,7 @@ private fun Composer(ctl: AppController, state: AppState, conv: Conversation, ru
                         // 10-22 用户：「需要兼容大多数手机的屏幕比例才行」——手机最窄 320dp、分屏窗口最窄 220dp、系统字体最大 200%（安卓规范，见 docs/参考资料.md「手机屏幕尺寸」）
                         val tools = rememberScrollState()
                         Row(Modifier.weight(1f).fadeEnd(tools).horizontalScroll(tools), verticalAlignment = Alignment.CenterVertically) {
-                            Box {
+                            Box(Modifier.guideTarget("plus")) {
                                 var plus by remember { mutableStateOf(ctl.debug("plus")) }
                                 ComposerIcon(Icons.Rounded.Add, "图片、文件、@ 成员、直接画图、直接做视频") { plus = true }
                                 androidx.compose.material3.DropdownMenu(plus, { plus = false }) {
@@ -1279,8 +1279,10 @@ private fun Composer(ctl: AppController, state: AppState, conv: Conversation, ru
                             // 联网：电脑上带字；手机上窄，只留图标（开着时高亮）
                             if (platform.isDesktop) {
                                 Spacer(Modifier.width(4.dp))
-                                ToggleChip("联网", Icons.Rounded.Language, conv.webSearch) {
-                                    ctl.run(Command.UpdateConversation(conv.copy(webSearch = !conv.webSearch)))
+                                Box(Modifier.guideTarget("web")) {
+                                    ToggleChip("联网", Icons.Rounded.Language, conv.webSearch) {
+                                        ctl.run(Command.UpdateConversation(conv.copy(webSearch = !conv.webSearch)))
+                                    }
                                 }
                                 Spacer(Modifier.width(4.dp))
                                 if (state.settings.memory.enabled) {
@@ -1294,8 +1296,10 @@ private fun Composer(ctl: AppController, state: AppState, conv: Conversation, ru
                             } else {
                                 // 手机上三个圆按钮都有底色了，挨着不留缝会粘成一条
                                 Spacer(Modifier.width(6.dp))
-                                ToggleIcon(Icons.Rounded.Language, if (conv.webSearch) "联网：开着（点一下关）" else "联网：关着（点一下开）", conv.webSearch) {
-                                    ctl.run(Command.UpdateConversation(conv.copy(webSearch = !conv.webSearch)), okText = if (conv.webSearch) "联网关了" else "联网开了")
+                                Box(Modifier.guideTarget("web")) {
+                                    ToggleIcon(Icons.Rounded.Language, if (conv.webSearch) "联网：开着（点一下关）" else "联网：关着（点一下开）", conv.webSearch) {
+                                        ctl.run(Command.UpdateConversation(conv.copy(webSearch = !conv.webSearch)), okText = if (conv.webSearch) "联网关了" else "联网开了")
+                                    }
                                 }
                                 Spacer(Modifier.width(6.dp))
                                 if (state.settings.memory.enabled) {
@@ -1308,7 +1312,7 @@ private fun Composer(ctl: AppController, state: AppState, conv: Conversation, ru
                                 }
                             }
                             // 听写：点一下开始录，再点一下停下，认出来的字填进输入框（不直接发）
-                            if (platform.canRecord) DictationButton(dictation, "说一段话，变成文字填进输入框（最多 5 分钟，再点一下停下）")
+                            if (platform.canRecord) Box(Modifier.guideTarget("mic")) { DictationButton(dictation, "说一段话，变成文字填进输入框（最多 5 分钟，再点一下停下）") }
                             // 2026-10-17 对话栏 = Chat + Cowork：AI 改文件要不要先问（电脑上才有；手机上改不了，PhoneGate 也会保留电脑上的）
                             if (platform.isDesktop && !ctl.remoteMode) {
                                 Spacer(Modifier.width(4.dp))

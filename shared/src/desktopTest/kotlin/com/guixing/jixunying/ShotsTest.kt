@@ -577,9 +577,12 @@ class ShotsTest {
         val desktop = DesktopPlatform(fileLog = false) { null }
         shoot("memguide-phone-composer", 720, 1600, 2f, hub, phone, "conv:c1")
         shoot("memguide-desktop-composer", 1280, 820, 1f, hub, desktop, "conv:c1")
-        shoot("memguide-phone-tour", 720, 1600, 2f, hub, phone, "settings:ABOUT#guide")
-        shoot("memguide-phone-whatsnew", 720, 1600, 2f, hub, phone, "settings:ABOUT#whatsnew")
-        shoot("memguide-desktop-tour", 1280, 820, 1f, hub, desktop, "settings:ABOUT#guide")
+        // 新版引导：每一步都画一张（电脑、手机各一套），看圈得准不准、文字框挡不挡
+        for (k in com.guixing.jixunying.ui.Guide.tour.indices) {
+            shoot("coach-desktop-%02d".format(k), 1280, 820, 1f, hub, desktop, "conv:c1#guide:$k", frames = 22)
+            shoot("coach-phone-%02d".format(k), 720, 1600, 2f, hub, phone, "conv:c1#guide:$k", frames = 22)
+        }
+        shoot("coach-phone-whatsnew-00", 720, 1600, 2f, hub, phone, "conv:c1#whatsnew:0", frames = 22)
         shoot("memguide-phone-about", 720, 1600, 2f, hub, phone, "settings:ABOUT")
         shoot("memguide-phone-memory", 720, 1600, 2f, hub, phone, "settings:MEMORY")
     }

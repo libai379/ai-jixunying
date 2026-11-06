@@ -148,10 +148,12 @@ fun Sidebar(ctl: AppController, modifier: Modifier, onNavigate: () -> Unit, onCo
                 horizontalArrangement = Arrangement.SpaceBetween, verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 // 手机本机跑不了 Code 栏，不给这个标签（2026-10-23），切到电脑才有
                 val tabs = if (codeAccess == CodeAccess.NO_LOCAL) SidebarTab.entries - SidebarTab.CODE else SidebarTab.entries
-                SidebarTabs(tabs, ctl.sidebarTab) {
-                    if (it != ctl.sidebarTab) { ctl.sidebarTab = it; query = "" }
-                    // 集训场的主区域跟着这一栏走：点进来就把文档、花费这些页关掉
-                    if (it == SidebarTab.WOLF) { ctl.page = null; ctl.settingsTab = null; onNavigate() }
+                Box(Modifier.guideTarget("sidetabs")) {
+                    SidebarTabs(tabs, ctl.sidebarTab) {
+                        if (it != ctl.sidebarTab) { ctl.sidebarTab = it; query = "" }
+                        // 集训场的主区域跟着这一栏走：点进来就把文档、花费这些页关掉
+                        if (it == SidebarTab.WOLF) { ctl.page = null; ctl.settingsTab = null; onNavigate() }
+                    }
                 }
                 Box(Modifier.align(Alignment.CenterVertically)) { DeviceMenu(ctl, state, onNavigate) }
             }
@@ -163,7 +165,7 @@ fun Sidebar(ctl: AppController, modifier: Modifier, onNavigate: () -> Unit, onCo
                 if (canNew) {
                     Spacer(Modifier.width(8.dp))
                     Box(
-                        Modifier.size(40.dp).clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.primary)
+                        Modifier.guideTarget("newchat").size(40.dp).clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.primary)
                             .clickable {
                                 when {
                                     code -> ctl.newCode(isDesktopHere)
@@ -653,8 +655,10 @@ private fun ConversationRow(ctl: AppController, state: AppState, c: Conversation
 @Composable
 fun MemberPickList(state: AppState, selected: Set<String>, onToggle: (String) -> Unit) {
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        state.members.forEach { m ->
+        // 聊天首选的模型排前面（2026-11-06 用户：「以后我们聊天模型的话，首选智谱」）
+        state.members.sortedBy { com.guixing.jixunying.model.ModelNotes.rank(it.modelId) }.forEach { m ->
             val on = m.id in selected
+            val note = com.guixing.jixunying.model.ModelNotes.of(m.modelId)
             Row(
                 Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
                     .border(1.dp, if (on) MaterialTheme.colorScheme.primary else Ext.c.border, RoundedCornerShape(12.dp))
@@ -668,6 +672,8 @@ fun MemberPickList(state: AppState, selected: Set<String>, onToggle: (String) ->
                     Text(m.name, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
                     Text(listOf(m.modelId.ifBlank { "未选模型" }, m.bio).filter { it.isNotBlank() }.joinToString(" · "),
                         style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    // 这个模型的脾气（第一轮找毛病测出来的），小字
+                    note?.let { Text(it.text, style = MaterialTheme.typography.labelSmall, color = if (it.preferred) Ext.c.success else Ext.c.subtle.copy(alpha = 0.85f)) }
                 }
                 androidx.compose.material3.Checkbox(on, { onToggle(m.id) })
             }
@@ -678,7 +684,8 @@ fun MemberPickList(state: AppState, selected: Set<String>, onToggle: (String) ->
 @Composable
 fun NewChatDialog(ctl: AppController) {
     val state by ctl.backend.store.state.collectAsState()
-    var picked by remember { mutableStateOf(state.members.take(1).map { it.id }.toSet()) }
+    // 默认选聊天首选的那位（没有就选第一位）
+    var picked by remember { mutableStateOf(state.members.sortedBy { com.guixing.jixunying.model.ModelNotes.rank(it.modelId) }.take(1).map { it.id }.toSet()) }
     AppDialog("新对话", { ctl.showNewChat = false }, width = 520.dp, actions = {
         Text(if (picked.size > 1) "群聊 · ${picked.size} 位成员" else if (picked.size == 1) "单聊" else "至少选一位",
             style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle, modifier = Modifier.weight(1f))

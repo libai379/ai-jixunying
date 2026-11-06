@@ -267,20 +267,20 @@ private fun SettingsPage(ctl: AppController, state: AppState, tab: SettingsTab) 
 @Composable
 fun PageHeader(title: String, desc: String, action: @Composable (() -> Unit)? = null) {
     // 窄屏（手机）上按钮放到说明下面，不挤压文字
-    androidx.compose.foundation.layout.BoxWithConstraints(Modifier.fillMaxWidth().padding(bottom = 16.dp)) {
+    androidx.compose.foundation.layout.BoxWithConstraints(Modifier.guideTarget("pageheader").fillMaxWidth().padding(bottom = 16.dp)) {
         val narrow = maxWidth < 520.dp
         if (narrow) Column {
             Text(title, style = MaterialTheme.typography.titleLarge)
             Spacer(Modifier.height(2.dp))
             Text(desc, style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
-            if (action != null) { Spacer(Modifier.height(10.dp)); action() }
+            if (action != null) { Spacer(Modifier.height(10.dp)); Box(Modifier.guideTarget("pageaction")) { action() } }
         } else Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text(title, style = MaterialTheme.typography.titleLarge)
                 Spacer(Modifier.height(2.dp))
                 Text(desc, style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
             }
-            if (action != null) { Spacer(Modifier.width(12.dp)); action() }
+            if (action != null) { Spacer(Modifier.width(12.dp)); Box(Modifier.guideTarget("pageaction")) { action() } }
         }
     }
 }
@@ -568,6 +568,11 @@ private fun MembersPage(ctl: AppController, state: AppState) {
                             }
                         }
                         Evals.label(m.modelId)?.let { Text(it, style = MaterialTheme.typography.labelSmall, color = Ext.c.success) }
+                        // 这个模型的脾气（2026-11-06 第一轮找毛病测出来的；用户：「用个小字儿做一个提示」）
+                        com.guixing.jixunying.model.ModelNotes.of(m.modelId)?.let { n ->
+                            Text((if (n.preferred) "★ " else "") + n.text, style = MaterialTheme.typography.labelSmall,
+                                color = if (n.preferred) Ext.c.success else Ext.c.subtle)
+                        }
                         if (m.bio.isNotBlank()) Text(m.bio, style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle, maxLines = 2, overflow = TextOverflow.Ellipsis)
                     }
                     IconButton(onClick = { editing = m }) { Icon(Icons.Rounded.Edit, "编辑", Modifier.size(18.dp)) }
@@ -1260,16 +1265,15 @@ private fun AboutPage(ctl: AppController) {
     UpdateCard(ctl)
     Spacer(Modifier.height(12.dp))
     // 引导随时能再看（2026-11-06 用户：「万一哪个功能找不到了，可以有迹可循」）
-    SectionCard {
+    SectionCard(Modifier.guideTarget("aboutguide")) {
         Text("功能介绍", style = MaterialTheme.typography.titleSmall)
         Text("各个功能是做什么的、在哪儿找；更新以后新加了什么", style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
         Spacer(Modifier.height(8.dp))
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            SpringButton("看功能介绍") { ctl.guide = "tour" }
-            if (Guide.whatsNew.containsKey(Guide.versionKey())) {
-                Spacer(Modifier.width(8.dp))
-                androidx.compose.material3.OutlinedButton(onClick = { ctl.guide = "new" }) { Text("这一版新加了什么") }
-            }
+        // 放不下就换行（220dp、字体 200% 时第二个按钮会被挤成 0 宽）
+        FlowRowCompat {
+            Box(Modifier.padding(end = 8.dp, bottom = 6.dp)) { SpringButton("看功能介绍") { ctl.guideStart = 0; ctl.guide = "tour" } }
+            if (Guide.whatsNew.containsKey(Guide.versionKey()))
+                Box(Modifier.padding(bottom = 6.dp)) { androidx.compose.material3.OutlinedButton(onClick = { ctl.guideStart = 0; ctl.guide = "new" }) { Text("这一版新加了什么") } }
         }
     }
     Spacer(Modifier.height(12.dp))

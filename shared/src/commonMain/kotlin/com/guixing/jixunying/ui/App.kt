@@ -135,6 +135,10 @@ class AppController(
     var showNewChat by mutableStateOf(false)
     /** 开着的引导（2026-11-06）："tour" 功能介绍、"new" 这一版新加的；null 不开。 */
     var guide by mutableStateOf<String?>(null)
+    /** 引导这一步要在手机上打开侧栏（圈侧栏里的按钮）。 */
+    var guideDrawer by mutableStateOf(false)
+    /** 截图用：引导从第几步开始（-Djxy.start=…#guide:3）。 */
+    var guideStart = 0
     /** 电脑快捷键（2026-10-24）：Ctrl+K 每按一次加一，侧栏搜索框看到变了就打开、拿焦点。 */
     var searchTick by mutableStateOf(0)
     /** Ctrl+F：在当前对话里找（对话页顶上出一条查找栏）。 */
@@ -335,18 +339,18 @@ fun App(hub: Hub, platform: Platform, debugStart: String? = null) {
                 DisposableEffect(backend) { onDispose { ctl.speech.stop() } }
                 // 新手引导 / 新版介绍（2026-11-06）：等状态到了再判断是新装还是更新；开发截图（带 -Djxy.start）时不自己弹，#guide / #whatsnew 才弹
                 LaunchedEffect(Unit) {
-                    when (debugStart?.substringAfter('#', "")) {
-                        "guide" -> { ctl.guide = "tour"; return@LaunchedEffect }
-                        "whatsnew" -> { ctl.guide = "new"; return@LaunchedEffect }
+                    val dbg = debugStart?.substringAfter('#', "").orEmpty()
+                    if (dbg.startsWith("guide") || dbg.startsWith("whatsnew")) {
+                        ctl.guideStart = dbg.substringAfter(':', "0").toIntOrNull() ?: 0
+                        ctl.guide = if (dbg.startsWith("guide")) "tour" else "new"
+                        return@LaunchedEffect
                     }
                     if (debugStart != null) return@LaunchedEffect
                     kotlinx.coroutines.delay(1_500)
                     Guide.due(platform.getPref(Guide.PREF), backend.store.state.value)?.let { ctl.guide = it }
                         ?: run { if (platform.getPref(Guide.PREF) == null) platform.setPref(Guide.PREF, Guide.versionKey()) }
                 }
-                ctl.guide?.let { mode ->
-                    GuideDialog(mode, onClose = { platform.setPref(Guide.PREF, Guide.versionKey()); ctl.guide = null }, onTour = { ctl.guide = "tour" })
-                }
+
                 // 开发截图用：conv:编号#speak = 打开会话后立刻读最后一条回答（看「停止」「合成中…」的样子）
                 LaunchedEffect(backend, ctl.debugDialog) {
                     if (ctl.debugDialog != "speak") return@LaunchedEffect
@@ -427,6 +431,10 @@ fun App(hub: Hub, platform: Platform, debugStart: String? = null) {
                         com.guixing.jixunying.ui.glass.GlassEnv(if (glassOn) wallpaper else null, glassOn, dark, look.glassTuning, paint)) {
                         MainLayout(ctl)
                     }
+                    // 引导盖在最上面（和界面同一个坐标系，才能圈准按钮）
+                    ctl.guide?.let { mode ->
+                        GuideOverlay(ctl, mode, onClose = { platform.setPref(Guide.PREF, Guide.versionKey()); ctl.guide = null; ctl.guideDrawer = false })
+                    }
                     // 开发截图用：-Djxy.start=…#toast 打开就弹一条提示，看它挡不挡东西
                     LaunchedEffect(Unit) { if (ctl.debugDialog == "toast") snackbar.showSnackbar("改文件先问我", duration = SnackbarDuration.Indefinite) }
                     // 提示条（2026-10-17 用户截图：「很挡视野」）：以前在底下、又宽又大，正好压住输入框；
@@ -500,6 +508,11 @@ private fun MainLayout(ctl: AppController) {
             // 开发截图用：起始参数带 #drawer 就让手机上的侧栏一打开就展开（看侧栏改版的样子）
             val drawer = rememberDrawerState(if (ctl.debugDialog == "drawer") DrawerValue.Open else DrawerValue.Closed)
             val scope = rememberCoroutineScope()
+            // 引导要圈侧栏里的按钮时打开侧栏，讲完关上
+            var guideOpened by remember { mutableStateOf(false) }
+            LaunchedEffect(ctl.guideDrawer) {
+                if (ctl.guideDrawer) { drawer.open(); guideOpened = true } else if (guideOpened) { drawer.close(); guideOpened = false }
+            }
             // 返回键：先关侧栏；在设置的某一页就回设置首页；再关设置 / 文档页；最后才交给系统（退出）
             LocalPlatform.current.BackHandler(drawer.isOpen || ctl.settingsTab != null || ctl.page != null) {
                 when {

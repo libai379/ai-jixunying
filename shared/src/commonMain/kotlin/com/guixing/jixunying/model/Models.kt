@@ -341,10 +341,10 @@ data class Settings(
         /**
          * 1 = 1.4.0 加了裁判和 AI 核实；2 = 1.5.0 加了 office（Word / Excel）；3 = 1.6.0 加了 code（Code 栏）；
          * 4 = 1.7.0 加了 speech（语音）；5 = 1.7.0 加了 semantic（按意思搜）；6 = 2026-10-17 加了 personal（自定义指令）；
-         * 7 = 2026-10-22 加了 glass（液态玻璃界面）；8 = 2026-10-24 加了 glassTuning（液态玻璃调参）；9 = 同一天加了 background（界面背景）。
+         * 7 = 2026-10-22 加了 glass（液态玻璃界面）；8 = 2026-10-24 加了 glassTuning（液态玻璃调参）；9 = 同一天加了 background（界面背景）；10 = 2026-11-06 没加设置项，只为一次性把「只用选的搜索引擎」改回自动（见 Engine 的 init）。
          * 以后再加旧版不认识的设置项，就加一，并在 SaveSettings 里保留。
          */
-        const val SCHEMA = 9
+        const val SCHEMA = 10
     }
 }
 

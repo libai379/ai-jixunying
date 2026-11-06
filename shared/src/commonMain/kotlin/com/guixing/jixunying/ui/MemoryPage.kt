@@ -91,7 +91,7 @@ fun MemoryPage(ctl: AppController, state: AppState) {
         HorizontalDivider(color = Ext.c.border, modifier = Modifier.padding(vertical = 8.dp))
         // 两种记忆（2026-11-06）：同一份记忆、两种想起来的方式；这里定新对话的默认，对话里输入框旁的按钮随时切
         FieldLabel("用哪种记忆", "两种用的是同一份记忆，只是想起来的方式不同。这里定默认；每个对话里输入框旁的按钮能随时切，回答下面还能「换一种记忆再答一次」比一比")
-        FlowRowCompat {
+        Box(Modifier.guideTarget("memmode")) { FlowRowCompat {
             listOf("full", "recall").forEach { mode ->
                 Box(Modifier.padding(end = 6.dp, bottom = 6.dp)) {
                     ToggleChip(MemoryModes.name(mode) + if (mode == "full") "（默认）" else "",
@@ -99,7 +99,7 @@ fun MemoryPage(ctl: AppController, state: AppState) {
                         MemoryModes.of("", ms.mode) == mode) { saveMs { it.copy(mode = if (mode == "recall") "recall" else "") } }
                 }
             }
-        }
+        } }
         Text(MemoryModes.desc(MemoryModes.of("", ms.mode)), style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
         HorizontalDivider(color = Ext.c.border, modifier = Modifier.padding(vertical = 8.dp))
         FieldLabel("记录员", "压缩聊天、挑记忆用的模型，便宜的就够")

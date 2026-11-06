@@ -432,6 +432,10 @@ class Engine(
         if (isPhone && storage.loadState() == null) s = s.copy(settings = s.settings.copy(proxy = ""))
         // 后台命令随上次程序退出都没了：清空列表（2026-10-18）
         if (s.conversations.any { it.background.isNotEmpty() }) s = s.copy(conversations = s.conversations.map { it.copy(background = emptyList()) })
+        // 搜索改回「模型自带的」（2026-11-06 用户：「以后自动用模型自带的搜索工具吧，就不用那个博查了」——
+        // 当时设成只用博查、博查余额用完，五个模型大半搜不到）：老设置版本里「只用选的引擎」的，换成自动，Key 留着
+        if (s.settings.schema in 1..9 && s.settings.search.mode == com.guixing.jixunying.model.SearchMode.ENGINE_ONLY)
+            s = s.copy(settings = s.settings.copy(search = s.settings.search.copy(mode = com.guixing.jixunying.model.SearchMode.AUTO, engine = com.guixing.jixunying.model.SearchEngine.BING_FREE)))
         // 这一版认得的设置版本（新版界面拿到状态再改、再发回来，带的就是它）
         if (s.settings.schema < Settings.SCHEMA) s = s.copy(settings = s.settings.copy(schema = Settings.SCHEMA))
         // ChatGPT 登录状态以本机凭据为准（上次停在「正在登录」的也清掉）

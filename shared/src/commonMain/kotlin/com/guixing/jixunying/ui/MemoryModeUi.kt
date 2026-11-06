@@ -77,7 +77,7 @@ fun MemoryModeToggle(mode: String, compact: Boolean, onToggle: () -> Unit) {
     }
     val tint by animateColorAsState(if (recall) primary else MaterialTheme.colorScheme.onSurfaceVariant, label = "tint")
     val fill by animateColorAsState(if (recall) primary.copy(alpha = 0.16f) else composerFill(), label = "fill")
-    val scaleMod = Modifier.graphicsLayer { val k = pressScale * pop.value; scaleX = k; scaleY = k }
+    val scaleMod = Modifier.guideTarget("memory").graphicsLayer { val k = pressScale * pop.value; scaleX = k; scaleY = k }
     val desc = "记忆：${MemoryModes.name(mode)}（点一下换成${MemoryModes.name(MemoryModes.other(mode))}）"
     val swap: androidx.compose.animation.AnimatedContentTransitionScope<Boolean>.() -> androidx.compose.animation.ContentTransform = {
         (slideInVertically(spring(dampingRatio = 0.55f, stiffness = 500f)) { it } + fadeIn() + scaleIn(initialScale = 0.6f))
