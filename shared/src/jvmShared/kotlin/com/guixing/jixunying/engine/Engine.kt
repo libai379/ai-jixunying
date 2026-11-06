@@ -379,7 +379,7 @@ class Engine(
         override fun compactLater(convId: String) { scope.launch { runCatching { compactIfLong(convId) } } }
         override fun backgroundOutput(id: String) = codeRunner?.backgroundOutput(id)
         override fun stopBackground(convId: String, id: String) { codeRunner?.stopBackground(id); markBg(convId, id) { it.copy(running = false) } }
-        override suspend fun fetchUrl(url: String): String = runCatching { search.fetch(url, false) }.getOrElse { search.fetch(url, true) }
+        override suspend fun fetchUrl(url: String, find: String?): String = runCatching { search.fetch(url, false, find) }.getOrElse { search.fetch(url, true, find) }
         override fun attachmentParts(m: Message, latest: Boolean, vision: Boolean): Pair<String, List<String>> {
             val sb = StringBuilder()
             val imgs = mutableListOf<String>()
@@ -5478,7 +5478,7 @@ class Engine(
         }
         if (fetch) {
             fn("fetch_url", "打开一个网页，读取正文文字。搜索摘要不够详细、或用户给了链接时使用（抖音、小红书、快手、微博、B站的作品链接和分享短链接也能读：文案、作者、点赞、评论、图片）。",
-                buildJsonObject { put("url", prop("完整网址，http 或 https 开头")) }, listOf("url"))
+                buildJsonObject { put("url", prop("完整网址，http 或 https 开头")); put("find", prop("可选。只看网页里含这几个词的段落（空格分开，比如国名、条目名、人名）。长网页（整本古书、长文档）只给前 12000 字，要看后面的某一条就写这个")) }, listOf("url"))
         }
         if (listen) {
             fn("listen_video", "听平台视频里说了什么，转成文字（抖音、小红书等作品链接，或者 fetch_url 结果里的视频地址）。用户想知道视频讲了什么、页面文字不够时用；按秒收费，最长听 10 分钟。",
@@ -6420,8 +6420,9 @@ class Engine(
                     return text
                 }
                 val (text, step) = try {
-                    val t = runCatching { search.fetch(url, false) }.getOrElse { search.fetch(url, true) }
-                    t to ToolStep("fetch", url, listOf(SearchSource(url.take(80), url)), ok = true)
+                    val find = args.str("find")?.trim()?.takeIf { it.isNotEmpty() }
+                    val t = runCatching { search.fetch(url, false, find) }.getOrElse { search.fetch(url, true, find) }
+                    t to ToolStep("fetch", url, listOf(SearchSource(url.take(80), url)), ok = true, note = find?.let { "找「$it」" }.orEmpty())
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Throwable) {

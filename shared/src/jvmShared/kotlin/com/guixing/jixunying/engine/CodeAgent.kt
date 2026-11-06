@@ -610,7 +610,7 @@ class CodeAgent(private val host: CodeHost) {
         fn("web_search", "联网搜索，查文档、报错、库的最新版本这类本机上没有的信息。返回标题、网址和摘要。",
             buildJsonObject { put("query", text("要搜的内容")) }, listOf("query"))
         fn("fetch_url", "打开一个网页，读它的正文文字（比如官方文档、发布说明、报错讨论）。",
-            buildJsonObject { put("url", text("网址，http 或 https 开头")) }, listOf("url"))
+            buildJsonObject { put("url", text("网址，http 或 https 开头")); put("find", text("可选。只看网页里含这几个词的段落（空格分开）。长网页只给前 12000 字，要看后面的某一段就写这个")) }, listOf("url"))
         fn("grep", "按内容在项目里查找，返回命中的文件、行号和那一行。",
             buildJsonObject {
                 put("pattern", text("要找的内容，正则表达式或者普通文字"))
@@ -926,7 +926,7 @@ class CodeAgent(private val host: CodeHost) {
             note = if (allowed) "$host 这个会话里不再问" else "")
         if (!allowed) { if (!waitApproval(convId, msgId, step)) return refused("打开 $url") } else addStep(convId, msgId, step)
         return try {
-            val text = this.host.fetchUrl(url)
+            val text = this.host.fetchUrl(url, args.str("find")?.trim()?.takeIf { it.isNotEmpty() })
             val (shown, cut) = CodeRunnerRules.clip(text, RESULT_LIMIT)
             setStep(convId, msgId, stepId) { it.copy(output = shown.take(UI_TEXT_LIMIT), ok = true) }
             "$url 的正文：\n$shown" + if (cut) "\n（太长，中间省略了）" else ""
@@ -2338,7 +2338,7 @@ interface CodeHost {
     suspend fun webSearch(query: String): Pair<ToolStep, List<com.guixing.jixunying.model.SearchSource>> =
         ToolStep("search", query, ok = false, note = "这台设备不能联网搜索") to emptyList()
     /** 打开一个网页，返回正文文字；打不开抛异常。 */
-    suspend fun fetchUrl(url: String): String = throw IllegalStateException("这台设备不能读网页")
+    suspend fun fetchUrl(url: String, find: String? = null): String = throw IllegalStateException("这台设备不能读网页")
     /** MCP（2026-10-18）：外部工具清单（给 AI 的名字, 说明, 参数格式）；调一个。 */
     suspend fun mcpToolDefs(): List<Triple<String, String, JsonObject>> = emptyList()
     suspend fun mcpCall(name: String, args: JsonObject): String = "这台设备没有外部工具"

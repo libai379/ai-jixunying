@@ -181,8 +181,17 @@ class WebSearch(private val proxy: () -> String?) {
         }
     }
 
-    /** 读一个网页的正文（粗略去标签），给模型看详情用。 */
-    suspend fun fetch(url: String, useProxy: Boolean): String {
+    /**
+     * 读一个网页的正文（粗略去标签），给模型看详情用。
+     * find（2026-11-06）：长网页只给前 12000 字，后面的看不到——《诸蕃志》卷上 5 万多字，渤泥国条在 1.5 万字以后，
+     * 模型拿搜索摘要里拼在一起的几段把占城的「身丁香」安到渤泥头上。带了 find 就从全文里截出含这几个词的段落。
+     */
+    suspend fun fetch(url: String, useProxy: Boolean, find: String? = null): String {
+        val all = fetchAll(url, useProxy)
+        return excerpt(all, find)
+    }
+
+    private suspend fun fetchAll(url: String, useProxy: Boolean): String {
         val resp = Http.client(if (useProxy) proxy() else null).get(url) {
             header("User-Agent", Http.UA)
             header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.6")
@@ -190,10 +199,36 @@ class WebSearch(private val proxy: () -> String?) {
         if (resp.status.value !in 200..299) throw ApiException(resp.status.value, "网页打不开")
         val text = resp.bodyAsText()
         val ct = resp.headers["Content-Type"].orEmpty()
-        return (if (ct.contains("html") || text.trimStart().startsWith("<")) Html.toText(Html.mainPart(text)) else text).take(12_000)
+        return (if (ct.contains("html") || text.trimStart().startsWith("<")) Html.toText(Html.mainPart(text)) else text).take(2_000_000)
     }
 
     companion object {
+        const val PAGE_LIMIT = 12_000
+
+        /**
+         * 不带 find：前 12000 字，长了在末尾说一声全文多长、怎么看后面。
+         * 带 find（空格或逗号分开几个词）：每处前后各 700 字，挨着的并成一段，最多 12000 字；一处都没找到就照旧给开头并说明。
+         */
+        fun excerpt(all: String, find: String?): String {
+            val words = find.orEmpty().split(Regex("""[\s,，、]+""")).map { it.trim() }.filter { it.isNotEmpty() }.distinct().take(5)
+            val tail = "\n\n（全文 ${all.length} 字，上面只是前 $PAGE_LIMIT 字；要看后面某一段，fetch_url 再带上 find 写要找的词，比如国名、条目名、人名）"
+            if (words.isEmpty()) return if (all.length <= PAGE_LIMIT) all else all.take(PAGE_LIMIT) + tail
+            val hits = words.flatMap { w -> Regex(Regex.escape(w)).findAll(all).map { it.range.first }.toList() }.sorted()
+            if (hits.isEmpty()) return "（全文 ${all.length} 字，没找到「${words.joinToString("」「")}」，下面是开头）\n" + all.take(PAGE_LIMIT)
+            val spans = mutableListOf<IntRange>()
+            for (h in hits) {
+                val r = maxOf(0, h - 700)..minOf(all.length, h + 700)
+                val last = spans.lastOrNull()
+                if (last != null && r.first <= last.last) spans[spans.lastIndex] = last.first..maxOf(last.last, r.last) else spans += r
+            }
+            val sb = StringBuilder("（全文 ${all.length} 字，「${words.joinToString("」「")}」出现 ${hits.size} 处，下面是这几处前后的原文）\n")
+            for (r in spans) {
+                if (sb.length >= PAGE_LIMIT) { sb.append("\n……（后面还有，换个更具体的词再找）"); break }
+                sb.append("\n……").append(all.substring(r.first, r.last).take(PAGE_LIMIT - sb.length + 200)).append("……\n")
+            }
+            return sb.toString()
+        }
+
         fun engineName(e: SearchEngine) = when (e) {
             SearchEngine.BING_FREE -> "必应（免费，无需 Key）"
             SearchEngine.BOCHA -> "博查 Bocha"

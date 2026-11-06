@@ -29,6 +29,9 @@ class LiveAnswerStyleTest {
 
     private val cases = listOf(
         Case("直播话术（截图那道，开联网）", listOf("我在抖音直播卖一款西马花珠沉香，6mm 108颗，帮我写一段开场介绍的话术", "达拉干沉香地位和历史底蕴"), search = true),
+        // 2026-11-06 华为上那段：第三问 DeepSeek 单列了「三个坑，务必避开」（用户：「第三段的坑完全没有必要」）
+        Case("直播话术·文莱（华为那段，开联网）", listOf("我在抖音直播卖一款西马花珠沉香，6mm，从产地优势、地位、稀缺性、纹路油脂、味道、文玩价值、市场价值写一份话术",
+            "达拉干沉香地位和历史底蕴", "文莱沉香地位，和历史底蕴"), search = true),
         Case("闲聊", listOf("最近直播完嗓子都哑了，有啥办法"), search = false),
         Case("知识", listOf("沉香和檀香有什么区别？"), search = false),
         Case("排查", listOf("RTSS 里「在OSD上显示」那一栏是灰的，勾不上，怎么回事？"), search = false),
