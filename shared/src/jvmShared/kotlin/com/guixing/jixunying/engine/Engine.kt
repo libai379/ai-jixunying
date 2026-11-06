@@ -865,12 +865,38 @@ class Engine(
 
     private fun appendDelta(convId: String, id: String, c: String, r: String) {
         val list = messages(convId)
+        var cc = c
         synchronized(list) {
             val i = list.indexOfFirst { it.id == id }
             if (i < 0) return
-            list[i] = list[i].copy(content = list[i].content + c, reasoning = list[i].reasoning + r)
+            cc = holdHead(id, list[i].content, c)
+            list[i] = list[i].copy(content = list[i].content + cc, reasoning = list[i].reasoning + r)
         }
-        emit(Event.MessageDelta(convId, id, c, r))
+        if (cc.isNotEmpty() || r.isNotEmpty()) emit(Event.MessageDelta(convId, id, cc, r))
+    }
+
+    /** 回答开头还没写出正文时扣住的那几个字（等看清是不是「〔17:53〕」这种时间标记）。 */
+    private val heldHeads = ConcurrentHashMap<String, String>()
+
+    /**
+     * 模型学聊天记录在开头写「〔17:53〕」：cleanReply 只在答完时去掉，边写边显示时用户先看到它，中途停下的就一直留着
+     * （2026-11-06 华为：「〔17:53〕行，把历史底蕴这段压成总结……」停在半截）。开头是「〔」就先扣住，等到「〕」再决定去不去掉。
+     */
+    internal fun holdHead(id: String, before: String, delta: String): String {
+        if (delta.isEmpty()) return delta
+        val held = heldHeads.remove(id)
+        if (held == null && before.isNotBlank()) return delta
+        val s = (held ?: "") + delta
+        val t = s.trimStart()
+        if (t.isEmpty()) return s
+        if (!t.startsWith("〔")) return s
+        val close = t.indexOf('〕')
+        if (close < 0) {
+            if (t.length <= 30 && "\n" !in t) { heldHeads[id] = s; return "" }
+            return s
+        }
+        if (close <= 30 && "\n" !in t.substring(0, close)) return t.substring(close + 1).trimStart()
+        return s
     }
 
     // ———————————————— 指令 ————————————————
@@ -5168,6 +5194,7 @@ class Engine(
             val thinkingRefused = thinking != null && llm.thinkingDropped(provider, model.id)
             if (thinkingRefused) emit(Event.Notice("「${member.name}」用的 ${model.id} 不认「${Thinking.label(member.thinking)}」的参数，这次按它默认的方式回答了"))
             val done = updateMessage(convId, msg.id) {
+                heldHeads.remove(msg.id)
                 it.copy(content = cleanReply(it.content, member), status = MsgStatus.DONE, usage = usage,
                     modelLabel = if (thinkingRefused) Prompts.modelLabel(state, member) else it.modelLabel)
             }
@@ -5193,7 +5220,9 @@ class Engine(
             save(convId)
             return null
         } catch (e: CancellationException) {
-            withContext(NonCancellable) { updateMessage(convId, msg.id) { it.copy(status = MsgStatus.STOPPED) } }
+            // 停在半截的也去掉开头学来的时间标记这些（以前只在答完时清，2026-11-06 华为停下的那条留着「〔17:53〕」）
+            withContext(NonCancellable) { updateMessage(convId, msg.id) { it.copy(content = cleanReply(it.content, member), status = MsgStatus.STOPPED) } }
+            heldHeads.remove(msg.id)
             throw e
         } catch (e: Throwable) {
             // 界面和微信上只说人话（friendlyError），服务商的原话写进日志，查问题用
