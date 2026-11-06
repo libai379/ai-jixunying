@@ -712,6 +712,8 @@ data class UpdateInfo(
     /** GitHub 给的 SHA-256（小写十六进制），下完拿它核对。 */
     val sha256: String = "",
     val kind: String = "",
+    /** 国内镜像（Gitee 发行版）上同一个文件的下载地址，手机先从这里下（2026-11-06）；空 = 没有。assetUrl 照旧是 GitHub 的（电脑代下只认它）。 */
+    val mirrorUrl: String = "",
 )
 
 /**

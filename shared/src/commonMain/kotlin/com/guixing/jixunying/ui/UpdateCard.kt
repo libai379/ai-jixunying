@@ -43,7 +43,7 @@ fun UpdateCard(ctl: AppController) {
     val info = up.latest
     var busy by remember { mutableStateOf(false) }
     var showNotes by remember { mutableStateOf(false) }
-    // 走哪条路下：""= 自动，"direct"、"proxy"、"host"（Command.UpdateDownloadVia）
+    // 走哪条路下：""= 自动，"direct"、"proxy"、"host"、"gitee"（Command.UpdateDownloadVia）
     var route by remember { mutableStateOf("") }
     // 手机遥控电脑时顺便看看电脑上是哪一版（老版本电脑没有这一项）
     val remote by ctl.hub.remote.collectAsState()
@@ -101,7 +101,7 @@ fun UpdateCard(ctl: AppController) {
                 Text("走哪条路下", style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
                 Row(Modifier.padding(top = 2.dp), verticalAlignment = Alignment.CenterVertically) {
                     val routes = if (platform.isDesktop) listOf("" to "自动", "proxy" to "走代理", "direct" to "直连 GitHub")
-                        else listOfNotNull("" to "自动", "direct" to "直连 GitHub", ("host" to "请电脑代下").takeIf { remote != null })
+                        else listOfNotNull("" to "自动", ("gitee" to "国内镜像").takeIf { info.mirrorUrl.isNotEmpty() }, "direct" to "直连 GitHub", ("host" to "请电脑代下").takeIf { remote != null })
                     routes.forEach { (key, label) ->
                         Pill(label, if (route == key) MaterialTheme.colorScheme.primary else Ext.c.subtle) { route = key }
                         Spacer(Modifier.width(6.dp))
@@ -111,7 +111,10 @@ fun UpdateCard(ctl: AppController) {
                     "proxy" -> "只走设置里的代理，不行就报错。"
                     "direct" -> "不走代理、不请电脑，手机或电脑自己直连 GitHub（国内常常很慢）。"
                     "host" -> "不先试直连，直接请配对的电脑下好再传过来（电脑要开着）。"
-                    else -> if (platform.isDesktop) "先走代理，不通再直连。" else "先直连 GitHub，慢了或者没下下来，再请电脑代下。"
+                    "gitee" -> "只从国内的 Gitee 下，不行就报错。"
+                    else -> if (platform.isDesktop) "先走代理，不通再直连。"
+                        else if (info.mirrorUrl.isNotEmpty()) "先从国内的 Gitee 下，不行再直连 GitHub，慢了再请电脑代下。"
+                        else "先直连 GitHub，慢了或者没下下来，再请电脑代下。"
                 }, style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, modifier = Modifier.padding(top = 2.dp))
             }
             Spacer(Modifier.height(6.dp))

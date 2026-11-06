@@ -45,6 +45,11 @@ class Updater(
      */
     private val slowAfterMs: Long = System.getProperty("jxy.update.slowAfterMs")?.toLongOrNull() ?: 15_000,
     private val minBytesPerSec: Long = System.getProperty("jxy.update.minSpeed")?.toLongOrNull() ?: 150L * 1024,
+    /**
+     * 国内镜像（2026-11-06 用户：「国内仓库还没放」）：Gitee 发行版只放手机包（单个附件最多 100MB，电脑包 160 多 MB 放不下，
+     * 上传实测回「文件大小已超出限制：100 MB」）。手机先查它、先从它下。测试里换了 GitHub 地址的不去碰真 Gitee。
+     */
+    private val mirrorApi: String? = System.getProperty("jxy.update.mirror") ?: GITEE_API.takeIf { api == LATEST_API },
 ) {
     /** 这条路下得太慢，主动放弃（后面还有路可走）。 */
     class SlowDownload(msg: String) : Exception(msg)
@@ -53,6 +58,40 @@ class Updater(
         const val LATEST_API = "https://api.github.com/repos/libai379/ai-jixunying/releases/latest"
         /** 只认本项目发行版的下载地址（电脑替手机代下时用，免得手机让电脑去下别的东西）。测试里换成假服务器（-Djxy.update.prefix）。 */
         val DOWNLOAD_PREFIX: String get() = System.getProperty("jxy.update.prefix") ?: "https://github.com/libai379/ai-jixunying/releases/download/"
+        const val GITEE_API = "https://gitee.com/api/v5/repos/clear-as-daylight/ai-jixunying/releases/latest"
+        const val GITEE_PAGE = "https://gitee.com/clear-as-daylight/ai-jixunying/releases/tag/"
+
+        /**
+         * Gitee 发行版 JSON → 手机要的东西；没有 .apk 或者说明里找不到它的 SHA-256 就返回 null（退回查 GitHub）。
+         * Gitee 不给文件的校验值和大小（2026-11-06 不登录查 releases/latest 实测：assets 只有 name、browser_download_url），
+         * 校验值从发行说明的「## Download」里读（每版都写「文件名：SHA-256」，和 GitHub 那份说明同一份）。
+         * assetUrl 按 GitHub 的发行版地址拼（两边文件名一样），镜像下不动时照旧直连 GitHub、请电脑代下。
+         */
+        fun parseMirror(json: JsonObject): UpdateInfo? {
+            fun JsonObject.s(k: String) = (this[k] as? JsonPrimitive)?.takeIf { it.isString }?.content.orEmpty()
+            val tag = json.s("tag_name").ifEmpty { return null }
+            val body = json.s("body")
+            val asset = (json["assets"] as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }
+                .firstOrNull { it.s("name").lowercase().endsWith(".apk") } ?: return null
+            val name = asset.s("name")
+            val url = asset.s("browser_download_url").ifEmpty { return null }
+            val sha = Regex(Regex.escape(name) + """[^0-9a-zA-Z\n]{0,8}([0-9a-fA-F]{64})""").find(body)?.groupValues?.get(1)?.lowercase() ?: return null
+            return UpdateInfo(
+                version = tag.removePrefix("v"),
+                tag = tag,
+                name = json.s("name"),
+                notes = body,
+                publishedAt = json.s("created_at"),
+                pageUrl = GITEE_PAGE + tag,
+                assetName = name,
+                assetUrl = DOWNLOAD_PREFIX + tag + "/" + name,
+                assetSize = 0,
+                sha256 = sha,
+                kind = "apk",
+                mirrorUrl = url,
+            )
+        }
+
         /** 安装包最大多少（防着拿到奇怪的东西把盘塞满）。 */
         const val MAX_SIZE = 600L * 1024 * 1024
 
@@ -138,6 +177,7 @@ class Updater(
 
     /** 查最新的一版。查不到抛异常（说法给人看）。 */
     suspend fun check(): UpdateInfo {
+        if (isPhone) mirrorApi?.let { m -> checkMirror(m)?.let { return it } }
         var last: Throwable? = null
         for (route in routes(api)) {
             try {
@@ -166,6 +206,30 @@ class Updater(
         throw IllegalStateException("连不上 GitHub（${why(last)}）")
     }
 
+    /** 手机先查国内镜像；查不到、没有手机包、说明里没校验值都返回 null，退回查 GitHub（只记日志，不报错）。 */
+    private suspend fun checkMirror(url: String): UpdateInfo? {
+        for (route in routes(url)) {
+            try {
+                var body = ""
+                var code = 0
+                Http.client(route).prepareGet(url) {
+                    timeout { requestTimeoutMillis = 15_000 }
+                    header("User-Agent", "AIJixunying/$current")
+                }.execute { resp -> code = resp.status.value; body = resp.bodyAsText() }
+                if (code !in 200..299) { log("查国内镜像：HTTP $code，改查 GitHub"); return null }
+                val json = Json.parse(body) as? JsonObject
+                val info = json?.let { parseMirror(it) }
+                if (info == null) log("查国内镜像：最新一版没有手机包或者说明里没有校验值，改查 GitHub")
+                return info
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                log("查国内镜像：${route ?: "直连"} 没成：${why(e)}")
+            }
+        }
+        return null
+    }
+
     /** 已经下好、核对过的那个文件（没有返回 null）。 */
     fun ready(info: UpdateInfo): File? =
         File(dir, info.assetName).takeIf { info.assetName.isNotEmpty() && it.isFile && info.sha256.isNotEmpty() && sha256(it) == info.sha256 }
@@ -188,6 +252,33 @@ class Updater(
         val target = File(dir, info.assetName)
         val part = File(dir, info.assetName + ".part")
         var last: Throwable? = null
+        // 国内镜像（Gitee）先下：自动时太慢、没下成、校验对不上都接着走 GitHub；手动选「gitee」只走它
+        val mirror = info.mirrorUrl.takeIf { it.isNotEmpty() && (only == null || only == "gitee") }
+        if (only == "gitee" && mirror == null) throw IllegalStateException("这一版国内镜像（Gitee）上没有这个文件，换条路吧")
+        if (mirror != null) {
+            for (route in routes(mirror)) {
+                try {
+                    val t0 = System.currentTimeMillis()
+                    fetch(route, mirror, part, info.assetSize, canAbort = only == null, onProgress)
+                    log("下 ${info.assetName}：国内镜像（${route ?: "直连"}）用了 ${(System.currentTimeMillis() - t0) / 1000} 秒，${part.length()} 字节")
+                    if (sha256(part) == info.sha256) return@withContext adopt(part, target)
+                    part.delete()
+                    log("下 ${info.assetName}：国内镜像下来的校验值对不上，删掉")
+                    last = IllegalStateException("国内镜像下来的文件和校验值对不上")
+                    break
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    part.delete()
+                    throw e
+                } catch (e: Throwable) {
+                    part.delete()
+                    log("下 ${info.assetName}：国内镜像（${route ?: "直连"}）没成：${why(e)}")
+                    last = e
+                }
+            }
+            if (only == "gitee") throw IllegalStateException("国内镜像（Gitee）没下下来（${why(last)}）")
+            last = null
+            onProgress(0f)
+        }
         val rs: List<String?> = routes(info.assetUrl).let { all ->
             when (only) {
                 "direct" -> listOf(null)
@@ -208,11 +299,7 @@ class Updater(
                     part.delete()
                     throw IllegalStateException("下下来的文件和 GitHub 给的校验值对不上（可能下坏了），已删掉，再试一次")
                 }
-                target.delete()
-                if (!part.renameTo(target)) { part.copyTo(target, overwrite = true); part.delete() }
-                // 只留这一个
-                dir.listFiles()?.filter { it.isFile && it.name != target.name }?.forEach { it.delete() }
-                return@withContext target
+                return@withContext adopt(part, target)
             } catch (e: kotlinx.coroutines.CancellationException) {
                 part.delete()
                 throw e
@@ -226,6 +313,14 @@ class Updater(
         }
         if (last is SlowDownload) throw last
         throw IllegalStateException("下载没成功（${why(last)}）")
+    }
+
+    /** 核对过的 .part 改成正式名字，updates/ 里只留这一个。 */
+    private fun adopt(part: File, target: File): File {
+        target.delete()
+        if (!part.renameTo(target)) { part.copyTo(target, overwrite = true); part.delete() }
+        dir.listFiles()?.filter { it.isFile && it.name != target.name }?.forEach { it.delete() }
+        return target
     }
 
     /** 边下边写进文件，带进度。GitHub 的下载地址会跳到 release-assets.githubusercontent.com，客户端自己跟着跳。 */

@@ -3565,7 +3565,7 @@ class Engine(
     }
 
     private suspend fun checkUpdate(): CommandResult {
-        setUpdate { it.copy(checking = true, status = "正在查 GitHub 上的最新版…", error = false) }
+        setUpdate { it.copy(checking = true, status = if (isPhone) "正在查最新版…" else "正在查 GitHub 上的最新版…", error = false) }
         return try {
             val info = updater.check()
             val newer = Updater.newer(info.version, updater.current)
@@ -3603,12 +3603,13 @@ class Engine(
         if (info.kind.isEmpty()) return CommandResult(false, "这一版没有这台设备能自动装的文件，去发行版网页下载")
         val fb = updateFallback
         if (route == "host" && fb == null) return CommandResult(false, "这台设备不能请电脑代下（只有配对了电脑的手机能）")
-        storage.log("JxyUpdate", "开始下 ${info.version}（${info.assetName}），线路：" + when (route) { "direct" -> "只直连"; "proxy" -> "只走代理"; "host" -> "请电脑代下"; else -> "自动" })
+        storage.log("JxyUpdate", "开始下 ${info.version}（${info.assetName}），线路：" + when (route) { "direct" -> "只直连"; "proxy" -> "只走代理"; "host" -> "请电脑代下"; "gitee" -> "只走国内镜像"; else -> "自动" })
         setUpdate { it.copy(progress = 0f, downloaded = "", error = false, status = when (route) {
             "host" -> "请电脑代下：电脑先下好（进度到一半），再传到手机"
             "direct" -> "只直连 GitHub 下 ${info.assetName}…"
             "proxy" -> "只走代理下 ${info.assetName}…"
-            else -> "正在下载 ${info.assetName}…"
+            "gitee" -> "从国内镜像（Gitee）下 ${info.assetName}…"
+            else -> if (info.mirrorUrl.isNotEmpty()) "从国内镜像（Gitee）下 ${info.assetName}，不行再走 GitHub…" else "正在下载 ${info.assetName}…"
         }) }
         if (route.isNotEmpty()) {
             updateJob = scope.launch {
