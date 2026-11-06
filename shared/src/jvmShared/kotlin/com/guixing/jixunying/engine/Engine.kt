@@ -5488,6 +5488,10 @@ class Engine(
                 "带 reference（对话里图片的文件名）时，模型照着参考图里的人、东西、风格重画一张，用来「这个人换个姿势 / 换个场景」「照这张的风格画」——但仍是重画，长相衣服会有出入，" +
                 "不是在原图上改" + (if (photo) "：要原图别的地方一个像素不动的改图用 P 图工具" else "") +
                 "。带参考图时描述里写清哪些照参考图（脸、发型、衣服），哪些要变（姿势、场景、光线），多张时用「图1」「图2」指（按 reference 的顺序）。" +
+                // 2026-11-06：阿雯拿用户认可的那张当参考，每次写「以图1为底重画一张」，脸次次漂、显老；千问、万相带图走的是编辑那一路，按改图指令写更守得住
+                "要保住参考图里的脸、只改一两处（眼神、表情、手势、皮肤细节）时，描述写成改图的话：「把图1里她的眼神改成……，脸、发型、衣服、场景都和图1一样」，" +
+                "别写「照参考图重画一张」「以图1为底重画」——写重画，模型会连脸一起重新画；一次只改一两处，尽量用画出那张的同一个模型。" +
+                "人像好不好看以用户的话为准，别自己说「明星级」「好看多了」，照实说改了哪儿。" +
                 "画出来不满意（字是乱的、画错了东西）可以换一个模型再画（model），写 replaces 换掉上一张，用户只收到最好的那张。" +
                     imageTips(ImagePick.candidates(media.providers)),
                 buildJsonObject {
@@ -6490,7 +6494,10 @@ class Engine(
                     throw e
                 } catch (e: Throwable) {
                     updateMessage(convId, msgId) { it.copy(tools = it.tools + ToolStep("image", prompt, ok = false, note = friendlyError(e))) }
-                    "画图失败：${friendlyError(e)}。可以换个模型再试，或者告诉用户。"
+                    // 等太久没回（2026-11-05 晚 qwen-image-3.0-pro 超时五次）：阿雯每次都说「没扣钱」，又自己换成用户没定的模型画，脸更差
+                    if (waitedOut(e)) "画图没等到结果：${friendlyError(e)}。平台那边可能还在画，也可能已经扣了钱，这边查不到——别跟用户说没扣钱，照实说不知道。" +
+                        "先用同一个模型再试一次" + (planned?.let { "（model 写 ${it.modelId}）" }.orEmpty()) + "；还不行就停下告诉用户，问他是等会儿再试还是换哪个模型，别自己换成用户没定的模型。"
+                    else "画图失败：${friendlyError(e)}。可以换个模型再试，或者告诉用户。"
                 }
             }
             "edit_image" -> editImage(convId, msgId, args, seen)
@@ -7156,6 +7163,12 @@ class Engine(
             val wait = ms?.let { if (it >= 60_000) "${it / 60_000} 分钟" else "${it / 1000} 秒" } ?: "很久"
             return "等了 $wait 还没等到${providerShortName(p)}回完（不是网断了：模型回得慢，或者这次的活太大）"
         }
+        // 连上了、发出去了，对方很久一个字都没回（2026-11-05 晚 qwen-image-3.0-pro 等满 180 秒，界面和 AI 都说成「网络连不上」）
+        if ("Socket timeout has expired" in msg) {
+            val ms = Regex("socket_timeout=(\\d+)").find(msg)?.groupValues?.get(1)?.toLongOrNull()
+            val wait = ms?.let { if (it >= 60_000 && it % 60_000 == 0L) "${it / 60_000} 分钟" else "${it / 1000} 秒" } ?: "很久"
+            return "等了 $wait ${providerShortName(p)}一个字都没回（多半不是网断了：那边处理得慢，或者这会儿忙）"
+        }
         return if (isNetError(e)) "网络连不上：$msg${proxyHint(p)}" else msg
     }
 
@@ -7190,6 +7203,13 @@ class Engine(
             else -> ApiTrouble.OTHER
         }
     }
+
+    /** 连上了、发出去了，只是等太久没回（读超时、整个请求到点）：不是网断，对方可能还在做、可能已经扣钱。看整条 cause 链（paintAuto 会包一层）。 */
+    private fun waitedOut(e: Throwable): Boolean =
+        generateSequence(e) { it.cause.takeIf { c -> c !== it } }.take(6).any {
+            val m = it.message.orEmpty()
+            "Socket timeout has expired" in m || "Request timeout has expired" in m
+        }
 
     private fun isNetError(e: Throwable): Boolean {
         val msg = e.message.orEmpty()

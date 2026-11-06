@@ -2,6 +2,7 @@ package com.guixing.jixunying.engine
 
 import com.guixing.jixunying.model.ProviderConfig
 import io.ktor.client.HttpClient
+import io.ktor.client.plugins.timeout
 import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.request.post
@@ -66,6 +67,9 @@ class ImageGen(private val proxyOf: (ProviderConfig) -> String?) {
         }
 
         /** 智谱画的图还带水印时告诉用户的话（没在智谱后台签去水印的免责声明，带 watermark_enabled = false 会被拒）。 */
+        /** 千问AI平台同步画图（multimodal-generation）最多等多久没回字算超时：平时一张一分钟上下，慢的时候三分钟还没好，给到 6 分钟。 */
+        const val SYNC_WAIT_MS = 360_000L
+
         const val ZHIPU_WATERMARK_NOTE = "智谱画的图还带着「AI生成」水印：要去掉，先到智谱开放平台 个人中心 → 安全管理 → 去水印管理 签一下免责声明，签完以后画的就不带了。"
 
         /** "1024x1024" → 宽高比 "1:1"（MiniMax、可灵要比例不要像素）。 */
@@ -393,6 +397,9 @@ class ImageGen(private val proxyOf: (ProviderConfig) -> String?) {
         suspend fun submit(async: Boolean) = client.post(root(p) + path) {
             header("Authorization", "Bearer ${p.apiKey.trim()}")
             if (async) header("X-DashScope-Async", "enable")
+            // 同步画图要等模型画完才回一个字：2026-11-05 晚 qwen-image-3.0-pro 五次等满 180 秒（全局的读超时）没回（平时 45～66 秒），
+            // 当成失败、AI 换了别的模型画，脸更差。同步的单独放宽到 SYNC_WAIT_MS；整个请求的上限照旧 10 分钟
+            if (!async) timeout { socketTimeoutMillis = SYNC_WAIT_MS }
             contentType(ContentType.Application.Json)
             setBody(body.toString())
         }
