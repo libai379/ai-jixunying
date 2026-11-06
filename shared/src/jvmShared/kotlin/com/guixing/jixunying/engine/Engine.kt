@@ -6382,6 +6382,9 @@ class Engine(
     }
 
     /** official 不为空：用这家（Kimi / DeepSeek）的官方搜索接口；它出错就退回设置里的搜索引擎，并在步骤上注明。 */
+    /** 搜索出错已经提醒过的（引擎 + 原因），一次运行里不重复弹。 */
+    private val searchWarned = java.util.Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
+
     private suspend fun runSearch(query: String, sources: MutableList<SearchSource>, official: ProviderConfig? = null): Pair<ToolStep, List<SearchSource>> {
         var note = ""
         if (official != null) {
@@ -6404,7 +6407,31 @@ class Engine(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Throwable) {
-            ToolStep("search", query, ok = false, note = listOf(note, friendlyError(e)).filter { it.isNotEmpty() }.joinToString("；")) to emptyList()
+            // 选的搜索引擎出错了（2026-11-06 实测：设置成「只用博查」，博查余额用完，五个模型的搜索全部 403，AI 只能凭印象答、答错）：
+            // 先换 DeepSeek 官方搜索，再换免费的；告诉用户一声（同一个原因一次运行里只说一次）
+            val why = friendlyError(e)
+            val engine = WebSearch.engineName(state.settings.search.engine)
+            // 没填 Key 是设置没做完，照用户选的来、不偷偷换别家（步骤上写明让他去填）；只有真去搜了出错（余额、网络）才换路
+            if (e is IllegalStateException && "还没填 Key" in why) return ToolStep("search", query, ok = false, note = listOf(note, why).filter { it.isNotEmpty() }.joinToString("；")) to emptyList()
+            if (searchWarned.add(engine + why.take(20))) emit(Event.Notice("联网搜索「$engine」出错：$why。这次先改用别的搜索；要一直正常，到 设置 → 联网搜索 充值或换一个", error = true))
+            val ds = state.providers.firstOrNull { it.enabled && !it.viaHost && it.apiKey.isNotBlank() && isDeepSeek(it) }?.takeIf { it.id != official?.id }
+            if (ds != null) try {
+                val res = search.deepseek(query, ds.baseUrl, ds.apiKey, proxyFor(ds.useProxy), state.settings.search.maxResults)
+                sources += res
+                return ToolStep("search", query, res, ok = true, note = "$engine 出错（$why），这次改用 DeepSeek 官方搜索") to res
+            } catch (e2: CancellationException) {
+                throw e2
+            } catch (_: Throwable) {}
+            if (state.settings.search.engine != com.guixing.jixunying.model.SearchEngine.BING_FREE) try {
+                val res = search.search(query, searchSettings().copy(engine = com.guixing.jixunying.model.SearchEngine.BING_FREE))
+                if (res.isNotEmpty()) {
+                    sources += res
+                    return ToolStep("search", query, res, ok = true, note = "$engine 出错（$why），这次改用免费搜索") to res
+                }
+            } catch (e3: CancellationException) {
+                throw e3
+            } catch (_: Throwable) {}
+            ToolStep("search", query, ok = false, note = listOf(note, why).filter { it.isNotEmpty() }.joinToString("；")) to emptyList()
         }
     }
 
