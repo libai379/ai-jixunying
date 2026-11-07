@@ -1251,8 +1251,17 @@ class Engine(
             CommandResult(data = conv.id)
         }
         is Command.UpdateConversation -> {
-            updateState { s -> s.copy(conversations = s.conversations.map { if (it.id == c.conversation.id) c.conversation.copy(updatedAt = it.updatedAt,
-                memoryTopic = it.memoryTopic, memoryTopicByUser = it.memoryTopicByUser, editedAt = now()) else it }) }
+            // 微信对话里换了谁回答（2026-11-06 用户：手机 App 里切了模型，微信一发消息又跳回 DeepSeek）：
+            // 微信每次答之前会对齐成本机 设置 → 微信 选的成员（alignChannelMembers），只改对话不改设置就会被改回去。
+            // 所以在微信对话里换成员 = 改本机的微信回答成员（这台设备所有微信对话一起换，和在设置里改一样）。
+            val before = state.conversation(c.conversation.id)
+            val wxPick = c.conversation.memberIds.filter { state.member(it) != null }
+            val wxChanged = before != null && before.channel.startsWith("weixin:") && wxPick.isNotEmpty() && wxPick != before.memberIds
+            updateState { s -> s.copy(
+                settings = if (wxChanged) s.settings.copy(weixin = s.settings.weixin.copy(memberIds = wxPick)) else s.settings,
+                conversations = s.conversations.map { if (it.id == c.conversation.id) c.conversation.copy(updatedAt = it.updatedAt,
+                memoryTopic = it.memoryTopic, memoryTopicByUser = it.memoryTopicByUser, editedAt = now())
+                else if (wxChanged && it.channel.startsWith("weixin:")) it.copy(memberIds = wxPick) else it }) }
             CommandResult()
         }
         is Command.DeleteConversation -> {

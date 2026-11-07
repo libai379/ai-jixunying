@@ -1765,6 +1765,39 @@ class EngineTest {
         phone.close()
     }
 
+    /**
+     * 2026-11-06 用户：手机 App 里在微信对话换了模型，微信一发消息又跳回 DeepSeek。
+     * 原因：微信每次答之前对齐成本机 设置 → 微信 的成员（alignChannelMembers），对话里换的被改回去。现在对话里换 = 改本机的微信回答成员。
+     */
+    @Test
+    fun weixinConversationMemberSwitchSticks() = runBlocking {
+        val phone = Engine(Storage(File(dir, "wxswitch").also { it.mkdirs() }), isPhone = true)
+        phone.call(Command.SaveProvider(ProviderConfig("p1", "custom", "假服务商", "${base()}/v1", "sk-test", listOf(ModelInfo("fake-chat")))))
+        phone.call(Command.SaveMember(Member("ds", "DeepSeek", providerId = "p1", modelId = "fake-chat")))
+        phone.call(Command.SaveMember(Member("zp", "智谱", providerId = "p1", modelId = "fake-chat")))
+        val s = phone.state.settings
+        phone.call(Command.SaveSettings(s.copy(weixin = s.weixin.copy(memberIds = listOf("ds")), relay = s.relay.copy(enabled = false))))
+        val wx = phone.channelConversation("weixin:me@im.wechat", "微信对话", listOf("ds"), webSearch = false)
+        val wx2 = phone.channelConversation("weixin:other@im.wechat", "微信对话", listOf("ds"), webSearch = false)
+        phone.call(Command.UpdateConversation(phone.state.conversation(wx)!!.copy(memberIds = listOf("zp"))))
+        assertEquals(listOf("zp"), phone.state.settings.weixin.memberIds, "对话里换的记进本机微信设置")
+        assertEquals(listOf("zp"), phone.state.conversation(wx2)!!.memberIds, "本机别的微信对话一起换")
+        // 微信来消息时 WeixinBridge.turn 做的对齐：不再改回 DeepSeek
+        phone.alignChannelMembers(wx, phone.state.settings.weixin.memberIds)
+        assertEquals(listOf("zp"), phone.state.conversation(wx)!!.memberIds)
+        val r = phone.channelTurn(wx, listOf(Engine.ChannelInput("你好", emptyList()))) {}
+        assertEquals(listOf("zp"), r.map { it.senderId })
+        // 只改标题这类不碰成员的，不动微信设置；普通对话换成员也不动
+        phone.call(Command.UpdateConversation(phone.state.conversation(wx)!!.copy(title = "改个名")))
+        assertEquals(listOf("zp"), phone.state.settings.weixin.memberIds)
+        val made = phone.call(Command.CreateConversation(listOf("zp")))
+        assertTrue(made.ok, "建普通对话：${made.message}")
+        val plain = phone.state.conversation(made.data!!)!!
+        phone.call(Command.UpdateConversation(plain.copy(memberIds = listOf("ds"))))
+        assertEquals(listOf("zp"), phone.state.settings.weixin.memberIds, "普通对话换成员不动微信设置")
+        phone.close()
+    }
+
     /** 2026-10-30 真回答里出过「〔11月x日〕」开头、正文里夹「[附件：视频_119551.mp4]」：学聊天记录的格式写的，回答里去掉。 */
     @Test
     fun replyDropsCopiedTimeAndAttachmentTags() = runBlocking {
