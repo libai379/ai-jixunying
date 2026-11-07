@@ -3125,20 +3125,60 @@ class Engine(
 
     /**
      * 这位成员现在在这台设备上答得了吗（只看配置，不调模型）：答不了返回原因（给人看的半句话），答得了返回 null。
-     * ChatGPT 订阅的凭据只在登录的那台设备上（不同步，见 ChatGptAuth）；手机上「经电脑问」的本机模型要连着电脑。
+     * ChatGPT 订阅的凭据只在登录的那台设备上（不同步，见 ChatGptAuth）；手机上「经电脑问」的本机模型要连着电脑；
+     * 电脑上走代理的，代理得开着（2026-11-07）。
      */
     private fun cannotAnswerHere(m: Member): String? {
         val p = state.provider(m.providerId) ?: return "还没配置模型"
         if (m.modelId.isBlank()) return "还没选模型"
         if (!p.enabled) return "服务商「${p.name}」停用了"
         if (Presets.isChatGpt(p)) return when {
-            chatgptAuth.creds.signedIn -> null
+            chatgptAuth.creds.signedIn -> proxyDownFor(m)
             isPhone -> "它用的 ChatGPT 订阅只在电脑上登录了，手机上没登录"
             else -> "它用的 ChatGPT 订阅还没登录"
         }
         if (p.viaHost) return if (hostBrowser?.online == true) null else "它用的是电脑本机的模型，电脑现在连不上"
         if (p.apiKey.isBlank() && !HostChatCodec.isLoopback(p.baseUrl)) return "服务商「${p.name}」没填 Key"
-        return null
+        return proxyDownFor(m)
+    }
+
+    /** 上一次看代理开没开：（什么时候看的，地址，开着没有），记 3 秒。 */
+    @Volatile private var proxyCheck = Triple(0L, "", true)
+
+    /**
+     * 代理开着没有：只看那个端口连不连得上（不看能不能翻出去）。2026-11-07 电脑开机后 v2rayN 过了二十多分钟才打开，
+     * 这期间走代理的成员每句都是「Failed to connect to /127.0.0.1:10809」。地址的写法和 Http.client 一样（可以带 http://）。
+     */
+    private fun proxyListening(): Boolean {
+        val addr = state.settings.proxy.trim()
+        if (addr.isEmpty()) return true
+        proxyCheck.let { (at, a, ok) -> if (a == addr && System.currentTimeMillis() - at < 3_000) return ok }
+        val hp = addr.substringAfter("://").substringBefore('/').substringAfterLast('@')
+        val host = hp.substringBeforeLast(':', hp).removePrefix("[").removeSuffix("]").ifEmpty { "127.0.0.1" }
+        val port = hp.substringAfterLast(':', "").toIntOrNull() ?: if (addr.startsWith("https")) 443 else 80
+        val ok = runCatching { java.net.Socket().use { it.connect(java.net.InetSocketAddress(host, port), 800) } }.isSuccess
+        proxyCheck = Triple(System.currentTimeMillis(), addr, ok)
+        return ok
+    }
+
+    /** 这位成员要走代理、代理又没开：返回给人看的半句话。只在电脑上看（手机上翻墙靠系统里的 VPN）。 */
+    private fun proxyDownFor(m: Member): String? {
+        if (isPhone) return null
+        val p = state.provider(m.providerId) ?: return null
+        if (!p.useProxy || state.settings.proxy.isBlank()) return null
+        return if (proxyListening()) null else "电脑上的代理 ${state.settings.proxy.trim()} 没开"
+    }
+
+    /**
+     * 电脑上：设置 → 微信 里选的回答成员都要走代理、代理又没开（2026-11-07 电脑开机时 v2rayN 还没起来，微信里来了句「网络连不上」；
+     * 用户选「电脑答不了就先让给手机答，代理一开电脑再接回来」）。返回给人看的原因，WeixinBridge 拿它把微信让给手机。
+     * 有一位不走代理就返回 null：电脑照常接，走代理的那位由 standIns 跳过、换答得了的答。
+     */
+    fun weixinBlockedByProxy(): String? {
+        if (isPhone) return null
+        val who = weixinAnswerers()
+        if (who.isEmpty() || who.any { proxyDownFor(it) == null }) return null
+        return "电脑上的代理 ${state.settings.proxy.trim()} 没开，微信先交给手机答；代理开了电脑自动接回"
     }
 
     private fun canSeeImages(m: Member): Boolean =

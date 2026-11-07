@@ -1850,6 +1850,108 @@ class EngineTest {
         }
     }
 
+    /**
+     * 2026-11-07 用户选「电脑答不了就先让给手机答，代理一开电脑再接回来」：电脑上微信的回答成员都要走代理、代理没开 → weixinBlockedByProxy 说原因；
+     * 代理开了、或者有一位不走代理 → 照常接；有一位不走代理时，走代理的那位这轮跳过，由不走代理的答并说一声。
+     */
+    @Test
+    fun weixinBlockedByProxy() = runBlocking {
+        val pc = Engine(Storage(File(dir, "proxyblock").also { it.mkdirs() }))
+        val proxyPort = freePort()
+        pc.call(Command.SaveProvider(ProviderConfig("px", "custom", "海外假服务商", "${base()}/v1", "sk-test", listOf(ModelInfo("fake-chat")), useProxy = true)))
+        pc.call(Command.SaveProvider(ProviderConfig("p1", "custom", "国内假服务商", "${base()}/v1", "sk-test", listOf(ModelInfo("fake-chat")))))
+        pc.call(Command.SaveMember(Member("miao", "阿苗", providerId = "px", modelId = "fake-chat")))
+        pc.call(Command.SaveMember(Member("zhi", "阿智", providerId = "p1", modelId = "fake-chat")))
+        val s = pc.state.settings
+        pc.call(Command.SaveSettings(s.copy(proxy = "127.0.0.1:$proxyPort", weixin = s.weixin.copy(memberIds = listOf("miao")),
+            search = s.search.copy(engine = SearchEngine.TAVILY), relay = s.relay.copy(enabled = false))))
+        val why = pc.weixinBlockedByProxy()
+        assertTrue(why != null && "127.0.0.1:$proxyPort" in why && "手机" in why, why.toString())
+        // 代理开了（结果记 3 秒）
+        java.net.ServerSocket(proxyPort, 50, java.net.InetAddress.getByName("127.0.0.1")).use {
+            delay(3_200)
+            assertNull(pc.weixinBlockedByProxy())
+        }
+        delay(3_200)
+        assertNotNull(pc.weixinBlockedByProxy(), "代理又关了")
+        // 写成 http://… 也认
+        pc.call(Command.SaveSettings(pc.state.settings.copy(proxy = "http://127.0.0.1:$proxyPort")))
+        assertNotNull(pc.weixinBlockedByProxy())
+        // 有一位不走代理：电脑照常接；走代理的阿苗这轮跳过，由阿智答，并说一声
+        pc.call(Command.SaveSettings(pc.state.settings.copy(weixin = pc.state.settings.weixin.copy(memberIds = listOf("miao", "zhi")))))
+        assertNull(pc.weixinBlockedByProxy())
+        val conv = pc.channelConversation("weixin:me@im.wechat", "微信对话", listOf("miao"), webSearch = false)
+        val notices = mutableListOf<String>()
+        val r = pc.channelTurn(conv, listOf(Engine.ChannelInput("在吗", emptyList()))) { notices += it }
+        assertEquals(listOf("zhi"), r.map { it.senderId })
+        assertEquals(MsgStatus.DONE, r.single().status)
+        assertTrue(notices.size == 1 && notices[0].let { "阿苗" in it && "代理" in it && "阿智" in it }, notices.toString())
+        pc.close()
+    }
+
+    /**
+     * 2026-11-07 用户选的：电脑上微信的回答成员都要走代理、代理没开（开机时 v2rayN 还没起来）→ 电脑先不收，微信让给手机答；
+     * 代理开了电脑接回，手机待命。
+     */
+    @Test
+    fun weixinPcYieldsToPhoneWhileProxyDown() = runBlocking {
+        val mqttPort = freePort()
+        val broker = io.moquette.broker.Server()
+        broker.startServer(io.moquette.broker.config.MemoryConfig(Properties().apply {
+            setProperty("port", mqttPort.toString()); setProperty("host", "127.0.0.1"); setProperty("websocket_port", "disabled")
+            setProperty("allow_anonymous", "true"); setProperty("persistence_enabled", "false"); setProperty("data_path", File(dir, "mqtt7").absolutePath)
+        }))
+        val (pc, ms) = engineWithMembers("小智", root = File(dir, "pc7").also { it.mkdirs() })
+        pc.call(Command.SaveSettings(pc.state.settings.copy(relay = RelaySettings(true, listOf("tcp://127.0.0.1:$mqttPort"), "测试电脑"))))
+        val relay = RelayHost(pc)
+        relay.restart()
+        val pcWx = com.guixing.jixunying.engine.WeixinBridge(pc, File(dir, "pc7/weixin"), loginBase = base(), cdnBase = "${base()}/c2c", backlogHoldMs = 1_500)
+        pc.weixin = pcWx
+        pcWx.start()
+        val (phone, _) = engineWithMembers("小米", root = File(dir, "phone7").also { it.mkdirs() })
+        val phoneWx = com.guixing.jixunying.engine.WeixinBridge(phone, File(dir, "phone7/weixin"), loginBase = base(), cdnBase = "${base()}/c2c")
+        phone.weixin = phoneWx
+        fun replies() = wxSent.filter { it.startsWith("{") }.map {
+            Json.parseToJsonElement(it).jsonObject["msg"]!!.jsonObject["item_list"]!!.jsonArray[0].jsonObject["text_item"]?.jsonObject?.get("text")?.jsonPrimitive?.content.orEmpty()
+        }
+        fun msg(id: Long, text: String, at: Long) =
+            """{"message_id":$id,"from_user_id":"me@im.wechat","to_user_id":"bot1@im.bot","message_type":1,"create_time_ms":$at,"context_token":"c$id","item_list":[{"type":1,"text_item":{"text":"$text"}}]}"""
+        val proxyPort = freePort()
+        try {
+            withTimeout(15_000) { while (!pc.state.relayStatus.startsWith("已连上")) delay(100) }
+            assertTrue(pc.call(Command.WeixinLogin).ok)
+            withTimeout(10_000) { while (!pc.state.weixin.answering) delay(50) }
+            val hub = Hub(phone, linkFactory = { RelayLink(it) }, pairer = { c, n -> pairWithHost(c, n) }, deviceName = "测试手机")
+            assertTrue(hub.pair(PairingCode(pc.state.hostId, pc.state.pairingSecret, "测试电脑", pc.state.settings.relay.brokers)).isSuccess)
+            com.guixing.jixunying.engine.WeixinHandover(hub, phone, phoneWx).start()
+            phoneWx.start()
+            withTimeout(30_000) { while (!phoneWx.isShared) delay(100) }
+            withTimeout(10_000) { while (phone.state.weixin.status != com.guixing.jixunying.engine.WeixinHandover.STANDBY) delay(50) }
+
+            // 电脑的小智改成走代理，代理没开：电脑让出来，手机接
+            val p = pc.state.providers.first { it.id == ms[0].providerId }
+            pc.call(Command.SaveProvider(p.copy(useProxy = true)))
+            pc.call(Command.SaveSettings(pc.state.settings.copy(proxy = "127.0.0.1:$proxyPort")))
+            withTimeout(20_000) { while (pc.state.weixin.answering) delay(50) }
+            val st = pc.state.weixin.bots.single().status
+            assertTrue("代理" in st && "手机" in st, st)
+            withTimeout(20_000) { while (!phone.state.weixin.answering) delay(50) }
+            wxSent.clear()
+            wxInbox += msg(71, "电脑代理没开的时候", System.currentTimeMillis())
+            withTimeout(20_000) { while (replies().none { "小米" in it }) delay(50) }
+            delay(500)
+            assertTrue(replies().none { "小智" in it || "没答上来" in it }, replies().toString())
+
+            // 代理开了：电脑接回，手机待命
+            java.net.ServerSocket(proxyPort, 50, java.net.InetAddress.getByName("127.0.0.1")).use {
+                withTimeout(30_000) { while (!pc.state.weixin.answering) delay(50) }
+                withTimeout(20_000) { while (phone.state.weixin.status != com.guixing.jixunying.engine.WeixinHandover.STANDBY) delay(50) }
+            }
+        } finally {
+            phoneWx.stop(); pcWx.stop(); relay.stop(); broker.stopServer()
+        }
+    }
+
     /** 2026-10-30 真回答里出过「〔11月x日〕」开头、正文里夹「[附件：视频_119551.mp4]」：学聊天记录的格式写的，回答里去掉。 */
     @Test
     fun replyDropsCopiedTimeAndAttachmentTags() = runBlocking {

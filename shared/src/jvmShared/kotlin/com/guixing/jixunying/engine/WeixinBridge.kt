@@ -664,6 +664,23 @@ class WeixinBridge(
             publish()
         }
 
+        /**
+         * 电脑把这个微信让出去有没有手机接（和 WeixinHandover.notMyTurn 对上）：绑定同步给过手机，
+         * 手机遥控电脑时绑的那台、或者电脑定的接班手机还配对着；电脑定了「都不接」就没人接。
+         */
+        private fun phoneCanTakeOver(): Boolean {
+            val acc = account
+            if (acc.shared || cursor.sharedAt <= 0) return false
+            val s = engine.state
+            if (acc.boundBy.isNotEmpty()) return s.devices.any { it.id == acc.boundBy }
+            val b = s.weixinBackup
+            return when {
+                b == "none" -> false
+                b.isEmpty() -> s.devices.isNotEmpty()
+                else -> s.devices.any { it.id == b }
+            }
+        }
+
         /** 停下来不说下线（解绑、换掉、重新同步时）。 */
         fun halt() { monitorJob?.cancel() }
 
@@ -695,6 +712,14 @@ class WeixinBridge(
                         show(other, false)
                         live = false
                         delay(2_000); continue
+                    }
+                    // 电脑：微信的回答成员都要走代理、代理又没开（开机时 v2rayN 还没起来），有手机能接就先不收、让手机答，代理开了再接回
+                    // （2026-11-07 用户选的；不收消息手机才拿得到，接回时手机答过的按它报的不再答）。没有手机能接就照常收，答不上来在微信里说一声查代理
+                    val blocked = if (phoneCanTakeOver()) engine.weixinBlockedByProxy() else null
+                    if (blocked != null) {
+                        show(blocked, false)
+                        live = false
+                        delay(5_000); continue
                     }
                     if (!live) {
                         live = true
