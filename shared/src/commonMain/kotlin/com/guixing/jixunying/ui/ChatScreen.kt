@@ -239,7 +239,11 @@ fun ChatScreen(ctl: AppController, convId: String, wide: Boolean, openDrawer: ()
             Text("松开鼠标，把文件放进输入框", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.primary)
         }
     }
-    if (showConvSettings) ConversationSettingsDialog(ctl, state, conv) { showConvSettings = false }
+    // 引导讲「对话设置」里的群聊方式、会审时由它打开（2026-11-07）
+    if (showConvSettings || ctl.guideDialog == "convset") ConversationSettingsDialog(ctl, state, conv) {
+        showConvSettings = false
+        if (ctl.guideDialog == "convset") ctl.guideDialog = null
+    }
     stanceDialog?.let { focus -> ConversationStancesDialog(ctl, state, conv, topics, focus.ifEmpty { null }) { stanceDialog = null } }
 }
 
@@ -798,7 +802,8 @@ private fun MessageActions(ctl: AppController, m: Message, alignEnd: Boolean, ca
     }
     val hasTable = export && remember(body) { Regex("""(?m)^\s*\|?\s*:?-{3,}:?\s*\|""").containsMatchIn(body) }
     Row(
-        Modifier.padding(top = 4.dp),
+        // 引导「回答下面的按钮」圈的是最后一条答完的回答（2026-11-07）
+        (if (m.id == ctl.guideAnswerId) Modifier.guideTarget("msgactions") else Modifier).padding(top = 4.dp),
         horizontalArrangement = if (alignEnd) Arrangement.End else Arrangement.Start,
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -1317,7 +1322,7 @@ private fun Composer(ctl: AppController, state: AppState, conv: Conversation, ru
                             if (platform.isDesktop && !ctl.remoteMode) {
                                 Spacer(Modifier.width(4.dp))
                                 // 动手（改别处的文件、删、跑命令）问不问：照 Claude 的权限菜单做成一个小菜单
-                                Box {
+                                Box(Modifier.guideTarget("filemode")) {
                                     var menu by remember { mutableStateOf(false) }
                                     val label = when { conv.fileOpen -> "全部放开"; conv.fileAuto -> "自动"; else -> "动手先问我" }
                                     ToggleChip(label, Icons.Rounded.Edit, conv.fileOpen || conv.fileAuto) { menu = true }
@@ -1505,6 +1510,7 @@ private fun ConversationSettingsDialog(ctl: AppController, state: AppState, conv
             MemberPickList(state, picked) { id -> picked = if (id in picked) picked - id else picked + id }
             if (picked.size > 1) {
                 Spacer(Modifier.height(12.dp))
+              Column(Modifier.guideTarget("cs.mode")) {
                 FieldLabel("没人被 @ 时怎么回答")
                 listOf(
                     ReplyMode.INDEPENDENT to ("独立作答（推荐）" to "每人各答各的，互相看不到，避免跟风附和；答完可以互相 @ 纠错"),
@@ -1519,9 +1525,10 @@ private fun ConversationSettingsDialog(ctl: AppController, state: AppState, conv
                         }
                     }
                 }
+              }
                 Spacer(Modifier.height(8.dp))
-                SwitchRow("会审模式", "对大家提的问题：先各自独立回答，再匿名互评、排名次，最后由中立的主席（立场档案用的裁判模型）写最终答案，" +
-                    "写清首轮分歧和少数派意见。每个问题要多调「成员数 + 1」次模型，适合重要、有争议的问题；只叫某几位时照常回答。", council) { council = it }
+                Box(Modifier.guideTarget("cs.council")) { SwitchRow("会审模式", "对大家提的问题：先各自独立回答，再匿名互评、排名次，最后由中立的主席（立场档案用的裁判模型）写最终答案，" +
+                    "写清首轮分歧和少数派意见。每个问题要多调「成员数 + 1」次模型，适合重要、有争议的问题；只叫某几位时照常回答。", council) { council = it } }
             }
             Spacer(Modifier.height(8.dp))
             SwitchRow("联网搜索", "需要时先搜索再回答，回答里标出处", search) { search = it }

@@ -155,7 +155,7 @@ fun Sidebar(ctl: AppController, modifier: Modifier, onNavigate: () -> Unit, onCo
                         if (it == SidebarTab.WOLF) { ctl.page = null; ctl.settingsTab = null; onNavigate() }
                     }
                 }
-                Box(Modifier.align(Alignment.CenterVertically)) { DeviceMenu(ctl, state, onNavigate) }
+                Box(Modifier.align(Alignment.CenterVertically).guideTarget("devmenu")) { DeviceMenu(ctl, state, onNavigate) }
             }
             Spacer(Modifier.height(10.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -187,8 +187,8 @@ fun Sidebar(ctl: AppController, modifier: Modifier, onNavigate: () -> Unit, onCo
                     state.docs.needPermission -> "要授权"
                     state.docs.scanning -> "扫描中…"
                     else -> "${state.docs.count} 个"
-                }, dot = if (state.docs.needPermission) Ext.c.warning else null) { ctl.openPage(MainPage.DOCS); onNavigate() }
-                QuickCard(Icons.Rounded.Flag, "立场档案", state.conversations.sumOf { it.stanceTopics }.let { if (it == 0) "还没有" else "$it 题" }) {
+                }, dot = if (state.docs.needPermission) Ext.c.warning else null, guide = "qdocs") { ctl.openPage(MainPage.DOCS); onNavigate() }
+                QuickCard(Icons.Rounded.Flag, "立场档案", state.conversations.sumOf { it.stanceTopics }.let { if (it == 0) "还没有" else "$it 题" }, guide = "qstances") {
                     ctl.openPage(MainPage.STANCES); onNavigate()
                 }
                 QuickCard(Icons.Rounded.Groups, "AI 成员", "${state.members.size} 位") { ctl.openSettings(SettingsTab.MEMBERS); onNavigate() }
@@ -206,8 +206,8 @@ fun Sidebar(ctl: AppController, modifier: Modifier, onNavigate: () -> Unit, onCo
             // 账号：最底下一行最左边（10-24），登了显示 GitHub 名字，没登显示「登录」，点进 设置 → 账号
             // 账号每台设备一个：手机遥控电脑时也显示手机自己的
             val localState by ctl.hub.local.store.state.collectAsState()
-            Box(Modifier.weight(1f)) { AccountChip(localState.account, iconsOnly) { ctl.openSettings(SettingsTab.ACCOUNT); onNavigate() } }
-            BottomItem(Icons.Rounded.Payments, "花费", null, iconsOnly) { ctl.openPage(MainPage.COSTS); onNavigate() }
+            Box(Modifier.weight(1f)) { Box(Modifier.guideTarget("account")) { AccountChip(localState.account, iconsOnly) { ctl.openSettings(SettingsTab.ACCOUNT); onNavigate() } } }
+            Box(Modifier.guideTarget("costs")) { BottomItem(Icons.Rounded.Payments, "花费", null, iconsOnly) { ctl.openPage(MainPage.COSTS); onNavigate() } }
             Spacer(Modifier.width(6.dp))
             // 记录员后台出了错：设置旁边亮红点。点进去照样是设置首页（以前直接跳「记忆」，
             // 出错提示没消之前每次点设置都进记忆，用户 2026-10-12 报的），首页里「记忆」那一项标红
@@ -243,12 +243,12 @@ private fun SidebarTabs(tabs: List<SidebarTab>, tab: SidebarTab, onPick: (Sideba
 
 /** 搜索框下面那三张小卡片之一：图标、名字、一行状态（原来侧栏底下的「我的文档」「立场档案」「AI 成员」）。 */
 @Composable
-private fun RowScope.QuickCard(icon: androidx.compose.ui.graphics.vector.ImageVector, title: String, sub: String, dot: Color? = null, onClick: () -> Unit) {
+private fun RowScope.QuickCard(icon: androidx.compose.ui.graphics.vector.ImageVector, title: String, sub: String, dot: Color? = null, guide: String? = null, onClick: () -> Unit) {
     // 按下弹簧缩一下（2026-10-22）；玻璃上底色半透明
     val press = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
     // 10-24 用户：「这个框太宽了，要不你做细一点」——图标和名字放一行，状态在下面一行，高度从 70 多压到 40 多
     Column(
-        Modifier.weight(1f).springPress(press).clip(RoundedCornerShape(12.dp)).background(cardFill())
+        Modifier.weight(1f).then(if (guide != null) Modifier.guideTarget(guide) else Modifier).springPress(press).clip(RoundedCornerShape(12.dp)).background(cardFill())
             .clickable(interactionSource = press, indication = androidx.compose.foundation.LocalIndication.current, onClick = onClick)
             .padding(horizontal = 8.dp, vertical = 6.dp),
     ) {

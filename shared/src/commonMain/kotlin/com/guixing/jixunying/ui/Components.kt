@@ -257,6 +257,8 @@ fun AppDialog(
                     }
                 }
                 Spacer(Modifier.size(10.dp))
+                // 引导走到弹窗里的那几步：说明框放在弹窗顶上（主界面上的文字框被弹窗挡住了，2026-11-07）
+                GuideDialogCard()
                 // 内容区：最高 contentCap，但窗口矮的时候先让出标题和底下按钮的位置、剩下的才给内容（weight，不占满）。
                 // 以前固定 620，窗口矮（用户 10-14 截图：新建 Code 会话）时「建好」被挤到窗口外面，只看得见右上角的叉
                 Column(Modifier.weight(1f, fill = false).heightIn(max = contentCap)) { content() }

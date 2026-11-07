@@ -27,6 +27,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.rounded.OpenInNew
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Badge
@@ -340,7 +341,11 @@ private fun ProvidersPage(ctl: AppController, state: AppState) {
             }
         }
     }
-    if (adding) ProviderDialog(ctl, null) { adding = false }
+    // 引导讲「添加服务商」弹窗里的每一栏时由它打开（2026-11-07）；用户自己关了，引导下一步会再打开
+    if (adding || (ctl.guideDialog == "provider" && editing == null)) ProviderDialog(ctl, null) {
+        adding = false
+        if (ctl.guideDialog == "provider") ctl.guideDialog = null
+    }
     editing?.let { e -> ProviderDialog(ctl, e) { editing = null } }
 }
 
@@ -388,7 +393,7 @@ private fun ProviderDialog(ctl: AppController, existing: ProviderConfig?, onClos
     AppDialog(if (existing == null) "添加服务商" else "编辑服务商", onClose, width = 620.dp, actions = {
         if (existing != null) TextButton(onClick = { confirmDelete = true }) { Text("删除", color = MaterialTheme.colorScheme.error) }
         Spacer(Modifier.weight(1f))
-        OutlinedButton(enabled = !busy && models.isNotEmpty(), onClick = {
+        OutlinedButton(modifier = Modifier.guideTarget("pv.test"), enabled = !busy && models.isNotEmpty(), onClick = {
             val chat = models.firstOrNull { !it.imageGen }
             if (chat == null) {
                 val looksChat = models.filter { !Presets.guessImageGen(it.id) }.map { it.id }
@@ -411,6 +416,7 @@ private fun ProviderDialog(ctl: AppController, existing: ProviderConfig?, onClos
         Button(onClick = { ctl.run(Command.SaveProvider(draft()), "已保存"); onClose() }) { Text("保存") }
     }) {
         Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState())) {
+          Column(Modifier.guideTarget("pv.preset")) {
             FieldLabel("服务商", "都按 OpenAI 兼容协议接入")
             SelectBox(preset.name, leading = { PresetBadge(preset, 20.dp) }) { close ->
                 Box(Modifier.padding(horizontal = 8.dp, vertical = 4.dp)) { TapToSearchField(search, { search = it }, "搜索服务商") }
@@ -439,6 +445,7 @@ private fun ProviderDialog(ctl: AppController, existing: ProviderConfig?, onClos
                 }
             }
             if (preset.note.isNotBlank()) Text(preset.note, style = MaterialTheme.typography.bodySmall, color = Ext.c.warning, modifier = Modifier.padding(top = 6.dp))
+          }
             Spacer(Modifier.height(10.dp))
             FieldLabel("显示名称")
             AppTextField(name, { name = it })
@@ -446,6 +453,7 @@ private fun ProviderDialog(ctl: AppController, existing: ProviderConfig?, onClos
             FieldLabel("接口地址（Base URL）", "到 /v1 这一级，不要带 /chat/completions")
             AppTextField(baseUrl, { baseUrl = it }, placeholder = "https://…/v1")
             Spacer(Modifier.height(10.dp))
+          Column(Modifier.guideTarget("pv.key")) {
             if (presetId == Presets.CHATGPT) ChatGptLogin(ctl, state) { ctl.run(Command.SaveProvider(draft()), quiet = true) { r -> it(r.ok) } }
             else Row(verticalAlignment = Alignment.CenterVertically) {
                 FieldLabel("API Key")
@@ -459,15 +467,18 @@ private fun ProviderDialog(ctl: AppController, existing: ProviderConfig?, onClos
             if (presetId != Presets.CHATGPT) AppTextField(key, { key = it }, placeholder = "sk-…", password = !showKey, trailing = {
                 IconButton(onClick = { showKey = !showKey }) { Icon(if (showKey) Icons.Rounded.VisibilityOff else Icons.Rounded.Visibility, null, Modifier.size(18.dp)) }
             })
+          }
             // ChatGPT 登录好了引擎会自己拉一次模型列表，弹窗里跟着更新
             val engineModels = state.provider(id)?.models
             androidx.compose.runtime.LaunchedEffect(engineModels) { if (presetId == Presets.CHATGPT && !engineModels.isNullOrEmpty()) models = engineModels }
             Spacer(Modifier.height(4.dp))
-            SwitchRow("走代理", "海外服务商一般要开 · 代理 ${state.settings.proxy.ifBlank { "未设置" }}（在 外观 里改）", useProxy) { useProxy = it }
+            Box(Modifier.guideTarget("pv.proxy")) {
+                SwitchRow("走代理", "海外服务商一般要开 · 代理 ${state.settings.proxy.ifBlank { "未设置" }}（在 外观 里改）", useProxy) { useProxy = it }
+            }
             HorizontalDivider(color = Ext.c.border, modifier = Modifier.padding(vertical = 8.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Box(Modifier.weight(1f)) { FieldLabel("模型", "每个模型选「聊天」还是「画图」") }
-                TextButton(enabled = !busy && (key.isNotBlank() || (presetId == Presets.CHATGPT && state.chatgpt.signedIn)), onClick = {
+                TextButton(modifier = Modifier.guideTarget("pv.fetch"), enabled = !busy && (key.isNotBlank() || (presetId == Presets.CHATGPT && state.chatgpt.signedIn)), onClick = {
                     busy = true
                     result = null
                     ctl.run(Command.SaveProvider(draft()), quiet = true) {
@@ -481,7 +492,7 @@ private fun ProviderDialog(ctl: AppController, existing: ProviderConfig?, onClos
                     Icon(Icons.Rounded.Refresh, null, Modifier.size(16.dp)); Spacer(Modifier.width(4.dp)); Text("拉取模型列表", maxLines = 1, softWrap = false)
                 }
             }
-            Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).border(1.dp, Ext.c.border, RoundedCornerShape(10.dp))) {
+            Column(Modifier.guideTarget("pv.models").fillMaxWidth().clip(RoundedCornerShape(10.dp)).border(1.dp, Ext.c.border, RoundedCornerShape(10.dp))) {
                 if (models.isEmpty()) Text("还没有模型。点「拉取模型列表」，或在下面手动添加。", style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle, modifier = Modifier.padding(12.dp))
                 models.forEachIndexed { i, m ->
                     if (i > 0) HorizontalDivider(color = Ext.c.border)
@@ -548,9 +559,9 @@ private fun MembersPage(ctl: AppController, state: AppState) {
         }
     }
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        state.members.forEach { m ->
+        state.members.forEachIndexed { idx, m ->
             val p = state.provider(m.providerId)
-            SectionCard(padding = androidx.compose.foundation.layout.PaddingValues(14.dp)) {
+            SectionCard(if (idx == 0) Modifier.guideTarget("mb.first") else Modifier, padding = androidx.compose.foundation.layout.PaddingValues(14.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     MemberAvatar(m, 42.dp)
                     Spacer(Modifier.width(12.dp))
@@ -583,7 +594,7 @@ private fun MembersPage(ctl: AppController, state: AppState) {
     Spacer(Modifier.height(20.dp))
     Text("从模板快速添加", style = MaterialTheme.typography.titleSmall)
     Spacer(Modifier.height(8.dp))
-    FlowRowCompat {
+    Box(Modifier.guideTarget("mb.templates")) { FlowRowCompat {
         MemberTemplates.all.forEach { t ->
             Row(
                 Modifier.padding(end = 8.dp, bottom = 8.dp).clip(RoundedCornerShape(12.dp)).border(1.dp, Ext.c.border, RoundedCornerShape(12.dp))
@@ -595,8 +606,11 @@ private fun MembersPage(ctl: AppController, state: AppState) {
                 Text(t.name, style = MaterialTheme.typography.bodyMedium)
             }
         }
-    }
+    } }
     editing?.let { m -> MemberDialog(ctl, state, m, isNew = state.member(m.id) == null) { editing = null } }
+    // 引导讲「添加成员」弹窗里的每一栏时由它打开（2026-11-07），不保存就不会多出成员
+    val guideNew = remember { newMember(state, null) }
+    if (ctl.guideDialog == "member" && editing == null) MemberDialog(ctl, state, guideNew, isNew = true) { ctl.guideDialog = null }
 }
 
 @OptIn(ExperimentalLayoutApi::class)
@@ -635,7 +649,7 @@ private fun MemberDialog(ctl: AppController, state: AppState, initial: Member, i
         }) { Text("保存") }
     }) {
         Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState())) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(Modifier.guideTarget("mb.name"), verticalAlignment = Alignment.CenterVertically) {
                 MemberAvatar(m, 56.dp)
                 Spacer(Modifier.width(14.dp))
                 Column(Modifier.weight(1f)) {
@@ -665,9 +679,12 @@ private fun MemberDialog(ctl: AppController, state: AppState, initial: Member, i
                 }
             }
             Spacer(Modifier.height(10.dp))
+          Column(Modifier.guideTarget("mb.bio")) {
             FieldLabel("定位 / 人设", "会写进它自己的设定，也会介绍给群里其他成员")
             AppTextField(m.bio, { m = m.copy(bio = it) }, singleLine = false, minLines = 3, placeholder = "例如：资深律师，回答严谨，会说明法律依据和风险")
+          }
             Spacer(Modifier.height(10.dp))
+          Column(Modifier.guideTarget("mb.model")) {
             FieldLabel("服务商")
             if (state.providers.isEmpty()) Text("先到「模型服务」添加服务商。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
             else SelectBox(provider?.name ?: "选择服务商", leading = provider?.let { { PresetBadge(Presets.byId(it.presetId), 20.dp) } }) { close ->
@@ -682,9 +699,12 @@ private fun MemberDialog(ctl: AppController, state: AppState, initial: Member, i
             if (provider != null) {
                 ModelPicker(m.modelId, { m = m.copy(modelId = it.trim()) }, provider.models.filter { !it.imageGen }, "例如 deepseek-flash")
             }
+          }
             Spacer(Modifier.height(10.dp))
+          Column(Modifier.guideTarget("mb.thinking")) {
             FieldLabel("思考", "快速 = 不先想直接答；深度 = 想透再答")
             ThinkingPicker(m.thinking, Thinking.rule(provider, m.modelId)) { m = m.copy(thinking = it) }
+          }
             Spacer(Modifier.height(10.dp))
             FieldLabel("温度（可选）", "留空用模型默认值；有的模型只接受固定值（如 kimi-k3 只能 1）")
             AppTextField(temp, { temp = it.filter { c -> c.isDigit() || c == '.' }.take(4) }, placeholder = "留空", keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
@@ -826,6 +846,7 @@ private fun SearchPage(ctl: AppController, state: AppState) {
     fun set(f: (com.guixing.jixunying.model.SearchSettings) -> com.guixing.jixunying.model.SearchSettings) = ctl.updateSettings { it.copy(search = f(it.search)) }
     PageHeader("联网搜索", "对话里打开「联网」后，AI 遇到时效性问题会先搜再答，并标出处。不需要单独的 AI：回答问题的那个模型自己决定什么时候搜、搜什么。改了马上生效。")
     SectionCard {
+      Column(Modifier.guideTarget("search.mode")) {
         FieldLabel("联网方式")
         RadioRow(s.mode == SearchMode.AUTO, "自动（推荐）", "智谱、千问用平台自带的官方搜索；Kimi、DeepSeek 用自家的官方搜索接口（同一个 Key，Kimi 每次 1 分钱、DeepSeek 每次 5 厘，出错自动换下面的引擎）；" +
             "其他模型（MiniMax、MiMo 等）：下面选的是免费必应时，借你已有的 DeepSeek 或 Kimi 来搜（免费必应搜中文常搜不对），没有就用下面的引擎") {
@@ -834,6 +855,7 @@ private fun SearchPage(ctl: AppController, state: AppState) {
         RadioRow(s.mode == SearchMode.ENGINE_ONLY, "全部用下面的搜索引擎", "所有模型统一用同一个搜索引擎，出处显示最一致") {
             set { it.copy(mode = SearchMode.ENGINE_ONLY) }
         }
+      }
         HorizontalDivider(color = Ext.c.border, modifier = Modifier.padding(vertical = 10.dp))
         FieldLabel("搜索引擎")
         listOf(
@@ -975,14 +997,16 @@ private fun ImagePage(ctl: AppController, state: AppState) {
         return
     }
     SectionCard {
-        FieldLabel("用哪个画图模型", "点一下就换，马上生效")
         val first = candidates.first()
         val qwenFirst = "qwen-image" in first.modelId.lowercase()
+      Column(Modifier.guideTarget("img.pick")) {
+        FieldLabel("用哪个画图模型", "点一下就换，马上生效")
         RadioRow(auto, "自动（推荐）",
             (if (qwenFirst) "画质优先，千问图像排第一。" else "画质优先（配了千问AI平台或阿里百炼，就先用画字最准的千问图像）。") +
                 "现在会用 ${first.modelId}（${first.providerName}，${first.note}）。画失败了（比如余额用完）会自动换下一家。") {
             save { it.copy(providerId = "", modelId = "") }
         }
+      }
         candidates.forEach { c ->
             val sel = !auto && current?.providerId == c.providerId && current.modelId == c.modelId
             RadioRow(sel, c.modelId, "${c.providerName} · ${c.note}" + if (c.inferred) " · 用这家的 Key 直接调" else "") {
@@ -994,7 +1018,7 @@ private fun ImagePage(ctl: AppController, state: AppState) {
     }
     Spacer(Modifier.height(12.dp))
     // AI 自己换模型再试（2026-11-03 用户：「如果一张图修不好，让他多试几个，随便调用各种模型和工具」）
-    SectionCard {
+    SectionCard(Modifier.guideTarget("img.retry")) {
         FieldLabel("AI 换模型再试", "画得不好、P 得不好时，AI 会自己换一个模型再做。每次回答第一次不算，之后累计最多再花这么多（按价格表估，画图、P 图、视频、配音一起算）")
         FlowRowCompat {
             listOf(0.0 to "不再试", 1.0 to "1 元", 2.0 to "2 元", 5.0 to "5 元", 10.0 to "10 元").forEach { (v, label) ->
@@ -1065,10 +1089,10 @@ private fun VideoSection(ctl: AppController, state: AppState) {
     fun perSec(vm: com.guixing.jixunying.model.VideoModel, r: String, extra: String = "") =
         Prices.of(VideoPick.pricePlatform(vm), VideoPick.billingModel(vm.id, r, extra), state.settings.costs.overrides)?.perSecond
     SectionCard {
-        SwitchRow("让 AI 做视频", "在对话里说「做一段……的视频」，AI 会调用视频模型，做好了点开就能播放。也能拿对话里的图、视频、文件，或者电脑上的文件当素材" +
+        Box(Modifier.guideTarget("vid.on")) { SwitchRow("让 AI 做视频", "在对话里说「做一段……的视频」，AI 会调用视频模型，做好了点开就能播放。也能拿对话里的图、视频、文件，或者电脑上的文件当素材" +
             "（让图片动起来、照着参考做、改一段视频、把视频接长、按文档做视频）。按秒收费，做一段要一到几分钟。", v.enabled) { on ->
             save { it.copy(enabled = on) }
-        }
+        } }
         if (providers.isEmpty()) {
             Spacer(Modifier.height(6.dp))
             Text("要先在「模型服务」里添加千问AI平台、阿里百炼或 MiniMax 中国版并填 Key（和聊天、画图用同一个 Key）。",
@@ -1262,18 +1286,36 @@ private fun LogCard(ctl: AppController) {
 private fun AboutPage(ctl: AppController) {
     val platform = LocalPlatform.current
     PageHeader("关于", "AI集训营 ${com.guixing.jixunying.model.APP_VERSION}")
-    UpdateCard(ctl)
+    Box(Modifier.guideTarget("update")) { UpdateCard(ctl) }
     Spacer(Modifier.height(12.dp))
-    // 引导随时能再看（2026-11-06 用户：「万一哪个功能找不到了，可以有迹可循」）
+    // 引导随时能再看（2026-11-06 用户：「万一哪个功能找不到了，可以有迹可循」）；11-07 分成章节，每章能单独看
     SectionCard(Modifier.guideTarget("aboutguide")) {
         Text("功能介绍", style = MaterialTheme.typography.titleSmall)
-        Text("各个功能是做什么的、在哪儿找；更新以后新加了什么", style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
+        Text("会真的跳到那个界面，一步一步圈出来讲：是做什么的、在哪儿、怎么用", style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
         Spacer(Modifier.height(8.dp))
         // 放不下就换行（220dp、字体 200% 时第二个按钮会被挤成 0 宽）
         FlowRowCompat {
-            Box(Modifier.padding(end = 8.dp, bottom = 6.dp)) { SpringButton("看功能介绍") { ctl.guideStart = 0; ctl.guide = "tour" } }
+            Box(Modifier.padding(end = 8.dp, bottom = 6.dp)) { SpringButton("新手必看（从头带一遍）") { ctl.guideStart = 0; ctl.guide = "tour" } }
             if (Guide.whatsNew.containsKey(Guide.versionKey()))
                 Box(Modifier.padding(bottom = 6.dp)) { androidx.compose.material3.OutlinedButton(onClick = { ctl.guideStart = 0; ctl.guide = "new" }) { Text("这一版新加了什么") } }
+        }
+        listOf(true to "新用户必看", false to "进阶").forEach { (essential, head) ->
+            Spacer(Modifier.height(10.dp))
+            Text(head, style = MaterialTheme.typography.labelMedium, color = Ext.c.subtle)
+            Spacer(Modifier.height(4.dp))
+            Guide.chapters.filter { it.essential == essential }.forEach { ch ->
+                Row(
+                    Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).clickable { ctl.guideStart = 0; ctl.guide = "ch:${ch.id}" }
+                        .padding(horizontal = 8.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(ch.title, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
+                        Text("${ch.desc} · ${ch.pages.size} 步", style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle)
+                    }
+                    Icon(Icons.AutoMirrored.Rounded.KeyboardArrowRight, null, Modifier.size(18.dp), tint = Ext.c.subtle)
+                }
+            }
         }
     }
     Spacer(Modifier.height(12.dp))

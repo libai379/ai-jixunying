@@ -1,6 +1,7 @@
 package com.guixing.jixunying.ui
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -156,8 +157,10 @@ fun WeixinPage(ctl: AppController, state: AppState) {
                 busy = true
                 ctl.run(Command.WeixinLogin, quiet = true) { r -> busy = false; if (!r.ok) ctl.toast(r.message) }
             }
-            if (wx.bots.isEmpty()) Button(enabled = !busy, onClick = bind) { Text(if (busy) "正在生成二维码…" else "绑定微信") }
-            else OutlinedButton(enabled = !busy, onClick = bind) { Text(if (busy) "正在生成二维码…" else "再绑一个微信") }
+            Box(Modifier.guideTarget("wx.bind")) {
+                if (wx.bots.isEmpty()) Button(enabled = !busy, onClick = bind) { Text(if (busy) "正在生成二维码…" else "绑定微信") }
+                else OutlinedButton(enabled = !busy, onClick = bind) { Text(if (busy) "正在生成二维码…" else "再绑一个微信") }
+            }
             Text(
                 if (platform.isDesktop || !phoneLocal)
                     "需要这台设备能上网（连的是腾讯的服务器，国内直连，不走代理）。能挂几个微信，同一个微信再扫一次只换掉它自己那份。" +
@@ -196,6 +199,7 @@ fun WeixinPage(ctl: AppController, state: AppState) {
         }
         SwitchRow("联网搜索", "微信里问时效性的问题会先搜再答，回复末尾附上来源", ws.webSearch) { v -> save { it.copy(webSearch = v) } }
         Spacer(Modifier.height(6.dp))
+      Column(Modifier.guideTarget("wx.who")) {
         FieldLabel("谁来回答微信消息", "选一位就是单聊；选多位就是群聊，每位的回答各发一条")
         val picked = ws.memberIds.filter { state.member(it) != null }.ifEmpty { state.members.take(1).map { it.id } }.toSet()
         if (state.members.isEmpty()) Text("还没有 AI 成员，先到「AI 成员」添加。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
@@ -205,6 +209,7 @@ fun WeixinPage(ctl: AppController, state: AppState) {
         }
         Text("换了以后，已经有的「微信对话」也一起换成这几位。",
             style = MaterialTheme.typography.labelSmall, color = Ext.c.subtle, modifier = Modifier.padding(top = 6.dp))
+      }
     }
     Spacer(Modifier.height(12.dp))
     SectionCard {

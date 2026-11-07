@@ -128,6 +128,7 @@
 - 给用户打开桌面版：先 :desktopApp:createDistributable，把 desktopApp/build/compose/binaries/main/app/ai-jixunying 复制到 G:\DevCache\ai-jixunying-app 再运行（直接运行 build 目录里的会占住文件，下次打包失败）
 - 渲染：Main.kt 默认 skiko.renderApi=OPENGL（DirectX 在用户电脑上会让字闪，见教训库 26）。用户正在用的窗口只截图，不要模拟鼠标键盘
 - 检查界面（不碰用户屏幕）：JXY_SHOTS=G:/DevCache/shots ./gradlew :shared:desktopTest --tests "*ShotsTest*" --rerun，电脑和手机尺寸、各页面、弹窗、深色模式都画成 PNG。要加场景就在 ShotsTest 里加一行，App 的 debugStart 支持 settings:标签名#弹窗、conv:对话编号#convsettings、conv:对话编号#stances、conv:对话编号#plus（输入框「+」菜单打开）、conv:对话编号#draw（直接画图开着）、conv:对话编号#longdraft（输入框里一大段草稿；# 后面能用 + 叠几个，比如 #longdraft+draw）、docs、stances、settingshome、newchat
+- 功能介绍 / 新手引导（ui/GuideUi.kt，2026-11-06 起，11-07 补完整）：Guide.chapters 是章节（新用户必看 3 章 + 进阶 8 章），每步 Page（要圈的 target、标题、说明、在哪儿、手机上开不开侧栏、要打开的弹窗 dialog、先跳到哪个界面 go）；tour = 欢迎 + 必看三章 + 「还有更多」；设置 → 关于 → 功能介绍 每章能单独打开（ctl.guide = "ch:编号"）。界面上要圈的东西挂 Modifier.guideTarget("名字")，弹窗里的那几步由 ctl.guideDialog 打开（provider / member / convset），弹窗顶上 GuideDialogCard 出同样的说明，那一栏自己画圈。加功能时顺手加一步并挂标记：GuideTest.everyTargetIsTaggedInTheUi 会查每个 target 都有人报位置。截图：ShotsTest.memoryAndGuideShots，-Djxy.start 的 #guide:3 / #guide-章节:2；只重画几张用 JXY_SHOTS_ONLY=正则。
 - 开发者署名（用户 2026-10-14 定）：「癸星」「癸星科技」两个都能用，现在关于页和电脑安装包的发布者 / 版权用的是「癸星科技」（model/Presets.kt 的 APP_DEVELOPER、desktopApp 的 vendor / copyright），不用再改。安卓签名证书里的 O=guixing、包名 com.guixing.jixunying 不动（改了手机没法覆盖安装）。
 - 版本号规则（2026-10-12 定，用户说「1.5.0 会规范三个数字的含义」，按我的提议没反对）：主.次.修。
   - 主：旧版和新版不再互通（联机协议、数据格式不兼容），或者整体改版，才加；次、修归零。

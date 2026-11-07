@@ -133,10 +133,14 @@ class AppController(
     var focusMessageId by mutableStateOf<String?>(null)
     var settingsTab by mutableStateOf<SettingsTab?>(null)
     var showNewChat by mutableStateOf(false)
-    /** 开着的引导（2026-11-06）："tour" 功能介绍、"new" 这一版新加的；null 不开。 */
+    /** 开着的引导（2026-11-06）："tour" 新手必看、"ch:章节编号" 某一章、"new" 这一版新加的；null 不开。 */
     var guide by mutableStateOf<String?>(null)
     /** 引导这一步要在手机上打开侧栏（圈侧栏里的按钮）。 */
     var guideDrawer by mutableStateOf(false)
+    /** 引导这一步要打开的弹窗（2026-11-07 完整引导：「provider」添加服务商、「member」添加成员、「convset」对话设置），一栏一栏圈给用户看；null 不开。 */
+    var guideDialog by mutableStateOf<String?>(null)
+    /** 引导要圈的那条回答（对话里最后一条 AI 回答）下面的按钮。 */
+    var guideAnswerId by mutableStateOf<String?>(null)
     /** 截图用：引导从第几步开始（-Djxy.start=…#guide:3）。 */
     var guideStart = 0
     /** 电脑快捷键（2026-10-24）：Ctrl+K 每按一次加一，侧栏搜索框看到变了就打开、拿焦点。 */
@@ -342,7 +346,13 @@ fun App(hub: Hub, platform: Platform, debugStart: String? = null) {
                     val dbg = debugStart?.substringAfter('#', "").orEmpty()
                     if (dbg.startsWith("guide") || dbg.startsWith("whatsnew")) {
                         ctl.guideStart = dbg.substringAfter(':', "0").toIntOrNull() ?: 0
-                        ctl.guide = if (dbg.startsWith("guide")) "tour" else "new"
+                        // #guide:3 新手必看第 3 步；#guide-models:2 「接上模型」那一章第 2 步
+                        val chapter = dbg.substringBefore(':').removePrefix("guide").removePrefix("-")
+                        ctl.guide = when {
+                            dbg.startsWith("whatsnew") -> "new"
+                            chapter.isNotEmpty() -> "ch:$chapter"
+                            else -> "tour"
+                        }
                         return@LaunchedEffect
                     }
                     if (debugStart != null) return@LaunchedEffect
@@ -433,7 +443,10 @@ fun App(hub: Hub, platform: Platform, debugStart: String? = null) {
                     }
                     // 引导盖在最上面（和界面同一个坐标系，才能圈准按钮）
                     ctl.guide?.let { mode ->
-                        GuideOverlay(ctl, mode, onClose = { platform.setPref(Guide.PREF, Guide.versionKey()); ctl.guide = null; ctl.guideDrawer = false })
+                        GuideOverlay(ctl, mode, onClose = {
+                            platform.setPref(Guide.PREF, Guide.versionKey())
+                            ctl.guide = null; ctl.guideDrawer = false; ctl.guideDialog = null; ctl.guideAnswerId = null
+                        })
                     }
                     // 开发截图用：-Djxy.start=…#toast 打开就弹一条提示，看它挡不挡东西
                     LaunchedEffect(Unit) { if (ctl.debugDialog == "toast") snackbar.showSnackbar("改文件先问我", duration = SnackbarDuration.Indefinite) }

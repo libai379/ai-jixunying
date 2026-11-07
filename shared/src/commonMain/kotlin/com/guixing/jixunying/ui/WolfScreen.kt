@@ -200,7 +200,7 @@ private fun WolfLobby(ctl: AppController, state: AppState, wide: Boolean) {
         Column(Modifier.widthIn(max = 820.dp)) {
             PageHeader("狼人杀", "法官是程序，AI 各用自己的模型，一步一步自己想、自己说。")
             // 两种玩法
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            FlowRow(Modifier.guideTarget("wolfmodes"), horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 ModeCard("🎙️ 我当主持人", "全是 AI 打。你看得到所有身份和夜里谁做了什么，可以暂停、一步一步来，白天能插话。", host) { host = true }
                 ModeCard("🙋 我上桌玩", "你（和朋友）坐几个座位，跟 AI 一起打。几个人就同一台设备轮流，轮到谁先挡住屏幕。", !host) { host = false }
             }

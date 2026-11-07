@@ -203,7 +203,7 @@ fun HostDevicesPage(ctl: AppController, state: AppState) {
     Text("手机在哪儿都能连这台电脑：家里、公司、出差、国外都行，不用同一个 Wi-Fi，也不用自己搭服务器。",
         style = MaterialTheme.typography.bodySmall, color = Ext.c.subtle)
     Spacer(Modifier.height(16.dp))
-    SectionCard {
+    SectionCard(Modifier.guideTarget("devpair")) {
         Row(verticalAlignment = Alignment.Top) {
             if (state.pairingSecret.isNotBlank()) QrCode(code)
             Spacer(Modifier.width(18.dp))
@@ -366,7 +366,7 @@ fun PhoneDevicesPage(ctl: AppController) {
     Spacer(Modifier.height(16.dp))
     val r = remote
     if (r == null) {
-        SectionCard {
+        SectionCard(Modifier.guideTarget("devpair")) {
             Button(enabled = !busy, modifier = Modifier.fillMaxWidth().height(46.dp), onClick = {
                 scope.launch { platform.scanQr()?.let { pair(it) } }
             }) {

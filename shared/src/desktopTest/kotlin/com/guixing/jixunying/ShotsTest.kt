@@ -556,6 +556,8 @@ class ShotsTest {
 
     /** frames：要等后台查东西的（比如提交弹窗查 git 状态）多渲染几帧，每帧约 60 毫秒。 */
     private fun shoot(name: String, w: Int, h: Int, density: Float, hub: Hub, platform: Platform, start: String?, frames: Int = 14) {
+        // 只重画改过的那几张：JXY_SHOTS_ONLY=正则（比如 coach-phone-0[2-7]），名字对不上的跳过（2026-11-07）
+        System.getenv("JXY_SHOTS_ONLY")?.takeIf { it.isNotBlank() }?.let { if (!Regex(it).containsMatchIn(name)) return }
         val scene = ImageComposeScene(w, h, Density(density)) { App(hub, platform, start) }
         var img: org.jetbrains.skia.Image? = null
         for (i in 0 until frames) {
@@ -581,6 +583,11 @@ class ShotsTest {
         for (k in com.guixing.jixunying.ui.Guide.tour.indices) {
             shoot("coach-desktop-%02d".format(k), 1280, 820, 1f, hub, desktop, "conv:c1#guide:$k", frames = 22)
             shoot("coach-phone-%02d".format(k), 720, 1600, 2f, hub, phone, "conv:c1#guide:$k", frames = 22)
+        }
+        // 2026-11-07 进阶的几章（新手必看的三章已经在上面的 tour 里）
+        for (ch in com.guixing.jixunying.ui.Guide.chapters.filter { !it.essential }) for (k in ch.pages.indices) {
+            shoot("coach-${ch.id}-desktop-%02d".format(k), 1280, 820, 1f, hub, desktop, "conv:c1#guide-${ch.id}:$k", frames = 22)
+            shoot("coach-${ch.id}-phone-%02d".format(k), 720, 1600, 2f, hub, phone, "conv:c1#guide-${ch.id}:$k", frames = 22)
         }
         shoot("coach-phone-whatsnew-00", 720, 1600, 2f, hub, phone, "conv:c1#whatsnew:0", frames = 22)
         shoot("memguide-phone-about", 720, 1600, 2f, hub, phone, "settings:ABOUT")
