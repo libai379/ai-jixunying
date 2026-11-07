@@ -578,6 +578,8 @@ class ShotsTest {
         val phone = PhonePlatform()
         val desktop = DesktopPlatform(fileLog = false) { null }
         shoot("memguide-phone-composer", 720, 1600, 2f, hub, phone, "conv:c1")
+        // 2026-11-07 输入法弹起时（#ime）那一排按钮才出来；平时只有一行输入框
+        shoot("memguide-phone-composer-ime", 720, 1600, 2f, hub, phone, "conv:c1#ime")
         shoot("memguide-desktop-composer", 1280, 820, 1f, hub, desktop, "conv:c1")
         // 新版引导：每一步都画一张（电脑、手机各一套），看圈得准不准、文字框挡不挡
         for (k in com.guixing.jixunying.ui.Guide.tour.indices) {
@@ -634,13 +636,15 @@ class ShotsTest {
         val problems = mutableListOf<String>()
         var cases = 0
         // 竖屏：c1 群聊；c14 有一条正在回答（出「停止」）；#draw 直接画图开着；#record 正在录音
-        val tall = listOf("conv:c1", "conv:c1#draw", "conv:c14", "conv:c14#draw", "conv:c14#record")
+        // 2026-11-07 起手机上那一排按钮跟着输入法出来，这里量的是输入法弹起后的样子（#ime）；收起的样子见 phoneComposerCollapsed
+        fun withIme(s: String) = if ('#' in s) "$s+ime" else "$s#ime"
+        val tall = listOf("conv:c1", "conv:c1#draw", "conv:c14", "conv:c14#draw", "conv:c14#record").map(::withIme)
         for (wDp in listOf(220, 320, 360, 412, 480, 840)) for (font in fonts) for (start in tall) {
             if (fitCase(hub, phone, wDp, if (wDp >= 600) wDp * 6 / 5 else wDp * 20 / 9, font, start, problems)) cases++
         }
         // 矮窗口：键盘弹出、横屏、横屏又开着键盘（915 宽是大屏手机横过来，带侧栏）、分屏又开着键盘；输入框里写了很长的草稿
         val short = listOf(320 to 280, 360 to 330, 412 to 390, 569 to 296, 640 to 150, 915 to 190, 220 to 200)
-        for ((wDp, hDp) in short) for (font in fonts) for (start in listOf("conv:c1#longdraft", "conv:c14#longdraft+draw", "conv:c14#record")) {
+        for ((wDp, hDp) in short) for (font in fonts) for (start in listOf("conv:c1#longdraft", "conv:c14#longdraft+draw", "conv:c14#record").map(::withIme)) {
             if (fitCase(hub, phone, wDp, hDp, font, start, problems)) cases++
         }
         // Code 栏的输入框（手机遥控时也是这一个，这里用电脑的台面）：c16 正在跑，出「上一条还在做」那行字
@@ -649,6 +653,60 @@ class ShotsTest {
         }
         kotlin.test.assertTrue(problems.isEmpty(), "量了 $cases 种，${problems.size} 处不对：\n" + problems.joinToString("\n"))
         kotlin.test.assertEquals(6 * 3 * 5 + 7 * 3 * 3 + 5 * 3 * 2, cases)
+    }
+
+    /**
+     * 手机上输入框平时收着（2026-11-07 用户：「在下边的时候这下边 5 个按键就不需要出现，只有弹出输入法的时候一块出来」）：
+     * 没点进输入框时那一排（＋、联网、记忆、话筒、发送）都不在，只有一行写字的地方，整个在窗口里；
+     * 正在回答时「停止」挂在输入框右边，整个在窗口里、不压扁、不盖着写字的地方。220 / 320 / 360dp × 字体 100% / 200%。平时就跑。
+     */
+    @Test
+    fun phoneComposerCollapsed() {
+        val tmp = tempDir("jxy-fold")
+        val hub = Hub(seed(File(tmp, "data"), File(tmp, "文档").apply { mkdirs() }))
+        val phone = FakeAvPlatform(PhonePlatform())
+        val problems = mutableListOf<String>()
+        var cases = 0
+        for (wDp in listOf(220, 320, 360)) for (font in listOf(1f, 2f)) for (start in listOf("conv:c1", "conv:c14", "conv:c14#draw")) {
+            val d = 2f
+            val w = wDp * d
+            val h = wDp * 20 / 9 * d
+            val name = "${wDp}dp、字体 ${(font * 100).toInt()}%、$start"
+            val scene = ImageComposeScene(w.toInt(), h.toInt(), Density(d, font)) { App(hub, phone, start) }
+            try {
+                fun nodes(): List<androidx.compose.ui.semantics.SemanticsNode> {
+                    val all = mutableListOf<androidx.compose.ui.semantics.SemanticsNode>()
+                    fun walk(n: androidx.compose.ui.semantics.SemanticsNode) { all += n; n.children.forEach { walk(it) } }
+                    scene.semanticsOwners.forEach { walk(it.rootSemanticsNode) }
+                    return all
+                }
+                fun descs(n: androidx.compose.ui.semantics.SemanticsNode) =
+                    n.config.getOrNull(androidx.compose.ui.semantics.SemanticsProperties.ContentDescription).orEmpty()
+                var frame = 0L
+                while (frame < 60 && nodes().none { it.config.contains(androidx.compose.ui.semantics.SemanticsActions.SetText) }) { frame++; scene.render(frame * 120_000_000L); Thread.sleep(20) }
+                repeat(6) { frame++; scene.render(frame * 120_000_000L); Thread.sleep(20) }
+                val all = nodes()
+                val hidden = listOf("发送", "画图", "做视频").filter { s -> all.any { n -> s in descs(n) } } +
+                    (if (all.any { n -> descs(n).any { it.startsWith("图片、文件") } }) listOf("＋") else emptyList())
+                if (hidden.isNotEmpty()) problems += "$name：收着时还看得到 $hidden"
+                val field = all.filter { it.config.contains(androidx.compose.ui.semantics.SemanticsActions.SetText) }.maxByOrNull { it.boundsInRoot.width }
+                if (field == null) { problems += "$name：找不到写字的地方"; continue }
+                val fb = field.boundsInRoot
+                if (fb.height < 16 * d || fb.width < 60 * d || fb.left < 0 || fb.right > w || fb.bottom > h) problems += "$name：写字的地方不对（${fb.width / d}×${fb.height / d}dp）"
+                val stops = all.filter { "停止" in descs(it) && it.config.contains(androidx.compose.ui.semantics.SemanticsActions.OnClick) }
+                if (start.startsWith("conv:c14") != (stops.size == 1)) problems += "$name：找到 ${stops.size} 个停止键"
+                stops.forEach { st ->
+                    val b = st.boundsInRoot
+                    if (b.left < 0 || b.right > w || b.bottom > h || b.height < 24 * d) problems += "$name：停止键出了窗口或被压扁"
+                    if (b.intersect(fb).width > 1 && b.intersect(fb).height > 1) problems += "$name：停止键盖着写字的地方"
+                }
+                cases++
+            } finally {
+                scene.close()
+            }
+        }
+        kotlin.test.assertTrue(problems.isEmpty(), "量了 $cases 种，${problems.size} 处不对：\n" + problems.joinToString("\n"))
+        kotlin.test.assertEquals(3 * 2 * 3, cases)
     }
 
     /**

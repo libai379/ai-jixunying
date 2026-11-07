@@ -2,6 +2,8 @@ package com.guixing.jixunying.ui
 
 import androidx.compose.material.icons.rounded.FormatQuote
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.foundation.layout.ime
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.KeyboardArrowUp
@@ -1150,7 +1152,7 @@ private fun Composer(ctl: AppController, state: AppState, conv: Conversation, ru
     val dictation = rememberDictation(ctl, conv.id) { t -> text = text.withSpoken(t) }
     // 开发截图用：conv:编号#record = 打开对话就是「正在录音」的样子
     LaunchedEffect(conv.id, ctl.debugDialog) {
-        if (ctl.debugDialog != "record") return@LaunchedEffect
+        if (!ctl.debug("record")) return@LaunchedEffect
         ctl.debugDialog = ""
         dictation.start()
     }
@@ -1168,6 +1170,23 @@ private fun Composer(ctl: AppController, state: AppState, conv: Conversation, ru
         drawMode = false
         videoMode = false
     }
+
+    // 手机上：输入法收着时只留一行输入框，「＋、联网、记忆、话筒、发送」那一排跟着输入法一起出来（2026-11-07 用户：
+    // 「在下边的时候这下边 5 个按键就不需要出现，只有弹出输入法的时候一块出来」）。按点没点进输入框（焦点）算：点进去输入法和这一排一起出来，
+    // 输入法被手势收下去就把焦点也放掉、这一排跟着收。「＋」菜单开着、正在听写时不收（菜单一弹输入法就收，这一排要是跟着收，菜单就一闪没了）；
+    // 新手引导讲到这几个按钮时也露出来。回答进行中的「停止」收起时挂在输入框右边。电脑上照旧一直在。
+    var plus by remember { mutableStateOf(ctl.debug("plus")) }
+    var composerFocused by remember { mutableStateOf(false) }
+    val keepTools = plus || dictation.recording || dictation.recognizing
+    val imeUp = androidx.compose.foundation.layout.WindowInsets.ime.getBottom(androidx.compose.ui.platform.LocalDensity.current) > 0
+    val focusManager = androidx.compose.ui.platform.LocalFocusManager.current
+    var imeWasUp by remember { mutableStateOf(false) }
+    LaunchedEffect(imeUp) {
+        if (imeUp) imeWasUp = true
+        else if (imeWasUp) { imeWasUp = false; if (!keepTools) focusManager.clearFocus() }
+    }
+    val showTools = platform.isDesktop || composerFocused || keepTools || ctl.debug("ime") ||
+        GuideTargets.active in setOf("plus", "web", "memory", "mic")
 
     Column(Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = if (short) 6.dp else 14.dp, top = if (short) 2.dp else 4.dp), horizontalAlignment = Alignment.CenterHorizontally) {
         Column(Modifier.widthIn(max = CHAT_MAX_WIDTH).fillMaxWidth()) {
@@ -1214,7 +1233,8 @@ private fun Composer(ctl: AppController, state: AppState, conv: Conversation, ru
                 Column(Modifier.padding(start = 14.dp, end = 10.dp, top = 10.dp, bottom = 8.dp)) {
                     PendingStrip(ctl, pending)
                     // 写字的地方最后量：下面那一排（发送键）先排，窗口矮时它让位、里面能滑
-                    Box(Modifier.weight(1f, fill = false).fillMaxWidth().heightIn(min = 26.dp, max = maxText)) {
+                  Row(Modifier.weight(1f, fill = false).fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Box(Modifier.weight(1f).heightIn(min = 26.dp, max = maxText)) {
                         if (text.text.isEmpty()) Text(
                             when {
                                 videoMode -> "直接做视频：描述画面和动作，比如「一只橘猫在窗台上伸懒腰，阳光洒进来」；附上的图片当首帧（两张是首尾帧），附上的视频按描述改或接长，附上的文档按内容做（按秒收费，发完回到聊天）"
@@ -1247,9 +1267,21 @@ private fun Composer(ctl: AppController, state: AppState, conv: Conversation, ru
                                     val lastMine = ctl.backend.store.messages.value[conv.id].orEmpty().lastOrNull { it.role == Role.USER }?.content.orEmpty()
                                     if (lastMine.isNotBlank()) { text = TextFieldValue(lastMine, TextRange(lastMine.length)); true } else false
                                 } else false
-                            },
+                            }.onFocusChanged { composerFocused = it.isFocused },
                         )
                     }
+                    if (!showTools && running) {
+                        Spacer(Modifier.width(8.dp))
+                        Box(
+                            Modifier.size(36.dp).clip(CircleShape).border(1.dp, Ext.c.border, CircleShape).clickable { ctl.run(Command.Stop(conv.id)) },
+                            contentAlignment = Alignment.Center,
+                        ) { Icon(Icons.Rounded.Stop, "停止", Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant) }
+                    }
+                  }
+                    AnimatedVisibility(showTools,
+                        enter = androidx.compose.animation.expandVertically(expandFrom = Alignment.Top) + androidx.compose.animation.fadeIn(),
+                        exit = androidx.compose.animation.shrinkVertically(shrinkTowards = Alignment.Top) + androidx.compose.animation.fadeOut()) {
+                    Column {
                     Spacer(Modifier.height(8.dp))
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         // 2026-10-22 用户发手机截图（发送键被挤到最右边没位置）：「必须得这么多按钮吗？能不能整理一下，合并一下」。
@@ -1260,7 +1292,6 @@ private fun Composer(ctl: AppController, state: AppState, conv: Conversation, ru
                         val tools = rememberScrollState()
                         Row(Modifier.weight(1f).fadeEnd(tools).horizontalScroll(tools), verticalAlignment = Alignment.CenterVertically) {
                             Box(Modifier.guideTarget("plus")) {
-                                var plus by remember { mutableStateOf(ctl.debug("plus")) }
                                 ComposerIcon(Icons.Rounded.Add, "图片、文件、@ 成员、直接画图、直接做视频") { plus = true }
                                 androidx.compose.material3.DropdownMenu(plus, { plus = false }) {
                                     PlusItem(Icons.Rounded.Image, "图片", "给 AI 看图") { plus = false; pick(true) }
@@ -1378,6 +1409,8 @@ private fun Composer(ctl: AppController, state: AppState, conv: Conversation, ru
                             onColor = MaterialTheme.colorScheme.onPrimary,
                             onClick = { send() },
                         )
+                    }
+                    }
                     }
                 }
             }
