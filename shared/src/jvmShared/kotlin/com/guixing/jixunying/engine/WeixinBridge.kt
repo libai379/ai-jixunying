@@ -27,7 +27,9 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -131,8 +133,11 @@ class WeixinBridge(
         const val STALE_TOKEN = -14
         /** 一条微信消息最长发多少字，再长就拆开。 */
         const val CHUNK = 1800
-        /** 电脑刚打开、绑定给过手机时，积压的消息先等这么久（手机连上来会说它答到了哪儿）。 */
-        const val BACKLOG_HOLD_MS = 30_000L
+        /**
+         * 电脑刚打开、绑定给过手机时，积压的消息最多等这么久（手机连上来会说它答到了哪儿，说了就不等满）。
+         * 手机每 25 秒打一次招呼，电脑开机时中转也要先连上，30 秒不够（2026-11-07），改成 90 秒。
+         */
+        const val BACKLOG_HOLD_MS = 90_000L
 
         /** 微信不显示 Markdown：把标题、加粗、列表、链接、表格分隔线换成普通文字。 */
         fun plainText(md: String): String {
@@ -351,7 +356,10 @@ class WeixinBridge(
     /** 另一台设备答到了 t：t 以前（含）发来的这台不再答。botId 空 = 老版本手机报的，算这台设备自己绑的那几个。 */
     fun raiseFence(botId: String, t: Long) {
         bots.filter { if (botId.isEmpty()) !it.account.shared && it.account.boundBy.isEmpty() else it.account.botId == botId }
-            .forEach { b -> if (t > b.cursor.answerAfter) b.editCursor { it.copy(answerAfter = maxOf(it.answerAfter, t)) } }
+            .forEach { b ->
+                if (t > b.cursor.answerAfter) b.editCursor { it.copy(answerAfter = maxOf(it.answerAfter, t)) }
+                b.fenceReportedAt.value = System.currentTimeMillis()
+            }
     }
 
     fun raiseFence(t: Long) = raiseFence("", t)
@@ -623,6 +631,8 @@ class WeixinBridge(
         private val typingTickets = ConcurrentHashMap<String, String>()
         private val seen = java.util.Collections.synchronizedSet(LinkedHashSet<String>())
         @Volatile private var monitorStartedAt = 0L
+        /** 另一台设备最近一次报「答到了哪儿」的时间（raiseFence）：刚打开时积压的消息等它报了再决定答不答。 */
+        val fenceReportedAt = kotlinx.coroutines.flow.MutableStateFlow(0L)
         @Volatile private var status = "正在连接…"
         @Volatile private var answering = false
         @Volatile private var lastMessageAt = 0L
@@ -751,10 +761,15 @@ class WeixinBridge(
             if (at in 1..cursor.answerAfter) return
             lastMessageAt = System.currentTimeMillis()
             publish()
-            // 电脑刚打开、绑定同步给过手机：积压的消息先等一会儿，手机连上来会说它答到了哪儿，答过的就不再答
-            val wait = monitorStartedAt + backlogHoldMs - System.currentTimeMillis()
-            if (cursor.sharedAt > 0 && at in 1 until monitorStartedAt && wait > 0) {
-                scope.launch { delay(wait); if (at > cursor.answerAfter) enqueue(from, m) }
+            // 电脑刚打开、绑定同步给过手机：积压的消息（开始收以前发来的）先等手机报它答到了哪儿，答过的就不再答。
+            // 从收到这条算起等，手机这次开始收以后报过了就不再等（2026-11-07 北京时间 12:24：电脑开机后积压的四句过了 30 秒才收到，
+            // 以前从「开始收」算的 30 秒正好过完，马上就答，把手机上午答过的四句又答了一遍；那会儿电脑上的代理还没开，就往微信发了一句「这次没答上来」）
+            if (cursor.sharedAt > 0 && at in 1 until monitorStartedAt) {
+                val since = monitorStartedAt
+                scope.launch {
+                    withTimeoutOrNull(backlogHoldMs) { fenceReportedAt.first { it >= since } }
+                    if (at > cursor.answerAfter) enqueue(from, m)
+                }
                 return
             }
             enqueue(from, m)

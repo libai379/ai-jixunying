@@ -1798,6 +1798,58 @@ class EngineTest {
         phone.close()
     }
 
+    /**
+     * 2026-11-07 北京时间 12:24：电脑开机，手机上午答过的四句过了 30 秒才从微信收到；以前从「开始收」算的 30 秒正好过完，
+     * 电脑马上又答了一遍（代理还没开，往微信发了「这次没答上来」）。现在从收到算起等手机报：报了答过的不答；报过以后再来的没答过的直接答。
+     */
+    @Test
+    fun weixinBacklogWaitsForPhoneReportAfterArrival() = runBlocking {
+        val root = File(dir, "pc6").also { it.mkdirs() }
+        val (pc, _) = engineWithMembers("小智", root = root)
+        fun bridge() = com.guixing.jixunying.engine.WeixinBridge(pc, File(root, "weixin"), loginBase = base(), cdnBase = "${base()}/c2c", backlogHoldMs = 4_000)
+        var wx = bridge()
+        pc.weixin = wx
+        wx.start()
+        fun replies() = wxSent.filter { it.startsWith("{") }.map {
+            Json.parseToJsonElement(it).jsonObject["msg"]!!.jsonObject["item_list"]!!.jsonArray[0].jsonObject["text_item"]?.jsonObject?.get("text")?.jsonPrimitive?.content.orEmpty()
+        }
+        fun msg(id: Long, text: String, at: Long) =
+            """{"message_id":$id,"from_user_id":"me@im.wechat","to_user_id":"bot1@im.bot","message_type":1,"create_time_ms":$at,"context_token":"c$id","item_list":[{"type":1,"text_item":{"text":"$text"}}]}"""
+        try {
+            assertTrue(pc.call(Command.WeixinLogin).ok)
+            withTimeout(10_000) { while (!pc.state.weixin.answering) delay(50) }
+            assertTrue(pc.call(Command.WeixinShareAll).ok, "绑定同步给过手机")
+            // 电脑关机，手机接着答了两句；然后电脑开机
+            wx.stop()
+            val t1 = System.currentTimeMillis() - 60_000
+            val t2 = t1 + 1_000
+            wx = bridge()
+            pc.weixin = wx
+            wx.start()
+            withTimeout(10_000) { while (!pc.state.weixin.answering) delay(50) }
+            // 积压的过了等待时长才收到（以前这时候已经不等了，马上答）
+            delay(4_500)
+            wxSent.clear()
+            wxInbox += msg(61, "中午好", t1)
+            wxInbox += msg(62, "干嘛呢", t2)
+            delay(1_500)
+            assertTrue(replies().isEmpty(), "手机还没报，先等着：${replies()}")
+            assertTrue(pc.call(Command.WeixinReport(t2, "bot1@im.bot")).ok)
+            delay(2_000)
+            assertTrue(replies().isEmpty(), "手机答过的不再答：${replies()}")
+            assertTrue(pc.state.conversations.none { it.channel.startsWith("weixin:") }, "也不进微信对话")
+            // 手机这次报过了：再来积压的、手机没答过的，不用再等
+            val t = System.currentTimeMillis()
+            wxInbox += msg(63, "这句手机没答", t2 + 1)
+            withTimeout(3_000) { while (replies().none { "小智" in it }) delay(50) }
+            assertTrue(System.currentTimeMillis() - t < 3_500)
+            assertEquals(1, replies().size, replies().toString())
+        } finally {
+            wx.stop()
+            pc.close()
+        }
+    }
+
     /** 2026-10-30 真回答里出过「〔11月x日〕」开头、正文里夹「[附件：视频_119551.mp4]」：学聊天记录的格式写的，回答里去掉。 */
     @Test
     fun replyDropsCopiedTimeAndAttachmentTags() = runBlocking {
